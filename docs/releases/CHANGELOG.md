@@ -6,8 +6,706 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+### Changed
+
+- Named Responses WebSocket requests now validate the documented `stream_id`
+  characters and length, and HTTP/SSE fallback events and Relay-generated
+  request errors include their named stream ID. Invalid IDs return
+  `invalid_stream_id`. A bare native Responses SSE `[DONE]` without a
+  `response.completed` is now an incomplete stream rather than a successful
+  WebSocket turn with no terminal event. SSE terminal markers from another
+  protocol no longer report a completed request for Responses, Chat
+  Completions, Messages or Gemini; a claimed Responses completion with an
+  explicitly failed or incomplete status is no longer recorded as success.
+  Full parallel WebSocket multiplexing remains open work.
+
+- Accounts with both a remaining provider quota window and credits now retain
+  the reported window for pool admission, including the protected Codex
+  account reserve. A temporarily unavailable route without an account error
+  no longer appears as an invented account failure.
+
+- Usage request and error lists now accept a page number for direct navigation;
+  previous and next controls remain available.
+
+- Route recovery now lives under **API → API** and applies to text requests in
+  Responses, Chat Completions, Messages and Gemini, including clients other
+  than ChatGPT. Existing saved switches are preserved; the wait is live and
+  still shares the request's send and queue budgets. Empty Gemini prompt blocks
+  converted to Chat Completions now keep a null assistant content field.
+
+- Source pricing and pool member rules show models directly under their provider,
+  without extra family headings. The model list keeps the catalog order and the
+  dialogs use tighter, consistent rows. Source pricing also shows explicit
+  five-minute and one-hour cache-write rates even when the model catalog was
+  discovered through another endpoint; prices without a stated TTL remain
+  unknown. An unknown cache-read price no longer appears as the input price.
+
+- Quick Setup now starts with a shared local or server pool. The local
+  connection step accepts both ChatGPT accounts and API sources, including
+  multiple connections before choosing a client. A new API source joins the
+  pool when saved; importing the current ChatGPT profile stays on the same
+  step so another source can be added. Existing direct **Choose API** mode
+  remains available from the application mode menu.
+
+- Light and dark themes now use the warm neutral surfaces and deep green accents
+  from the Zenith website, while keeping warning, error and information colors
+  distinct.
+
+- Model Rules now use consistent compact controls for reasoning, request speed
+  and model visibility. Selected reasoning levels have check marks, and narrow
+  windows keep speed labels visible without horizontal scrolling.
+
+- Usage now has separate summary cards, compact filters and clearer request
+  details. Narrow windows show labeled report cards, while summary settings
+  use the same switches as the rest of Relay.
+
+- Relay dialogs now share one compact visual style and close when the free
+  space outside the window is clicked. Action menus, option lists, the mode
+  picker, context menus and the mobile Help contents use the same compact
+  surface and close on an outside click as well. Escape and the close button
+  keep the same behavior. Long forms now use consistent field widths, action
+  areas, selected states and scroll boundaries across connection, proxy,
+  automation and export windows.
+
+- Pool now separates participant counts, routing controls and current activity
+  in an open layout. Connections and Pool share a compact summary with inline
+  counts. Account controls have a full-width search field in narrow windows.
+  Excel / Basis Points has moved to API as **Model
+  substitution protection**, with an explanation for OpenAI accounts and
+  immediate saving. Request details still identify the transport used.
+
+- Excel / Basis Points tool failures now identify the invalid envelope field
+  without revealing tool arguments. An ambiguous unqualified namespace tool or
+  a non-object function argument is rejected instead of dispatching the wrong
+  tool. Responses output is unwrapped before conversion to Chat Completions,
+  Messages or Gemini, including their SSE event formats. Malformed completed
+  output remains terminal for that request and does not cool down the account
+  or trigger an automatic second generation.
+
+- Account routes using Excel / Basis Points now use the v0.1.14 tool envelope:
+  the client tool name is carried in `references`, while `code` contains the
+  function arguments or custom-tool input directly. Tool calls from an earlier
+  native route remain valid continuation history instead of failing with
+  `input.tool_call`, and namespaced tools retain their fully qualified name.
+  Requests also carry stable turn metadata and the exact Excel client headers,
+  including the corrected Office header names, so the upstream endpoint does
+  not reject an otherwise valid request with a generic 422.
+  The strict Basis Points body now matches the upstream adapter: client tool
+  definitions stay in developer instructions, `tools`/`tool_choice` are not
+  forwarded, and the original stream flag is preserved.
+  A malformed client-tool relay now gets the same single bounded regeneration
+  used by the official adapter before Relay records a terminal 502.
+
+- Disconnecting a managed ChatGPT profile now restores only Relay-owned
+  settings and login fields. External `config.toml` edits and newer manual
+  OAuth sign-ins are kept instead of blocking the disconnect; reconnecting
+  still cannot silently replace that new sign-in.
+
+- A changed ChatGPT model catalog file no longer makes its profile backup look
+  corrupt. Disconnect restores the previous settings and sign-in without
+  deleting the externally edited catalog; newer sign-ins remain protected.
+
+- Converted tool turns keep parallel Responses function calls together for
+  Chat Completions providers. Messages and Chat Completions refusals reach
+  clients with the proper terminal reason, including empty refusals in Codex;
+  an incomplete Messages answer no longer appears as a successful completion.
+  Request details distinguish the model requested by the client from the ID
+  sent to the selected source when they differ.
+
+- macOS builds now use ad-hoc signing without an Apple certificate. The DMG
+  and updater archive are checked before publication, and release files include
+  checksums. First launch still needs one-time approval in macOS settings.
+
+- Codex catalogs now retain Ultra for exact models supported by the installed
+  Codex or a matching native account card when the pool can route Max and the
+  subagent effort. Generic API/adapter Max no longer creates a misleading
+  Ultra option. This Codex orchestration mode is separate from request speed.
+
+- API-source model and balance refreshes now share bounded work between manual
+  and background requests. Changing an API address, key or catalog discards
+  late results. Reopening a page uses the current session's cached statistics;
+  an explicit refresh fetches again. If that fetch fails, the last successful
+  amount is shown as stale with the failure reason, without disabling routing.
+  Background observations appear in Pool and Choose API without extra provider
+  reads. Protocol aliases now activate the cadence of their physical API source
+  instead of being mistaken for accounts.
+
+- Pool and API cards keep model, quota and balance refresh evidence out of the
+  normal presentation. Values, actionable failures and stale-reading warnings
+  remain visible where they help the user; detailed refresh state and check
+  times stay in diagnostics and do not affect routing.
+
+- Desktop and Relay Server share account quota/model refresh work between
+  background jobs and manual requests. Quota and model lists update independently,
+  repeated refreshes respect provider pauses, and closing a waiting request does
+  not cancel shared work. Initial quota/model and reset-credit authorization
+  preparation joins a
+  separate on-demand job with reserved capacity; credentials never enter the
+  observation cache. Late results and errors cannot overwrite a newer
+  sign-in, proxy setting or replaced account; newer quota data from model
+  requests takes precedence over an older read. Fresh quota headers from an
+  inference request can postpone the next automatic quota poll when subscription
+  metadata is current; manual refresh and reset verification remain scheduled.
+  Relay Server also checks quota again shortly after a reported future reset.
+  A delayed server 401 from an old bearer cannot invalidate a newer token or
+  replaced login during quota or model recovery. Late OAuth and Agent-task
+  writes cannot replace credentials installed by a subsequent import; an old
+  runtime build cannot publish after that import or account deletion. Server
+  re-import and deletion now close the old account route before changing its
+  saved credential; a failed vault deletion restores the record without
+  reopening pending work on the old runtime. Provider
+  management requests also have a shared bounded HTTP queue with reserved
+  login/recovery capacity; a changed account or source cannot send an outdated
+  queued read. An older desktop refresh or pending token write cannot recreate
+  credentials after an account is deleted and added again.
+
+- The 1.1.3 update converts existing pool profiles to the current rotation automatically
+  at startup, preserving saved member settings and gateway enabled state. No
+  migration confirmation, notification, manual stop/start or rollback UI is
+  required. Obsolete failure thresholds and ranking options are discarded;
+  older saved profiles and presets still open. Old servers cannot receive
+  unsupported rotation settings.
+
+- Moving accounts to a user-managed server now closes pending local dispatch
+  through import and verified cleanup. An interrupted move or a server-owned
+  account cannot reappear in local routing after a restart; failed local
+  activation keeps ownership in recovery rather than enabling two copies.
+
+- If deleting a local account fails and its credentials or profile cannot be
+  restored, the local gateway now stops instead of serving a stale route.
+
+- Capacity and recovery waits now share runtime/per-key count and retained-byte
+  limits, event-driven wakeups and one accumulated wait budget across retries
+  and transport handoffs. Busy capacity is assigned fairly between keys;
+  cancellation releases queue accounting without penalizing a provider. When
+  every physical slot is busy, new requests no longer rescan the entire wait
+  queue; unsupported routes still fail without joining it.
+
+- Pool selection now uses normalized local load in automatic mode, with
+  physical members sharing capacity across protocol aliases. Retries share one
+  request budget through transports and repairs; an uncertain provider outcome
+  is not silently replayed. Mandatory provider pauses are installed before a
+  slot becomes available to another request. Server API sources no longer have
+  a second, independently timed storm block outside pool rotation. Pending sends
+  cannot use an old desktop account/source route while its membership, endpoint,
+  proxy, login or permissions are being replaced; already started work may finish.
+
+- Usage details show cache lifetimes only when the provider reports them and
+  mark missing values clearly. OpenAI's documented minimum for GPT-5.6 and later
+  appears separately from usage data; Relay does not estimate a live expiry.
+
+- Catalog ordering now keeps model families from the same numbered generation
+  together and uses stable family IDs for their order. A later release date
+  alone no longer moves GPT-6 Sol above GPT-6 Astra.
+
+- Background refresh can no longer replace saved settings with an older
+  snapshot. Switching away from a connection and back also clears pending
+  refresh work, so a slow earlier request cannot stall the current view.
+  Visible remote pool pages now pick up server changes periodically and when
+  returning to the window without requiring a local state-change event.
+
+- API settings now offer a small standard/automatic tool optimization switch
+  for local and compatible server pools. Standard mode forwards the complete
+  catalog; automatic mode applies native Responses deferred tool search to
+  every eligible request, with a compatibility retry when the selected
+  endpoint does not support the standard fields. Relay no longer exposes
+  thresholds or name-based allow/deny lists. The switch saves immediately; the
+  full behavior is in Help.
+
+- Pool catalog refresh now resolves each member's routes once for all its models,
+  avoiding repeated discovery-policy work as model inventories grow. Offline
+  models retain their editable metadata and cache-price fields. (`3e6e174`)
+- Codex tool schemas preserve reference scope, validation constraints and literal
+  data while limiting reference expansion, preventing excessive memory growth
+  from deeply nested or branching definitions. (`3e6e174`)
+- Converted Chat Completions responses retain reasoning text alongside tool
+  calls in JSON, streams and follow-up history. Opaque reasoning state continues
+  to require its native owner. (`e211560`)
+- Retrying source setup after a failed snapshot or pool-membership update reuses
+  the saved source instead of creating a duplicate. Removed unused controls and
+  frontend helpers for the retired API-role ordering and manual route editor.
+  (`54b0c75`)
+
+- Long generations no longer end because Relay's HTTP, SSE or WebSocket timers
+  expire. Relay waits for the provider, keeps streaming connections alive and
+  preserves client cancellation and retries for real failures before output.
+  (`3e6e174`)
+
+- Reduced memory retained by reference catalogs between updates. Source data
+  stays compact, cached derived data is skipped when loading, and saving a
+  catalog no longer reads another full copy of the previous file into memory.
+- Reduced startup and catalog refresh work by indexing model matches once and
+  sharing immutable reference data. Refresh no longer merges the same catalog
+  twice or duplicates its JSON tree in memory.
+- Fixed a Windows crash when refreshing pool members. Bulk quota refresh keeps
+  bounded concurrency and returns each account's result without overflowing
+  the desktop command stack.
+- Codex launch now applies pending model catalog updates before opening the
+  client. Connecting a local pool checks its catalog before closing Codex, and
+  starting the client no longer waits for an intermediate interface refresh.
+  Profile preparation failures reliably reopen a previously running client.
+  Account catalog requests run concurrently within a shared time limit, and
+  history synchronization avoids rereading every file just to fingerprint it.
+  A successful connection reuses its catalog when launching, and an OpenCode
+  configuration error no longer prevents Codex catalog updates.
+- Reconnecting Codex no longer fails because already-matching chat history
+  exceeds the history-repair size limit. Only files requiring a provider change
+  count toward the rewrite budget, so model and speed updates can complete
+  without backing up unchanged conversations.
+
+- Model details now come from a shared reference catalog for accounts and API
+  providers, with consistent defaults when metadata is missing. Participant
+  capability fields no longer hide reasoning or tools, and redundant metadata
+  polling has been removed. Provider prices still take precedence when supplied.
+- OpenAI models offer Standard, Fast and Ultrafast by Relay policy, including
+  models whose account or provider returns no speed fields. Explicit speed
+  choices survive rotation and override the pool default.
+  Speed catalog entries include descriptions so Codex's Ultrafast option no
+  longer has an empty explanation.
+
+- API sources, stored proxies and quota automations share a more readable layout
+  and compact editors. Proxy import can check new addresses immediately and show
+  the actual exit IP, country and response time. Failed checks keep saved proxies
+  and assignments; declared location is shown separately from observed results.
+  Quota rules run automatically without a separate start button or mode selector.
+  Existing manual rules are upgraded while disabled rules remain disabled.
+  Default rule names now distinguish starting a quota countdown from resetting
+  the weekly limit, including existing rules. Custom names remain unchanged.
+  The editor starts with the automation type and its relevant fields; a custom
+  rule name is optional. General automation labels no longer refer only to quotas.
+  The Automations tab omits the shared search and refresh toolbar; rule changes
+  update the list automatically.
+  Frequent row actions use icons with tooltips. API source rows place launch
+  before edit, with additional actions last. (`0b65f07`, `54b0c75`)
+
+- Source creation keeps provider choices visible above a single column of key,
+  address and name fields. Quick setup now groups progress, choices and navigation
+  in a compact workspace without repeating the window's logo. Custom API setup
+  exposes all required fields and can continue after they are filled; reselecting
+  the active provider preserves edits. (`54b0c75`)
+
+- The API tab brings status, pool counts, address and key into one connection
+  panel with labelled copy actions. Port settings have their own row, and key
+  reissue is available from the key's action menu.
+
+- Adding connections to a pool now uses one searchable list, account/API sections,
+  a selected-connections view and fixed add actions. Selection stays intact
+  while filtering.
+
+- Native requests no longer fail adapter compatibility checks because a source
+  catalog omits a reasoning level or incorrectly marks a feature unsupported.
+  Converted routes retain their feature and reasoning checks.
+
+- Settings no longer repeat the enabled debug-mode notice and operations-folder
+  button below the toggle; the folder action remains in Diagnostics.
+
+- Streaming keep-alives wait for complete event boundaries, preventing a pause
+  in a fragmented response from inserting a heartbeat into its JSON content.
+
+- Invalid stream events now retain safe parser diagnostics in request details:
+  JSON error category, position and frame sizes, without recording response
+  content. These diagnostics identify Relay's parser separately from an
+  upstream error message.
+
+- Streams with mixed LF/CRLF/CR line endings no longer merge separate events and
+  fail with `stream_invalid`. The shared parser preserves event order for
+  native streams, protocol adapters and context compaction.
+
+- Converted Codex requests accept client tracing, cache-affinity keys and the
+  optional encrypted-reasoning output selector. Plain text and empty reasoning
+  controls no longer exclude otherwise compatible routes. Unsupported options
+  identify the offending field; encrypted input still requires a native route.
+
+- Codex context compaction accepts completed output items delivered before the
+  final stream event. Account routing retains only ChatGPT's infrastructure
+  cookie in memory, isolated by account and authorization. WebSocket continuations
+  reconnect after credential changes only with portable history, and delayed
+  catalog refreshes cannot overwrite a different Codex profile binding.
+
+- Relay accepts gzip and zstd JSON requests from current clients. Account
+  compaction falls back to the Responses compaction trigger when the old
+  compact endpoint is explicitly unavailable, preserving context and usage.
+  Turn-state hints stay with the exact session, model and account credentials,
+  including authentication refresh and concurrent responses.
+
+- Model visibility, member model permissions, draining, launch preferences and automation enablement
+  now use the same switch styling as application settings.
+
+- Pool model rules can reset model and group order to the catalog default.
+  Default order places OpenAI, Anthropic, Google and xAI first, then other
+  companies alphabetically, and keeps each catalog family together,
+  with newer versions first inside the family, consistently across providers.
+  New families are grouped automatically from metadata. Failed reorder operations restore the displayed saved order,
+  and another reorder cannot overlap a pending save.
+
+- Catalog refresh retains prices and reference reasoning levels even when legacy
+  route lists or endpoint declarations are incomplete. Pool client projections
+  follow automatic routing, and converted requests retain their source prices
+  across all four protocols. Server background refresh also updates protocol
+  metadata without overwriting concurrent edits or restoring removed sources.
+  Codex receives shared reference reasoning levels through eligible Responses
+  routes, including converted models, with key scopes and adapter limits applied.
+
+- Pool model rules now retain names, groups, prices, reasoning modes and saved
+  order for all pooled account and API models, even while a member is disabled
+  or unavailable. Shared model IDs appear once and count only pool members.
+
+- Codex model labels use shared reference names, then compact labels from the
+  model ID, consistently across pools and direct API
+  connections. Shared reference names remain intact when participant metadata
+  is malformed, and a valid owning-account card takes precedence over an
+  incompatible one. Model IDs and pool order are preserved.
+
+- Removed the technical force-refresh sign-in action from account cards and
+  menus. Sign-in recovery now stays in the normal sign-in flow, while quota
+  refresh remains the only visible refresh action.
+
+- Pool recovery is automatic: all compatible members are considered, temporary
+  failures pause for at least five seconds, and repeated failures increase the
+  cooldown. Unavailable models, rejected credentials, and opaque gateway
+  rejections no longer prevent fallback to another eligible API or account.
+  Removed the manual retry-count and last-candidate cooldown controls.
+
+- Rewrote English and Russian Help around the current connection workflow,
+  operating modes, pool rotation, quotas, balances, and recovery. Added a linked
+  contents list and corrected obsolete settings paths and behavior descriptions.
+  Help now has a reading column, a sticky section index with the current section,
+  numbered setup steps, and error rows that fit narrow windows. The index becomes
+  a compact menu on small screens.
+  The error reference now groups exact codes with causes and concrete recovery
+  steps, with expandable categories and search by code or symptom.
+
+- Weekly quota reset uses a compact action row with a separate credit count
+  in account and pool cards.
+
+- Pool member rules open with a compact model list and one switch per model.
+  Expandable provider groups retain disabled models; long lists support search.
+  API prices share aligned columns beside each model, including 5-minute and
+  1-hour cache writes; narrow windows use labeled price rows. Secondary settings use aligned rows
+  on their own tab. Account and API model order now follows metadata and saved manual order
+  without moving disabled models or prioritizing price overrides.
+
+- Accounts and API providers now share three pool rotation modes: Smart,
+  In order, and Round robin. One reorderable list replaces separate API roles,
+  with member weights and shared request limits. Settings apply without
+  interrupting active requests; unavailable members do not block the rest.
+  Concurrent edits are detected before saving, and presets retain the mixed order.
+  The editor uses one scrollbar, short status labels and mode-specific controls;
+  centered fields use Request share and Concurrent requests, with Unlimited
+  shown for an unset concurrency cap. Detailed explanations are in Help.
+  Automatic modes show ready members first,
+  while In order preserves your manual queue. Modes support keyboard selection.
+  Smart ignores manual order, includes all similarly suitable members instead
+  of limiting selection to three, and stops preferring stale quota readings.
+  Recent failures lose their scheduling penalty within a minute, so recovered
+  members can return automatically. Finishing an older request cannot release
+  another recovery probe; occupied probes allow a bounded wait. Server pool
+  membership changes immediately apply saved order and request limits.
+  The next-candidate hint follows the scheduler and is omitted when the choice
+  depends on the model or format. Stale activity events cannot overwrite a
+  newer runtime's state.
+
+- Pool controls now use a compact toolbar, a separate current/next route line,
+  and a framed panel with a shaded status strip and dividers between counters.
+  Connections uses the same panel styling for search, filters, and account actions.
+  Both summaries keep the total provider credits when available. Full route
+  and model names wrap on narrow screens; icon actions retain their tooltips.
+- Pool request speed is now a single draggable, three-position control for
+  Standard, Fast, and Ultrafast instead of a menu and a separate switch.
+  Its compact label shows only the selected mode, with smooth transitions
+  that respect reduced-motion preferences. Keyboard and touch selection are
+  supported; dragging saves on release.
+
+### Added
+
+- Pools serve Responses, Chat Completions, Messages and Gemini concurrently,
+  with native paths and supported conversions for JSON and streaming requests.
+- API source routing is now fully automatic. Relay keeps adapter routing
+  internal, prefers each model's declared native endpoint and converts requests
+  from Responses, Chat Completions, Messages or Gemini when needed.
+  Chat Completions supports function tools and their result history.
+- New API sources determine formats automatically from provider declarations
+  and endpoint settings. Every catalog model remains routable through the
+  source fallback when declarations are absent. Legacy manual-mode fields are
+  accepted during import and ignored; old physical endpoint assignments remain
+  fallback hints so mixed-protocol sources keep working after an upgrade.
+- OpenCode uses protocol-specific SDK groups and retains working model IDs and
+  user options during catalog refresh. Codex uses HTTP streaming when a model
+  needs conversion, while native WebSocket connections remain supported.
+
+- API cards recognize Sub2API, New API, compatible One API billing, DeepSeek
+  and SiliconFlow balances. OpenRouter statistics work with ordinary inference keys. Cards
+  distinguish wallets, key allowances, subscriptions, currencies and Relay's
+  own usage estimate, omit internal adapter labels and missing request counts, and mark failed refreshes
+  without discarding the last known balance. Refresh progress uses the button
+  animation without adding a duplicate status line below the counters.
+
+- Failed request details now show the provider's original error code, type,
+  message, and HTTP status separately from Relay's category. Messages can be
+  copied; sensitive content is hidden and long messages are bounded. Older
+  records explicitly show when no provider message was saved.
+- **Diagnostics** in Settings. Relay keeps separate, size-limited and
+  redacted logs for errors, crashes, and important operation stages; each
+  folder can be opened directly from the app. Detailed operation logging is
+  off by default and can be enabled there when troubleshooting.
+- Local Cockpit-compatible account exports now preserve a safe account name
+  and bounded, de-duplicated tags. Import accepts the same metadata without
+  exposing credentials; existing Relay tags remain authoritative on reimport.
+
 ### Fixed
 
+- Gemini prompt blocks and empty filtered or token-limited candidates now
+  reach clients as incomplete responses in JSON and streaming conversions,
+  rather than appearing as malformed upstream output or successful completion.
+- Account-card actions now use separate, consistent controls without the
+  nested header frame; sign-in-required quota states have a clearer
+  keyboard and pointer target.
+- Pool rotation modes now save on first use and after members join or leave,
+  without reverting to Smart because of an outdated stored member list.
+  Concurrent edits still refresh and retry safely. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- ChatGPT account selection and quota reserve share a compact panel; feature
+  switches use flat rows with concise descriptions. Pool member settings no
+  longer add a second frame inside the dialog. The OpenCode tab subtitle now
+  says "Use the pool in OpenCode". ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- GPT model names in ChatGPT and Codex keep their original IDs even when the
+  selected account has no matching catalog card. Explicit key prefixes and
+  existing aliases remain supported; capabilities come from the matching model.
+  ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Responses tool-history recovery preserves call/result links when a client
+  references an item ID or omits a call ID. Results are matched by kind and
+  namespace without deleting history or guessing between parallel calls.
+  HTTP, streaming and WebSocket use the same bounded recovery. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Pool rotation now saves mode, order and member settings immediately. Dragging
+  works consistently, concurrent membership updates refresh the editor, and
+  conflicting saves retry without restoring removed members. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Model rule actions share one aligned group with consistently sized format,
+  reasoning, speed and enable controls. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Provider price fields use one rounded outline, a separated currency marker
+  and numbers aligned to the right. Focus and invalid values highlight the
+  whole field consistently in both themes. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Pool speed labels and connection summaries fit wider system fonts without
+  clipping or unnecessary line breaks on desktop screens. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
+- Multiple routes for one member share rotation weight and request capacity.
+  An unsupported endpoint does not disable the member's other formats; quota
+  and authentication failures remain shared. Continuation retries preserve
+  complete history, tool results and opaque ownership.
+- Converted requests reject unsupported parameters instead of dropping them.
+  Schemas keep their constraints, per-turn instructions do not persist into
+  later turns, and reasoning levels are offered only where they can be mapped.
+  Streamed tools retain their IDs and order, and usage reflects the actual
+  upstream format without inventing missing counters.
+
+- Smart cache affinity no longer selects a member outside the best available
+  group or bypasses its rotation accounting.
+- Provider retry delays are respected for overloaded and unavailable models
+  and other service errors, including when a shorter recovery delay is configured.
+
+- Updated TLS handling to rustls 0.23.45 to address RUSTSEC-2026-0285.
+
+- Pool no longer reports that every member is unavailable when routing telemetry
+  is missing or stale but ready members remain. When none are ready, the warning
+  separates quota waits, unavailable members, and disabled members, with readable
+  error reasons. Pool and Connections group accounts by availability while
+  preserving routing order within each group.
+- Provider failures inside HTTP 200 JSON or streaming responses remain failures
+  in usage history. Rate limiting and spend-limit errors stay distinct, and
+  explicit request-validation errors do not put an account into cooldown.
+- A provider's generic request rejection or disabled model no longer blocks
+  fallback to another compatible member. Service errors on account routes keep
+  their account attribution without marking the account unhealthy.
+- Tool continuations validate the whole history, including calls beyond the
+  first sixteen. Completed historic calls no longer select the owner of a new
+  tool result, and outputs from different owners cannot be mixed implicitly.
+  Examples in tool schemas and nested result data no longer affect routing.
+- Account model refreshes no longer erase an independent block, sign-in, or
+  verification failure, or downgrade a terminal catalog error after a temporary
+  network failure. Quota-monitoring errors no longer hide the reason an account
+  is unavailable in Connections and Pool.
+- Pool activity matches the last-used account or API source by identity, so
+  requests with identical timestamps cannot highlight the wrong member.
+- Recovery preserves the original response binding for other chat branches
+  and retries, and uses the current request options without reviving old
+  instructions or transport settings. Provider-side
+  conversation and item references, or tool results without their calls, no
+  longer count as a complete local replay.
+- Chats with a supplied compacted context can continue without a stale response
+  reference over HTTP or WebSocket. The compacted window and retained tool
+  results stay intact; unreadable compaction is no longer silently discarded.
+- Chat recovery now requires a saved conversation chain before removing an
+  earlier response reference unless a complete compacted window is supplied,
+  preventing silent loss of prior context.
+- Manual credential refresh and observed client logins restore account routing
+  health. Remote account cards now reflect runtime cooldowns and unavailable routes.
+- Recovered pool accounts remain available without removing another member.
+  Delayed authentication updates no longer undo a newer account disable, and
+  account cards reflect temporary runtime unavailability during cooldowns.
+- Importing an account or API source without adding it to the pool no longer
+  restarts the live local gateway. This prevents an unrelated listener restart
+  from interrupting Relay during inventory-only imports.
+- After an interrupted launch or import, Diagnostics now records the last
+  redacted operation stage on the next start, even when detailed debug logging
+  was disabled.
+- A chat whose original account has run out of quota can now continue through
+  the next compatible healthy account or API source. This works for both
+  ordinary and WebSocket Responses requests.
+- Chats can recover from an expired response reference using Relay's locally
+  retained history, including on an already-open WebSocket. Complete tool
+  history can rotate with the pool; incomplete tool state is no longer silently
+  removed during recovery.
+- Unknown response references are rejected before reaching an unrelated
+  account. Clients can resend complete history without the old reference;
+  otherwise Relay reports that the continuation context is unavailable.
+- An account that needs sign-in, is cooling down, or has an error now disables
+  only that candidate, including when its status changes while the local gateway
+  is already running. The rest of the pool and its available models keep
+  rotating normally.
+- Account import and OAuth cleanup no longer leave stale temporary state that
+  can close Relay or block the next import. A JSON account can be added to
+  Relay without adding it to the pool.
+- Refreshed account credits and quota limits are applied to the running pool,
+  including when Relay is open only in the tray. Only real provider credits
+  are shown as available balance.
+- Background ChatGPT wake checks now use the live gateway runtime, including
+  its token refresh, cooldown, usage, and diagnostics paths, while staying
+  pinned to the account that the scheduler selected.
+- A model can be returned to Standard speed while its route is temporarily
+  unavailable. Fast and Ultrafast are recalculated for every retry candidate,
+  so an unsupported speed is not carried to the next account or API source.
+- Model Rules now shows only models that have a usable route. Stale ownership
+  is released when a route becomes unavailable, so a compatible replacement
+  can serve the chat.
+- Saving a partial Model Rules reorder now preserves unavailable and
+  binding-only pool models instead of treating them as removed.
+- Pool and Connections cards use consistent account information and
+  reauthentication controls. Unavailable accounts remain visible with their
+  status instead of making the whole pool look unavailable.
+- Closing the main window now hides Relay in the tray and reopens the same
+  window instead of destroying it. The OAuth completion page no longer shows
+  a close button that cannot work.
+
+## 1.1.3 release draft (not published)
+
+Before tagging the release, replace this heading with a dated `[1.1.3]`
+heading and add the tag link required by the release workflow.
+
+<!-- relay-notes:en -->
+
+Zenith Relay 1.1.3 improves account recovery, native ChatGPT integration,
+model discovery, streaming resilience, and local data safety.
+
+### Fixed
+
+- Relay storage now uses separate durable database, vault, catalog, migration,
+  temporary WebView/import, export, and recovery folders on Windows, macOS, and
+  Linux. Startup safely migrates only Relay-owned flat files, removes the old
+  legacy-marker file after relocating it, and refuses to overwrite a conflicting
+  durable copy.
+- ChatGPT history transfer now reconciles the desktop's local chat catalog as
+  well as its state database, clears stale visibility markers, and can complete
+  a prior partial transfer without rewriting already-correct rollout files. It
+  keeps conversation chronology, handles legacy catalog rows with no host id,
+  and includes the catalog in the existing rollback backup.
+- A stale account import no longer overwrites a newer in-memory OAuth rotation.
+  Relay persists and restarts from the authoritative credential state, while
+  preserving a separate credential update that completed meanwhile.
+- Relay-owned ChatGPT account discovery and requests now start with a stable
+  Codex fallback and asynchronously follow the newest published stable Rust
+  Codex release from the official OpenAI GitHub feed. Prerelease versions are
+  ignored, and the selected version stays in process memory instead of being
+  written to a local JSON cache; identity headers from a directly connected
+  client remain preserved.
+- Automatic Responses Lite now stays off unless every configured fallback route
+  has confirmed native Lite support for the selected model. Mixed or partially
+  known pools therefore preserve one full-Responses tool and reasoning-context
+  contract across HTTP, WebSocket, and account-only retries; explicit client
+  Lite requests are unchanged.
+- Relay no longer exits during startup when the client-login watchdog starts
+  before the desktop state is available; optimized desktop builds now open
+  reliably.
+- Launching a direct ChatGPT account now removes a previously managed Relay or
+  external model catalog for that session. Codex can again load the account's
+  native model names and its own available speed controls; the prior catalog is
+  restored when switching away.
+- Responses WebSocket streams no longer switch upstream or append a synthetic
+  Relay failure after output has reached the client, including HTTP/SSE
+  fallback. Disconnecting the client cancels fallback waits and releases the
+  occupied route. Enabled API text-route recovery can keep waiting for a temporary
+  route recovery without the former 30-second deadline.
+- Compact Usage tables now keep Russian column headings readable while
+  preserving timing and request identifiers, and keyboard focus remains
+  visible on shared navigation and action controls.
+- Requests carrying complete tool history can now leave a failed account after
+  a pre-output streaming or transport error, instead of being blocked by their
+  old tool affinity. Stateful continuations retain their original owner.
+- Desktop and tray icon artwork now uses more of its transparent canvas, so
+  Zenith Relay appears visually consistent with neighboring system icons.
+- Codex profile attachment now removes the unsupported `persistent` reasoning
+  effort from the desktop setting while Relay is active; profile restore keeps
+  the user's original configuration intact.
+- Reasoning catalogs now match decimal and dashed model versions, so Claude
+  releases such as Fable 5.1 and Opus 4.8 retain the full OpenRouter effort
+  enum instead of falling back to partial LiteLLM flags. Native ChatGPT
+  `ultra` levels are preserved, while Messages bridges expose `ultra` only as
+  the supported Codex alias translated to upstream `max`.
+- Model capabilities now come from the merged public metadata catalog for both
+  API sources and accounts, including ChatGPT/Codex and OpenCode profiles.
+  Unknown models accept text and image input with text output, without invented
+  reasoning, tools, or limits. Incomplete provider metadata no longer excludes
+  image requests from pool routes. Native account Responses Lite settings
+  remain isolated between accounts.
+- Retryable 502/503 failures move to the next eligible pool route before response
+  output begins; removed providers do not remain eligible for new requests.
+- Usage history now attributes upstream overload and server failures on OAuth
+  routes to the selected account instead of misidentifying it as an API
+  provider. Provider-neutral category text remains accurate for both route
+  kinds.
+- Model Rules now shows the selected global Standard or Fast pool policy when
+  an OpenAI-family model has no per-model override. Fast sends the upstream
+  `priority` request tier; it is not a capability check or a speed guarantee.
+
+- Responses tool continuations now retain the physical route that created both
+  function and custom-tool calls. A transient owner failure no longer replays
+  an orphaned tool output to another provider and surfaces a misleading
+  tool-call mismatch.
+- Reopening an older Codex chat on another model now recovers a stale
+  custom-tool or function call that has no recorded output. Relay removes only
+  the incomplete historical call and retries the new-model request instead of
+  exposing the provider's `No tool output found` error.
+- Responses bridges reject opaque compaction history with a specific
+  compatibility error, allowing an eligible native Responses route to be
+  tried without penalizing the bridge. A bridge also rejects a non-empty
+  context-management request instead of silently dropping the client's
+  compaction settings. Native requests preserve client-owned settings;
+  experimental compaction is not enabled automatically.
+- Hover hints now use Relay's themed tooltips throughout the interface instead
+  of browser popups. Redundant hints are hidden when the full value is visible;
+  truncated values and disabled-control explanations remain available.
+- Source launch buttons now ask whether to open the selected API source in
+  ChatGPT or OpenCode. OpenCode receives that source's exact endpoint,
+  credential, and verified native Responses models instead of silently using
+  the pool connection.
+- Proxy assignment is now available from each account card's three-dot menu;
+  the lower action bar no longer shows an edit pencil for this secondary action.
+- Reset-quota refresh failures remain visible even when the consumed credit was
+  the last available one, and reset diagnostics now use the shared redaction
+  path for provider errors, URL credentials, and quoted secret fields.
+- Pool profile switching no longer terminates the process tree of ChatGPT or
+  OpenCode. Relay stops only the identified desktop process, so unrelated
+  child processes cannot close Relay or another active desktop session.
+- Model Rules and source pricing now show one group per company instead of
+  separate family subgroups. Default model order puts newer releases first
+  across families while preserving manually saved ordering.
+- Model Rules is now limited to pool management: provider-dependent prices are
+  no longer shown or edited there. Per-source pricing remains available in the
+  source editor, where each API can keep its own prices.
+- Relay now keeps setup-only streaming frames internal until a route produces
+  real output or completes. A provider failure before that point falls back to
+  another eligible route instead of appearing as a separate user-visible
+  failed request.
+- Responses custom-tool continuations now stay bound to the route that created
+  the tool call. If a conversation is switched to another model or provider,
+  Relay refuses the unsafe continuation locally instead of forwarding it to a
+  provider that cannot recognize the tool-call id.
 - Unknown pooled models whose provider does not advertise reasoning metadata can
   now be configured manually with Low, Medium, High, Extra high, and Max.
   Relay sends no reasoning setting until the user explicitly enables one.
@@ -24,6 +722,72 @@ release entries are kept concise and link to the corresponding tag.
   highlight for the last-used member.
 - Runtime activity overlays are reconciled with fresh snapshots so an old
   release event cannot hide a newly active account or mislabel the next route.
+- Changing Usage filters while a report is still loading can no longer replace
+  the current report with a stale result or leave it empty. The API page also
+  remains usable when a partially saved gateway address is malformed.
+- Direct provider switching no longer rejects every routed model as having no
+  compatible text models after Relay stops publishing a synthetic truncation
+  limit. Provider-supplied truncation policies remain validated when present.
+
+<!-- relay-notes:ru -->
+
+Zenith Relay 1.1.3 улучшает восстановление аккаунтов, нативную интеграцию с
+ChatGPT, обнаружение моделей, устойчивость потоковой передачи и безопасность
+локальных данных.
+
+### Исправления и улучшения
+
+- Хранилище Relay разделено на устойчивые папки для базы, vault, каталогов,
+  миграций, временных данных, экспорта и восстановления на Windows, macOS и
+  Linux. Миграция переносит только файлы Relay, не перезаписывает конфликтующие
+  данные и удаляет старый маркер после успешного переноса.
+- Перенос истории ChatGPT теперь обновляет и локальный каталог чатов клиента,
+  включая старые строки без `host_id`, очищает устаревшие маркеры видимости и
+  сохраняет резервную копию для отката.
+- Устаревший импорт аккаунта больше не затирает более новые OAuth-учётные
+  данные из работающего Relay; актуальная авторитетная версия сохраняется и
+  используется при перезапуске маршрута.
+- Relay наблюдает фактический переход клиента на страницу входа и показывает
+  предупреждение только у связанного аккаунта, не блокируя переключение
+  аккаунтов по локальному сроку действия токена.
+- Для собственных запросов ChatGPT Relay сразу использует стабильную резервную
+  версию Codex, а после загрузки и затем раз в час асинхронно проверяет
+  официальный GitHub-релиз Rust Codex. Бета-, альфа- и другие prerelease-версии
+  игнорируются; выбранная версия хранится только в памяти процесса, без
+  локального JSON-кэша. Идентификационные заголовки напрямую подключённого
+  клиента сохраняются.
+- При прямом подключении ChatGPT Codex снова получает нативные названия
+  моделей и собственное управление скоростью; временный каталог Relay при
+  этом корректно снимается и восстанавливается при смене профиля.
+- Метаданные моделей обновляются из публичных каталогов для API-источников,
+  аккаунтов, ChatGPT/Codex и OpenCode. Неизвестные модели не скрываются и не
+  получают вымышленных лимитов, инструментов или reasoning-возможностей.
+- Автоматический режим Responses Lite включается только при подтверждённой
+  нативной поддержке на каждом запасном маршруте. Явный запрос клиента Lite
+  остаётся без изменений.
+- После появления ответа поток больше не меняет upstream и не добавляет
+  искусственную ошибку Relay. До первого байта доступны безопасный failover,
+  отмена ожидания при отключении клиента и ожидание временного восстановления
+  ChatGPT без прежнего ограничения в 30 секунд.
+- Продолжения с function/custom tools сохраняют физический маршрут-владельца.
+  Неполные старые вызовы инструментов можно безопасно восстановить при смене
+  модели, а небезопасное продолжение блокируется локально.
+- Ошибки 502/503 до начала ответа переходят на следующий подходящий маршрут;
+  удалённые источники не остаются доступны для новых запросов. Ошибки OAuth
+  корректно относятся к аккаунту, а не к несуществующему API-провайдеру.
+- Правила моделей показывают выбранную общую политику Standard или Fast для
+  OpenAI-моделей без отдельного переопределения. Fast отправляет upstream
+  режим `priority`, но не является проверкой поддержки или гарантией скорости.
+  Порядок и группировка моделей стали стабильнее, а цены редактируются только
+  у конкретного источника.
+- Мониторинг кредитов, квот и еженедельного сброса устойчивее к временным
+  ошибкам; наличие подтверждённого положительного или безлимитного кредита
+  допускает аккаунт в пул без подмены расчёта стоимости.
+- Статус пула сохраняет последний использованный маршрут рядом со следующим
+  кандидатом и не теряет актуальную активность при поздних событиях. Таблицы
+  Usage не затираются устаревшими ответами при смене фильтра.
+- Интерфейс получил русские компактные заголовки, тематические подсказки,
+  видимый keyboard focus, аккуратные действия прокси и обновлённые иконки.
 
 ## [1.1.2] - 2026-09-03
 
@@ -88,8 +852,25 @@ integration, recovery, and the local-first desktop workflow.
   for usage and API-equivalent totals. Pricing remains informational and never
   changes routing or quota decisions.
 
+### Model catalog
+
+- Added a separate `models.dev` metadata catalog for provider, family, display
+  name, release dates, and safe descriptive capabilities. LiteLLM remains the
+  only source of pricing; metadata never adds models, enables routing, or
+  changes reasoning and availability decisions.
+- Model metadata is loaded from the local cache at startup and refreshed in the
+  background with conditional HTTP validation. Stale or unavailable metadata
+  remains usable, and backend-owned family/order data is shared by all model
+  pickers without frontend name heuristics.
+
 ### Desktop UI
 
+- Account cards show a **Credits** row and the pool shows **Total credits**
+  when the connected provider explicitly reports a positive or unlimited
+  ledger. Values use at most one decimal place; zero or missing ledgers stay
+  hidden and do not affect billing or Relay's API-equivalent calculation. When
+  quota headroom is otherwise tied, the pool prefers the larger fresh ledger
+  before continuing its normal fair rotation.
 - The Overview application launcher now only starts an already connected
   application; the connect-time launch preference is shown only during setup.
 - ChatGPT recovery provides named, protected snapshots of `config.toml` and
@@ -381,7 +1162,7 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...main
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...release/1.1.3
 [1.1.2]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.2
 [1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1
 [1.1.0]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0

@@ -3,6 +3,7 @@ use crate::state::{GatewayKeyRecord, ServerAccountRecord, ServerProxyRecord, Sou
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zenith_relay_core::scheduler::refresh::RefreshIdentity;
 
 trait BatchRecord: Serialize {
     const UPSERT_SQL: &'static str;
@@ -92,6 +93,19 @@ impl Store {
         )
     }
 
+    pub fn chatgpt_retry_until_available(&self) -> Result<bool, String> {
+        Ok(self
+            .metadata("chatgpt_retry_until_available")?
+            .is_some_and(|value| value == "true"))
+    }
+
+    pub fn set_chatgpt_retry_until_available(&self, enabled: bool) -> Result<(), String> {
+        self.set_metadata(
+            "chatgpt_retry_until_available",
+            if enabled { "true" } else { "false" },
+        )
+    }
+
     pub fn sources(&self) -> Result<Vec<SourceRecord>, String> {
         self.list_records("sources")
     }
@@ -165,6 +179,7 @@ impl Store {
             return Err("pending import no longer exists".to_string());
         }
         transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
         Ok(!existed)
     }
 
@@ -175,24 +190,62 @@ impl Store {
         id: &str,
         update: impl FnOnce(&mut ServerAccountRecord) -> Result<T, String>,
     ) -> Result<Option<T>, String> {
+        self.update_account_with_refresh_identity(id, update)
+            .map(|updated| updated.map(|(value, _)| value))
+    }
+
+    /// Return the durable identity from the same transaction as this usage
+    /// observation. A subsequent configuration edit must not make a late
+    /// passive quota or Retry-After hint target the replacement registration.
+    pub(crate) fn update_account_with_refresh_identity<T>(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut ServerAccountRecord) -> Result<T, String>,
+    ) -> Result<Option<(T, RefreshIdentity)>, String> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let json = transaction
+        let snapshot = transaction
             .query_row(
-                "SELECT data_json FROM accounts WHERE id = ?1",
+                "SELECT data_json, refresh_revision, (SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'refresh_config_revision') FROM accounts WHERE id = ?1",
                 [id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .optional()
             .map_err(db_error)?;
-        let Some(json) = json else {
+        let Some((json, revision, configuration_revision)) = snapshot else {
             transaction.commit().map_err(db_error)?;
+            self.notify_refresh_changed();
             return Ok(None);
         };
-        let mut record = parse_json(&json)?;
+        let identity = RefreshIdentity::new(
+            format!("account:{id}"),
+            u64::try_from(revision).map_err(|_| "account refresh revision is invalid")?,
+            u64::try_from(configuration_revision)
+                .map_err(|_| "refresh configuration revision is invalid")?,
+        );
+        let mut record: ServerAccountRecord = parse_json(&json)?;
+        let previous_monitoring = (
+            record.enabled,
+            record.auth_state,
+            record.secret_ref.clone(),
+            record.source_id.clone(),
+            record.proxy_id.clone(),
+            record.bypass_common_proxy,
+            record.created_at_ms,
+        );
         let value = update(&mut record)?;
+        let monitoring_changed = previous_monitoring
+            != (
+                record.enabled,
+                record.auth_state,
+                record.secret_ref.clone(),
+                record.source_id.clone(),
+                record.proxy_id.clone(),
+                record.bypass_common_proxy,
+                record.created_at_ms,
+            );
         transaction
             .execute(
                 "UPDATE accounts SET data_json = ?1, secret_ref = ?2 WHERE id = ?3",
@@ -200,7 +253,12 @@ impl Store {
             )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
-        Ok(Some(value))
+        // Usage counts/passive quota do not trigger an inventory-wide scan on
+        // each completed request. Runtime activity directly updates cadence.
+        if monitoring_changed {
+            self.notify_refresh_changed();
+        }
+        Ok(Some((value, identity)))
     }
 
     /// Persists Team breaker sibling state without recording synthetic usage.
@@ -243,7 +301,9 @@ impl Store {
                     .map_err(db_error)?;
             }
         }
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
+        Ok(())
     }
 
     pub fn delete_account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
@@ -296,6 +356,7 @@ impl Store {
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
         json.map(|value| parse_json(&value)).transpose()
     }
 
@@ -349,7 +410,9 @@ impl Store {
                 return Err("pool account not found".to_string());
             }
         }
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
+        Ok(())
     }
 
     pub fn keys(&self) -> Result<Vec<GatewayKeyRecord>, String> {
@@ -377,7 +440,9 @@ impl Store {
                 .execute("DELETE FROM gateway_keys WHERE id = ?1", [id])
                 .map_err(db_error)?;
         }
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        self.notify_refresh_changed();
+        Ok(())
     }
 }
 
@@ -440,6 +505,42 @@ mod tests {
         let stored = store.account("account_1").unwrap().unwrap();
         assert_eq!(stored.proxy_id.as_deref(), Some("proxy_1"));
         assert_eq!(stored.last_used_at_ms, Some(2));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_hint_identity_is_the_transaction_identity_not_a_later_configuration() {
+        let root = test_root("usage-hint-identity");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        store.save_account(&account()).unwrap();
+        let original = store
+            .account_refresh_scope("account_1")
+            .unwrap()
+            .1
+            .identity();
+        let ((), observed) = store
+            .update_account_with_refresh_identity("account_1", |record| {
+                record.last_used_at_ms = Some(2);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed, original);
+
+        let mut updated = store.account("account_1").unwrap().unwrap();
+        updated.proxy_id = Some("new-proxy".into());
+        store.save_account(&updated).unwrap();
+        let current = store
+            .account_refresh_scope("account_1")
+            .unwrap()
+            .1
+            .identity();
+        assert_ne!(observed, current);
+        assert_eq!(
+            store.account("account_1").unwrap().unwrap().last_used_at_ms,
+            Some(2)
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

@@ -59,7 +59,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
   }, [layout]);
 
   const columns: Record<RequestColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
-    time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
+    time: { label: t("usage.time"), cell: (row) => <time dateTime={row.time}>{formatTime(row.time)}</time> },
     status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"} label={requestStatusLabel(row, t)} /> },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },
@@ -115,7 +115,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
       <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bindColumnDrag(id)}><span>{columns[id].label}</span></button>
       <span className="usage-column-resizer" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={t("usage.resizeColumn", { column: columns[id].label })} aria-valuemin={REQUEST_COLUMN_MIN_WIDTH[id]} aria-valuemax={REQUEST_COLUMN_MAX_WIDTH} aria-valuenow={Math.round(layout.widths[id] ?? REQUEST_COLUMN_MIN_WIDTH[id])} onPointerDown={(event) => startResize(event, id)} onPointerMove={(event) => resizeColumn(event, id)} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); setResize(null); }} onLostPointerCapture={() => setResize(null)} onDoubleClick={() => setLayout((current) => ({ ...current, widths: {} }))} onKeyDown={(event) => resizeColumnByKeyboard(event, id)} />
     </th>)}</tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((id) => <td key={id} data-column={id} title={id === "model" ? row.model ?? undefined : id === "connection" ? row.connection : undefined}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+    <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((id) => <td key={id} data-column={id} data-label={columns[id].label} data-relay-tooltip={id === "model" ? row.model ?? undefined : id === "connection" ? row.connection : undefined}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
@@ -151,10 +151,10 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   const moveColumnBy = (column: AggregateColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<AggregateColumnId, { label: string; cell: (group: AggregateRow) => ReactNode }> = {
-    name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <span className="usage-aggregate-name" title={group.name}>{group.name}</span> },
+    name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <span className="usage-aggregate-name" data-relay-tooltip={group.name}>{group.name}</span> },
     requests: { label: t("usage.requests"), cell: (group) => <CompactNumber value={group.requests} locale={i18n.language} /> },
     success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
-    breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span>{group.cacheWriteInputSamples ? <span title={`${t("usage.cacheWriteInputTokens")}: ${formatFullNumber(group.cacheWriteInputTokens, i18n.language)}`}><small>{t("usage.cacheWriteShort")}</small>{formatCompactNumber(group.cacheWriteInputTokens, i18n.language)}</span> : null}<span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span></div> },
+    breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span data-relay-tooltip={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span data-relay-tooltip={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span><span data-relay-tooltip={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span>{group.cacheWriteInputSamples ? <span data-relay-tooltip={`${t("usage.cacheWriteInputTokens")}: ${formatFullNumber(group.cacheWriteInputTokens, i18n.language)}`}><small>{t("usage.cacheWriteShort")}</small>{formatCompactNumber(group.cacheWriteInputTokens, i18n.language)}</span> : null}<span data-relay-tooltip={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span></div> },
     total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
     speed: { label: t("usage.generationSpeedShort"), cell: (group) => <SpeedValue value={group.generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests), i18n.resolvedLanguage ?? i18n.language, t) },
@@ -167,7 +167,7 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
   return <div className="relay-table-wrap"><table className={`relay-table usage-aggregate-table usage-sortable-table ${field === "connection" ? "usage-connections-table" : "usage-models-table"}`}>
     <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
     <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
-    <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>
+    <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id} data-label={columns[id].label}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
@@ -178,18 +178,18 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
   const moveColumnBy = (column: ErrorColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
   const columns: Record<ErrorColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
-    time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
+    time: { label: t("usage.time"), cell: (row) => <time dateTime={row.time}>{formatTime(row.time)}</time> },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     origin: { label: t("usage.errorOrigin"), cell: (row) => formatErrorOrigin(row.errorOrigin, t) },
-    error: { label: t("usage.errorCategory"), cell: (row) => <span title={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</span> },
+    error: { label: t("usage.errorCategory"), cell: (row) => <span data-relay-tooltip={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</span> },
     request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
   };
   if (!rows.length) return <EmptyState title={t("usage.noErrors")} description={t("usage.noErrorsHint")} />;
   return <div className="relay-table-wrap"><table className="relay-table usage-error-table usage-sortable-table">
     <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
     <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.id}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+    <tbody>{rows.map((row) => <tr key={row.id}>{order.map((id) => <td key={id} data-column={id} data-label={columns[id].label}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
   </table></div>;
 }
 
@@ -210,6 +210,26 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   });
   const formatTokens = (value: number | null) => value == null ? "—" : formatFullNumber(value, i18n.language);
   const hasTokenValue = (value: number | null): value is number => value != null && value > 0;
+  const hasCacheRead = hasTokenValue(breakdown.cacheRead);
+  const hasCacheWrite = hasTokenValue(breakdown.cacheWrite);
+  const reportedCacheWindows = (row.cacheWriteTtl ?? "")
+    .split(",")
+    .map((window) => window.trim().toLowerCase())
+    .filter((window) => /^\d{1,5}(?:ms|s|m|h|d)$/.test(window))
+    .map((window) => window === "5m" ? t("usage.cacheWriteTtls.5m") : window === "1h" ? t("usage.cacheWriteTtls.1h") : window)
+    .join(", ");
+  const cacheWindowLabel = reportedCacheWindows
+    ? t("usage.cacheWriteWindowReported", { ttl: reportedCacheWindows })
+    : hasCacheWrite
+      ? [
+          t("usage.cacheRetentionWindowNotReported"),
+          row.documentedCacheRetentionMinimum === "30m"
+            ? t("usage.cacheRetentionWindowOpenAiMinimum")
+            : null,
+        ].filter(Boolean).join(" · ")
+    : row.documentedCacheRetentionMinimum === "30m"
+      ? t("usage.cacheRetentionWindowOpenAiMinimum")
+      : null;
   const toolWarning = Boolean(
     toolUse
       && toolUse.forwardedToolCount > 0
@@ -222,13 +242,13 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     ...(toolUse ? [{ id: "tools", label: t("usage.requestSections.tools") }] : []),
     ...(routing ? [{ id: "route", label: t("usage.requestSections.route") }] : []),
   ];
-  return <Dialog title={t("usage.requestDetails")} onClose={onClose} wide className="request-details-dialog" closeOnBackdrop>
+  return <Dialog title={t("usage.requestDetails")} onClose={onClose} wide className="request-details-dialog">
     <div className="request-details-header">
       <div className="request-details-identity">
         <StatusBadge status={row.requestOrigin?.startsWith("blocked_") ? "warning" : row.success ? "ready" : "error"} label={requestStatusLabel(row, t)} />
-        <code title={row.model ?? undefined}>{row.model ?? "-"}</code>
+        <code data-relay-tooltip={row.model ?? undefined}>{row.model ?? "-"}</code>
       </div>
-      <div className="request-details-id"><span>{t("usage.requestId")}</span><code title={row.requestId ?? undefined}>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</div>
+      <div className="request-details-id"><span>{t("usage.requestId")}</span><code data-relay-tooltip={row.requestId ?? undefined}>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</div>
     </div>
     <div className="request-details-metrics">
       <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} />
@@ -239,12 +259,17 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
     <Tabs value={section} items={tabs} onChange={(value) => setSection(value as typeof section)} label={t("usage.requestSectionsLabel")} />
     {section === "overview" ? <>
       <dl className="request-details-list">
+        {row.requestedModel && row.routedModel && row.requestedModel !== row.routedModel ? <>
+          <div><dt>{t("usage.requestedModel")}</dt><dd><code>{row.requestedModel}</code></dd></div>
+          <div><dt>{t("usage.routedModel")}</dt><dd><code>{row.routedModel}</code></dd></div>
+        </> : null}
         <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
         <div><dt>{t("usage.protocol")}</dt><dd><code>{formatWireApi(row.wireApi, t)}</code></dd></div>
+        {row.success && routing?.endpointKind && routing.endpointKind !== row.wireApi ? <div><dt>{t("usage.endpoint")}</dt><dd><code>{formatEndpointKind(routing.endpointKind, row.wireApi, t)}</code></dd></div> : null}
         <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
         {formatObservedServiceTier(row) ? <div><dt>{t("usage.upstreamTier")}</dt><dd><code>{formatObservedServiceTier(row)}</code></dd></div> : null}
         <div><dt>{t("usage.reasoning")}</dt><dd>{formatReasoningSummary(row, t)}</dd></div>
-        {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd title={t("codex.backgroundRequestHint")}>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
+        {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd data-relay-tooltip={t("codex.backgroundRequestHint")}>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
       </dl>
       {!row.success ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
         <h3>{t("usage.errorDetails")}</h3>
@@ -252,28 +277,49 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
           <div><dt>{t("usage.attempt")}</dt><dd>{row.attempt}</dd></div>
           <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
           <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div>
-          <div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
-          <div><dt>{t("usage.endpoint")}</dt><dd><code>{routing?.endpointKind ?? formatWireApi(row.wireApi, t)}</code></dd></div>
+          <div><dt>{t("usage.errorCategory")}</dt><dd data-relay-tooltip={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
+          <div><dt>{t("usage.endpoint")}</dt><dd><code>{formatEndpointKind(routing?.endpointKind, row.wireApi, t)}</code></dd></div>
         </dl>
+        <h3>{t("usage.upstreamError")}</h3>
+        {row.upstreamError ? <>
+          <dl className="request-details-list request-provider-fields">
+            <div><dt>{t("usage.upstreamHttpStatus")}</dt><dd>{row.upstreamError.httpStatus ?? t("common.unknown")}</dd></div>
+            {row.upstreamError.code ? <div><dt>{t("usage.upstreamErrorCode")}</dt><dd><code>{row.upstreamError.code}</code></dd></div> : null}
+            {row.upstreamError.errorType ? <div><dt>{t("usage.upstreamErrorType")}</dt><dd><code>{row.upstreamError.errorType}</code></dd></div> : null}
+          </dl>
+          {row.upstreamError.message ? <div className="request-upstream-message">
+            <pre>{row.upstreamError.message}</pre>
+            <CopyButton value={row.upstreamError.message} label={t("usage.copyUpstreamError")} />
+          </div> : <p className="form-note">{t("usage.upstreamErrorUnavailable")}</p>}
+          {row.upstreamError.redacted ? <p className="form-note">{t("usage.upstreamErrorRedacted")}</p> : null}
+          {row.upstreamError.truncated ? <p className="form-note">{t("usage.upstreamErrorTruncated")}</p> : null}
+        </> : <p className="form-note">{t("usage.upstreamErrorUnavailable")}</p>}
       </section> : null}
     </> : null}
     {section === "tokens" ? <dl className="request-details-list request-details-token-list">
       {breakdown.inputTotal == null || hasTokenValue(breakdown.inputTotal) ? <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><dd>{formatTokens(breakdown.inputTotal)}</dd></div>
         {hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><dd>{formatTokens(breakdown.uncachedInput)}</dd></div> : null}
-        {hasTokenValue(breakdown.cacheRead) ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}</dd></div> : null}
-        {hasTokenValue(breakdown.cacheWrite) ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)}{row.cacheWriteTtl ? ` (${t(`usage.cacheWriteTtls.${row.cacheWriteTtl}`)})` : ""}</dd></div> : null}
+        {hasCacheRead ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}</dd></div> : null}
+        {hasCacheWrite ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)}</dd></div> : null}
+        {cacheWindowLabel ? <div className="request-details-token-child"><dt data-relay-tooltip={t("usage.cacheRetentionWindowHint")}>{t("usage.cacheRetentionWindow")}</dt><dd>{cacheWindowLabel}</dd></div> : null}
       </div> : null}
       {breakdown.outputTotal == null || hasTokenValue(breakdown.outputTotal) ? <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.outputTokens")}</dt><dd>{formatTokens(breakdown.outputTotal)}</dd></div>
         {hasTokenValue(breakdown.reasoning) ? <div className="request-details-token-child"><dt>{t("usage.reasoningTokens")}</dt><dd>{formatTokens(breakdown.reasoning)}</dd></div> : null}
       </div> : null}
       {breakdown.total == null || hasTokenValue(breakdown.total) ? <div className="request-details-token-total"><dt>{t("usage.totalTokens")}</dt><dd>{formatTokens(breakdown.total)}</dd></div> : null}
-      {row.apiEquivalent && (row.apiEquivalent.microUsd > 0 || row.apiEquivalent.pricedTokens > 0 || row.apiEquivalent.unpricedTokens > 0) ? <div className="request-details-token-api"><dt>{t("usage.apiEquivalent")}</dt><dd title={t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens })}>{formatUsageApiEquivalent(row.apiEquivalent, i18n.language)}</dd></div> : null}
+      {row.apiEquivalent && (row.apiEquivalent.microUsd > 0 || row.apiEquivalent.pricedTokens > 0 || row.apiEquivalent.unpricedTokens > 0) ? <div className="request-details-token-api"><dt>{t("usage.apiEquivalent")}</dt><dd data-relay-tooltip={t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens })}>{formatUsageApiEquivalent(row.apiEquivalent, i18n.language)}</dd></div> : null}
     </dl> : null}
     {section === "tools" && toolUse ? <section className="request-details-section">
       <dl className="request-details-list">
         <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount} → {toolUse.forwardedToolCount}</dd></div>
+        {toolUse.policyMode ? <div><dt>{t("toolPolicy.title")}</dt><dd>{t(`toolPolicy.modes.${toolUse.policyMode}`)}</dd></div> : null}
+        {toolUse.policyOutcome ? <div><dt>{t("toolPolicy.result")}</dt><dd>{t(`toolPolicy.outcomes.${toolUse.policyOutcome}`)}</dd></div> : null}
+        {toolUse.deferredToolSearch ? <div><dt>{t("toolPolicy.deferred")}</dt><dd>{t("toolPolicy.deferredValue")}</dd></div> : null}
+        {toolUse.policyFallback ? <div><dt>{t("toolPolicy.fallback")}</dt><dd>{t("toolPolicy.fallbackValue")}</dd></div> : null}
+        {toolUse.filteredToolCount != null && toolUse.filteredToolCount > 0 ? <div><dt>{t("toolPolicy.filtered")}</dt><dd>{toolUse.filteredToolCount}</dd></div> : null}
+        {toolUse.clientSchemaBytes != null && toolUse.forwardedSchemaBytes != null ? <div><dt>{t("toolPolicy.schemaBytes")}</dt><dd>{formatFullNumber(toolUse.clientSchemaBytes, i18n.language)} → {formatFullNumber(toolUse.forwardedSchemaBytes, i18n.language)}</dd></div> : null}
         <div><dt>{t("usage.toolChoice")}</dt><dd>{formatToolChoice(toolUse.toolChoice, t)}</dd></div>
         <div><dt>{t("usage.toolCallsReturned")}</dt><dd>{toolUse.toolCallCount}</dd></div>
         <div><dt>{t("usage.terminalOutput")}</dt><dd>{formatTerminalOutput(toolUse.terminalOutput, t)}</dd></div>
@@ -297,7 +343,7 @@ function RequestDetailMetric({ label, value }: { label: string; value: ReactNode
 
 function SpeedValue({ value, locale, unit }: { value: number | null; locale: string; unit: string }) {
   const { t } = useTranslation();
-  return <span className="usage-speed-value" title={t("usage.generationSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
+  return <span className="usage-speed-value" data-relay-tooltip={t("usage.generationSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
 }
 
 function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
@@ -315,8 +361,8 @@ function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoning
   const requestOrigin = row.requestOrigin;
   return <span className="usage-model-value">
     <code>{row.model ?? "-"}</code>
-    {requestOrigin ? <span className="usage-request-origin" title={t("codex.backgroundRequestHint")}><Bot aria-hidden /></span> : null}
-    {effort ? <small title={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
+    {requestOrigin ? <span className="usage-request-origin" data-relay-tooltip={t("codex.backgroundRequestHint")}><Bot aria-hidden /></span> : null}
+    {effort ? <small data-relay-tooltip={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
   </span>;
 }
 
@@ -356,6 +402,15 @@ function formatWireApi(value: string | null, t: TFunction): string {
   if (value === "chat_completions") return t("usage.protocols.chatCompletions");
   if (value === "gemini") return t("usage.protocols.gemini");
   return value ?? "—";
+}
+
+function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
+  if (value === "excel_basis_points") return t("usage.endpoints.excelBasisPoints");
+  if (value === "responses") return t("usage.protocols.responses");
+  if (value === "chat_completions") return t("usage.protocols.chatCompletions");
+  if (value === "messages") return t("usage.protocols.messages");
+  if (value === "gemini") return t("usage.protocols.gemini");
+  return value ?? formatWireApi(wireApi, t);
 }
 
 function formatErrorCategory(category: string | null, t: TFunction): string {
@@ -408,5 +463,5 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
 }
 
 export function CompactNumber({ value, locale }: { value: number; locale: string }) {
-  return <span title={formatFullNumber(value, locale)}>{formatCompactNumber(value, locale)}</span>;
+  return <span data-relay-tooltip={formatFullNumber(value, locale)}>{formatCompactNumber(value, locale)}</span>;
 }

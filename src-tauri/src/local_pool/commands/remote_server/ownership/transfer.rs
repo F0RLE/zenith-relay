@@ -579,6 +579,8 @@ mod tests {
             "id": account_id,
             "label": "Synthetic account",
             "identityHint": "synthetic",
+            "basisPointsAvailable": false,
+            "basisPointsEnabled": false,
             "enabled": true,
             "inPool": true,
             "draining": false,

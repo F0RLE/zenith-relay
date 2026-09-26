@@ -13,7 +13,7 @@ pub use adapter::{
     NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub(crate) use adapter::{
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    gemini_incomplete, remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids,
 };
 pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
@@ -22,23 +22,28 @@ pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
 pub use management::pool_model_summaries;
 pub use management::{
     account_candidate_enabled, account_operational_state, api_equivalent_projection_window,
-    apply_model_display_order, apply_model_reasoning_summary, apply_model_speed_summary,
-    apply_pool_model_configuration, merge_configuration_preset_settings,
-    model_has_api_source_route, model_has_native_account_route, normalize_configuration_preset,
-    operational_status, pool_candidate_count, pool_model_summaries_with_pricing,
-    pool_pricing_source_summary, pooled_source_runtime_available, quota_refresh_status,
-    source_runtime_available, valid_generated_id, validate_resolved_configuration_preset_members,
-    AccountOperationalInput, AccountOperationalState, AccountPresetRule, AccountRoutingBlockReason,
+    apply_member_model_display_order, apply_model_display_order,
+    apply_model_display_order_with_catalog, apply_model_metadata, apply_model_protocol_routes,
+    apply_model_reasoning_summary, apply_model_speed_summary, apply_pool_model_configuration,
+    canonical_pool_model_id, codex_catalog_supports_websockets, complete_model_display_order,
+    member_model_catalog, merge_configuration_preset_settings, model_has_api_source_route,
+    model_has_native_account_route, normalize_configuration_preset, operational_status,
+    pool_candidate_count, pool_model_summaries_with_pricing, pool_pricing_source_summary,
+    pool_routing_summary, pooled_source_runtime_available, quota_refresh_status,
+    source_runtime_available, update_model_reasoning_policy, valid_generated_id,
+    validate_resolved_configuration_preset_members, AccountOperationalInput,
+    AccountOperationalState, AccountPresetRule, AccountRefreshState, AccountRoutingBlockReason,
     AccountSummary, ApiError, ClientWireApi, ConfigurationPreset, ConfigurationPresetApplyInput,
     ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
     ConfigurationPresetPreview, ConfigurationPresetPreviewInput, ConfigurationPresetSettings,
-    ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelSummary,
-    OperationalStatus, PresetQuotaPolicy, PresetRoutingPolicy, ProfileKeyRotation, ProxyMode,
-    QuotaRefreshStatus, QuotaWindowUsage, RemoteAccountLocation, RevealedAccountIdentity,
-    RuntimeStateSnapshot, RuntimeTargetSummary, SourcePresetRule, SourceSummary, UsageBucket,
+    ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelCatalogIdentity,
+    ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus, PresetQuotaPolicy,
+    PresetRoutingPolicy, ProfileKeyRotation, ProxyMode, QuotaRefreshStatus, QuotaWindowUsage,
+    RefreshStatus, RemoteAccountLocation, RevealedAccountIdentity, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourcePresetRule, SourceRefreshState, SourceSummary, UsageBucket,
     UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals,
     CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
     PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
-pub(crate) use sse::event_end as sse_event_end;
+pub(crate) use sse::{data as sse_data, event_end as sse_event_end, lines as sse_lines};
 pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

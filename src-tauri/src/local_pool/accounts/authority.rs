@@ -16,9 +16,10 @@ use std::{
 use tokio::time::{sleep, Duration, Instant};
 use uuid::Uuid;
 use zenith_relay_core::accounts::{
-    AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
-    TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
+    AccountAuthState, TokenDispatchRevision, TokenPersistenceAdapter, TokenPersistenceFailure,
+    TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
@@ -132,6 +133,44 @@ impl ProcessAccountLocks {
             }
         }
     }
+
+    /// Attempts to acquire a credential lock without waiting for its current
+    /// owner. Compensating transactions use this after an asynchronous
+    /// operation has failed: if a newer login or refresh owns the lock, the
+    /// old transaction must leave its state alone instead of waiting and then
+    /// restoring a stale snapshot.
+    pub fn try_acquire(
+        &self,
+        local_account_id: &str,
+    ) -> Result<Option<ProcessAccountGuard>, ProcessLockError> {
+        validate_local_account_id(local_account_id)?;
+        let lock_dir = self.root.join("locks");
+        ensure_lock_dir(&lock_dir)?;
+        let path = lock_path(&lock_dir, local_account_id);
+        for _ in 0..2 {
+            let owner = LockOwner {
+                owner_token: Uuid::new_v4().hyphenated().to_string(),
+                created_at_ms: now_ms(),
+                process_id: std::process::id(),
+            };
+            match create_lock(&path, &owner) {
+                Ok(()) => {
+                    return Ok(Some(ProcessAccountGuard {
+                        path,
+                        owner_token: owner.owner_token,
+                    }));
+                }
+                Err(CreateLockError::Exists) => {
+                    if !recover_stale_lock(&path, self.config.stale_after_ms)? {
+                        return Ok(None);
+                    }
+                }
+                Err(CreateLockError::Unsafe) => return Err(ProcessLockError::UnsafePath),
+                Err(CreateLockError::Io) => return Err(ProcessLockError::Io),
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub struct ProcessAccountGuard {
@@ -201,6 +240,86 @@ impl<B, C> StoredRefreshAdapter<B, C> {
     }
 }
 
+impl<B, C> StoredRefreshAdapter<B, C>
+where
+    B: SecretBackend + Send + Sync,
+    C: CodexRefreshClient,
+{
+    async fn refresh_inner(
+        &self,
+        local_account_id: &str,
+        now_ms: u64,
+        revision: Option<&TokenDispatchRevision>,
+    ) -> Result<TokenRefresh, TokenRefreshFailure> {
+        let _guard = self
+            .locks
+            .acquire(local_account_id)
+            .await
+            .map_err(lock_refresh_failure)?;
+        let superseded = || {
+            TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "credential_superseded")
+        };
+        if revision.is_some_and(|revision| revision.guard().is_none()) {
+            return Err(superseded());
+        }
+        let current = self.credentials.require(local_account_id).map_err(|_| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                error_codes::CREDENTIAL_LOAD_FAILED,
+            )
+        })?;
+        if current.is_access_usable(now_ms, self.refresh_skew_ms) {
+            return current.to_token_refresh().map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_stored_credential",
+                )
+            });
+        }
+        let refresh_token = current.refresh_token().ok_or_else(|| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::ExpiredRefreshToken,
+                error_codes::REFRESH_TOKEN_MISSING,
+            )
+        })?;
+        let refreshed = self
+            .client
+            .refresh(
+                local_account_id,
+                current.provider_account_id(),
+                refresh_token,
+                now_ms,
+            )
+            .await?;
+        let updated = current.apply_refresh(refreshed, now_ms).map_err(|_| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "invalid_refresh_response",
+            )
+        })?;
+        {
+            // The on-disk secret write is synchronous. Hold the slot read
+            // guard while saving so a removed/re-added slot cannot receive
+            // the old provider result, even if it uses the same account id.
+            let _revision_guard = revision
+                .map(|revision| revision.guard().ok_or_else(superseded))
+                .transpose()?;
+            self.credentials.save(&updated).map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    error_codes::CREDENTIAL_PERSIST_FAILED,
+                )
+            })?;
+        }
+        updated.to_token_refresh().map_err(|_| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "invalid_stored_credential",
+            )
+        })
+    }
+}
+
 impl<B, C> TokenRefreshAdapter for StoredRefreshAdapter<B, C>
 where
     B: SecretBackend + Send + Sync,
@@ -212,60 +331,17 @@ where
         _stale_refresh_token: &'a str,
         now_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<TokenRefresh, TokenRefreshFailure>> + Send + 'a>> {
-        Box::pin(async move {
-            let _guard = self
-                .locks
-                .acquire(local_account_id)
-                .await
-                .map_err(lock_refresh_failure)?;
-            let current = self.credentials.require(local_account_id).map_err(|_| {
-                TokenRefreshFailure::new(
-                    TokenRefreshFailureKind::Transient,
-                    "credential_load_failed",
-                )
-            })?;
-            if current.is_access_usable(now_ms, self.refresh_skew_ms) {
-                return current.to_token_refresh().map_err(|_| {
-                    TokenRefreshFailure::new(
-                        TokenRefreshFailureKind::Transient,
-                        "invalid_stored_credential",
-                    )
-                });
-            }
-            let refresh_token = current.refresh_token().ok_or_else(|| {
-                TokenRefreshFailure::new(
-                    TokenRefreshFailureKind::ExpiredRefreshToken,
-                    "refresh_token_missing",
-                )
-            })?;
-            let refreshed = self
-                .client
-                .refresh(
-                    local_account_id,
-                    current.provider_account_id(),
-                    refresh_token,
-                    now_ms,
-                )
-                .await?;
-            let updated = current.apply_refresh(refreshed, now_ms).map_err(|_| {
-                TokenRefreshFailure::new(
-                    TokenRefreshFailureKind::Transient,
-                    "invalid_refresh_response",
-                )
-            })?;
-            self.credentials.save(&updated).map_err(|_| {
-                TokenRefreshFailure::new(
-                    TokenRefreshFailureKind::Transient,
-                    "credential_persist_failed",
-                )
-            })?;
-            updated.to_token_refresh().map_err(|_| {
-                TokenRefreshFailure::new(
-                    TokenRefreshFailureKind::Transient,
-                    "invalid_stored_credential",
-                )
-            })
-        })
+        Box::pin(self.refresh_inner(local_account_id, now_ms, None))
+    }
+
+    fn refresh_fenced<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        _stale_refresh_token: &'a str,
+        now_ms: u64,
+        revision: &'a TokenDispatchRevision,
+    ) -> Pin<Box<dyn Future<Output = Result<TokenRefresh, TokenRefreshFailure>> + Send + 'a>> {
+        Box::pin(self.refresh_inner(local_account_id, now_ms, Some(revision)))
     }
 }
 
@@ -290,15 +366,137 @@ pub trait AccountMetadataSink: Send + Sync {
 pub struct CredentialPersistence<B, M> {
     credentials: CredentialStore<B>,
     metadata: Arc<M>,
+    locks: ProcessAccountLocks,
 }
 
 impl<B, M> CredentialPersistence<B, M> {
-    pub fn new(credentials: CredentialStore<B>, metadata: Arc<M>) -> Self {
+    pub fn new(credentials: CredentialStore<B>, metadata: Arc<M>, root: PathBuf) -> Self {
         Self {
             credentials,
             metadata,
+            locks: ProcessAccountLocks::with_config(root, ProcessLockConfig::default())
+                .expect("default credential lock config is valid"),
         }
     }
+}
+
+impl<B, M> CredentialPersistence<B, M>
+where
+    B: SecretBackend + Send + Sync,
+    M: AccountMetadataSink,
+{
+    async fn persist_inner(
+        &self,
+        account_id: &str,
+        tokens: &TokenSet,
+        revision: Option<&TokenDispatchRevision>,
+    ) -> Result<(), TokenPersistenceFailure> {
+        let _lock = self
+            .locks
+            .acquire(account_id)
+            .await
+            .map_err(persistence_lock_failure)?;
+        let stored = {
+            // No await between the incarnation check, credential read and
+            // write. Deletion and import also wait for the process lock.
+            let _fence = revision
+                .map(|revision| revision.guard().ok_or_else(superseded_persistence))
+                .transpose()?;
+            let current = self
+                .credentials
+                .require(account_id)
+                .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
+            if current.generation() > tokens.generation()
+                || (current.generation() == tokens.generation()
+                    && current.issued_at_ms() >= tokens.issued_at_ms())
+            {
+                current
+            } else {
+                let updated = current
+                    .with_token_set(tokens)
+                    .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_TOKEN_SET))?;
+                self.credentials.save(&updated).map_err(|_| {
+                    TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED)
+                })?;
+                updated
+            }
+        };
+        self.metadata
+            .persist_generation(account_id, stored.generation(), stored.issued_at_ms())
+            .await
+            .map_err(|_| TokenPersistenceFailure::new(error_codes::METADATA_PERSIST_FAILED))
+    }
+
+    async fn persist_auth_state_inner(
+        &self,
+        account_id: &str,
+        auth_state: AccountAuthState,
+        revision: Option<&TokenDispatchRevision>,
+    ) -> Result<(), TokenPersistenceFailure> {
+        let _lock = self
+            .locks
+            .acquire(account_id)
+            .await
+            .map_err(persistence_lock_failure)?;
+        if revision.is_some_and(|revision| revision.guard().is_none()) {
+            return Err(superseded_persistence());
+        }
+        // The process lock is retained through the metadata sink's async
+        // runtime update; delete/import cannot reuse this account id meanwhile.
+        self.metadata
+            .persist_auth_state(account_id, auth_state)
+            .await
+            .map_err(|_| TokenPersistenceFailure::new(error_codes::METADATA_PERSIST_FAILED))
+    }
+
+    async fn persist_agent_task_inner(
+        &self,
+        account_id: &str,
+        expected_task_id: Option<&str>,
+        expected_identity: Option<&AgentIdentityCredential>,
+        task_id: &str,
+    ) -> Result<String, TokenPersistenceFailure> {
+        let _lock = self
+            .locks
+            .acquire(account_id)
+            .await
+            .map_err(persistence_lock_failure)?;
+        let current = self
+            .credentials
+            .require(account_id)
+            .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_LOAD_FAILED))?;
+        let agent = current
+            .agent_identity()
+            .ok_or_else(superseded_persistence)?;
+        if expected_identity.is_some_and(|expected| {
+            agent.private_key() != expected.private_key()
+                || agent.runtime_id() != expected.runtime_id()
+                || expected.task_id() != expected_task_id
+        }) {
+            return Err(superseded_persistence());
+        }
+        if let Some(current_task_id) = agent
+            .task_id()
+            .filter(|current_task_id| Some(*current_task_id) != expected_task_id)
+        {
+            return Ok(current_task_id.to_string());
+        }
+        let updated = current
+            .with_agent_task_id(task_id.to_string())
+            .map_err(|_| TokenPersistenceFailure::new(error_codes::INVALID_AGENT_TASK_ID))?;
+        self.credentials
+            .save(&updated)
+            .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED))?;
+        Ok(task_id.to_string())
+    }
+}
+
+fn persistence_lock_failure(_: ProcessLockError) -> TokenPersistenceFailure {
+    TokenPersistenceFailure::new(error_codes::PERSISTENCE_FAILED)
+}
+
+fn superseded_persistence() -> TokenPersistenceFailure {
+    TokenPersistenceFailure::new(error_codes::PERSISTENCE_FAILED)
 }
 
 impl<B, M> TokenPersistenceAdapter for CredentialPersistence<B, M>
@@ -311,30 +509,16 @@ where
         local_account_id: &'a str,
         tokens: &'a TokenSet,
     ) -> Pin<Box<dyn Future<Output = Result<(), TokenPersistenceFailure>> + Send + 'a>> {
-        Box::pin(async move {
-            let current = self
-                .credentials
-                .require(local_account_id)
-                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
-            let stored = if current.generation() > tokens.generation()
-                || (current.generation() == tokens.generation()
-                    && current.issued_at_ms() >= tokens.issued_at_ms())
-            {
-                current
-            } else {
-                let updated = current
-                    .with_token_set(tokens)
-                    .map_err(|_| TokenPersistenceFailure::new("invalid_token_set"))?;
-                self.credentials
-                    .save(&updated)
-                    .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
-                updated
-            };
-            self.metadata
-                .persist_generation(local_account_id, stored.generation(), stored.issued_at_ms())
-                .await
-                .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
-        })
+        Box::pin(self.persist_inner(local_account_id, tokens, None))
+    }
+
+    fn persist_fenced<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        tokens: &'a TokenSet,
+        revision: &'a TokenDispatchRevision,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TokenPersistenceFailure>> + Send + 'a>> {
+        Box::pin(self.persist_inner(local_account_id, tokens, Some(revision)))
     }
 
     fn persist_auth_state<'a>(
@@ -342,12 +526,16 @@ where
         local_account_id: &'a str,
         auth_state: AccountAuthState,
     ) -> Pin<Box<dyn Future<Output = Result<(), TokenPersistenceFailure>> + Send + 'a>> {
-        Box::pin(async move {
-            self.metadata
-                .persist_auth_state(local_account_id, auth_state)
-                .await
-                .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
-        })
+        Box::pin(self.persist_auth_state_inner(local_account_id, auth_state, None))
+    }
+
+    fn persist_auth_state_fenced<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        auth_state: AccountAuthState,
+        revision: &'a TokenDispatchRevision,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TokenPersistenceFailure>> + Send + 'a>> {
+        Box::pin(self.persist_auth_state_inner(local_account_id, auth_state, Some(revision)))
     }
 
     fn persist_agent_task_id<'a>(
@@ -356,26 +544,21 @@ where
         expected_task_id: Option<&'a str>,
         task_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, TokenPersistenceFailure>> + Send + 'a>> {
-        Box::pin(async move {
-            let current = self
-                .credentials
-                .require(local_account_id)
-                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
-            if let Some(current_task_id) = current
-                .agent_identity()
-                .and_then(AgentIdentityCredential::task_id)
-                .filter(|current_task_id| Some(*current_task_id) != expected_task_id)
-            {
-                return Ok(current_task_id.to_string());
-            }
-            let updated = current
-                .with_agent_task_id(task_id.to_string())
-                .map_err(|_| TokenPersistenceFailure::new("invalid_agent_task_id"))?;
-            self.credentials
-                .save(&updated)
-                .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
-            Ok(task_id.to_string())
-        })
+        Box::pin(self.persist_agent_task_inner(local_account_id, expected_task_id, None, task_id))
+    }
+
+    fn persist_agent_task_id_for_identity<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        expected: &'a AgentIdentityCredential,
+        task_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, TokenPersistenceFailure>> + Send + 'a>> {
+        Box::pin(self.persist_agent_task_inner(
+            local_account_id,
+            expected.task_id(),
+            Some(expected),
+            task_id,
+        ))
     }
 }
 
@@ -482,10 +665,12 @@ fn validate_local_account_id(value: &str) -> Result<(), ProcessLockError> {
 
 fn lock_refresh_failure(error: ProcessLockError) -> TokenRefreshFailure {
     let code = match error {
-        ProcessLockError::Timeout => "refresh_lock_timeout",
-        ProcessLockError::InvalidIdentity => "invalid_account_id",
-        ProcessLockError::InvalidConfiguration => "refresh_lock_configuration",
-        ProcessLockError::Io | ProcessLockError::UnsafePath => "refresh_lock_unavailable",
+        ProcessLockError::Timeout => error_codes::REFRESH_LOCK_TIMEOUT,
+        ProcessLockError::InvalidIdentity => error_codes::INVALID_ACCOUNT_ID,
+        ProcessLockError::InvalidConfiguration => error_codes::REFRESH_LOCK_CONFIGURATION,
+        ProcessLockError::Io | ProcessLockError::UnsafePath => {
+            error_codes::REFRESH_LOCK_UNAVAILABLE
+        }
     };
     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, code)
 }
@@ -669,6 +854,20 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn nonblocking_lock_acquire_leaves_a_live_refresh_owner_undisturbed() {
+        let root = temp_root("try-acquire");
+        let locks = ProcessAccountLocks::with_config(root.clone(), fast_lock_config()).unwrap();
+        let guard = locks.acquire("relay_account_1").await.unwrap();
+        let started = Instant::now();
+
+        assert!(locks.try_acquire("relay_account_1").unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        drop(guard);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metadata_failure_stays_pending_and_retries_without_second_refresh() {
         let root = temp_root("persistence");
@@ -690,7 +889,7 @@ mod tests {
         .unwrap();
         let metadata = Arc::new(CaptureMetadata::default());
         metadata.fail_generation.store(true, Ordering::SeqCst);
-        let persistence = CredentialPersistence::new(store, metadata.clone());
+        let persistence = CredentialPersistence::new(store, metadata.clone(), root.clone());
         let authority = TokenAuthority::new(1).unwrap();
         authority
             .register("relay_account_1", initial_tokens, AccountAuthState::Active)
@@ -711,6 +910,187 @@ mod tests {
         assert_eq!(prepared.status, PrepareStatus::Ready);
         assert_eq!(client.calls.load(Ordering::SeqCst), 1);
         assert_eq!(metadata.generation_calls.load(Ordering::SeqCst), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
+        struct PausedRefresh {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+
+        impl CodexRefreshClient for PausedRefresh {
+            fn refresh<'a>(
+                &'a self,
+                _local_account_id: &'a str,
+                _provider_account_id: Option<&'a str>,
+                _refresh_token: &'a str,
+                now_ms: u64,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(CredentialRefresh::new(
+                        "old-refresh-access".into(),
+                        Some("old-refresh-rotated".into()),
+                        None,
+                        Some(now_ms + 60_000),
+                    )
+                    .unwrap())
+                })
+            }
+        }
+
+        let root = temp_root("removed-slot-refresh");
+        let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+        let old = expired_credentials();
+        store.save(&old).unwrap();
+        let client = Arc::new(PausedRefresh {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let adapter = Arc::new(
+            StoredRefreshAdapter::with_lock_config(
+                root.clone(),
+                store.clone(),
+                client.clone(),
+                0,
+                fast_lock_config(),
+            )
+            .unwrap(),
+        );
+        let persistence = Arc::new(CredentialPersistence::new(
+            store.clone(),
+            Arc::new(CaptureMetadata::default()),
+            root.clone(),
+        ));
+        let authority = Arc::new(TokenAuthority::new(1).unwrap());
+        authority
+            .register(
+                "relay_account_1",
+                old.to_token_set().unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let pending = {
+            let authority = authority.clone();
+            let adapter = adapter.clone();
+            let persistence = persistence.clone();
+            tokio::spawn(async move {
+                authority
+                    .prepare_and_persist(
+                        "relay_account_1",
+                        10,
+                        0,
+                        adapter.as_ref(),
+                        persistence.as_ref(),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), client.entered.notified())
+            .await
+            .unwrap();
+        let replacement = readd_replacement(&authority, &store).await;
+        client.release.notify_one();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), pending)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(TokenAuthorityError::AccountNotFound)
+        ));
+        assert!(store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_token_persistence_cannot_write_into_a_readded_account() {
+        use futures_util::poll;
+        use std::task::Poll;
+
+        let root = temp_root("removed-slot-persistence");
+        let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+        let original = expired_credentials();
+        store.save(&original).unwrap();
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "relay_account_1",
+                original.to_token_set().unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let persistence = CredentialPersistence::new(
+            store.clone(),
+            Arc::new(CaptureMetadata::default()),
+            root.clone(),
+        );
+        let locks = ProcessAccountLocks::with_config(root.clone(), fast_lock_config()).unwrap();
+        let held = locks.acquire("relay_account_1").await.unwrap();
+        let mut pending =
+            Box::pin(authority.invalidate_access_and_persist("relay_account_1", 10, &persistence));
+        assert!(matches!(poll!(pending.as_mut()), Poll::Pending));
+
+        let replacement = readd_replacement(&authority, &store).await;
+        drop(held);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), pending)
+                .await
+                .unwrap(),
+            Err(TokenAuthorityError::PersistenceFailed(_))
+        ));
+        assert!(store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task() {
+        const TEST_KEY: &str = "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+        let root = temp_root("replaced-agent-task");
+        let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+        let old =
+            AgentIdentityCredential::unregistered(TEST_KEY.into(), "old-runtime".into()).unwrap();
+        let replacement = StoredCodexCredentials::new_agent_identity(
+            "relay_account_1",
+            AgentIdentityCredential::unregistered(TEST_KEY.into(), "new-runtime".into()).unwrap(),
+            2,
+            2,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        store.save(&replacement).unwrap();
+        let persistence = CredentialPersistence::new(
+            store.clone(),
+            Arc::new(CaptureMetadata::default()),
+            root.clone(),
+        );
+        assert!(persistence
+            .persist_agent_task_id_for_identity("relay_account_1", &old, "old-task")
+            .await
+            .is_err());
+        assert!(store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -746,6 +1126,40 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    async fn readd_replacement(
+        authority: &TokenAuthority,
+        store: &CredentialStore<MemorySecrets>,
+    ) -> StoredCodexCredentials {
+        assert!(authority.remove("relay_account_1"));
+        store.delete("relay_account_1").unwrap();
+        let replacement = StoredCodexCredentials::new(
+            "relay_account_1",
+            "replacement-access".into(),
+            Some("replacement-refresh".into()),
+            None,
+            Some(1),
+            11,
+            1,
+            None,
+            Some("replacement-provider".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        store.save(&replacement).unwrap();
+        authority
+            .register(
+                "relay_account_1",
+                replacement.to_token_set().unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        replacement
     }
 
     fn fast_lock_config() -> ProcessLockConfig {

@@ -6,5 +6,7 @@ pub mod http;
 pub mod jobs;
 pub mod state;
 pub mod store;
+#[cfg(test)]
+mod test_fixtures;
 mod token_refresh;
 mod usage_writer;

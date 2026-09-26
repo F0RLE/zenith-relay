@@ -3,15 +3,16 @@ import { useTranslation } from "react-i18next";
 import { closeWindow, minimizeWindow, toggleMaximizeWindow, type Platform } from "../platform/desktop";
 
 type TitleBarProps = {
-  platform: Platform;
+  platform: Platform | "unknown";
 };
 
 export function TitleBar({ platform }: TitleBarProps) {
   const { t } = useTranslation();
   const macos = platform === "macos";
+  const stylePlatform = platform === "unknown" ? "linux" : platform;
 
   const controls = (
-    <div className={`window-controls window-controls-${platform}`}>
+    <div className={`window-controls window-controls-${stylePlatform}`}>
       <button className="minimize" type="button" onClick={() => minimizeWindow()} aria-label={t("window.minimize")}>
         {macos ? <span aria-hidden /> : <Minus aria-hidden />}
       </button>
@@ -25,7 +26,7 @@ export function TitleBar({ platform }: TitleBarProps) {
   );
 
   return (
-    <header className={`titlebar titlebar-${platform}`} data-tauri-drag-region>
+    <header className={`titlebar titlebar-${stylePlatform}`} data-tauri-drag-region>
       {macos ? controls : null}
       <div className="titlebar-drag" data-tauri-drag-region>
         <img className="titlebar-logo" src="/icons/zenith-sword.png" alt="" data-tauri-drag-region />

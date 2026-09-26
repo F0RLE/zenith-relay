@@ -24,8 +24,10 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
-      - uses: dtolnay/rust-toolchain@1.97.1
+          bun-version: 1.4.2
+      - name: Test proposed PR metadata policy
+        run: bun test ./.github/tools/pr-metadata.test.mjs
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -79,8 +81,6 @@ jobs:
     name: ${{ matrix.name }}
     needs: check
     if: github.event_name != 'pull_request'
-    permissions:
-      contents: write
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: "-Dwarnings"
@@ -105,8 +105,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
-      - uses: dtolnay/rust-toolchain@1.97.1
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: bun install --frozen-lockfile
         working-directory: src
@@ -128,50 +128,58 @@ jobs:
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
             cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
           '
-      - name: Prepare release body
-        id: release_body
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $downloads = @"
-          ## Downloads
-
-          | Architecture | Windows | Ubuntu | macOS |
-          |---|---|---|---|
-          | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64-setup.exe) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-intel.dmg) |
-          | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64-setup.exe) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-arm64.dmg) |
-
-          Windows: use **Setup** for normal installation, or **EXE** for a portable launch with in-place updates.
-
-          License: [AGPL-3.0-only](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/LICENSE.txt) · [Corresponding source](${{ github.server_url }}/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.zip)
-          "@
-          $notes = ""
-          if ($env:GITHUB_REF -like "refs/tags/*") {
-            $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
-            $changelog = Get-Content -Raw -LiteralPath "docs/releases/CHANGELOG.md"
-            $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
-            if (-not $releaseSection.Success) {
-              throw "docs/releases/CHANGELOG.md must contain a user-facing section for release $version"
-            }
-            $notes = $releaseSection.Value.Trim()
-          }
-          if (-not $notes) {
-            if ($env:GITHUB_REF -like "refs/tags/*") {
-              throw "User-facing release notes are empty for $env:GITHUB_REF_NAME"
-            }
-            $notes = "## Development build`n`nThis build is not a published release."
-          }
-          $body = "$downloads`n`n<!-- relay-notes:en -->`n$notes"
-          $body | Set-Content -Path release-notes.md -Encoding utf8
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        # Release publishing is performed below after every platform has
-        # produced the normalized asset names. Supplying tagName here would
-        # make tauri-action upload the native bundle names as a second copy.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        # The publish-release job uploads normalized assets after all builds
+        # and macOS package checks pass. Do not upload from tauri-action.
+      - name: Verify macOS installer and updater contents
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=(src-tauri/target/release/bundle/macos/*.app)
+          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+          archives=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
+          if (( ${#apps[@]} != 1 || ${#dmgs[@]} != 1 || ${#archives[@]} != 1 )); then
+            echo 'Expected exactly one macOS app, DMG and updater archive.' >&2
+            exit 1
+          fi
+
+          verify_app() {
+            codesign --verify --deep --strict --verbose=2 "$1"
+            signing_details="$(codesign -dv --verbose=4 "$1" 2>&1)"
+            if ! grep -q 'Signature=adhoc' <<< "$signing_details"; then
+              echo 'The macOS app must have an ad-hoc signature.' >&2
+              exit 1
+            fi
+          }
+
+          verify_app "${apps[0]}"
+          updater_app_dir="$RUNNER_TEMP/relay-updater-verification"
+          mkdir -p "$updater_app_dir"
+          tar -xzf "${archives[0]}" -C "$updater_app_dir"
+          updater_apps=("$updater_app_dir"/*.app)
+          if (( ${#updater_apps[@]} != 1 )); then
+            echo 'The macOS updater archive must contain exactly one app.' >&2
+            exit 1
+          fi
+          verify_app "${updater_apps[0]}"
+
+          mount_point="$RUNNER_TEMP/relay-installer-verification"
+          mkdir -p "$mount_point"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "${dmgs[0]}"
+          trap 'hdiutil detach "$mount_point"' EXIT
+          installed_apps=("$mount_point"/*.app)
+          if (( ${#installed_apps[@]} != 1 )); then
+            echo 'The macOS installer must contain exactly one app.' >&2
+            exit 1
+          fi
+          verify_app "${installed_apps[0]}"
       - name: Collect and verify release files
         shell: pwsh
         run: |
@@ -221,37 +229,108 @@ jobs:
           if (!(Test-Path "$portable.sig")) {
             throw "Portable updater signature was not created"
           }
-      - name: Upload release assets
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view $env:GITHUB_REF_NAME > $null 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            if ($env:GITHUB_REF_NAME.Contains("-")) {
-              gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md --prerelease
-            } else {
-              gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md
-            }
-          }
-          Get-ChildItem "artifacts/zenith-relay-${{ matrix.name }}*" -File -ErrorAction SilentlyContinue |
-            ForEach-Object { gh release upload $env:GITHUB_REF_NAME $_.FullName --clobber }
-      - name: Update release notes
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --notes-file release-notes.md
       - uses: actions/upload-artifact@v7
         with:
           name: zenith-relay-${{ matrix.name }}
           path: artifacts/*
           if-no-files-found: error
 
+  publish-release:
+    name: Publish verified release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-artifacts
+      - name: Prepare release body
+        shell: pwsh
+        run: |
+          $downloads = @"
+          ## Downloads
+
+          | Architecture | Windows | Ubuntu | macOS |
+          |---|---|---|---|
+          | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64-setup.exe) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-intel.dmg) |
+          | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64-setup.exe) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-arm64.dmg) |
+
+          Windows: use **Setup** for normal installation, or **EXE** for a portable launch with in-place updates.
+          macOS: the app is ad-hoc signed, not notarized. Move it from the DMG to Applications. For the first launch, use **System Settings → Privacy & Security → Open Anyway**. If macOS reports the app as damaged, see the [macOS installation steps](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/docs/help/en/README.md#install-on-macos).
+
+          Checksums: [SHA256SUMS](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS)
+
+          License: [AGPL-3.0-only](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/LICENSE.txt) · [Corresponding source](${{ github.server_url }}/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.zip)
+          "@
+          $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
+          $changelog = Get-Content -Raw -LiteralPath "docs/releases/CHANGELOG.md"
+          $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
+          if (-not $releaseSection.Success) {
+            throw "docs/releases/CHANGELOG.md must contain a user-facing section for release $version"
+          }
+          $notes = $releaseSection.Value.Trim()
+          if (-not $notes) {
+            throw "User-facing release notes are empty for $env:GITHUB_REF_NAME"
+          }
+          foreach ($locale in @("en", "ru")) {
+            if ($notes -notmatch "(?im)<!--\s*relay-notes:$locale\s*-->") {
+              throw "Release notes for $env:GITHUB_REF_NAME must include a relay-notes:$locale section"
+            }
+          }
+          "$downloads`n`n$notes" | Set-Content -Path release-notes.md -Encoding utf8
+      - name: Check all release assets before publishing
+        shell: pwsh
+        run: |
+          $required = @{
+            'windows-x64'   = @('.exe', '.exe.sig', '-setup.exe', '-setup.exe.sig')
+            'windows-arm64' = @('.exe', '.exe.sig', '-setup.exe', '-setup.exe.sig')
+            'macos-arm64'   = @('.dmg', '.app.tar.gz', '.app.tar.gz.sig')
+            'macos-intel'   = @('.dmg', '.app.tar.gz', '.app.tar.gz.sig')
+            'linux-x64'    = @('.AppImage', '.AppImage.sig', '.deb', '.deb.sig', '.rpm', '.rpm.sig')
+            'linux-arm64'  = @('.AppImage', '.AppImage.sig', '.deb', '.deb.sig', '.rpm', '.rpm.sig')
+          }
+          New-Item -ItemType Directory -Force -Path release-files | Out-Null
+          foreach ($platform in $required.Keys) {
+            $folder = "release-artifacts/zenith-relay-$platform"
+            foreach ($suffix in $required[$platform]) {
+              $name = "zenith-relay-$platform$suffix"
+              $file = Join-Path $folder $name
+              if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+                throw "Missing required release artifact: $file"
+              }
+              Copy-Item -LiteralPath $file -Destination release-files
+            }
+          }
+          $hashes = Get-ChildItem release-files -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          }
+          $hashes | Set-Content -LiteralPath release-files/SHA256SUMS -Encoding ascii
+      - name: Publish release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME > $null 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $releaseArguments = @('release', 'create', $env:GITHUB_REF_NAME, '--target', $env:GITHUB_SHA, '--title', "Zenith Relay $env:GITHUB_REF_NAME", '--notes-file', 'release-notes.md')
+            if ($env:GITHUB_REF_NAME.Contains('-')) { $releaseArguments += '--prerelease' }
+            & gh @releaseArguments
+            if ($LASTEXITCODE -ne 0) { throw "Unable to create GitHub Release $env:GITHUB_REF_NAME" }
+          } else {
+            gh release edit $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { throw "Unable to update GitHub Release $env:GITHUB_REF_NAME" }
+          }
+          foreach ($file in (Get-ChildItem release-files -File)) {
+            gh release upload $env:GITHUB_REF_NAME $file.FullName --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Unable to upload $($file.Name)" }
+          }
+
   publish-updater-manifest:
     name: Publish updater manifest
-    needs: build
+    needs: publish-release
     if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     permissions:

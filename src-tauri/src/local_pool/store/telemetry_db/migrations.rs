@@ -383,7 +383,14 @@ PRAGMA user_version = 28;
 COMMIT;
 "#;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 28;
+pub(super) const MIGRATION_029: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN upstream_error_json TEXT;
+PRAGMA user_version = 29;
+COMMIT;
+"#;
+
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 29;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"

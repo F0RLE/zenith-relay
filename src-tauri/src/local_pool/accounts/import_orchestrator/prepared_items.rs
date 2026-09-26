@@ -36,6 +36,21 @@ pub(super) fn parsed_item_value(
     if let Some(priority) = item.priority {
         value.insert("priority".into(), priority.into());
     }
+    if item.account_is_fedramp {
+        value.insert("chatgpt_account_is_fedramp".into(), true.into());
+    }
+    if !item.tags.is_empty() {
+        value.insert(
+            "tags".into(),
+            serde_json::Value::Array(
+                item.tags
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
     let secrets = item.secrets();
     insert_optional_string(&mut value, "access_token", secrets.access_token());
     insert_optional_string(&mut value, "refresh_token", secrets.refresh_token());
@@ -77,6 +92,9 @@ fn apply_material(
     insert_optional_string(value, "refresh_token", material.refresh_token.as_deref());
     insert_optional_string(value, "id_token", material.id_token.as_deref());
     insert_optional_string(value, "plan_type", material.plan_type.as_deref());
+    if material.account_is_fedramp {
+        value.insert("chatgpt_account_is_fedramp".into(), true.into());
+    }
     if let Some(expires_at_ms) = material.expires_at_ms {
         value.insert("expires_at_ms".into(), expires_at_ms.into());
     }

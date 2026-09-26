@@ -1,9 +1,15 @@
 use super::{
-    accounts::{credentials::CredentialStore, NativeSecretBackend},
+    accounts::{
+        authority::{ProcessAccountLocks, ProcessLockConfig},
+        credentials::CredentialStore,
+        import_session::SecretBackend,
+        NativeSecretBackend,
+    },
     models::LocalAccountRecord,
     state::DesktopOAuthEvents,
     store::{telemetry_db::TelemetryDb, LocalPoolStore},
 };
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -15,7 +21,11 @@ use zenith_relay_core::{
         AccountUsageState,
     },
     automations::WakeCoordinator,
-    quota::QuotaRefreshQueue,
+    providers::chatgpt::subscription_refresh_due,
+    scheduler::refresh::{
+        passive_quota_age_ms, quota_reset_delay, service::RefreshService, RefreshIdentity,
+        RefreshKind,
+    },
     UsageCallback, UsageEvent,
 };
 
@@ -23,8 +33,8 @@ pub(crate) struct DesktopUsageWriter {
     telemetry: Arc<TelemetryDb>,
     store: Arc<Mutex<LocalPoolStore>>,
     credentials: CredentialStore<NativeSecretBackend>,
-    quota_refresh: Arc<Mutex<QuotaRefreshQueue>>,
-    quota_refresh_notify: Arc<Notify>,
+    account_locks: ProcessAccountLocks,
+    refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
     wake: Arc<Mutex<WakeCoordinator>>,
     failed: Arc<AtomicU64>,
     wake_notify: Arc<Notify>,
@@ -34,12 +44,20 @@ pub(crate) struct DesktopUsageWriter {
 pub(crate) struct DesktopUsageWriterParts {
     pub(crate) telemetry: Arc<TelemetryDb>,
     pub(crate) store: Arc<Mutex<LocalPoolStore>>,
-    pub(crate) quota_refresh: Arc<Mutex<QuotaRefreshQueue>>,
-    pub(crate) quota_refresh_notify: Arc<Notify>,
+    pub(crate) transient_root: PathBuf,
+    pub(crate) refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
     pub(crate) wake: Arc<Mutex<WakeCoordinator>>,
     pub(crate) failed: Arc<AtomicU64>,
     pub(crate) wake_notify: Arc<Notify>,
     pub(crate) state_events: DesktopOAuthEvents,
+}
+
+struct AccountRefreshHint {
+    identity: RefreshIdentity,
+    refresh_now: bool,
+    passive_observation: Option<(u64, u64)>,
+    reset_delay_ms: Option<u64>,
+    retry_delay_ms: Option<u64>,
 }
 
 impl DesktopUsageWriter {
@@ -48,8 +66,15 @@ impl DesktopUsageWriter {
             telemetry: parts.telemetry,
             store: parts.store,
             credentials: CredentialStore::from_backend(NativeSecretBackend),
-            quota_refresh: parts.quota_refresh,
-            quota_refresh_notify: parts.quota_refresh_notify,
+            // The default configuration is a fixed valid value. Constructing
+            // the lock itself performs no filesystem I/O; acquisition remains
+            // best-effort inside the synchronous usage callback.
+            account_locks: ProcessAccountLocks::with_config(
+                parts.transient_root,
+                ProcessLockConfig::default(),
+            )
+            .expect("default account lock configuration is valid"),
+            refresh: parts.refresh,
             wake: parts.wake,
             failed: parts.failed,
             wake_notify: parts.wake_notify,
@@ -61,8 +86,8 @@ impl DesktopUsageWriter {
         let telemetry = self.telemetry.clone();
         let store = self.store.clone();
         let credentials = self.credentials.clone();
-        let quota_refresh = self.quota_refresh.clone();
-        let quota_refresh_notify = self.quota_refresh_notify.clone();
+        let account_locks = self.account_locks.clone();
+        let account_refresh = self.refresh.clone();
         let wake = self.wake.clone();
         let failed = self.failed.clone();
         let wake_notify = self.wake_notify.clone();
@@ -73,13 +98,34 @@ impl DesktopUsageWriter {
             let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
             let observed_at = observed_at.to_rfc3339();
             let account_id = event.account_id.clone();
-            let access_expiry = if event.http_status == 401 {
-                account_id.as_deref().map(|account_id| {
-                    expire_account_access(&credentials, account_id, observed_at_ms)
-                })
-            } else {
-                None
-            };
+            // A 401 may arrive after an OAuth refresh or a manual sign-in has
+            // replaced the credentials used by the original request. Acquire
+            // the same per-account lock as credential writers, then compare
+            // the request's provenance before changing either the secret or
+            // the visible account state. Unknown/locked provenance is safer
+            // as a telemetry-only observation than invalidating a fresh login.
+            let (access_expiry, ignore_account_observation, _account_lock) =
+                if event.http_status == 401 {
+                    match (account_id.as_deref(), event.account_token_generation) {
+                        (Some(account_id), Some(expected_generation)) => {
+                            match account_locks.try_acquire(account_id) {
+                                Ok(Some(lock)) => match expire_account_access(
+                                    &credentials,
+                                    account_id,
+                                    expected_generation,
+                                    observed_at_ms,
+                                ) {
+                                    Some(access_state) => (Some(access_state), false, Some(lock)),
+                                    None => (None, true, Some(lock)),
+                                },
+                                Ok(None) | Err(_) => (None, true, None),
+                            }
+                        }
+                        _ => (None, true, None),
+                    }
+                } else {
+                    (None, false, None)
+                };
             let successful_auth_state = if event.success {
                 account_id
                     .as_deref()
@@ -113,8 +159,34 @@ impl DesktopUsageWriter {
                     observed_at_ms,
                     access_expiry,
                     successful_auth_state,
+                    ignore_account_observation,
                 ) && account.account.is_automatic_quota_monitoring_eligible()
                     && account.remote_location.is_none();
+                let new_passive = event.success
+                    && !ignore_account_observation
+                    && event.quota_snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot != &visible_state.0
+                            && snapshot.updated_at_ms.is_some()
+                            && snapshot.updated_at_ms >= visible_state.0.updated_at_ms
+                            && snapshot == &account.account.quota
+                    });
+                let passive_observation = new_passive
+                    .then(|| {
+                        (!subscription_refresh_due(
+                            account.account.subscription.active_until_ms,
+                            account.account.subscription.updated_at_ms,
+                            observed_at_ms,
+                        ))
+                        .then(|| {
+                            passive_quota_age_ms(&account.account.quota, observed_at_ms)
+                                .zip(account.account.quota.updated_at_ms)
+                        })
+                        .flatten()
+                    })
+                    .flatten();
+                let reset_delay_ms = new_passive
+                    .then(|| quota_reset_delay(account_id, &account.account.quota, observed_at_ms))
+                    .flatten();
                 let visible_state_changed = visible_state
                     != (
                         account.account.quota.clone(),
@@ -139,9 +211,20 @@ impl DesktopUsageWriter {
                     .replace_account_state(accounts, keys, automations)
                     .map_err(|_| ())?;
                 *coordinator = next;
+                let (_, fence) = store.account_refresh_scope(account_id).map_err(|_| ())?;
                 Ok((
                     natural_use,
-                    refresh_now.then(|| account_id.to_string()),
+                    Some(AccountRefreshHint {
+                        identity: fence.identity(),
+                        refresh_now,
+                        passive_observation,
+                        reset_delay_ms,
+                        retry_delay_ms: (refresh_now && event.http_status == 429)
+                            .then_some(event.retry_at_ms)
+                            .flatten()
+                            .map(|at| at.saturating_sub(observed_at_ms))
+                            .filter(|delay| *delay > 0),
+                    }),
                     visible_state_changed,
                 ))
             });
@@ -160,44 +243,54 @@ impl DesktopUsageWriter {
             {
                 state_events.emit_state_changed();
             }
-            let queued = update
-                .as_ref()
-                .ok()
-                .and_then(|(_, account_id, _)| account_id.as_deref())
-                .map_or(Ok(false), |account_id| {
-                    quota_refresh
-                        .lock()
-                        .map_err(|_| ())?
-                        .mark_dirty(account_id, observed_at_ms)
-                        .map_err(|_| ())
-                });
-            if queued.as_ref().is_ok_and(|changed| *changed) {
-                quota_refresh_notify.notify_one();
+            if let Some(hint) = update.as_ref().ok().and_then(|(_, hint, _)| hint.as_ref()) {
+                account_refresh.set_member_active(&hint.identity.member_id);
+                if let Some((age_ms, observed_at_ms)) = hint.passive_observation {
+                    account_refresh.observe_passive_quota(&hint.identity, age_ms, observed_at_ms);
+                }
+                if let Some(delay_ms) = hint.reset_delay_ms {
+                    account_refresh.schedule_after(&hint.identity, RefreshKind::Quota, delay_ms);
+                }
+                if let Some(delay_ms) = hint.retry_delay_ms {
+                    account_refresh.respect_retry_after(
+                        &hint.identity,
+                        RefreshKind::Quota,
+                        delay_ms,
+                    );
+                }
+                if hint.refresh_now {
+                    account_refresh.mark_dirty(&hint.identity, RefreshKind::Quota);
+                }
+            } else if let Some(account_id) = account_id.as_deref() {
+                account_refresh.set_member_active(&format!("account:{account_id}"));
             }
-            let touched = update.is_ok() && queued.is_ok();
-            if !recorded || !touched {
+            if !recorded || update.is_err() {
                 failed.fetch_add(1, Ordering::Relaxed);
             }
         })
     }
 }
 
-pub(super) fn expire_account_access(
-    credentials: &CredentialStore<NativeSecretBackend>,
+pub(super) fn expire_account_access<B: SecretBackend>(
+    credentials: &CredentialStore<B>,
     account_id: &str,
+    expected_generation: u64,
     now_ms: u64,
-) -> AccountAccessState {
+) -> Option<AccountAccessState> {
     let Ok(Some(mut stored)) = credentials.load(account_id) else {
-        return AccountAccessState::Failed;
+        return Some(AccountAccessState::Failed);
+    };
+    if stored.generation() != expected_generation {
+        return None;
     };
     let refreshable = stored.refresh_token().is_some();
     stored.expire_access_at(now_ms);
     if credentials.save(&stored).is_err() {
-        AccountAccessState::Failed
+        Some(AccountAccessState::Failed)
     } else if refreshable {
-        AccountAccessState::Refreshable
+        Some(AccountAccessState::Refreshable)
     } else {
-        AccountAccessState::AccessOnly
+        Some(AccountAccessState::AccessOnly)
     }
 }
 
@@ -220,7 +313,11 @@ pub(super) fn apply_account_usage_state(
     observed_at_ms: u64,
     access_state: Option<AccountAccessState>,
     successful_auth_state: Option<AccountAuthState>,
+    ignore_account_observation: bool,
 ) -> bool {
+    if ignore_account_observation {
+        return false;
+    }
     if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
         snapshot.updated_at_ms.unwrap_or_default()
             >= account.account.quota.updated_at_ms.unwrap_or_default()

@@ -3,29 +3,31 @@ use super::{
     validate_secret, validation_error, vault_error, ManagementError,
 };
 use crate::state::{AppState, SourceRecord};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
-    normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
+    discover_source_with_protocol_config, normalize_model_price_overrides,
+    source_points_to_gateway, ApiModelPriceOverride, ProviderSource, SourceDiscovery,
+    SourceProtocolBinding, SourceProtocolConfig, WireApi,
 };
 
 mod policy;
 
-use policy::source_runtime_policy_compatible;
+use policy::{source_dispatch_permission_changed, source_runtime_policy_compatible};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/sources", get(list_sources).post(create_source))
         .route("/sources/{id}", patch(update_source).delete(delete_source))
         .route("/sources/{id}/test", post(test_source))
+        .route("/sources/{id}/probe", post(probe_source))
         .route("/sources/{id}/stats", get(source_stats))
 }
 
@@ -81,6 +83,7 @@ pub async fn create_source(
             }
             record.models = discovery.models;
             record.protocol_bindings = discovery.protocol_bindings;
+            record.protocol_config.merge_catalog(discovery.capabilities);
             record.detected_model_prices = discovery.detected_model_prices;
         }
         Err(error) => {
@@ -143,6 +146,8 @@ pub async fn update_source(
     Path(id): Path<String>,
     Json(input): Json<SourcePatch>,
 ) -> Result<Json<SourceSummary>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
     let mut record = find_source(&state, &id)?;
     let old_record = record.clone();
     let source_priorities = input.source_priorities.clone();
@@ -151,7 +156,7 @@ pub async fn update_source(
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret missing")
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
     if let Some(value) = input.name {
         record.name = clean_label(&value, "source name")?;
@@ -171,6 +176,9 @@ pub async fn update_source(
     }
     if let Some(value) = input.protocol_bindings {
         record.protocol_bindings = value;
+    }
+    if record.base_url != old_record.base_url || input.api_key.is_some() {
+        record.protocol_config.invalidate(&record.base_url);
     }
     if let Some(value) = input.models {
         record.models = normalized_values(value);
@@ -207,13 +215,13 @@ pub async fn update_source(
     }
     normalize_record_protocol_bindings(&mut record)?;
     if record.in_pool
-        && !record
-            .supports_any_wire_api()
-            .map_err(|message| ManagementError::validation("source_protocol_invalid", message))?
+        && !record.supports_any_wire_api().map_err(|message| {
+            ManagementError::validation(error_codes::SOURCE_PROTOCOL_INVALID, message)
+        })?
     {
         return Err(ManagementError::new(
             StatusCode::CONFLICT,
-            "source_pool_protocol_unsupported",
+            error_codes::SOURCE_POOL_PROTOCOL_UNSUPPORTED,
             "source must expose at least one verified API route before joining the pool",
             "pool",
             false,
@@ -231,7 +239,7 @@ pub async fn update_source(
             .find(|source| source.id == record.id)
             .ok_or_else(|| {
                 ManagementError::validation(
-                    "source_priority_target_not_found",
+                    error_codes::SOURCE_PRIORITY_TARGET_NOT_FOUND,
                     "source priority target not found",
                 )
             })?;
@@ -248,8 +256,25 @@ pub async fn update_source(
     };
     let policy_only_update =
         input.api_key.is_none() && source_runtime_policy_compatible(previous_sources, next_sources);
+    let permission_changed =
+        source_dispatch_permission_changed(&old_record, &record, input.api_key.is_some());
+    // A source can own several protocol routes. Block all of their pending
+    // dispatches before changing its durable key, address or permissions.
+    // Pure ordering and recovery-delay edits do not revoke pending leases.
+    let _dispatch_fences = if permission_changed {
+        state
+            .runtime()
+            .map_err(runtime_error)?
+            .map(|runtime| runtime.fence_source_dispatch(&record.id))
+    } else {
+        None
+    };
     if let Some(secret) = input.api_key.as_deref() {
         validate_secret(secret, "source API key")?;
+        state
+            .store
+            .invalidate_source_refresh(&record.id)
+            .map_err(store_error)?;
         state
             .vault
             .save(&record.secret_ref, secret)
@@ -260,7 +285,12 @@ pub async fn update_source(
         None => state.store.save_source(&record),
     };
     if let Err(error) = save_result {
-        let _ = state.vault.save(&record.secret_ref, &old_secret);
+        if let Err(restore) = state.vault.save(&record.secret_ref, &old_secret) {
+            let _ = state.replace_runtime(None);
+            return Err(runtime_error(format!(
+                "source save failed; previous credential could not be restored: {restore}"
+            )));
+        }
         return Err(store_error(error));
     }
     let restore =
@@ -269,7 +299,7 @@ pub async fn update_source(
         match apply_source_policies_if_running(&state, previous_sources, next_sources) {
             Ok(applied) => applied,
             Err(error) => {
-                let recovery = state.rollback_and_rebuild_runtime(restore()).await;
+                let recovery = build.rollback_and_rebuild(&state, restore()).await;
                 return match recovery {
                     Ok(()) => Err(runtime_error(error)),
                     Err(recovery) => Err(runtime_error(format!("{error}; {recovery}"))),
@@ -280,8 +310,8 @@ pub async fn update_source(
         false
     };
     if !runtime_applied {
-        state
-            .rebuild_runtime_or_rollback(restore())
+        build
+            .rebuild_or_rollback(&state, restore())
             .await
             .map_err(runtime_error)?;
     }
@@ -326,7 +356,7 @@ fn apply_source_priorities(
             .find(|source| source.id == *source_id)
             .ok_or_else(|| {
                 ManagementError::validation(
-                    "source_priority_target_not_found",
+                    error_codes::SOURCE_PRIORITY_TARGET_NOT_FOUND,
                     "source priority target not found",
                 )
             })?;
@@ -339,21 +369,31 @@ pub async fn delete_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
     let record = find_source(&state, &id)?;
     let secret = state
         .vault
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret missing")
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
+    let _dispatch_fences = state
+        .runtime()
+        .map_err(runtime_error)?
+        .map(|runtime| runtime.fence_source_dispatch(&id));
     state.store.delete_source(&id).map_err(store_error)?;
-    state
-        .vault
-        .delete(&record.secret_ref)
-        .map_err(vault_error)?;
-    state
-        .rebuild_runtime_or_rollback(|| {
+    if let Err(error) = state.vault.delete(&record.secret_ref) {
+        // The vault write outcome may be uncertain. Restore the record, but
+        // do not keep serving the old executor until reconciliation.
+        let restore = state.store.save_source(&record);
+        let _ = state.replace_runtime(None);
+        restore.map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
+        return Err(vault_error(error));
+    }
+    build
+        .rebuild_or_rollback(&state, || {
             state.vault.save(&record.secret_ref, &secret)?;
             state.store.save_source(&record)?;
             Ok(())
@@ -367,69 +407,133 @@ pub async fn test_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<SourceSummary>, ManagementError> {
-    let mut record = find_source(&state, &id)?;
-    let previous = record.clone();
+    let record = find_source(&state, &id)?;
+    ensure_not_server_self_source(&state, &record.base_url)?;
+    let record = crate::jobs::request_source_models(&state, &id)
+        .await
+        .map_err(|error| {
+            if error.contains("changed during refresh") {
+                stale_probe_error()
+            } else if error == error_codes::SOURCE_SECRET_MISSING {
+                ManagementError::not_found(
+                    error_codes::SOURCE_SECRET_MISSING,
+                    "source secret missing",
+                )
+            } else {
+                ManagementError::new(
+                    StatusCode::BAD_GATEWAY,
+                    error_codes::SOURCE_TEST_FAILED,
+                    "source catalog is unavailable",
+                    "source",
+                    true,
+                )
+            }
+        })?;
+    Ok(Json(source_summary(&state, &record)?))
+}
+
+fn stale_probe_error() -> ManagementError {
+    ManagementError::new(
+        StatusCode::CONFLICT,
+        error_codes::SOURCE_PROBE_STALE,
+        "source changed during the check; refresh and try again",
+        "source",
+        false,
+    )
+}
+
+pub async fn probe_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<zenith_relay_core::SourceProbeInput>,
+) -> Result<Json<zenith_relay_core::SourceProbeResult>, ManagementError> {
+    let record = find_source(&state, &id)?;
+    if record.protocol_config.revision != input.expected_revision {
+        return Err(stale_probe_error());
+    }
+    ensure_not_server_self_source(&state, &record.base_url)?;
     let api_key = state
         .vault
         .load(&record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret missing")
+            ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
-    ensure_not_server_self_source(&state, &record.base_url)?;
-    let discovery = match discover_models(&record, &api_key).await {
-        Ok(discovery) => discovery,
-        Err(error) => {
-            // Keep the last confirmed catalog available while the upstream
-            // endpoint is temporarily unreachable. The error is diagnostic;
-            // it must not silently remove otherwise valid runtime routes.
-            record.last_error_code = Some(error.code.clone());
-            state.store.save_source(&record).map_err(store_error)?;
-            return Ok(Json(source_summary(&state, &record)?));
-        }
+    let source = ProviderSource {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        base_url: record.base_url.clone(),
+        api_key: api_key.clone(),
+        wire_api: record.wire_api,
+        models: record.models.clone(),
     };
-    if let Some(base_url) = discovery.resolved_base_url.as_deref() {
-        record.base_url = base_url.to_string();
+    let (_, refresh_fence) = state.store.source_refresh_scope(&id).map_err(store_error)?;
+    let refresh_state = state.clone();
+    let refresh_fence_for_http = refresh_fence.clone();
+    let http_scope =
+        zenith_relay_core::scheduler::refresh::http::ManagementHttpScope::checked(move || {
+            refresh_state
+                .store
+                .source_refresh_scope(&refresh_fence_for_http.source_id)
+                .is_ok_and(|(_, current)| current == refresh_fence_for_http)
+        });
+    let result = zenith_relay_core::probe_source_generation_with_scope(&source, &input, http_scope)
+        .await
+        .map_err(source_discovery_error)?;
+    let _configuration = state.configuration_lock.lock().await;
+    let mut current = find_source(&state, &id)?;
+    let previous = current.clone();
+    let (_, current_fence) = state.store.source_refresh_scope(&id).map_err(store_error)?;
+    // Comparing visible fields alone accepts a delete/re-add with the same
+    // source ID and configuration. The durable incarnation must still match.
+    if current_fence != refresh_fence
+        || current.base_url != record.base_url
+        || current.models != record.models
+        || current.protocol_config != record.protocol_config
+        || state
+            .vault
+            .load(&current.secret_ref)
+            .map_err(vault_error)?
+            .as_deref()
+            != Some(api_key.as_str())
+        || !current
+            .protocol_config
+            .apply_probe(input.expected_revision, result.capability.clone())
+    {
+        return Err(stale_probe_error());
     }
-    record.models = discovery.models;
-    record.protocol_bindings = discovery.protocol_bindings;
-    record.detected_model_prices = discovery.detected_model_prices;
-    normalize_record_protocol_bindings(&mut record)?;
-    record.last_error_code = None;
-    state.store.save_source(&record).map_err(store_error)?;
+    normalize_record_protocol_bindings(&mut current)?;
+    state.store.save_source(&current).map_err(store_error)?;
     state
-        .rebuild_runtime_or_rollback(|| {
-            state.store.save_source(&previous)?;
-            Ok(())
-        })
+        .rebuild_runtime_or_rollback(|| state.store.save_source(&previous))
         .await
         .map_err(runtime_error)?;
-    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
-        runtime.refresh_source_model_metadata_for_source(&id).await;
-    }
-    Ok(Json(source_summary(&state, &record)?))
+    Ok(Json(result))
 }
 
 pub async fn source_stats(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<SourceStatsQuery>,
 ) -> Result<Json<zenith_relay_core::SourceProviderStats>, ManagementError> {
     let record = find_source(&state, &id)?;
-    let api_key = state
-        .vault
-        .load(&record.secret_ref)
-        .map_err(vault_error)?
-        .ok_or_else(|| {
-            ManagementError::not_found("source_secret_missing", "source secret is missing")
-        })?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    fetch_source_provider_stats(&record.base_url, &api_key)
+    crate::jobs::request_source_stats(&state, &id, query.force)
         .await
         .map(Json)
-        .map_err(|_| {
+        .map_err(|error| {
+            if error == error_codes::SOURCE_SECRET_MISSING {
+                return ManagementError::not_found(
+                    error_codes::SOURCE_SECRET_MISSING,
+                    "source secret is missing",
+                );
+            }
+            if error.contains("changed during refresh") || error == "source not found" {
+                return stale_probe_error();
+            }
             ManagementError::new(
                 StatusCode::BAD_GATEWAY,
-                "source_stats_unavailable",
+                error_codes::SOURCE_STATS_UNAVAILABLE,
                 "source stats are unavailable",
                 "source",
                 true,
@@ -437,11 +541,18 @@ pub async fn source_stats(
         })
 }
 
+#[derive(Default, Deserialize)]
+pub struct SourceStatsQuery {
+    #[serde(default)]
+    force: bool,
+}
+
 fn source_record(
     id: String,
     secret_ref: String,
     input: SourceInput,
 ) -> Result<SourceRecord, ManagementError> {
+    let protocol_config = SourceProtocolConfig::automatic(&input.base_url);
     let mut record = SourceRecord {
         id,
         name: clean_label(&input.name, "source name")?,
@@ -457,6 +568,7 @@ fn source_record(
         )?,
         wire_api: input.wire_api,
         protocol_bindings: input.protocol_bindings,
+        protocol_config,
         models: normalized_values(input.models),
         allowed_models: normalized_values(input.allowed_models),
         excluded_models: normalized_values(input.excluded_models),
@@ -509,7 +621,7 @@ fn normalize_pricing_identity(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
     {
         return Err(ManagementError::validation(
-            "source_pricing_identity_invalid",
+            error_codes::SOURCE_PRICING_IDENTITY_INVALID,
             format!("{label} contains unsupported characters"),
         ));
     }
@@ -520,36 +632,17 @@ fn validate_record_protocol_bindings(record: &SourceRecord) -> Result<(), Manage
     if record.protocol_bindings.is_empty() {
         return Ok(());
     }
-    normalize_source_protocol_bindings(
-        record.protocol_bindings.clone(),
-        record.wire_api,
-        &record.models,
-    )
-    .map(drop)
-    .map_err(|error| validation_error(error.to_string()))
+    record
+        .effective_protocol_bindings()
+        .map(drop)
+        .map_err(|error| validation_error(error.to_string()))
 }
 
 fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), ManagementError> {
-    if record.protocol_bindings.is_empty() {
-        return Ok(());
-    }
-    let source_wide_catalog_route =
-        record.protocol_bindings.len() == 1 && record.protocol_bindings[0].model_ids.is_empty();
-    let mut bindings = normalize_source_protocol_bindings(
-        std::mem::take(&mut record.protocol_bindings),
-        record.wire_api,
-        &record.models,
-    )
-    .map_err(|error| validation_error(error.to_string()))?;
-    if source_wide_catalog_route {
-        // Preserve automatic source-wide discovery; runtime readers expand
-        // the empty route through the effective bindings helper.
-        if let Some(binding) = bindings.first_mut() {
-            binding.model_ids.clear();
-        }
-    }
-    record.protocol_bindings = bindings;
-    Ok(())
+    record
+        .effective_protocol_bindings()
+        .map(drop)
+        .map_err(validation_error)
 }
 
 fn clear_source_binding_models(bindings: &mut [SourceProtocolBinding]) {
@@ -567,7 +660,7 @@ fn clear_source_catalog(record: &mut SourceRecord) {
 fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
     (value <= 24 * 60 * 60).then_some(value).ok_or_else(|| {
         ManagementError::validation(
-            "source_recovery_delay_invalid",
+            error_codes::SOURCE_RECOVERY_DELAY_INVALID,
             "source recovery delay must not exceed 24 hours",
         )
     })
@@ -576,8 +669,9 @@ fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
 fn normalize_source_prices(
     prices: BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<BTreeMap<String, ApiModelPriceOverride>, ManagementError> {
-    normalize_model_price_overrides(prices)
-        .map_err(|message| ManagementError::validation("source_model_price_invalid", message))
+    normalize_model_price_overrides(prices).map_err(|message| {
+        ManagementError::validation(error_codes::SOURCE_MODEL_PRICE_INVALID, message)
+    })
 }
 
 async fn discover_models(
@@ -592,10 +686,13 @@ async fn discover_models(
         wire_api: record.wire_api,
         models: record.models.clone(),
     };
-    let discovery =
-        discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings)
-            .await
-            .map_err(source_discovery_error)?;
+    let discovery = discover_source_with_protocol_config(
+        &source,
+        &record.protocol_bindings,
+        &record.protocol_config,
+    )
+    .await
+    .map_err(source_discovery_error)?;
     Ok(discovery)
 }
 
@@ -608,13 +705,14 @@ fn source_discovery_error(error: zenith_relay_core::Error) -> ManagementError {
             StatusCode::BAD_GATEWAY,
             *status == 408 || *status == 429 || *status >= 500,
         ),
-        zenith_relay_core::Error::Upstream(_)
+        zenith_relay_core::Error::ManagementHttpUnavailable
+        | zenith_relay_core::Error::Upstream(_)
         | zenith_relay_core::Error::UpstreamBodyTooLarge
         | zenith_relay_core::Error::InvalidUpstreamResponse(_) => (StatusCode::BAD_GATEWAY, true),
     };
     ManagementError::new(
         status,
-        "source_test_failed",
+        error_codes::SOURCE_TEST_FAILED,
         error.to_string(),
         "upstream",
         retryable,
@@ -628,7 +726,9 @@ fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementErr
         .map_err(store_error)?
         .into_iter()
         .find(|record| record.id == id)
-        .ok_or_else(|| ManagementError::not_found("source_not_found", "source not found"))
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::SOURCE_NOT_FOUND, "source not found")
+        })
 }
 
 fn source_summary(
@@ -641,7 +741,9 @@ fn source_summary(
         .sources
         .into_iter()
         .find(|value| value.id == record.id)
-        .ok_or_else(|| ManagementError::internal("snapshot_missing", "source snapshot missing"))
+        .ok_or_else(|| {
+            ManagementError::internal(error_codes::SNAPSHOT_MISSING, "source snapshot missing")
+        })
 }
 
 fn ensure_not_server_self_source(
@@ -654,7 +756,7 @@ fn ensure_not_server_self_source(
     );
     if source_points_to_gateway(source_base_url, &gateway_base_url) {
         return Err(ManagementError::validation(
-            "source_self_route",
+            error_codes::SOURCE_SELF_ROUTE,
             "source base URL must not point back to this Relay gateway",
         ));
     }
@@ -667,6 +769,7 @@ mod tests {
     use crate::config::Config;
     use crate::store::{Store, Vault};
     use axum::extract::{Path, State};
+    use axum::routing::post;
     use std::collections::BTreeMap;
     use tempfile::TempDir;
     use zenith_relay_core::Error;
@@ -679,6 +782,174 @@ mod tests {
         let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
         let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
         AppState::new(config, store, vault).unwrap()
+    }
+
+    use crate::test_fixtures::pooled_source;
+
+    #[tokio::test]
+    async fn source_probe_rejects_delete_and_readd_with_identical_configuration() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root, 0);
+        let (started, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let handler_release = release.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let (started, release) = (started.clone(), handler_release.clone());
+                async move {
+                    started.send(()).unwrap();
+                    release.notified().await;
+                    Json(serde_json::json!({
+                        "status": "completed",
+                        "output": [{"type": "message", "content": [{
+                            "type": "output_text", "text": "OK"
+                        }]}]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut source = pooled_source("source-readded", "test-model");
+        source.base_url = format!("http://{address}/v1");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-key")
+            .unwrap();
+
+        let worker_state = state.clone();
+        let source_id = source.id.clone();
+        let probe = tokio::spawn(async move {
+            probe_source(
+                State(worker_state),
+                Path(source_id),
+                Json(zenith_relay_core::SourceProbeInput {
+                    model_id: "test-model".into(),
+                    wire_api: WireApi::Responses,
+                    expected_revision: 0,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let _configuration = state.configuration_lock.lock().await;
+            state.store.delete_source(&source.id).unwrap();
+            state.store.save_source(&source).unwrap();
+        }
+        release.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().status, StatusCode::CONFLICT);
+        assert!(state.store.sources().unwrap()[0]
+            .protocol_config
+            .capabilities
+            .is_empty());
+        state.shutdown_runtime().await.unwrap();
+        state.refresh.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn source_policy_patch_updates_all_routes_without_replacing_the_runtime() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root, 0);
+        let source = pooled_source("synthetic-source", "model-a");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let runtime = state.runtime().unwrap().unwrap();
+
+        let Json(summary) = update_source(
+            State(state.clone()),
+            Path(source.id.clone()),
+            Json(SourcePatch {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!summary.enabled);
+        assert!(!state.store.sources().unwrap()[0].enabled);
+        assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
+        assert!(runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_endpoint_patch_retires_the_previous_transport() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root, 0);
+        let source = pooled_source("endpoint-source", "model-a");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let previous = state.runtime().unwrap().unwrap();
+
+        let Json(summary) = update_source(
+            State(state.clone()),
+            Path(source.id.clone()),
+            Json(SourcePatch {
+                base_url: Some("https://changed.example.test/v1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.base_url, "https://changed.example.test/v1");
+        let current = state.runtime().unwrap().unwrap();
+        assert!(!Arc::ptr_eq(&previous, &current));
+        assert!(previous
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
+        assert!(current
+            .candidate_runtime_order()
+            .iter()
+            .any(|candidate| candidate.available));
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_delete_retires_all_routes_of_the_old_runtime() {
+        let root = TempDir::new().unwrap();
+        let state = test_state(&root, 0);
+        let source = pooled_source("removed-source", "model-a");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let old_runtime = state.runtime().unwrap().unwrap();
+
+        delete_source(State(state.clone()), Path(source.id.clone()))
+            .await
+            .unwrap();
+        assert!(state.store.sources().unwrap().is_empty());
+        assert!(state.runtime().unwrap().is_none());
+        assert!(old_runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
     }
 
     #[test]
@@ -713,6 +984,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: zenith_relay_core::SourceAdapter::Native,
@@ -765,6 +1037,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["provider/model".to_string()],
             allowed_models: Vec::new(),
@@ -782,9 +1055,13 @@ mod tests {
             .save(&record.secret_ref, "source-secret")
             .unwrap();
 
-        let error = source_stats(State(state), Path(record.id))
-            .await
-            .expect_err("a source pointing at this Relay must be rejected");
+        let error = source_stats(
+            State(state),
+            Path(record.id),
+            Query(SourceStatsQuery::default()),
+        )
+        .await
+        .expect_err("a source pointing at this Relay must be rejected");
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "source_self_route");

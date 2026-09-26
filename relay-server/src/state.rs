@@ -14,6 +14,7 @@ use std::{
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
+    model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
     pricing::{
         CatalogStatus, PriceEvidence, PricingCatalog, PricingCatalogLoader, PricingContext,
         SourcePricingMetadata,
@@ -21,15 +22,14 @@ use zenith_relay_core::{
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
-    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
-    runtime_source_supports_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot,
-    GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, RuntimeCandidatePolicy,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding,
+    SourceProtocolConfig, WireApi,
 };
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 35;
+pub const SERVER_SCHEMA_VERSION: u32 = 39;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -62,6 +62,8 @@ pub struct SourceRecord {
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    pub protocol_config: SourceProtocolConfig,
     pub models: Vec<String>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
@@ -77,29 +79,62 @@ pub struct SourceRecord {
 }
 
 impl SourceRecord {
+    pub fn effective_protocol_bindings(&self) -> Result<Vec<SourceProtocolBinding>, String> {
+        self.protocol_config
+            .resolve(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+            )
+            .map_err(|error| error.to_string())
+    }
+
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        runtime_source_models_for_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .map_err(|error| error.to_string())
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                Some(wire_api),
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
-        runtime_source_supports_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .map_err(|error| error.to_string())
+        self.models_for_wire_api(wire_api)
+            .map(|models| !models.is_empty())
     }
 
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                None,
+            )
+            .map(|models| !models.is_empty())
             .map_err(|error| error.to_string())
+    }
+
+    pub fn models_with_cache_write_pricing(&self) -> std::collections::BTreeSet<String> {
+        self.effective_protocol_bindings()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|route| {
+                route.adapter.upstream_protocol(route.wire_api)
+                    == zenith_relay_core::UpstreamProtocol::Messages
+            })
+            .flat_map(|route| {
+                route
+                    .model_ids
+                    .into_iter()
+                    .map(|model| model.to_ascii_lowercase())
+            })
+            .collect()
     }
 }
 
@@ -270,10 +305,23 @@ pub struct AppState {
     pub started_at_ms: u64,
     pub wake_lock: tokio::sync::Mutex<()>,
     pub configuration_lock: tokio::sync::Mutex<()>,
+    /// Serializes runtime construction/publication with account incarnation
+    /// switches. A stale build must finish before an import/delete commits.
+    pub(crate) runtime_build_lock: tokio::sync::Mutex<()>,
+    /// Serializes credential-reference switches with vault token/task writes.
+    /// Separate from configuration_lock: runtime rebuild may await the token
+    /// authority while holding configuration_lock.
+    pub(crate) account_credential_lock: tokio::sync::Mutex<()>,
     pub quota_reset_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) refresh: Arc<
+        zenith_relay_core::scheduler::refresh::service::RefreshService<
+            crate::jobs::RefreshReadResult,
+        >,
+    >,
     pub(crate) failed_usage_writes: AtomicU64,
     pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
     pricing: Arc<PricingCatalogLoader>,
+    model_metadata: Arc<ModelMetadataCatalogLoader>,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
 }
 
@@ -288,6 +336,10 @@ impl AppState {
             PricingCatalogLoader::open(config.data_dir.join("litellm-prices.json"))
                 .map_err(|error| error.to_string())?,
         );
+        let model_metadata = Arc::new(
+            ModelMetadataCatalogLoader::open(config.data_dir.join("models-dev.json"))
+                .map_err(|error| error.to_string())?,
+        );
         Ok(Arc::new(Self {
             config,
             store,
@@ -299,10 +351,19 @@ impl AppState {
             started_at_ms: now_ms(),
             wake_lock: tokio::sync::Mutex::new(()),
             configuration_lock: tokio::sync::Mutex::new(()),
+            runtime_build_lock: tokio::sync::Mutex::new(()),
+            account_credential_lock: tokio::sync::Mutex::new(()),
             quota_reset_locks: Mutex::new(HashMap::new()),
+            refresh:
+                zenith_relay_core::scheduler::refresh::service::RefreshService::with_cache_policy(
+                    Default::default(),
+                    crate::jobs::cache_observation,
+                )
+                .map_err(str::to_string)?,
             failed_usage_writes: AtomicU64::new(0),
             usage_writer: Mutex::new(None),
             pricing,
+            model_metadata,
             runtime: RwLock::new(None),
         }))
     }
@@ -317,6 +378,14 @@ impl AppState {
 
     pub(crate) fn pricing_status(&self) -> CatalogStatus {
         self.pricing.status()
+    }
+
+    pub(crate) fn model_metadata_loader(&self) -> Arc<ModelMetadataCatalogLoader> {
+        self.model_metadata.clone()
+    }
+
+    pub(crate) fn model_metadata_catalog(&self) -> Arc<ModelMetadataCatalog> {
+        self.model_metadata.snapshot()
     }
 
     /// Build a redacted pricing identity map for usage and snapshot reads.
@@ -348,6 +417,7 @@ impl AppState {
             let metadata = SourcePricingMetadata {
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
+                cache_write_models: source.models_with_cache_write_pricing(),
             };
             let key = identity_hint(&source.id);
             source_metadata.insert(key.clone(), metadata.clone());
@@ -395,17 +465,26 @@ impl AppState {
     }
 
     pub fn replace_runtime(&self, runtime: Option<Arc<GatewayRuntime>>) -> Result<(), String> {
-        *self
+        let mut active = self
             .runtime
             .write()
-            .map_err(|_| "runtime lock poisoned".to_string())? = runtime;
+            .map_err(|_| "runtime lock poisoned".to_string())?;
+        if let Some(previous) = active.as_ref() {
+            if runtime
+                .as_ref()
+                .is_none_or(|next| !Arc::ptr_eq(previous, next))
+            {
+                previous.retire_for_replacement();
+            }
+        }
+        *active = runtime;
         Ok(())
     }
 
     pub fn runtime_order(&self) -> Result<Vec<CandidateRuntimeSnapshot>, String> {
         Ok(self
             .runtime()?
-            .map(|runtime| runtime.candidate_runtime_order())
+            .map(|runtime| runtime.candidate_runtime_order_for_key(SYSTEM_GATEWAY_KEY_ID))
             .unwrap_or_default())
     }
 }

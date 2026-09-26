@@ -6,13 +6,10 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeHistory, WakeTask},
     deserialize_model_reasoning_allowed_levels, normalize_model_ids,
     normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, normalize_source_protocol_bindings,
-    normalize_subscription_plan_order,
+    normalize_model_service_tier_overrides,
     protocol::RemoteAccountLocation,
-    runtime_source_models_for_wire_api, runtime_source_supports_any_wire_api,
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, RuntimeCandidatePolicy,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceProtocolBinding, WireApi,
-    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    ApiModelPriceOverride, DefaultServiceTier, RuntimeCandidatePolicy, RuntimeSourcePolicyRecord,
+    RuntimeSourcePolicyUpdate, SourceProtocolBinding, SourceProtocolConfig, WireApi,
 };
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
@@ -37,20 +34,21 @@ pub enum BindScope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySettings {
+    #[serde(default)]
+    pub tool_policy: zenith_relay_core::ToolPolicy,
+    /// Use the explicitly labelled Excel/Basis Points route for compatible
+    /// OAuth accounts. The physical account candidate and its quota remain
+    /// shared with native Responses traffic.
+    #[serde(default)]
+    pub basis_points_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     pub enabled: bool,
     pub bind_scope: BindScope,
     pub port: u16,
     pub client_host: String,
     #[serde(default = "default_max_retry_candidates")]
     pub max_retry_candidates: u8,
-    #[serde(default = "default_cooldown_after_failures")]
-    pub cooldown_after_failures: u8,
-    #[serde(default = "default_keep_last_candidate_available")]
-    pub keep_last_candidate_available: bool,
-    #[serde(default)]
-    pub routing_strategy: RoutingStrategy,
-    #[serde(default)]
-    pub subscription_plan_order: Vec<String>,
     #[serde(default)]
     pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
@@ -67,6 +65,10 @@ pub struct GatewaySettings {
     pub codex_background_tasks_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
+    /// Legacy persisted key for API text-route recovery, including non-ChatGPT
+    /// clients. Retained so existing local settings survive upgrades.
+    #[serde(default)]
+    pub chatgpt_retry_until_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_refresh_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +242,8 @@ pub struct ProviderSourceRecord {
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    pub protocol_config: SourceProtocolConfig,
     pub models: Vec<String>,
     #[serde(default)]
     pub allowed_models: Vec<String>,
@@ -306,6 +310,12 @@ pub struct LocalAccountRecord {
     pub cooldowns: BTreeMap<String, u64>,
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Observation from the official Codex client. This is informational and
+    /// must never be used as a routing or account-switch hard block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_auth_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_client_login_redirect_at_ms: Option<u64>,
 }
 
 impl LocalAccountRecord {
@@ -358,15 +368,14 @@ impl Default for AutomationRecords {
 impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
+            tool_policy: Default::default(),
+            basis_points_enabled: false,
             enabled: false,
             bind_scope: BindScope::Localhost,
             port: DEFAULT_GATEWAY_PORT,
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
-            cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
-            keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-            routing_strategy: RoutingStrategy::Adaptive,
-            subscription_plan_order: Vec::new(),
+            pool_routing: Some(zenith_relay_core::PoolRoutingPolicy::default()),
             default_service_tier: DefaultServiceTier::Standard,
             image_base_model: None,
             common_proxy_configured: false,
@@ -376,6 +385,7 @@ impl Default for GatewaySettings {
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             codex_background_tasks_enabled: true,
             codex_websockets_enabled: true,
+            chatgpt_retry_until_available: false,
             catalog_refresh_error: None,
             catalog_refresh_error_at_ms: None,
             hidden_models: Vec::new(),
@@ -388,20 +398,50 @@ impl Default for GatewaySettings {
 }
 
 impl GatewaySettings {
+    pub fn pool_routing_for(
+        &self,
+        sources: &[ProviderSourceRecord],
+        accounts: &[LocalAccountRecord],
+    ) -> zenith_relay_core::PoolRoutingPolicy {
+        zenith_relay_core::resolve_pool_routing(
+            self.pool_routing.as_ref(),
+            sources
+                .iter()
+                .filter(|m| m.in_pool)
+                .map(|m| {
+                    (
+                        zenith_relay_core::PoolMemberKind::Source,
+                        m.id.clone(),
+                        m.priority,
+                        m.weight,
+                    )
+                })
+                .chain(accounts.iter().filter(|m| m.account.in_pool).map(|m| {
+                    (
+                        zenith_relay_core::PoolMemberKind::Account,
+                        m.account.id.clone(),
+                        m.priority,
+                        m.weight,
+                    )
+                }))
+                .collect(),
+        )
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
         }
+        self.tool_policy.clone().normalized()?;
         if self.client_host != "127.0.0.1" && self.client_host != "localhost" {
             return Err("local gateway host must be localhost or 127.0.0.1");
         }
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
         }
-        if !(1..=8).contains(&self.cooldown_after_failures) {
-            return Err("cooldown after failures must be between 1 and 8");
+        if let Some(policy) = &self.pool_routing {
+            policy.validate()?;
         }
-        normalize_subscription_plan_order(self.subscription_plan_order.clone())?;
         if self
             .image_base_model
             .as_deref()
@@ -433,14 +473,6 @@ impl GatewaySettings {
 
 fn default_quota_request_timeout_seconds() -> u64 {
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS
-}
-
-fn default_cooldown_after_failures() -> u8 {
-    DEFAULT_COOLDOWN_AFTER_FAILURES
-}
-
-fn default_keep_last_candidate_available() -> bool {
-    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {
@@ -493,50 +525,43 @@ impl ProviderSourceRecord {
     /// Resolves the legacy single-protocol fields into the same shape used by
     /// current multi-protocol records without mutating persisted legacy data.
     pub fn effective_protocol_bindings(&self) -> Result<Vec<SourceProtocolBinding>, String> {
-        normalize_source_protocol_bindings(
-            self.protocol_bindings.clone(),
-            self.wire_api,
-            &self.models,
-        )
-        .map_err(|error| error.to_string())
-    }
-
-    pub fn normalize_protocol_bindings(&mut self) -> Result<(), String> {
-        if self.protocol_bindings.is_empty() {
-            return Ok(());
-        }
-        let source_wide_catalog_route =
-            self.protocol_bindings.len() == 1 && self.protocol_bindings[0].model_ids.is_empty();
-        let bindings = self.effective_protocol_bindings()?;
-        if source_wide_catalog_route {
-            // An empty single route means discover the source-wide catalog;
-            // effective bindings expand it only for validation and routing.
-            return Ok(());
-        }
-        // `wire_api` is a compatibility default for legacy readers. Do not
-        // derive it from route order: an explicit mixed source is defined by
-        // `protocol_bindings`, and discovery is free to return routes in any
-        // stable upstream order.
-        self.protocol_bindings = bindings;
-        Ok(())
+        self.protocol_config
+            .resolve(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn validate_protocol_bindings(&self) -> Result<(), String> {
         self.effective_protocol_bindings().map(drop)
     }
 
+    #[cfg(test)]
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        runtime_source_models_for_wire_api(
-            &self.protocol_bindings,
-            self.wire_api,
-            &self.models,
-            wire_api,
-        )
-        .map_err(|error| error.to_string())
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                Some(wire_api),
+            )
+            .map_err(|error| error.to_string())
     }
 
     pub fn supports_any_wire_api(&self) -> Result<bool, String> {
-        runtime_source_supports_any_wire_api(&self.protocol_bindings, self.wire_api, &self.models)
+        self.protocol_config
+            .models_for(
+                &self.base_url,
+                &self.models,
+                &self.protocol_bindings,
+                self.wire_api,
+                None,
+            )
+            .map(|models| !models.is_empty())
             .map_err(|error| error.to_string())
     }
 }

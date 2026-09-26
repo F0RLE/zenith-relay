@@ -3,11 +3,6 @@ import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/ty
 const subscriptionPlanPriority = ["enterprise", "business", "pro-20x", "pro-5x", "pro", "plus", "go", "edu", "free", "unknown"];
 const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
 
-export type ApiSourceRole = "primary" | "stabilizer" | "reserve";
-
-const API_SOURCE_PRIMARY_PRIORITY = 1_000_000;
-const API_SOURCE_RESERVE_PRIORITY = -1_000_000;
-
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   const positions = new Map<string, number>();
   const sourcePositions = new Map<string, { index: number; active: boolean }>();
@@ -56,6 +51,9 @@ export function runtimeCandidateForMember(
     candidateId: memberId,
     kind,
     available: candidates.some((candidate) => candidate.available),
+    nextForNewRequest: candidates.some((candidate) => candidate.nextForNewRequest),
+    ...(firstCandidate?.activityRevision == null ? {} : { activityRevision: firstCandidate.activityRevision }),
+    ...(firstCandidate?.runtimeId == null ? {} : { runtimeId: firstCandidate.runtimeId }),
     inFlight: candidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0),
     activeRequestCount: candidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0),
     activeModels: activeModelCounts(candidates),
@@ -117,26 +115,58 @@ export function applyRuntimeActivity(
   return applyRuntimeActivities(order, [activity]);
 }
 
+export function compareRuntimeActivity(
+  left: { runtimeId?: number | undefined; revision: number },
+  right: { runtimeId?: number | undefined; revision: number },
+) {
+  return (left.runtimeId ?? 0) - (right.runtimeId ?? 0) || left.revision - right.revision;
+}
+
+export function currentRuntimeActivities(
+  order: readonly CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  const runtimeId = order[0]?.runtimeId;
+  return [...activities].filter((activity) => runtimeId == null || activity.runtimeId == null || activity.runtimeId >= runtimeId);
+}
+
+/** A late poll must not resurrect activity already retired by a newer snapshot. */
+export function preferNewerRuntimeOrder(current: CandidateRuntimeSnapshot[], incoming: CandidateRuntimeSnapshot[]) {
+  const previous = current[0];
+  const next = incoming[0];
+  if (previous?.runtimeId == null || previous.activityRevision == null
+    || next?.runtimeId == null || next.activityRevision == null) return incoming;
+  return compareRuntimeActivity(
+    { runtimeId: previous.runtimeId, revision: previous.activityRevision },
+    { runtimeId: next.runtimeId, revision: next.activityRevision },
+  ) > 0 ? current : incoming;
+}
+
 export function applyRuntimeActivities(
   order: CandidateRuntimeSnapshot[],
   activities: Iterable<RuntimeActivitySnapshot>,
 ) {
   const updates = new Map<string, RuntimeActivitySnapshot>();
-  for (const activity of activities) {
+  for (const activity of currentRuntimeActivities(order, activities)) {
     const previous = updates.get(activity.candidateId);
-    if (!previous || activity.revision > previous.revision) {
+    if (!previous || compareRuntimeActivity(activity, previous) > 0) {
       updates.set(activity.candidateId, activity);
     }
   }
   if (!updates.size) return order;
 
+  const snapshotRevision = order.reduce((revision, candidate) => Math.min(revision, candidate.activityRevision ?? 0), Infinity);
+  const previewStale = [...updates.values()].some((activity) =>
+    (activity.runtimeId ?? 0) > (order[0]?.runtimeId ?? 0) || activity.revision > snapshotRevision);
   let changed = false;
   const next = order.map((candidate) => {
     const activity = updates.get(candidate.candidateId);
-    if (!activity) return candidate;
+    const base = previewStale && candidate.nextForNewRequest ? { ...candidate, nextForNewRequest: false } : candidate;
+    changed ||= base !== candidate;
+    if (!activity || compareRuntimeActivity(activity, { runtimeId: candidate.runtimeId, revision: candidate.activityRevision ?? -1 }) <= 0) return base;
     changed = true;
     return {
-      ...candidate,
+      ...base,
       inFlight: activity.inFlight,
       activeRequestCount: activity.activeRequestCount,
       activeModels: activity.activeModels,
@@ -172,7 +202,15 @@ export function reconcileRuntimeActivityOverlay(
   const candidates = new Map(order.map((candidate) => [candidate.candidateId, candidate]));
   for (const [candidateId, activity] of overlay) {
     const candidate = candidates.get(candidateId);
-    if (!candidate || (activeRequestCount(candidate) > 0 && activity.activeRequestCount === 0)) {
+    const runtimeId = candidate?.runtimeId ?? order[0]?.runtimeId;
+    if (runtimeId != null && activity.runtimeId != null && runtimeId !== activity.runtimeId) {
+      if (runtimeId > activity.runtimeId) overlay.delete(candidateId);
+      continue;
+    }
+    const revision = candidate?.activityRevision ?? order[0]?.activityRevision;
+    if (revision != null) {
+      if (revision >= activity.revision) overlay.delete(candidateId);
+    } else if (!candidate || (activeRequestCount(candidate) > 0 && activity.activeRequestCount === 0)) {
       overlay.delete(candidateId);
     }
   }
@@ -228,18 +266,4 @@ export function compareAccountPlans(left: { id: string; label: string }, right: 
   const leftRank = accountPlanOrder.indexOf(left.id);
   const rightRank = accountPlanOrder.indexOf(right.id);
   return (leftRank < 0 ? accountPlanOrder.length : leftRank) - (rightRank < 0 ? accountPlanOrder.length : rightRank) || left.label.localeCompare(right.label);
-}
-
-export function apiSourceRole(priority: number): ApiSourceRole {
-  if (priority >= API_SOURCE_PRIMARY_PRIORITY) return "primary";
-  if (priority <= API_SOURCE_RESERVE_PRIORITY) return "reserve";
-  return "stabilizer";
-}
-
-export function apiSourcePriority(role: ApiSourceRole, position = 0, total = 1) {
-  const index = Math.max(0, Math.trunc(position));
-  const rank = Math.max(1, Math.trunc(total) - index);
-  if (role === "primary") return API_SOURCE_PRIMARY_PRIORITY + rank;
-  if (role === "reserve") return API_SOURCE_RESERVE_PRIORITY - index;
-  return rank;
 }

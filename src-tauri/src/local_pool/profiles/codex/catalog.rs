@@ -4,16 +4,80 @@ use super::{
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde_json::{json, Value};
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    process::Command,
+};
+use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::{
-    codex_catalog_entry_is_compatible, codex_model_display_name, codex_model_is_picker_eligible,
-    decode_codex_model_alias, normalize_codex_catalog_priorities,
-    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+    apply_codex_ultra_from_official_model, codex_catalog_entry_is_compatible,
+    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
+    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
 };
 
 const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+const MAX_BUNDLED_CODEX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
+
+fn bundled_codex_ultra_models() -> HashMap<String, Value> {
+    // Read the installed Codex's offline catalog at refresh time, including
+    // when the CLI has been updated since Relay started.
+    let mut command = Command::new("codex");
+    command.args(["debug", "models", "--bundled"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let Ok(output) = command.output() else {
+        return HashMap::new();
+    };
+    if !output.status.success() || output.stdout.len() > MAX_BUNDLED_CODEX_CATALOG_BYTES {
+        return HashMap::new();
+    }
+    serde_json::from_slice::<Value>(&output.stdout)
+        .map(|catalog| official_codex_ultra_rows(&catalog))
+        .unwrap_or_default()
+}
+
+fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Value> {
+    catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let slug = entry.get("slug")?.as_str()?;
+            let has_ultra = entry
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)?
+                .iter()
+                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"));
+            if !has_ultra || !zenith_relay_core::is_valid_model_id(slug) {
+                return None;
+            }
+            let mut ultra = json!({
+                "slug": slug,
+                "supported_reasoning_levels": [{"effort": "ultra"}]
+            });
+            for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
+                if let Some(value) = entry.get(field).and_then(Value::as_str) {
+                    ultra[field] = json!(value);
+                }
+            }
+            Some((slug.to_ascii_lowercase(), ultra))
+        })
+        .collect()
+}
+
+fn add_installed_codex_ultra(entry: &mut Value, model: &str, bundled: &HashMap<String, Value>) {
+    if let Some(official) = bundled.get(&model.to_ascii_lowercase()) {
+        apply_codex_ultra_from_official_model(entry, official, model);
+    }
+}
 
 pub(super) fn direct_source_model_catalog_with_manifest(
     codex_home: &Path,
@@ -56,6 +120,34 @@ pub(super) fn direct_source_model_catalog_with_manifest(
         return Ok(None);
     }
     Ok(Some(normalize_model_catalog_values(models)?))
+}
+
+pub(super) fn direct_source_model_catalog_with_capabilities(
+    codex_home: &Path,
+    source_models: &[String],
+    metadata: &ModelMetadataCatalog,
+) -> Result<Option<String>> {
+    let catalog = direct_source_model_catalog_with_manifest(codex_home, source_models, None)?;
+    let Some(catalog) = catalog else {
+        return Ok(None);
+    };
+    let mut value: Value = serde_json::from_str(&catalog)
+        .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
+    let bundled = bundled_codex_ultra_models();
+    if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
+            model["display_name"] = Value::String(metadata.codex_display_name(&decoded));
+            metadata.apply_codex_capabilities(&decoded, model);
+            add_installed_codex_ultra(model, &decoded, &bundled);
+        }
+    }
+    Ok(Some(
+        serde_json::to_string(&value).map_err(LocalPoolError::invalid_state)?,
+    ))
 }
 
 fn is_direct_source_model(model: &str) -> bool {
@@ -308,6 +400,23 @@ pub(super) fn build_managed_model_catalog(
     current_managed_catalog: Option<&[u8]>,
     relay_catalog_json: &str,
 ) -> Result<String> {
+    let bundled = bundled_codex_ultra_models();
+    build_managed_model_catalog_with_bundled(
+        codex_home,
+        user_catalog_path,
+        current_managed_catalog,
+        relay_catalog_json,
+        &bundled,
+    )
+}
+
+fn build_managed_model_catalog_with_bundled(
+    codex_home: &Path,
+    user_catalog_path: Option<&str>,
+    current_managed_catalog: Option<&[u8]>,
+    relay_catalog_json: &str,
+    bundled: &HashMap<String, Value>,
+) -> Result<String> {
     let template =
         collect_native_catalog_template(codex_home, user_catalog_path, current_managed_catalog)?;
     let template = template.unwrap_or_default();
@@ -358,7 +467,12 @@ pub(super) fn build_managed_model_catalog(
         let mut entry = relay_model
             .as_object()
             .and_then(|upstream| {
-                if relay_managed {
+                if codex_catalog_entry_is_compatible(relay_model) {
+                    // The gateway already projected models.dev capabilities.
+                    // Re-normalizing would reintroduce legacy context defaults
+                    // and discard output modalities on an unknown model.
+                    Some(relay_model.clone())
+                } else if relay_managed {
                     normalize_upstream_codex_catalog_entry(
                         upstream,
                         &model,
@@ -370,7 +484,28 @@ pub(super) fn build_managed_model_catalog(
                 }
             })
             .unwrap_or_else(|| {
-                routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
+                if relay_managed {
+                    routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
+                } else {
+                    // A malformed native row must not fall back to Relay's
+                    // routed context policy. Codex owns native context, so a
+                    // missing field stays missing until the native catalog is
+                    // available again.
+                    let mut fallback =
+                        routed_codex_catalog_entry(Some(&template), &model, priority, None);
+                    if let Some(object) = fallback.as_object_mut() {
+                        for key in [
+                            "context_window",
+                            "max_context_window",
+                            "auto_compact_token_limit",
+                            "effective_context_window_percent",
+                        ] {
+                            object.remove(key);
+                        }
+                        object.insert("slug".into(), Value::String(slug.to_string()));
+                    }
+                    fallback
+                }
             });
         if !slug.to_ascii_lowercase().starts_with("zenith/") {
             entry["slug"] = Value::String(slug.to_string());
@@ -381,6 +516,9 @@ pub(super) fn build_managed_model_catalog(
         }
         if let Some(description) = relay_model.get("description").and_then(Value::as_str) {
             entry["description"] = Value::String(description.to_string());
+        }
+        if relay_managed {
+            add_installed_codex_ultra(&mut entry, &model, bundled);
         }
         if let Some(slug) = model_slug(&entry) {
             if seen.insert(slug.to_ascii_lowercase()) {
@@ -395,4 +533,59 @@ pub(super) fn build_managed_model_catalog(
         ));
     }
     normalize_model_catalog_values(models)
+}
+
+#[cfg(test)]
+mod ultra_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_codex_metadata_uses_exact_models_and_only_orchestration_fields() {
+        let catalog = json!({"models": [
+            {"slug": "gpt-future", "supported_reasoning_levels": [
+                {"effort": "max"}, {"effort": "ultra"}
+            ], "multi_agent_version": "v2", "multi_agent_reasoning_effort": "xhigh",
+               "base_instructions": "not a Relay instruction"},
+            {"slug": "gpt-other", "supported_reasoning_levels": [{"effort": "max"}]}
+        ]});
+        let official = official_codex_ultra_rows(&catalog);
+        assert!(official.contains_key("gpt-future"));
+        assert!(!official.contains_key("gpt-other"));
+        let mut relay = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+        relay["slug"] = json!("gpt-future");
+        relay["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
+        let mut qualified = routed_codex_catalog_entry(None, "vendor/gpt-future", 1_001, None);
+        qualified["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
+        let relay_catalog = json!({"models": [relay, qualified]});
+        let home = std::env::temp_dir().join(format!("relay-codex-ultra-{}", std::process::id()));
+        let managed = build_managed_model_catalog_with_bundled(
+            &home,
+            None,
+            None,
+            &relay_catalog.to_string(),
+            &official,
+        )
+        .unwrap();
+        let managed: Value = serde_json::from_str(&managed).unwrap();
+        assert_eq!(
+            managed["models"][0]["supported_reasoning_levels"][2]["effort"],
+            "ultra"
+        );
+        assert_eq!(managed["models"][0]["multi_agent_version"], "v2");
+        assert_eq!(
+            managed["models"][0]["multi_agent_reasoning_effort"],
+            "xhigh"
+        );
+        assert_ne!(
+            managed["models"][0]["base_instructions"],
+            "not a Relay instruction"
+        );
+        assert_eq!(
+            managed["models"][1]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
 }

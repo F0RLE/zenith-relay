@@ -3,6 +3,8 @@ use crate::ErrorOrigin;
 use axum::body::{to_bytes, Body};
 use std::time::Duration;
 
+mod retry_hints;
+
 #[tokio::test]
 async fn generated_errors_keep_the_original_diagnostic_category() {
     let response = api_error_with_origin_and_category(
@@ -177,6 +179,64 @@ fn invalid_function_call_output_call_ids_are_detected_without_matching_generic_e
 }
 
 #[test]
+fn missing_responses_call_ids_are_detected_without_matching_invalid_ids() {
+    for payload in [
+        br#"{"error":{"message":"Missing field call_id"}}"#.as_slice(),
+        br#"{"error":{"message":"Missing required field: `call_id`"}}"#.as_slice(),
+        br#"{"error":{"message":"The call id is required"}}"#.as_slice(),
+        br#"{"error":{"code":"missing_call_id"}}"#.as_slice(),
+        b"Missing required parameter: call_id".as_slice(),
+    ] {
+        assert!(
+            responses_call_id_is_missing(payload),
+            "expected missing call_id detector to match {}",
+            String::from_utf8_lossy(payload)
+        );
+    }
+    for payload in [
+        br#"{"error":{"message":"Invalid call_id for function_call_output"}}"#.as_slice(),
+        br#"{"error":{"message":"Invalid call id"}}"#.as_slice(),
+        br#"{"error":{"message":"Missing field: model"}}"#.as_slice(),
+        br#"{"error":{"code":"invalid_request"}}"#.as_slice(),
+    ] {
+        assert!(
+            !responses_call_id_is_missing(payload),
+            "unexpected missing call_id match for {}",
+            String::from_utf8_lossy(payload)
+        );
+    }
+}
+
+#[test]
+fn tool_link_rejection_is_consistent_for_json_and_stream_envelopes() {
+    for message in [
+        "Missing required field: call_id",
+        "No tool output found for custom tool call call_test.",
+        "No tool output found for function call call_test.",
+        "Invalid call_id for function_call_output",
+    ] {
+        let error = json!({"message": message});
+        let buffered = json!({"error": error});
+        let stream = json!({"type":"response.failed", "response":{"error":error}});
+        assert!(responses_tool_call_links_rejected(
+            &serde_json::to_vec(&buffered).unwrap()
+        ));
+        assert!(responses_tool_call_links_rejected_value(&stream));
+    }
+    for message in [
+        "Invalid request",
+        "Missing field: model",
+        "Invalid tool arguments",
+    ] {
+        let error = json!({"error":{"message":message}});
+        assert!(!responses_tool_call_links_rejected(
+            &serde_json::to_vec(&error).unwrap()
+        ));
+        assert!(!responses_tool_call_links_rejected_value(&error));
+    }
+}
+
+#[test]
 fn zenith_gateway_invalid_request_is_detected_without_matching_generic_bad_requests() {
     assert!(zenith_gateway_invalid_request(
         br#"{"error":{"code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
@@ -225,6 +285,71 @@ fn strict_responses_message_item_id_error_is_detected_without_matching_other_ite
         ));
     assert!(!responses_message_item_id_requires_msg_prefix(
         br#"{"error":{"message":"Expected an ID that begins with 'msg'."}}"#,
+    ));
+    assert!(responses_message_item_id_requires_msg_prefix(
+        br#"{"error":{"message":"text part msg_Upmcar_gD7yF-8YP1qSM8AM not found"}}"#,
+    ));
+    assert!(!responses_message_item_id_requires_msg_prefix(
+        br#"{"error":{"message":"text part fc_123 not found"}}"#,
+    ));
+}
+
+#[test]
+fn missing_tool_output_recovery_matches_only_explicit_responses_errors() {
+    assert!(responses_tool_call_is_missing_output(
+        br#"{"error":{"message":"No tool output found for custom tool call ctc_123"}}"#
+    ));
+    assert!(responses_tool_call_is_missing_output(
+        br#"{"error":{"code":"unanswered_function_call"}}"#
+    ));
+    assert!(!responses_tool_call_is_missing_output(
+        br#"{"error":{"message":"No tool call found for custom tool call output"}}"#
+    ));
+}
+
+#[test]
+fn model_switch_recovery_resets_only_safe_responses_continuations() {
+    let mismatch = br#"{"error":{"message":"Tool call output does not match the model that created the previous response"}}"#;
+    assert!(recoverable_response_model_switch(
+        StatusCode::BAD_REQUEST,
+        "upstream_tool_call_mismatch",
+        true,
+        false,
+        mismatch,
+    ));
+    assert!(recoverable_response_model_switch(
+        StatusCode::BAD_REQUEST,
+        "upstream_invalid_request",
+        true,
+        false,
+        br#"{"error":{"message":"previous_response_id belongs to another model"}}"#,
+    ));
+    assert!(!recoverable_response_model_switch(
+        StatusCode::BAD_REQUEST,
+        "upstream_tool_call_mismatch",
+        true,
+        true,
+        mismatch,
+    ));
+    assert!(!recoverable_response_model_switch(
+        StatusCode::BAD_REQUEST,
+        "upstream_invalid_request",
+        false,
+        false,
+        mismatch,
+    ));
+}
+
+#[test]
+fn prompt_cache_write_rejection_requires_explicit_cache_creation_wording() {
+    assert!(prompt_cache_write_rejected(
+        br#"{"error":{"message":"cache_control ephemeral cache write is unsupported"}}"#
+    ));
+    assert!(prompt_cache_write_rejected(
+        br#"{"error":{"message":"cache creation TTL is invalid"}}"#
+    ));
+    assert!(!prompt_cache_write_rejected(
+        br#"{"error":{"message":"cached input is not available"}}"#
     ));
 }
 
@@ -362,6 +487,21 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 "upstream_candidate_rejected",
             ),
             (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"error":{"type":"invalid_request_error","code":"model_disabled"}}"#.as_slice(),
+                "upstream_candidate_rejected",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"status":"INVALID_ARGUMENT"}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"error":{"code":"validation_error"}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
                 StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"websocket_not_supported"}}"#.as_slice(),
                 "upstream_websocket_unsupported",
@@ -413,19 +553,19 @@ fn deactivated_workspace_detection_requires_the_exact_structured_code() {
 }
 
 #[test]
-fn delayed_gateway_invalid_request_event_does_not_cool_down_source() {
+fn generic_gateway_rejection_remains_a_candidate_failure() {
     let value: Value = serde_json::from_slice(
             br#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
         )
         .unwrap();
 
     let classification = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &value);
-    assert_eq!(classification.category, "upstream_invalid_request");
+    assert_eq!(classification.category, "upstream_candidate_rejected");
     assert_eq!(
         upstream_event_failure_category(Some("error"), &value),
-        Some("upstream_invalid_request")
+        Some("upstream_candidate_rejected")
     );
-    assert!(!failure_category_requires_cooldown(classification.category));
+    assert!(failure_category_requires_cooldown(classification.category));
 }
 
 #[test]
@@ -461,21 +601,57 @@ fn preserved_upstream_error_keeps_only_safe_structured_messages() {
     assert_eq!(nested.code, "bad_request");
     assert_eq!(nested.message, "Zenith AI request is invalid.");
 
-    assert!(preserved_upstream_error(
+    let redacted = preserved_upstream_error(
             &failure,
             br#"{"error":{"code":"service_unavailable","message":"request failed at https://gateway.example.invalid/v1; bearer secret"}}"#,
         )
-        .is_none());
-    assert!(preserved_upstream_error(
+        .unwrap();
+    assert!(!redacted.message.contains("https://"));
+    assert!(!redacted.message.contains("secret"));
+    let redacted = preserved_upstream_error(
             &failure,
             br#"{"error":{"code":"service_unavailable","message":"quota exceeded for org-acme; contact admin@acme.test"}}"#,
         )
-        .is_none());
-    assert!(preserved_upstream_error(
+        .unwrap();
+    assert!(!redacted.message.contains("org-acme"));
+    assert!(!redacted.message.contains("admin@"));
+    let unknown = preserved_upstream_error(
         &failure,
         br#"{"error":{"code":"provider_error","message":"upstream diagnostic"}}"#,
     )
-    .is_none());
+    .unwrap();
+    assert_eq!(unknown.code, "provider_error");
+    assert_eq!(unknown.message, "upstream diagnostic");
+}
+
+#[test]
+fn quota_rate_and_validation_failures_keep_distinct_effects() {
+    for (code, category, cooldown) in [
+        ("slow_down", "upstream_rate_limited", true),
+        (
+            "organization_spend_limit_exceeded",
+            "upstream_quota_exhausted",
+            true,
+        ),
+        (
+            "project_spend_limit_exceeded",
+            "upstream_quota_exhausted",
+            true,
+        ),
+        ("INVALID_ARGUMENT", "upstream_invalid_request", false),
+        ("validation_error", "upstream_invalid_request", false),
+    ] {
+        let classification = classify_upstream_error_value(
+            StatusCode::BAD_GATEWAY,
+            &json!({"error": {"code": code}}),
+        );
+        assert_eq!(classification.category, category, "{code}");
+        assert_eq!(
+            failure_category_requires_cooldown(category),
+            cooldown,
+            "{code}"
+        );
+    }
 }
 
 #[test]
@@ -500,7 +676,7 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         "upstream_candidate_rejected",
         false
     ));
-    assert!(!retryable_failure(
+    assert!(retryable_failure(
         StatusCode::BAD_REQUEST,
         "upstream_candidate_rejected",
         true
@@ -513,6 +689,11 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
     assert!(retryable_failure(
         StatusCode::BAD_GATEWAY,
         "upstream_usage_not_included",
+        false
+    ));
+    assert!(retryable_failure(
+        StatusCode::UNAUTHORIZED,
+        "upstream_unauthorized",
         false
     ));
     assert!(!retryable_failure(
@@ -742,10 +923,10 @@ fn websocket_connection_limit_is_account_global() {
 #[test]
 fn rate_limit_delay_uses_the_stronger_hint_and_keeps_explicit_zero() {
     assert_eq!(
-        cooldown::rate_limit_cooldown_ms(Some(1_000), Some(120_000), 1),
+        cooldown::retry_delay_ms(Some(1_000), Some(120_000), 1_000),
         120_000
     );
-    assert_eq!(cooldown::rate_limit_cooldown_ms(Some(0), None, 5), 0);
+    assert_eq!(cooldown::retry_delay_ms(Some(0), None, 1_000), 0);
 }
 
 #[test]
@@ -759,31 +940,4 @@ fn source_recovery_delay_overrides_automatic_but_not_provider_retry_after() {
         120_000
     );
     assert_eq!(cooldown::source_cooldown_ms(5_000, None, false), 5_000);
-}
-
-#[test]
-fn no_header_rate_limit_backoff_is_exponential_and_capped() {
-    assert_eq!(cooldown::exponential_backoff_ms(1), 1_000);
-    assert_eq!(cooldown::exponential_backoff_ms(2), 2_000);
-    assert_eq!(cooldown::exponential_backoff_ms(3), 4_000);
-    assert_eq!(
-        cooldown::exponential_backoff_ms(32),
-        MAX_RATE_LIMIT_COOLDOWN_MS
-    );
-}
-
-#[test]
-fn failed_half_open_probes_back_off_without_shortening_retry_after() {
-    assert_eq!(cooldown::half_open_backoff_ms(0, 2, true), 2_000);
-    assert_eq!(cooldown::half_open_backoff_ms(60_000, 2, false), 60_000);
-    assert_eq!(cooldown::half_open_backoff_ms(60_000, 2, true), 120_000);
-    assert_eq!(cooldown::half_open_backoff_ms(60_000, 3, true), 240_000);
-    assert_eq!(
-        cooldown::half_open_backoff_ms(60_000, 32, true),
-        MAX_RATE_LIMIT_COOLDOWN_MS
-    );
-    assert_eq!(
-        cooldown::half_open_backoff_ms(MAX_RATE_LIMIT_RETRY_HINT_MS, 2, true),
-        MAX_RATE_LIMIT_RETRY_HINT_MS
-    );
 }

@@ -1,4 +1,9 @@
 use super::*;
+mod automatic;
+mod policy;
+mod preview;
+mod recovery;
+mod rotation;
 use crate::scheduler::{CandidateKind, CandidateQuota};
 use crate::ModelRules;
 use std::collections::{BTreeSet, HashSet};
@@ -18,11 +23,13 @@ fn candidate(id: &str) -> RuntimeCandidate {
         model_rules: ModelRules::default(),
         health: CandidateHealth::Healthy,
         quota: CandidateQuota::Unknown,
+        provider_credits_micro_units: None,
+        provider_credits_unlimited: false,
         quota_updated_at_ms: None,
         quota_reset_at_ms: None,
         cooldowns: BTreeMap::new(),
         last_used_at: None,
-        consecutive_failures: 0,
+
         secret_available: true,
     }
 }
@@ -102,6 +109,9 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         candidate_id: "source".into(),
         kind: CandidateKind::ApiSource,
         available: true,
+        next_for_new_request: false,
+        activity_revision: 0,
+        runtime_id: 0,
         in_flight: 0,
         active_request_count: 0,
         active_models: Vec::new(),
@@ -131,7 +141,7 @@ fn image_lane_is_separate_from_text_load_and_caps_each_oauth_account() {
 
     assert!(scheduler.reserve_for("first", "gpt-5", 100));
     let image = select_image(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(image.candidate_id, "first");
+    assert_eq!(image.candidate_id, "second");
     assert_eq!(image.diagnostics.in_flight_before, 0);
     assert!(scheduler.reserve_image_for("first", "gpt-image-2", 100));
 
@@ -160,7 +170,7 @@ fn oauth_text_leases_allow_parallel_account_requests() {
         select(&mut scheduler, &HashSet::new())
             .unwrap()
             .candidate_id,
-        "oauth"
+        "api"
     );
     assert!(scheduler.release_for("oauth", Some("gpt-5")));
     assert!(scheduler.release_for("oauth", Some("gpt-5")));
@@ -277,9 +287,6 @@ fn hard_filters_reject_every_ineligible_candidate_state() {
     let mut zero_quota = candidate("zero-quota");
     zero_quota.quota = CandidateQuota::Available(0);
     candidates.push(zero_quota);
-    let mut stale = candidate("stale");
-    stale.quota = CandidateQuota::Stale;
-    candidates.push(stale);
     let mut cooled = candidate("cooled");
     cooled.cooldowns.insert("gpt-5".to_string(), 101);
     candidates.push(cooled);
@@ -335,219 +342,6 @@ fn hard_filters_reject_every_ineligible_candidate_state() {
             now_ms: 100,
         })
         .is_none());
-}
-
-#[test]
-fn selection_orders_api_priority_then_quota_and_stable_id() {
-    let mut scheduler = PoolScheduler::new();
-    let mut low_priority = candidate("a-low-priority");
-    low_priority.priority = 1;
-    low_priority.quota = CandidateQuota::Available(100);
-    scheduler.upsert(low_priority);
-    let mut high_priority = candidate("z-high-priority");
-    high_priority.priority = 100;
-    high_priority.quota = CandidateQuota::Available(1);
-    scheduler.upsert(high_priority);
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "z-high-priority");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::ManualPriority);
-
-    scheduler = PoolScheduler::new();
-    let mut unknown = candidate("unknown");
-    unknown.quota = CandidateQuota::Unknown;
-    scheduler.upsert(unknown);
-    let mut known_low = candidate("known-low");
-    known_low.quota = CandidateQuota::Available(1);
-    scheduler.upsert(known_low);
-    let mut known_high = candidate("known-high");
-    known_high.quota = CandidateQuota::Available(2);
-    scheduler.upsert(known_high);
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "known-high"
-    );
-
-    scheduler = PoolScheduler::new();
-    let mut old = candidate("old");
-    old.last_used_at = Some(1);
-    scheduler.upsert(old);
-    let mut new = candidate("new");
-    new.last_used_at = Some(2);
-    scheduler.upsert(new);
-    scheduler.upsert(candidate("never"));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "never"
-    );
-
-    scheduler = PoolScheduler::new();
-    let mut light = candidate("a-light");
-    light.weight = 1;
-    scheduler.upsert(light);
-    let mut heavy = candidate("z-heavy");
-    heavy.weight = 2;
-    scheduler.upsert(heavy);
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "a-light");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
-
-    scheduler = PoolScheduler::new();
-    scheduler.upsert(candidate("b"));
-    scheduler.upsert(candidate("a"));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "a"
-    );
-}
-
-#[test]
-fn api_source_order_stays_stable_across_concurrent_and_sequential_requests() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.upsert(candidate("active-source"));
-    scheduler.upsert(candidate("other-source"));
-
-    for _ in 0..2 {
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(selected.candidate_id, "active-source");
-        assert!(scheduler.reserve(&selected.candidate_id));
-    }
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "active-source"
-    );
-
-    assert!(scheduler.release("active-source"));
-    assert!(scheduler.release("active-source"));
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "active-source");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
-
-    let selected = select(
-        &mut scheduler,
-        &HashSet::from(["active-source".to_string()]),
-    )
-    .unwrap();
-    assert_eq!(selected.candidate_id, "other-source");
-    assert_eq!(
-        selected.diagnostics.reason,
-        SelectionReason::FallbackAttempt
-    );
-}
-
-#[test]
-fn oauth_quota_ignores_last_use_and_legacy_priority() {
-    let mut scheduler = PoolScheduler::new();
-    let mut low_quota = oauth_candidate("low-quota");
-    low_quota.quota = CandidateQuota::Available(1);
-    low_quota.priority = 100;
-    low_quota.last_used_at = None;
-    scheduler.upsert(low_quota);
-    let mut high_quota = oauth_candidate("high-quota");
-    high_quota.quota = CandidateQuota::Available(9_000);
-    high_quota.priority = 1;
-    high_quota.last_used_at = Some(99);
-    scheduler.upsert(high_quota);
-
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "high-quota"
-    );
-}
-
-#[test]
-fn prompt_cache_affinity_applies_to_accounts_with_quota_and_load_guards() {
-    let mut scheduler = PoolScheduler::new();
-    let mut cached = oauth_candidate("cached");
-    cached.quota = CandidateQuota::Available(5_000);
-    scheduler.upsert(cached);
-    let mut fullest = oauth_candidate("fullest");
-    fullest.quota = CandidateQuota::Available(5_400);
-    scheduler.upsert(fullest);
-    assert!(scheduler.bind_prompt_affinity("thread", "cached", 0));
-
-    let select_thread = |scheduler: &mut PoolScheduler| {
-        scheduler
-            .select(SelectionRequest {
-                model: "gpt-5",
-                allowed_protocols: &[WireApi::Responses],
-                scope: &CandidateScope::default(),
-                tried: &HashSet::new(),
-                response_affinity_key: None,
-                prompt_affinity_key: Some("thread"),
-                now_ms: 1,
-            })
-            .unwrap()
-    };
-
-    let selected = select_thread(&mut scheduler);
-    assert_eq!(selected.candidate_id, "cached");
-    assert_eq!(
-        selected.diagnostics.reason,
-        SelectionReason::PromptCacheAffinity
-    );
-
-    assert!(scheduler.reserve("cached"));
-    assert_eq!(select_thread(&mut scheduler).candidate_id, "cached");
-    assert!(scheduler.reserve("cached"));
-    assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
-    assert!(scheduler.release("cached"));
-    assert!(scheduler.release("cached"));
-
-    assert!(scheduler.update_candidate_availability(
-        "fullest",
-        true,
-        CandidateHealth::Healthy,
-        CandidateQuota::Available(5_501),
-    ));
-    assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
-
-    let mut scheduler = PoolScheduler::new();
-    scheduler.upsert(candidate("a"));
-    scheduler.upsert(candidate("b"));
-    assert!(scheduler.bind_prompt_affinity("thread", "b", 0));
-    let selected = select_thread(&mut scheduler);
-    assert_eq!(selected.candidate_id, "b");
-    assert_eq!(
-        selected.diagnostics.reason,
-        SelectionReason::PromptCacheAffinity
-    );
-}
-
-#[test]
-fn prompt_cache_affinity_does_not_override_api_source_order() {
-    let mut scheduler = PoolScheduler::new();
-    let mut first = candidate("first");
-    first.priority = 2;
-    scheduler.upsert(first);
-    let mut cached = candidate("cached");
-    cached.priority = 1;
-    scheduler.upsert(cached);
-    assert!(scheduler.bind_prompt_affinity("thread", "cached", 0));
-
-    let selected = scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: Some("thread"),
-            now_ms: 1,
-        })
-        .unwrap();
-
-    assert_eq!(selected.candidate_id, "first");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::ManualPriority);
 }
 
 #[test]
@@ -639,125 +433,6 @@ fn removing_a_busy_candidate_drains_its_lease_before_final_removal() {
 }
 
 #[test]
-fn oauth_equal_quota_uses_stable_order_without_last_use() {
-    let mut scheduler = PoolScheduler::new();
-    let mut high_priority = oauth_candidate("high-priority");
-    high_priority.priority = 100;
-    high_priority.last_used_at = Some(20);
-    scheduler.upsert(high_priority);
-    let mut low_priority = oauth_candidate("low-priority");
-    low_priority.priority = 1;
-    low_priority.last_used_at = Some(10);
-    scheduler.upsert(low_priority);
-
-    let first = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(first.candidate_id, "high-priority");
-    assert!(scheduler.record_success("high-priority", "gpt-5", 30));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "high-priority"
-    );
-}
-
-#[test]
-fn api_source_roles_remain_strict_around_fair_oauth_routing() {
-    let mut primary = PoolScheduler::new();
-    let mut source = candidate("primary-source");
-    source.priority = API_SOURCE_PRIMARY_PRIORITY;
-    primary.upsert(source);
-    primary.upsert(oauth_candidate("account"));
-    let selected = select(&mut primary, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "primary-source");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::SourceRole);
-
-    let mut reserve = PoolScheduler::new();
-    let mut source = candidate("reserve-source");
-    source.priority = API_SOURCE_RESERVE_PRIORITY;
-    reserve.upsert(source);
-    reserve.upsert(oauth_candidate("account"));
-    let selected = select(&mut reserve, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "account");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::SourceRole);
-    let selected = select(&mut reserve, &HashSet::from(["account".to_string()])).unwrap();
-    assert_eq!(selected.candidate_id, "reserve-source");
-    assert_eq!(
-        selected.diagnostics.reason,
-        SelectionReason::FallbackAttempt
-    );
-
-    let mut stabilizer = PoolScheduler::new();
-    stabilizer.upsert(candidate("stabilizer-source"));
-    stabilizer.upsert(oauth_candidate("account"));
-    let selected = select(&mut stabilizer, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "account");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::SourceRole);
-    assert!(stabilizer.reserve("account"));
-    assert_eq!(
-        select(&mut stabilizer, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "account"
-    );
-}
-
-#[test]
-fn stabilizer_sources_are_exhausted_by_priority_before_last_reserve() {
-    let mut scheduler = PoolScheduler::new();
-    for (id, priority) in [
-        ("stabilizer-first", 300),
-        ("stabilizer-second", 200),
-        ("stabilizer-third", 100),
-        ("last-reserve", API_SOURCE_RESERVE_PRIORITY),
-    ] {
-        let mut source = candidate(id);
-        source.priority = priority;
-        scheduler.upsert(source);
-    }
-
-    let mut tried = HashSet::new();
-    for expected in [
-        "stabilizer-first",
-        "stabilizer-second",
-        "stabilizer-third",
-        "last-reserve",
-    ] {
-        let selected = select(&mut scheduler, &tried).unwrap();
-        assert_eq!(selected.candidate_id, expected);
-        tried.insert(selected.candidate_id);
-    }
-}
-
-#[test]
-fn active_and_sequential_requests_keep_the_highest_quota() {
-    let mut scheduler = PoolScheduler::new();
-    let mut full = candidate("full");
-    full.quota = CandidateQuota::Available(100);
-    scheduler.upsert(full);
-    let mut low = candidate("low");
-    low.quota = CandidateQuota::Available(1);
-    scheduler.upsert(low);
-
-    let first = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(first.candidate_id, "full");
-    assert!(scheduler.reserve(&first.candidate_id));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "full"
-    );
-    assert!(scheduler.release(&first.candidate_id));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "full"
-    );
-}
-
-#[test]
 fn occupied_oauth_account_remains_eligible_for_text_selection() {
     let mut scheduler = PoolScheduler::new();
     let mut busy = oauth_candidate("busy");
@@ -797,166 +472,6 @@ fn one_oauth_account_accepts_parallel_text_requests() {
 }
 
 #[test]
-fn higher_quota_account_remains_preferred_until_refresh() {
-    let mut scheduler = PoolScheduler::new();
-    let mut full = oauth_candidate("full");
-    full.quota = CandidateQuota::Available(100);
-    scheduler.upsert(full);
-    let mut low = oauth_candidate("low");
-    low.quota = CandidateQuota::Available(1);
-    scheduler.upsert(low);
-
-    for _ in 0..100 {
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(selected.candidate_id, "full");
-        assert!(scheduler.reserve(&selected.candidate_id));
-        assert!(scheduler.release(&selected.candidate_id));
-    }
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "full"
-    );
-}
-
-#[test]
-fn equal_quota_sequential_requests_rotate_without_configured_weight() {
-    let mut scheduler = PoolScheduler::new();
-    for (id, weight) in [("full", 4), ("half", 2), ("quarter", 1)] {
-        let mut account = oauth_candidate(id);
-        account.quota = CandidateQuota::Available(5_000);
-        account.weight = weight;
-        scheduler.upsert(account);
-    }
-
-    let mut counts = BTreeMap::new();
-    for _ in 0..70 {
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert!(scheduler.reserve(&selected.candidate_id));
-        *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
-        assert!(scheduler.release(&selected.candidate_id));
-    }
-
-    assert_eq!(counts.get("full"), Some(&24));
-    assert_eq!(counts.get("half"), Some(&23));
-    assert_eq!(counts.get("quarter"), Some(&23));
-}
-
-#[test]
-fn quota_highest_uses_parallel_load_only_as_an_equal_quota_tie_break() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_routing_strategy(RoutingStrategy::QuotaHighest);
-    for id in ["first", "second"] {
-        let mut account = oauth_candidate(id);
-        account.quota = CandidateQuota::Available(5_000);
-        scheduler.upsert(account);
-    }
-
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "first");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
-    assert!(scheduler.reserve("first"));
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "second");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
-    assert!(scheduler.release("first"));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "first"
-    );
-}
-
-#[test]
-fn sequential_requests_use_the_greatest_refreshed_quota() {
-    let mut scheduler = PoolScheduler::new();
-    for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
-        let mut account = oauth_candidate(id);
-        account.quota = CandidateQuota::Available(quota);
-        scheduler.upsert(account);
-    }
-
-    let mut counts = BTreeMap::new();
-    for index in 0..70 {
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        if index == 0 {
-            assert_eq!(selected.candidate_id, "full");
-            assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
-            assert_eq!(selected.diagnostics.eligible_candidates, 3);
-            assert_eq!(
-                selected.diagnostics.quota_remaining_basis_points,
-                Some(10_000)
-            );
-            assert_eq!(selected.diagnostics.in_flight_before, 0);
-        }
-        assert!(scheduler.reserve(&selected.candidate_id));
-        *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
-        assert!(scheduler.release(&selected.candidate_id));
-    }
-    assert_eq!(counts.get("full"), Some(&70));
-    assert_eq!(counts.get("half"), None);
-    assert_eq!(counts.get("quarter"), None);
-}
-
-#[test]
-fn quota_refresh_rebases_rotation_on_current_headroom() {
-    let mut scheduler = PoolScheduler::new();
-    for (id, quota) in [("first", 10_000), ("second", 1_000)] {
-        let mut account = oauth_candidate(id);
-        account.quota = CandidateQuota::Available(quota);
-        scheduler.upsert(account);
-    }
-    for _ in 0..11 {
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert!(scheduler.reserve(&selected.candidate_id));
-        assert!(scheduler.release(&selected.candidate_id));
-    }
-
-    for id in ["first", "second"] {
-        assert!(scheduler.update_candidate_availability(
-            id,
-            true,
-            CandidateHealth::Healthy,
-            CandidateQuota::Available(5_000),
-        ));
-    }
-
-    let first = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(first.candidate_id, "first");
-    assert!(scheduler.reserve(&first.candidate_id));
-    assert!(scheduler.release(&first.candidate_id));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "second"
-    );
-}
-
-#[test]
-fn concurrent_requests_follow_available_quota_headroom() {
-    let mut scheduler = PoolScheduler::new();
-    for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
-        let mut account = oauth_candidate(id);
-        account.quota = CandidateQuota::Available(quota);
-        scheduler.upsert(account);
-    }
-
-    let mut counts = BTreeMap::new();
-    for _ in 0..7 {
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert!(scheduler.reserve(&selected.candidate_id));
-        *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
-    }
-
-    assert_eq!(counts.get("full"), Some(&7));
-    assert_eq!(counts.get("half"), None);
-    assert_eq!(counts.get("quarter"), None);
-}
-
-#[test]
 fn concurrent_requests_fill_each_oauth_account_once() {
     let mut scheduler = PoolScheduler::new();
     for (id, quota) in [
@@ -977,133 +492,21 @@ fn concurrent_requests_fill_each_oauth_account_once() {
         *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
     }
 
-    assert_eq!(counts, [("sixty-three".to_string(), 200)].into());
-}
-
-#[test]
-fn subscription_expiry_routing_is_strict_and_places_unknown_dates_last() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_routing_strategy(RoutingStrategy::SubscriptionExpiry);
-    for (id, expires_at_ms, quota) in [
-        ("unknown", None, CandidateQuota::Available(100)),
-        ("nearest", Some(10), CandidateQuota::Available(100)),
-        ("later", Some(20), CandidateQuota::Available(10_000)),
-        ("disabled-unknown", None, CandidateQuota::Available(10_000)),
-        ("exhausted-unknown", None, CandidateQuota::Exhausted),
-    ] {
-        let mut account = oauth_candidate(id);
-        account.quota = quota;
-        account.enabled = id != "disabled-unknown";
-        scheduler.upsert(account);
-        assert!(scheduler.set_candidate_subscription_expiry(id, expires_at_ms));
+    assert_eq!(
+        counts,
+        [
+            ("sixty-three".into(), 50),
+            ("fifty-four".into(), 50),
+            ("fifty-two".into(), 50),
+            ("fifty-one".into(), 50),
+        ]
+        .into()
+    );
+    for (id, count) in counts {
+        for _ in 0..count {
+            assert!(scheduler.release(&id));
+        }
     }
-
-    assert_eq!(
-        scheduler
-            .runtime_order(0)
-            .into_iter()
-            .take(3)
-            .map(|candidate| candidate.candidate_id)
-            .collect::<Vec<_>>(),
-        ["nearest", "later", "unknown"]
-    );
-
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "nearest");
-    assert_eq!(
-        selected.diagnostics.reason,
-        SelectionReason::SubscriptionExpiry
-    );
-    assert!(scheduler.reserve("nearest"));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "nearest"
-    );
-    assert!(scheduler.release("nearest"));
-    assert!(scheduler.update_candidate_availability(
-        "nearest",
-        true,
-        CandidateHealth::Healthy,
-        CandidateQuota::Exhausted,
-    ));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "later"
-    );
-    assert!(scheduler.update_candidate_availability(
-        "later",
-        true,
-        CandidateHealth::Healthy,
-        CandidateQuota::Exhausted,
-    ));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "unknown"
-    );
-}
-
-#[test]
-fn subscription_plan_routing_keeps_group_order_until_the_group_is_unavailable() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_routing_strategy(RoutingStrategy::SubscriptionPlan);
-    scheduler.set_subscription_plan_order(&["business".into(), "plus".into(), "unknown".into()]);
-    for (id, plan, quota) in [
-        ("business", Some("Business"), 100),
-        ("plus", Some("plus"), 10_000),
-        ("unknown", None, 10_000),
-    ] {
-        let mut account = oauth_candidate(id);
-        account.quota = CandidateQuota::Available(quota);
-        scheduler.upsert(account);
-        assert!(scheduler.set_candidate_subscription_plan(id, plan));
-    }
-
-    let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-    assert_eq!(selected.candidate_id, "business");
-    assert_eq!(
-        selected.diagnostics.reason,
-        SelectionReason::SubscriptionPlan
-    );
-    assert!(scheduler.reserve("business"));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "business"
-    );
-    assert!(scheduler.release("business"));
-    assert!(scheduler.update_candidate_availability(
-        "business",
-        true,
-        CandidateHealth::Healthy,
-        CandidateQuota::Exhausted,
-    ));
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "plus"
-    );
-}
-
-#[test]
-fn subscription_plan_order_is_normalized_and_bounded() {
-    assert_eq!(
-        normalize_subscription_plan_order(vec![
-            " Business ".into(),
-            "business".into(),
-            "PLUS".into()
-        ])
-        .unwrap(),
-        ["business", "plus"]
-    );
-    assert!(normalize_subscription_plan_order(vec!["bad\nplan".into()]).is_err());
 }
 
 #[test]
@@ -1149,6 +552,145 @@ fn response_affinity_is_mandatory() {
         None,
         "a continuation cannot move to a candidate that did not create the response"
     );
+}
+
+#[test]
+fn response_affinity_owner_outside_key_scope_can_be_reset_for_fallback() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    let mut fallback = candidate("fallback");
+    fallback.priority = 10;
+    scheduler.upsert(fallback);
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    let scope = CandidateScope {
+        source_ids: Some(BTreeSet::from(["fallback".to_string()])),
+        ..CandidateScope::default()
+    };
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(false),
+        "a removed pool member must not keep an opaque response pinned forever"
+    );
+
+    // Affinity selection remains mandatory until the caller resets the
+    // opaque continuation, preserving the safety rule for a still-configured
+    // owner while allowing the request layer to make the membership change
+    // explicit before choosing the fallback.
+    assert!(scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &HashSet::new(),
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: None,
+            now_ms: 1,
+        })
+        .is_none());
+    assert!(scheduler.invalidate_response_affinity("response"));
+    assert_eq!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
+                now_ms: 1,
+            })
+            .unwrap()
+            .candidate_id,
+        "fallback"
+    );
+}
+
+#[test]
+fn optional_affinity_reports_a_temporarily_unavailable_owner() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    scheduler.upsert(candidate("fallback"));
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    let scope = CandidateScope::default();
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        scheduler.response_affinity_owner_is_eligible(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true)
+    );
+
+    assert!(scheduler.set_candidate_health("owner", CandidateHealth::ReauthRequired));
+    assert_eq!(
+        scheduler.response_affinity_owner_supports_route(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(true),
+        "reauth is a temporary availability state, not a route-shape change"
+    );
+    assert_eq!(
+        scheduler.response_affinity_owner_is_eligible(
+            "response",
+            "gpt-5",
+            &[WireApi::Responses],
+            &scope,
+            1,
+        ),
+        Some(false)
+    );
+}
+
+#[test]
+fn removed_candidate_keeps_response_owner_only_until_a_replacement_id_is_upserted() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(candidate("owner"));
+    scheduler.upsert(candidate("fallback"));
+    assert!(scheduler.bind_response_affinity("response", "owner", 0));
+
+    assert!(scheduler.remove("owner").is_some());
+    assert_eq!(
+        scheduler.response_affinity_candidate("response", 1),
+        Some("owner".into())
+    );
+    assert!(scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: Some("response"),
+            prompt_affinity_key: None,
+            now_ms: 1,
+        })
+        .is_none());
+
+    scheduler.upsert(candidate("owner"));
+    assert_eq!(scheduler.response_affinity_candidate("response", 1), None);
 }
 
 #[test]
@@ -1223,16 +765,8 @@ fn cooldown_expires_and_success_clears_it_and_updates_last_used_timestamp() {
             now_ms: 101,
         })
         .is_some());
-    assert_eq!(scheduler.record_failure("candidate"), Some(1));
-    assert_eq!(scheduler.record_failure("candidate"), Some(2));
+
     assert!(scheduler.record_success("candidate", "gpt-5", 102));
-    assert_eq!(
-        scheduler
-            .candidate("candidate")
-            .unwrap()
-            .consecutive_failures,
-        0
-    );
 }
 
 #[test]
@@ -1249,75 +783,6 @@ fn cooldown_updates_never_shorten_an_existing_retry_window() {
             .get("gpt-5"),
         Some(&10_000)
     );
-    assert_eq!(scheduler.record_failure("candidate"), Some(1));
-    assert!(scheduler.reset_failures("candidate"));
-    assert_eq!(
-        scheduler
-            .candidate("candidate")
-            .unwrap()
-            .consecutive_failures,
-        0
-    );
-}
-
-#[test]
-fn cooldown_classification_requires_every_source_to_be_cooled() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.upsert(candidate("first"));
-    scheduler.upsert(candidate("second"));
-    assert!(scheduler.set_cooldown_with_reason(
-        "first",
-        "gpt-5",
-        10_000,
-        CooldownReason::RateLimit,
-    ));
-    assert!(scheduler.set_cooldown_with_reason(
-        "second",
-        "gpt-5",
-        10_000,
-        CooldownReason::RateLimit,
-    ));
-
-    let scope = CandidateScope::default();
-    let tried = HashSet::new();
-    let allowed_protocols = [WireApi::Responses];
-    let request = || SelectionRequest {
-        model: "gpt-5",
-        allowed_protocols: &allowed_protocols,
-        scope: &scope,
-        tried: &tried,
-        response_affinity_key: None,
-        prompt_affinity_key: None,
-        now_ms: 100,
-    };
-    assert_eq!(
-        scheduler.all_applicable_cooldown(request()),
-        Some((10_000, CooldownReason::RateLimit))
-    );
-
-    assert!(scheduler.set_cooldown_with_reason("first", "*", 5_000, CooldownReason::Transient,));
-    assert_eq!(
-        scheduler.all_applicable_cooldown(request()),
-        Some((10_000, CooldownReason::Transient))
-    );
-    assert!(scheduler.clear_cooldown("first", "*"));
-    assert_eq!(
-        scheduler.all_applicable_cooldown(request()),
-        Some((10_000, CooldownReason::RateLimit))
-    );
-
-    assert!(scheduler.set_cooldown_with_reason(
-        "second",
-        "gpt-5",
-        20_000,
-        CooldownReason::Transient,
-    ));
-    assert_eq!(
-        scheduler.all_applicable_cooldown(request()),
-        Some((10_000, CooldownReason::Transient))
-    );
-    assert!(scheduler.clear_cooldown("second", "gpt-5"));
-    assert_eq!(scheduler.all_applicable_cooldown(request()), None);
 }
 
 #[test]
@@ -1355,175 +820,6 @@ fn mandatory_cooldown_dominates_aggregate_reason() {
 }
 
 #[test]
-fn transient_cooldown_waits_for_the_configured_failure_threshold() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(3, false);
-    scheduler.upsert(candidate("candidate"));
-
-    assert_eq!(scheduler.record_failure("candidate"), Some(1));
-    assert!(!scheduler.set_cooldown_with_reason_for_model_at(
-        "candidate",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &CandidateScope::default(),
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Transient,
-            now_ms: 100,
-        },
-    ));
-    assert_eq!(scheduler.record_failure("candidate"), Some(2));
-    assert!(!scheduler.set_cooldown_with_reason_for_model_at(
-        "candidate",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &CandidateScope::default(),
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Transient,
-            now_ms: 100,
-        },
-    ));
-    assert!(scheduler
-        .candidate("candidate")
-        .unwrap()
-        .cooldowns
-        .is_empty());
-}
-
-#[test]
-fn transient_cooldown_is_applied_at_the_threshold_when_another_candidate_exists() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(3, true);
-    scheduler.upsert(candidate("first"));
-    scheduler.upsert(candidate("second"));
-    for _ in 0..3 {
-        assert!(scheduler.record_failure("first").is_some());
-    }
-
-    assert!(scheduler.set_cooldown_with_reason_for_model_at(
-        "first",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &CandidateScope::default(),
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Transient,
-            now_ms: 100,
-        },
-    ));
-    assert_eq!(
-        scheduler.candidate("first").unwrap().cooldowns.get("gpt-5"),
-        Some(&10_000)
-    );
-}
-
-#[test]
-fn last_candidate_stays_available_by_default() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(3, true);
-    scheduler.upsert(candidate("only"));
-    for _ in 0..3 {
-        assert!(scheduler.record_failure("only").is_some());
-    }
-
-    assert!(!scheduler.set_cooldown_with_reason_for_model_at(
-        "only",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &CandidateScope::default(),
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Transient,
-            now_ms: 100,
-        },
-    ));
-    assert!(scheduler.candidate("only").unwrap().cooldowns.is_empty());
-}
-
-#[test]
-fn last_candidate_respects_request_scope_and_protocols() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(3, true);
-    scheduler.upsert(candidate("first"));
-    scheduler.upsert(candidate("second"));
-    for _ in 0..3 {
-        assert!(scheduler.record_failure("first").is_some());
-    }
-    let request_scope = CandidateScope {
-        source_ids: Some(["first".to_string()].into()),
-        ..CandidateScope::default()
-    };
-
-    assert!(!scheduler.set_cooldown_with_reason_for_model_at(
-        "first",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &request_scope,
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Transient,
-            now_ms: 100,
-        },
-    ));
-    assert!(scheduler.candidate("first").unwrap().cooldowns.is_empty());
-}
-
-#[test]
-fn last_candidate_ignores_unusable_peers() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(1, true);
-    scheduler.upsert(candidate("first"));
-    let mut disabled = candidate("second");
-    disabled.enabled = false;
-    scheduler.upsert(disabled);
-    assert_eq!(scheduler.record_failure("first"), Some(1));
-
-    assert!(!scheduler.set_cooldown_with_reason_for_model_at(
-        "first",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &CandidateScope::default(),
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Transient,
-            now_ms: 100,
-        },
-    ));
-    assert!(scheduler.candidate("first").unwrap().cooldowns.is_empty());
-}
-
-#[test]
-fn mandatory_cooldown_bypasses_the_transient_policy() {
-    let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(8, true);
-    scheduler.upsert(candidate("only"));
-
-    assert!(scheduler.set_cooldown_with_reason_for_model_at(
-        "only",
-        CooldownRequest {
-            scope: "gpt-5",
-            policy_model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            request_scope: &CandidateScope::default(),
-            retry_at_ms: 10_000,
-            reason: CooldownReason::Mandatory,
-            now_ms: 100,
-        },
-    ));
-    assert_eq!(
-        scheduler.candidate("only").unwrap().cooldowns.get("gpt-5"),
-        Some(&10_000)
-    );
-}
-
-#[test]
 fn affinity_retry_time_uses_only_the_response_owner() {
     let mut scheduler = PoolScheduler::new();
     let mut owner = candidate("owner");
@@ -1550,59 +846,6 @@ fn affinity_retry_time_uses_only_the_response_owner() {
 }
 
 #[test]
-fn expired_cooldown_allows_only_one_half_open_probe_per_model() {
-    let mut scheduler = PoolScheduler::new();
-    let mut recovering = candidate("recovering");
-    recovering.cooldowns.insert("gpt-5".to_string(), 100);
-    scheduler.upsert(recovering);
-    let scope = CandidateScope::default();
-    let tried = HashSet::new();
-    let request = || SelectionRequest {
-        model: "gpt-5",
-        allowed_protocols: &[WireApi::Responses],
-        scope: &scope,
-        tried: &tried,
-        response_affinity_key: None,
-        prompt_affinity_key: None,
-        now_ms: 101,
-    };
-
-    let first = scheduler.select(request()).unwrap();
-    assert!(first.half_open_probe);
-    assert!(scheduler.reserve_for(&first.candidate_id, "gpt-5", 101));
-    assert!(scheduler.select(request()).is_none());
-    assert!(scheduler.release_for(&first.candidate_id, Some("gpt-5")));
-    assert!(scheduler.select(request()).unwrap().half_open_probe);
-}
-
-#[test]
-fn expired_global_cooldown_allows_only_one_probe_across_models() {
-    let mut scheduler = PoolScheduler::new();
-    let mut recovering = candidate("recovering");
-    recovering.models.insert("gpt-6".to_string());
-    recovering.cooldowns.insert("*".to_string(), 100);
-    scheduler.upsert(recovering);
-    let scope = CandidateScope::default();
-    let tried = HashSet::new();
-    let request = |model| SelectionRequest {
-        model,
-        allowed_protocols: &[WireApi::Responses],
-        scope: &scope,
-        tried: &tried,
-        response_affinity_key: None,
-        prompt_affinity_key: None,
-        now_ms: 101,
-    };
-
-    let first = scheduler.select(request("gpt-5")).unwrap();
-    assert!(first.half_open_probe);
-    assert!(scheduler.reserve_for(&first.candidate_id, "gpt-5", 101));
-    assert!(scheduler.select(request("gpt-6")).is_none());
-    assert!(scheduler.release_for(&first.candidate_id, Some("gpt-5")));
-    assert!(scheduler.select(request("gpt-6")).unwrap().half_open_probe);
-}
-
-#[test]
 fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {
     let mut scheduler = PoolScheduler::new();
     scheduler.upsert(candidate("first"));
@@ -1624,7 +867,7 @@ fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {
             request_count: 1,
         }]
     );
-    assert_eq!(loaded[0].dispatches, 1);
+    assert_eq!(loaded[0].dispatches, 0);
     assert_eq!(loaded[0].last_used_at_ms, None);
     assert_eq!(
         scheduler
@@ -1639,7 +882,7 @@ fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {
             })
             .unwrap()
             .candidate_id,
-        "first"
+        "second"
     );
     assert!(scheduler.record_success("first", "gpt-5", 75));
     assert_eq!(scheduler.runtime_order(75)[0].last_used_at_ms, Some(75));
@@ -1666,8 +909,8 @@ fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {
         .iter()
         .find(|candidate| candidate.candidate_id == "second")
         .unwrap();
-    assert!(second.half_open);
-    assert!(!second.available);
+    assert!(!second.half_open);
+    assert!(second.available);
 }
 
 #[test]
@@ -1755,7 +998,7 @@ fn earliest_retry_ignores_candidates_blocked_for_non_cooldown_reasons() {
             prompt_affinity_key: None,
             now_ms: 100,
         }),
-        Some(250)
+        Some(300)
     );
 }
 
@@ -1791,11 +1034,10 @@ fn oauth_candidates_honor_runtime_cooldowns_and_allow_stale_quota() {
     let mut account = oauth_candidate("account");
     account.quota = CandidateQuota::Stale;
     account.cooldowns.insert("gpt-5".into(), 10_000);
-    account.consecutive_failures = 7;
     scheduler.upsert(account);
 
     assert!(scheduler.set_cooldown("account", "gpt-5", 20_000));
-    assert_eq!(scheduler.record_failure("account"), Some(8));
+
     assert!(select(&mut scheduler, &HashSet::new()).is_none());
     let snapshot = scheduler.runtime_order(100).remove(0);
     assert!(!snapshot.available);
@@ -1886,6 +1128,48 @@ fn protected_account_keeps_its_quota_reserve() {
 }
 
 #[test]
+fn protected_account_with_provider_credits_and_remaining_window_is_routable() {
+    use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};
+
+    let quota = QuotaSnapshot {
+        primary: Some(QuotaWindow {
+            kind: QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: None,
+            available_basis_points: Some(4_200),
+            explicitly_full: None,
+            reset_at_ms: Some(500),
+            window_minutes: Some(43_200),
+            observed_at_ms: 100,
+            full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: None,
+        }),
+        provider_credits_available: true,
+        available_credits_micro_units: Some(250_000_000),
+        updated_at_ms: Some(100),
+        ..Default::default()
+    };
+    let mut scheduler = PoolScheduler::new();
+    let mut account = oauth_candidate("account");
+    account.quota = CandidateQuota::from_snapshot(&quota, 100, 60_000);
+    account.quota_updated_at_ms = quota.updated_at_ms;
+    scheduler.upsert(account);
+    assert!(scheduler.set_protected_candidate(Some("account"), 100));
+
+    assert_eq!(
+        scheduler.routing_quota_factor(scheduler.candidate("account").unwrap()),
+        4_100
+    );
+    assert_eq!(
+        select(&mut scheduler, &HashSet::new())
+            .unwrap()
+            .candidate_id,
+        "account"
+    );
+    assert!(scheduler.runtime_order(100)[0].available);
+}
+
+#[test]
 fn execution_fences_are_reference_counted_and_capability_blocks_are_model_scoped() {
     let mut scheduler = PoolScheduler::new();
     let mut account = oauth_candidate("account");
@@ -1917,40 +1201,45 @@ fn execution_fences_are_reference_counted_and_capability_blocks_are_model_scoped
 }
 
 #[test]
-fn near_equal_quota_prefers_the_account_that_resets_first() {
+fn old_dispatch_fence_cannot_release_a_reintroduced_candidate_fence() {
     let mut scheduler = PoolScheduler::new();
-    scheduler.set_routing_strategy(RoutingStrategy::QuotaHighest);
-    let mut earlier = oauth_candidate("earlier");
-    earlier.quota = CandidateQuota::Available(5_000);
-    earlier.quota_reset_at_ms = Some(1_000);
-    let mut later = oauth_candidate("later");
-    later.quota = CandidateQuota::Available(5_050);
-    later.quota_reset_at_ms = Some(2_000);
-    scheduler.upsert(earlier);
-    scheduler.upsert(later);
+    scheduler.upsert(candidate("source"));
+    let old_epoch = scheduler.begin_execution_fence("source").unwrap();
+    scheduler.remove("source").unwrap();
+    scheduler.upsert(candidate("source"));
+    let new_epoch = scheduler.begin_execution_fence("source").unwrap();
+    assert_ne!(old_epoch, new_epoch);
 
-    assert_eq!(
-        select(&mut scheduler, &HashSet::new())
-            .unwrap()
-            .candidate_id,
-        "earlier"
-    );
+    scheduler.end_execution_fence("source", old_epoch);
+    assert!(select(&mut scheduler, &HashSet::new()).is_none());
+    scheduler.end_execution_fence("source", new_epoch);
+    assert!(select(&mut scheduler, &HashSet::new()).is_some());
 }
 
 #[test]
-fn provider_model_storm_breaker_is_shared_by_source_and_clears_on_success() {
+fn shared_source_rate_deadline_is_visible_to_rotation_and_expires_without_another_observation() {
     let mut scheduler = PoolScheduler::new();
-    scheduler.set_provider_storm_breaker_enabled(true);
     let first = candidate("first");
     let mut second = candidate("second");
     second.source_id = first.source_id.clone();
     scheduler.upsert(first);
     scheduler.upsert(second);
 
-    assert!(!scheduler.record_provider_rate_limit("first", "gpt-5", 1));
-    assert!(!scheduler.record_provider_rate_limit("first", "gpt-5", 2));
-    assert!(scheduler.record_provider_rate_limit("first", "gpt-5", 3));
+    for id in ["first", "second"] {
+        assert!(scheduler.set_cooldown_with_reason(id, "gpt-5", 300, CooldownReason::RateLimit,));
+    }
+    let scope = CandidateScope::default();
+    let tried = HashSet::new();
+    let request = |now_ms| SelectionRequest {
+        model: "gpt-5",
+        allowed_protocols: &[WireApi::Responses],
+        scope: &scope,
+        tried: &tried,
+        response_affinity_key: None,
+        prompt_affinity_key: None,
+        now_ms,
+    };
     assert!(select(&mut scheduler, &HashSet::new()).is_none());
-    assert!(scheduler.record_success("first", "gpt-5", 4));
-    assert!(select(&mut scheduler, &HashSet::new()).is_some());
+    assert_eq!(scheduler.earliest_retry_at(request(100)), Some(300));
+    assert!(scheduler.select(request(300)).is_some());
 }

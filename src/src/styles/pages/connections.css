@@ -1,251 +1,75 @@
-
-.relay-dialog.wide:has(.automation-form) {
-  width: min(620px, 100%);
-}
-
-.relay-dialog:has(.automation-form) > header,
-.relay-dialog:has(.automation-form) > footer {
-  min-height: 52px;
-}
-
-.relay-dialog:has(.automation-form) .relay-dialog-body {
-  padding: 16px 18px;
-}
-
-.relay-form.automation-form {
-  gap: 12px;
-}
-
-.automation-target-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.automation-rule {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding-top: 10px;
-  border-top: 1px solid var(--relay-border);
-}
-
-.automation-rule > span {
-  color: var(--relay-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.automation-rule > strong {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.automation-execution {
-  flex: 0 0 auto;
-}
-
-.automation-execution button {
-  min-width: 104px;
-}
-
-.automation-account-picker {
-  max-height: 142px;
-  overflow: auto;
-  background: var(--relay-subtle);
-}
-
-.automation-account-picker .scope-grid label {
-  min-width: 0;
-}
-
-.automation-account-picker .scope-grid span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.automation-validation {
-  margin: -4px 0 0;
-  color: var(--relay-error);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-@media (max-width: 620px) {
-  .automation-target-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .automation-rule {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .automation-execution {
-    width: 100%;
-  }
-
-  .automation-execution button {
-    min-width: 0;
-    flex: 1;
-  }
-}
-
-@media (max-height: 600px) {
-  .relay-dialog:has(.automation-form) .relay-dialog-body {
-    padding-block: 8px;
-  }
-
-  .relay-form.automation-form {
-    gap: 10px;
-  }
-
-  .automation-account-picker {
-    padding: 8px;
-  }
-
-  .automation-rule {
-    padding-top: 6px;
-  }
-}
-
 .account-command-bar {
-  min-height: 46px;
-  display: flex;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
 }
 
 .account-command-context {
   min-width: 0;
-  flex: 1;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .account-command-context > span {
   color: var(--relay-muted);
   font-size: 12px;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .account-command-context .account-search {
-  width: clamp(130px, 20vw, 260px);
-  min-width: 130px;
+  width: 100%;
+  min-width: 0;
 }
 
 .account-command-context .account-search input {
   width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding-block: 6px;
 }
 
 .account-command-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.account-command-bar:has(.account-command-context > span) {
-  width: fit-content;
-  max-width: 100%;
-  min-height: 44px;
-  padding: 4px 6px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
+.account-command-bar[data-selection="true"] {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.account-command-bar:has(.account-command-context > span) .account-command-context {
-  flex: 0 0 auto;
-  gap: 8px;
-  padding-right: 10px;
-  border-right: 1px solid var(--relay-border);
+.account-command-bar .relay-icon-button,
+.account-command-bar .relay-action-menu > summary {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  flex: 0 0 34px;
 }
 
-.account-command-bar:has(.account-command-context > span) .account-command-actions {
-  gap: 4px;
-  flex-wrap: nowrap;
+.account-command-bar .relay-icon-button:not([aria-pressed="true"]),
+.account-command-bar .relay-action-menu > summary {
+  border-color: transparent;
+  background: transparent;
+}
+
+.account-command-bar .relay-icon-button:not([aria-pressed="true"]):hover:not(:disabled),
+.account-command-bar .relay-action-menu > summary:hover,
+.account-command-bar .relay-action-menu[open] > summary {
+  background: var(--relay-subtle);
 }
 
 .connections-account-controls {
+  container-type: inline-size;
   position: relative;
-  margin: 10px 0 12px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
+  margin: 16px 0;
 }
 
 .connections-account-controls:has(.relay-action-menu[open]) {
   z-index: 40;
-}
-
-.connections-account-controls .account-command-bar,
-.connections-account-controls .account-command-bar:has(.account-command-context > span) {
-  width: auto;
-  max-width: none;
-  min-height: 50px;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.connections-account-controls .account-command-context {
-  flex: 0 1 auto;
-  gap: 8px;
-}
-
-.connections-account-controls .account-command-actions {
-  flex: 0 0 auto;
-  flex-wrap: nowrap;
-  margin-left: auto;
-}
-
-.connections-account-summary {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  overflow: hidden;
-  border-top: 1px solid var(--relay-border);
-  background: var(--relay-subtle);
-}
-
-.connections-account-summary > div {
-  min-width: 0;
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 7px 12px;
-  border-right: 1px solid var(--relay-border);
-}
-
-.connections-account-summary > div:last-child {
-  border-right: 0;
-}
-
-.connections-account-summary span {
-  overflow: hidden;
-  color: var(--relay-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.connections-account-summary strong {
-  flex: 0 0 auto;
-  font-size: 17px;
-  line-height: 20px;
 }
 
 .account-transfer-progress {
@@ -352,17 +176,16 @@
 }
 
 .account-filter-stack {
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 0 1 auto;
-  flex-wrap: nowrap;
+  gap: 6px;
 }
 
 .account-filter-menu,
 .account-filter-menu .relay-option-trigger {
   min-width: 0;
-  max-width: min(240px, 24vw);
+  max-width: 220px;
 }
 
 .account-filter-menu {
@@ -371,143 +194,60 @@
 
 .account-filter-menu .relay-option-trigger {
   width: max-content;
+  min-height: 34px;
+  padding-block: 6px;
 }
 
-.account-group-toggle.relay-button {
-  flex: 0 0 auto;
-  min-height: 36px;
-  padding: 7px 11px;
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.account-group-toggle.relay-button[aria-pressed="true"] {
+.account-group-toggle[aria-pressed="true"] {
   border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
-@media (max-width: 760px) {
-  .connections-account-controls .account-command-bar {
-    display: grid;
+@container (max-width: 780px) {
+  .account-command-bar:not([data-selection="true"]) {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "context context"
-      "filters actions";
-    align-items: center;
-    gap: 8px;
-    min-height: 0;
+      "context actions"
+      "filters filters";
+    gap: 10px 12px;
   }
 
-  .connections-account-controls .account-command-context {
-    min-width: 0;
-    gap: 8px;
+  .account-command-bar:not([data-selection="true"]) .account-command-context {
     grid-area: context;
   }
 
-  .connections-account-controls .account-command-context .account-search {
-    width: auto;
-    min-width: 0;
-    flex: 1 1 auto;
-  }
-
-  .connections-account-controls .account-filter-stack {
+  .account-filter-stack {
     grid-area: filters;
-    align-self: center;
-    width: 100%;
-    min-width: 0;
-    gap: 6px;
-    overflow-x: auto;
-    padding-bottom: 1px;
   }
 
-  .connections-account-controls .account-filter-menu,
-  .connections-account-controls .account-filter-menu .relay-option-trigger {
-    width: fit-content;
-    min-width: 0;
-    max-width: min(154px, 42vw);
-  }
-
-  .connections-account-controls .account-group-toggle.relay-button {
-    width: 36px;
-    padding: 0;
-  }
-
-  .connections-account-controls .account-group-toggle span {
-    display: none;
-  }
-
-  .connections-account-controls .account-command-actions {
+  .account-command-bar:not([data-selection="true"]) .account-command-actions {
     grid-area: actions;
-    min-width: 0;
-    margin-left: auto;
-    gap: 6px;
-  }
-
-  .connections-account-controls .account-command-actions .relay-icon-button {
-    width: 34px;
-    height: 34px;
-  }
-
-  .connections-account-controls .account-filter-stack {
-    align-items: center;
   }
 }
 
-.connections-account-summary i,
-.pool-summary i {
-  flex: 0 0 auto;
-  color: var(--relay-muted);
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-}
-
-@media (min-width: 761px) and (max-width: 900px) {
-  .connections-account-controls .account-command-bar {
-    display: grid;
-    grid-template-columns: 202px minmax(0, 1fr) 160px;
-    align-items: center;
-    gap: 8px;
+@container (max-width: 480px) {
+  .account-command-bar:not([data-selection="true"]) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "context" "filters" "actions";
   }
 
-  .connections-account-controls .account-command-context,
-  .connections-account-controls .account-filter-stack,
-  .connections-account-controls .account-command-actions {
-    min-width: 0;
-    margin: 0;
+  .account-filter-menu {
+    flex: 1 1 0;
   }
 
-  .connections-account-controls .account-command-context {
-    gap: 8px;
-  }
-
-  .connections-account-controls .account-command-context .account-search {
-    width: 170px;
-    min-width: 0;
-  }
-
-  .connections-account-controls .account-filter-stack {
+  .account-filter-menu .relay-option-trigger {
     width: 100%;
+  }
+
+  .account-command-bar[data-selection="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .account-command-bar[data-selection="true"] .account-command-actions {
     justify-content: flex-start;
-    gap: 6px;
-    overflow: visible;
-  }
-
-  .connections-account-controls .account-filter-menu,
-  .connections-account-controls .account-filter-menu .relay-option-trigger {
-    width: fit-content;
-    min-width: 0;
-    max-width: min(154px, 20vw);
-  }
-
-  .connections-account-controls .account-group-toggle.relay-button {
-    min-width: 126px;
-    padding-inline: 8px;
-  }
-
-  .connections-account-controls .account-command-actions {
-    justify-content: flex-end;
-    gap: 6px;
+    flex-wrap: wrap;
   }
 }
 
@@ -817,42 +557,46 @@
   display: flex;
   align-self: center;
   align-items: center;
+  gap: 6px;
   margin-right: 10px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
 }
 
 .account-card-header-actions .relay-action-menu summary {
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 5px 0 0 5px;
-}
-
-.account-card-header-actions .account-select-button {
-  width: 30px;
-  min-height: 30px;
-  border: 0;
-  border-left: 1px solid var(--relay-border);
-  border-radius: 0 5px 5px 0;
+  width: 32px;
+  height: 32px;
+  border-color: var(--relay-border);
+  border-radius: 6px;
   background: transparent;
   color: var(--relay-muted);
 }
 
-.account-card-header-actions .account-select-button[aria-pressed="true"] {
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
+.account-card-header-actions .account-select-button {
+  width: 32px;
+  min-height: 32px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--relay-muted);
 }
 
+.account-card-header-actions .relay-action-menu summary:hover,
+.account-card-header-actions .relay-action-menu[open] summary,
 .account-card-header-actions .account-select-button:hover:not(:disabled),
 .account-card-header-actions .account-select-button:focus-visible {
+  border-color: var(--relay-border-strong);
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
 
+.account-card-header-actions .account-select-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
 .account-card-header-actions .account-select-button[aria-pressed="true"]:hover:not(:disabled),
 .account-card-header-actions .account-select-button[aria-pressed="true"]:focus-visible {
+  border-color: var(--relay-accent);
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -864,8 +608,8 @@
   justify-content: center;
   gap: 6px;
   min-height: 30px;
-  margin: 0 12px 10px;
-  padding: 6px 4px 0;
+  margin: 0 10px;
+  padding: 8px 0;
   overflow: hidden;
   border: 0;
   border-top: 1px solid var(--relay-border);
@@ -1033,6 +777,7 @@
 
 .compact-quota-layout {
   min-height: 72px;
+  flex: 1;
   padding: 8px 10px;
 }
 
@@ -1069,7 +814,11 @@
   text-align: center;
 }
 
-.compact-quota-layout .quota-meter-heading > span { grid-area: label; }
+.compact-quota-layout .quota-meter-heading > span {
+  grid-area: label;
+  font-size: 11px;
+  line-height: 16px;
+}
 .compact-quota-layout .quota-meter-heading > strong { grid-area: value; }
 
 .compact-quota-layout .quota-meter-heading small {
@@ -1083,6 +832,8 @@
 
 .compact-quota-layout .quota-meter-heading small {
   width: 100%;
+  font-size: 9px;
+  line-height: 12px;
   text-align: center;
 }
 
@@ -1108,6 +859,44 @@
 
 .compact-quota-layout .quota-meter[data-level="critical"] .quota-meter-heading > strong {
   color: var(--relay-error);
+}
+
+/* An upstream credit ledger is not a reset token or a Relay value estimate.
+ * Keep it with the provider quota it describes, on its own compact row. */
+.account-provider-quota-strip {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  align-self: stretch;
+  flex-shrink: 0;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--relay-border);
+  font-variant-numeric: tabular-nums;
+}
+
+.account-provider-quota-strip dt,
+.account-provider-quota-strip dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-provider-quota-strip dt {
+  color: var(--relay-muted);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.account-provider-quota-strip dd {
+  color: var(--relay-text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 16px;
 }
 
 .account-card-footer {
@@ -1216,7 +1005,10 @@
 
 .account-quota-refresh-state.is-action {
   width: 100%;
+  min-height: 40px;
+  padding: 6px 10px;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   cursor: pointer;
   font: inherit;
@@ -1225,8 +1017,13 @@
 .account-quota-refresh-state.is-action:hover,
 .account-quota-refresh-state.is-action:focus-visible {
   background: var(--relay-error-soft, color-mix(in srgb, var(--relay-error) 10%, transparent));
-  outline: 1px solid color-mix(in srgb, var(--relay-error) 35%, transparent);
-  outline-offset: -1px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-error) 35%, transparent);
+  color: var(--relay-error);
+}
+
+.account-quota-refresh-state.is-action:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--relay-error) 45%, transparent);
+  outline-offset: 1px;
 }
 
 .account-quota-refresh-state svg {
@@ -1324,15 +1121,14 @@
 
 .relay-action-menu > div {
   position: absolute;
+  overflow-y: auto;
   z-index: 30;
   top: 38px;
   right: 0;
   width: min(240px, calc(100vw - 16px));
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  max-height: min(360px, calc(100dvh - 52px));
+  padding: var(--relay-popover-padding);
+  overscroll-behavior: contain;
 }
 
 .account-row-menu.account-bulk-menu > div {
@@ -1367,10 +1163,7 @@
 }
 
 .oauth-waiting .oauth-waiting-status {
-  padding: 14px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-subtle);
+  padding: 4px 0 12px;
 }
 
 .oauth-expiry {
@@ -1379,9 +1172,8 @@
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  padding: 0 11px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
+  padding: 10px 0;
+  border-block: 1px solid var(--relay-border);
   color: var(--relay-secondary);
 }
 
@@ -1412,34 +1204,18 @@
   white-space: nowrap;
 }
 
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table {
-  table-layout: fixed;
-}
-
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(1) { width: 56px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(2) { width: 130px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(3) { width: 170px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(4) { width: 120px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5) { width: 110px; }
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:last-child { width: 124px; }
-
-.relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:not(:last-child) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .relay-action-menu button {
   width: 100%;
-  min-height: 34px;
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 5px;
   background: transparent;
   color: var(--relay-secondary);
+  font-size: 12px;
+  line-height: 16px;
   text-align: left;
   cursor: pointer;
 }
@@ -1548,11 +1324,8 @@
   z-index: 1000;
   max-height: min(280px, calc(100vh - 52px));
   overflow-y: auto;
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  padding: var(--relay-popover-padding);
+  overscroll-behavior: contain;
   visibility: hidden;
   scrollbar-color: var(--relay-border-strong) transparent;
 }
@@ -1563,14 +1336,12 @@
 
 .relay-option-list button {
   width: 100%;
-  min-height: 34px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 16px;
   align-items: center;
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 5px;
   background: transparent;
   color: var(--relay-secondary);
   font-size: 12px;
@@ -1597,15 +1368,34 @@
   justify-self: center;
 }
 
+.relay-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.relay-option-copy > span,
+.relay-option-copy > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relay-option-copy > small {
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 450;
+  line-height: 13px;
+}
+
 .app-context-menu {
   position: fixed;
   z-index: 1100;
   width: 190px;
-  padding: 5px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
+  max-height: min(280px, calc(100dvh - 52px));
+  overflow-y: auto;
+  padding: var(--relay-popover-padding);
+  overscroll-behavior: contain;
   visibility: hidden;
 }
 
@@ -1615,14 +1405,12 @@
 
 .app-context-menu button {
   width: 100%;
-  min-height: 34px;
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   padding: 7px 9px;
   border: 0;
-  border-radius: 5px;
   background: transparent;
   color: var(--relay-secondary);
   font-size: 12px;
@@ -1663,7 +1451,7 @@
 }
 
 .account-export-form {
-  gap: 10px;
+  gap: 16px;
 }
 
 .account-export-heading {
@@ -1684,16 +1472,8 @@
 
 .account-export-formats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.account-export-formats[data-count="4"] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.account-export-formats[data-count="7"] button:last-child {
-  grid-column: 2;
+  gap: 6px;
 }
 
 .account-export-formats button {
@@ -1702,9 +1482,9 @@
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   overflow: hidden;
-  padding: 0 28px;
+  padding: 10px 32px 10px 12px;
   border: 1px solid var(--relay-border);
   border-radius: 6px;
   background: var(--relay-surface);
@@ -1712,7 +1492,7 @@
   font: inherit;
   font-size: 12px;
   font-weight: 600;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -1728,10 +1508,7 @@
 }
 
 .account-export-formats button span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: center;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .account-export-formats button svg {
@@ -1742,14 +1519,10 @@
 }
 
 .account-export-description {
-  min-height: 34px;
   margin: 0;
-  padding: 8px 10px;
-  border-left: 2px solid var(--relay-accent);
-  background: var(--relay-subtle);
   color: var(--relay-muted);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .account-export-description-toolbar,
@@ -1762,10 +1535,16 @@
 .account-export-description-toolbar {
   min-height: 32px;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .account-export-description-toolbar > label {
   font-weight: 650;
+}
+
+.account-export-description-controls {
+  margin-left: auto;
 }
 
 .account-export-description-controls > input[type="file"] {
@@ -1861,3 +1640,5 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+.source-probe-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.source-probe-result code { overflow-wrap: anywhere; color: var(--relay-muted); }

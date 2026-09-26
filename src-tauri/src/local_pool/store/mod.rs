@@ -1,23 +1,33 @@
+mod refresh;
+mod rotation_upgrade;
+mod source_refresh;
+pub(crate) use source_refresh::SourceRefreshFence;
+use source_refresh::{SourceRefreshRevisions, STATE_SOURCE_REVISIONS};
 pub mod secret_store;
 pub mod telemetry_db;
 pub(crate) mod vault;
 
 use self::telemetry_db::TelemetryDb;
-use crate::local_pool::{
-    error::{ErrorCode, LocalPoolError, Result},
-    models::{
-        AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-        OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord, CURRENT_SCHEMA_VERSION,
-        MAX_LOCAL_ACCOUNTS,
+use crate::{
+    local_pool::{
+        error::{ErrorCode, LocalPoolError, Result},
+        models::{
+            AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
+            OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord,
+            CURRENT_SCHEMA_VERSION, MAX_LOCAL_ACCOUNTS,
+        },
     },
+    storage_paths::StoragePaths,
 };
+pub(crate) use refresh::{AccountRefreshFence, AppliedAccountRefresh};
+use refresh::{RefreshRevisions, STATE_REFRESH_REVISIONS};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zenith_relay_core::{normalize_image_base_model, normalize_subscription_plan_order};
+use zenith_relay_core::{automations::WakeExecutionPolicy, normalize_image_base_model};
 
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
@@ -36,6 +46,7 @@ const LEGACY_STATE_FILES: [&str; 7] = [
     "remote-target.json",
 ];
 const MAX_LEGACY_JSON_BYTES: u64 = 16 * 1024 * 1024;
+const SQLITE_SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 pub struct LocalPoolStore {
     database: Arc<TelemetryDb>,
@@ -46,21 +57,19 @@ pub struct LocalPoolStore {
     automations: AutomationRecords,
     remote_target: Option<RemoteTargetRecord>,
     ownership_operation: Option<OwnershipOperationRecord>,
+    refresh_revisions: RefreshRevisions,
+    source_refresh_revisions: SourceRefreshRevisions,
+    refresh_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl LocalPoolStore {
     pub fn open(app_root: PathBuf) -> Result<Self> {
-        let root = app_root.join("data");
-        fs::create_dir_all(&root).map_err(|err| {
-            LocalPoolError::new(
-                ErrorCode::Io,
-                format!("failed to create local pool store: {err}"),
-            )
-        })?;
-        migrate_database_file(&root)?;
-        let database = Arc::new(TelemetryDb::open(&root.join("relay.sqlite"))?);
+        migrate_database_layout(&app_root)?;
+        let paths = StoragePaths::from_root(&app_root);
+        let root = paths.data_root();
+        let database = Arc::new(TelemetryDb::open(&paths.database_file())?);
         let state = load_or_initialize_state(&root, &database)?;
-        let gateway = state.gateway;
+        let mut gateway = state.gateway;
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
@@ -72,7 +81,22 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let accounts = state.accounts;
-        let automations = state.automations;
+        rotation_upgrade::upgrade_saved_gateway(&database, &mut gateway, &sources, &accounts)?;
+
+        let mut automations = state.automations;
+        let mut automation_policy_changed = false;
+        for task in &mut automations.tasks {
+            if task.execution_policy == WakeExecutionPolicy::RequireConfirmation {
+                task.execution_policy = WakeExecutionPolicy::Automatic;
+                automations
+                    .state
+                    .clear_task_confirmation_requirement(&task.id);
+                automation_policy_changed = true;
+            }
+        }
+        if automation_policy_changed {
+            database.replace_state_json(&[(STATE_AUTOMATIONS, serialize_state(&automations)?)])?;
+        }
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
@@ -84,6 +108,34 @@ impl LocalPoolStore {
                 .validate()
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
+        let refresh_revisions = match state.refresh_revisions {
+            Some(revisions) => {
+                revisions.validate(&accounts)?;
+                revisions
+            }
+            None => {
+                let revisions = RefreshRevisions::initialize(&accounts)?;
+                database.replace_state_json(&[(
+                    STATE_REFRESH_REVISIONS,
+                    serialize_state(&revisions)?,
+                )])?;
+                revisions
+            }
+        };
+        let source_refresh_revisions = match state.source_refresh_revisions {
+            Some(revisions) => {
+                revisions.validate(&sources)?;
+                revisions
+            }
+            None => {
+                let revisions = SourceRefreshRevisions::default().with_sources(&[], &sources)?;
+                database.replace_state_json(&[(
+                    STATE_SOURCE_REVISIONS,
+                    serialize_state(&revisions)?,
+                )])?;
+                revisions
+            }
+        };
         cleanup_legacy_state_files(&root)?;
         Ok(Self {
             database,
@@ -94,6 +146,9 @@ impl LocalPoolStore {
             automations,
             remote_target: state.remote_target,
             ownership_operation: state.ownership_operation,
+            refresh_revisions,
+            source_refresh_revisions,
+            refresh_changed: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -143,6 +198,27 @@ impl LocalPoolStore {
             .find(|account| account.account.id == id)
     }
 
+    pub fn update_client_auth_observation(
+        &mut self,
+        account_id: &str,
+        status: Option<String>,
+        login_redirect_at_ms: Option<u64>,
+    ) -> Result<bool> {
+        let Some(current) = self.account(account_id).cloned() else {
+            return Ok(false);
+        };
+        if current.client_auth_status == status
+            && current.last_client_login_redirect_at_ms == login_redirect_at_ms
+        {
+            return Ok(false);
+        }
+        let mut updated = current;
+        updated.client_auth_status = status;
+        updated.last_client_login_redirect_at_ms = login_redirect_at_ms;
+        self.upsert_account(updated)?;
+        Ok(true)
+    }
+
     pub fn upsert_source(&mut self, source: ProviderSourceRecord) -> Result<()> {
         let mut next = self.sources.clone();
         if let Some(current) = next.iter_mut().find(|current| current.id == source.id) {
@@ -174,6 +250,31 @@ impl LocalPoolStore {
             next.push(account);
         }
         self.replace_accounts_and_keys(next, self.keys.clone())
+    }
+
+    /// Restores one account only when its current record still belongs to the
+    /// transaction that is being rolled back. This avoids a failed runtime
+    /// rebuild replacing the entire account snapshot and erasing a concurrent
+    /// login, quota observation, or edit of another account.
+    ///
+    /// A client-login watchdog observation is presentation-only, so preserve a
+    /// newer observation while restoring the transaction's previous record.
+    pub fn restore_account_if_current(
+        &mut self,
+        previous: &LocalAccountRecord,
+        attempted: &LocalAccountRecord,
+    ) -> Result<bool> {
+        let Some(current) = self.account(&attempted.account.id).cloned() else {
+            return Ok(false);
+        };
+        if !account_matches_rollback_snapshot(&current, attempted) {
+            return Ok(false);
+        }
+        let mut restored = previous.clone();
+        restored.client_auth_status = current.client_auth_status;
+        restored.last_client_login_redirect_at_ms = current.last_client_login_redirect_at_ms;
+        self.upsert_account(restored)?;
+        Ok(true)
     }
 
     pub fn replace_records(
@@ -321,7 +422,22 @@ impl LocalPoolStore {
             return Ok(());
         }
 
-        let mut values = Vec::with_capacity(4);
+        let revisions = if changed.accounts {
+            self.refresh_revisions
+                .with_accounts(&self.accounts, &accounts)?
+        } else {
+            self.refresh_revisions.clone()
+        };
+        let source_revisions = self
+            .source_refresh_revisions
+            .with_sources(&self.sources, &sources)?;
+        let mut values = Vec::with_capacity(6);
+        if source_revisions != self.source_refresh_revisions {
+            values.push((STATE_SOURCE_REVISIONS, serialize_state(&source_revisions)?));
+        }
+        if revisions != self.refresh_revisions {
+            values.push((STATE_REFRESH_REVISIONS, serialize_state(&revisions)?));
+        }
         if changed.sources {
             values.push((STATE_SOURCES, serialize_state(&sources)?));
         }
@@ -344,14 +460,25 @@ impl LocalPoolStore {
                 .replace_state_json_and_delete_accounts_data(&values, deleted_account_ids)?;
         }
 
+        let refresh_changed = self.refresh_registration_changed(&revisions, &accounts)
+            || source_revisions != self.source_refresh_revisions;
+        self.source_refresh_revisions = source_revisions;
         self.sources = sources;
         self.accounts = accounts;
         self.keys = keys;
         self.automations = automations;
+        self.refresh_revisions = revisions;
+        if refresh_changed {
+            self.notify_refresh_changed();
+        }
         Ok(())
     }
 
     pub fn replace_gateway(&mut self, mut gateway: GatewaySettings) -> Result<()> {
+        gateway.tool_policy = gateway
+            .tool_policy
+            .normalized()
+            .map_err(LocalPoolError::invalid_state)?;
         gateway.hidden_models = crate::local_pool::models::normalized_values(gateway.hidden_models);
         gateway.model_price_overrides = gateway
             .model_price_overrides
@@ -370,9 +497,6 @@ impl LocalPoolStore {
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.model_display_order =
             zenith_relay_core::normalize_model_ids(gateway.model_display_order);
-        gateway.subscription_plan_order =
-            normalize_subscription_plan_order(gateway.subscription_plan_order)
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
             .map_err(LocalPoolError::invalid_state)?;
         if gateway == self.gateway {
@@ -381,9 +505,20 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        self.database
-            .replace_state_json(&[(STATE_GATEWAY, serialize_state(&gateway)?)])?;
+        let revisions = self
+            .refresh_revisions
+            .with_gateway(&self.gateway, &gateway)?;
+        let mut values = vec![(STATE_GATEWAY, serialize_state(&gateway)?)];
+        if revisions != self.refresh_revisions {
+            values.push((STATE_REFRESH_REVISIONS, serialize_state(&revisions)?));
+        }
+        self.database.replace_state_json(&values)?;
+        let refresh_changed = revisions != self.refresh_revisions;
         self.gateway = gateway;
+        self.refresh_revisions = revisions;
+        if refresh_changed {
+            self.notify_refresh_changed();
+        }
         Ok(())
     }
 
@@ -432,14 +567,23 @@ impl LocalPoolStore {
                 .validate()
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         }
+        let revisions = self
+            .refresh_revisions
+            .with_accounts(&self.accounts, &accounts)?;
         self.database.replace_state_json(&[
             (STATE_ACCOUNTS, serialize_state(&accounts)?),
             (STATE_KEYS, serialize_state(&keys)?),
             (STATE_OWNERSHIP_OPERATION, serialize_state(&operation)?),
+            (STATE_REFRESH_REVISIONS, serialize_state(&revisions)?),
         ])?;
+        let refresh_changed = self.refresh_registration_changed(&revisions, &accounts);
         self.accounts = accounts;
         self.keys = keys;
         self.ownership_operation = operation;
+        self.refresh_revisions = revisions;
+        if refresh_changed {
+            self.notify_refresh_changed();
+        }
         Ok(())
     }
 
@@ -492,6 +636,31 @@ impl LocalPoolStore {
     }
 }
 
+/// Prepares the dedicated SQLite directory before any code opens the database.
+/// This also lets startup validate a database-layout conflict before it changes
+/// credentials or other durable state.
+pub(crate) fn migrate_database_layout(app_root: &Path) -> Result<()> {
+    let paths = StoragePaths::from_root(app_root);
+    let data_root = paths.data_root();
+    let database_root = paths.database_root();
+    ensure_storage_directory(&data_root)?;
+    ensure_storage_directory(&database_root)?;
+    migrate_database_file(&data_root, &database_root)
+}
+
+fn account_matches_rollback_snapshot(
+    current: &LocalAccountRecord,
+    attempted: &LocalAccountRecord,
+) -> bool {
+    let mut comparable = current.clone();
+    // CDP observations describe the desktop client's visible login state. They
+    // can legitimately arrive while a local account mutation is being applied
+    // and must not make the mutation own a newer credential or quota update.
+    comparable.client_auth_status = attempted.client_auth_status.clone();
+    comparable.last_client_login_redirect_at_ms = attempted.last_client_login_redirect_at_ms;
+    comparable == *attempted
+}
+
 #[derive(Clone, Copy)]
 struct RecordChanges {
     sources: bool,
@@ -515,6 +684,8 @@ struct PersistedState {
     automations: AutomationRecords,
     remote_target: Option<RemoteTargetRecord>,
     ownership_operation: Option<OwnershipOperationRecord>,
+    refresh_revisions: Option<RefreshRevisions>,
+    source_refresh_revisions: Option<SourceRefreshRevisions>,
 }
 
 #[derive(Deserialize)]
@@ -544,6 +715,14 @@ fn load_or_initialize_state(root: &Path, database: &TelemetryDb) -> Result<Persi
         automations: load_state_from_values(&values, STATE_AUTOMATIONS)?,
         remote_target: load_optional_state_from_values(&values, STATE_REMOTE_TARGET)?,
         ownership_operation: load_optional_state_from_values(&values, STATE_OWNERSHIP_OPERATION)?,
+        source_refresh_revisions: values
+            .contains_key(STATE_SOURCE_REVISIONS)
+            .then(|| load_state_from_values(&values, STATE_SOURCE_REVISIONS))
+            .transpose()?,
+        refresh_revisions: values
+            .contains_key(STATE_REFRESH_REVISIONS)
+            .then(|| load_state_from_values(&values, STATE_REFRESH_REVISIONS))
+            .transpose()?,
     })
 }
 
@@ -642,6 +821,8 @@ fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
         automations: read_legacy_json(&root.join("automations.json"))?,
         remote_target,
         ownership_operation: None,
+        refresh_revisions: None,
+        source_refresh_revisions: None,
     }))
 }
 
@@ -688,26 +869,177 @@ fn cleanup_legacy_state_files(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn migrate_database_file(root: &Path) -> Result<()> {
-    let legacy = root.join("usage.sqlite");
-    let target = root.join("relay.sqlite");
-    if legacy.exists() && target.exists() {
+fn ensure_storage_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::Io,
+            format!("failed to create local pool store: {error}"),
+        )
+    })?;
+    let metadata = fs::symlink_metadata(path).map_err(legacy_io_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "both usage.sqlite and relay.sqlite exist",
+            format!("local pool storage directory is unsafe: {}", path.display()),
         ));
     }
-    if !legacy.exists() {
-        return Ok(());
+    Ok(())
+}
+
+/// The database used to live next to catalogs and vault files. Move it before
+/// opening SQLite so its sidecars stay with the database and an interrupted
+/// migration never selects one of two competing copies.
+fn migrate_database_file(data_root: &Path, database_root: &Path) -> Result<()> {
+    let target = database_root.join("relay.sqlite");
+    let legacy_paths = [
+        data_root.join("relay.sqlite"),
+        data_root.join("usage.sqlite"),
+    ];
+    let sources = legacy_paths
+        .iter()
+        .filter_map(|path| regular_file_if_present(path, "legacy Relay database").transpose())
+        .collect::<Result<Vec<_>>>()?;
+    if sources.len() > 1 {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "multiple legacy Relay databases exist; recovery is required before migration",
+        ));
     }
-    fs::rename(&legacy, &target).map_err(legacy_io_error)?;
-    for suffix in ["-wal", "-shm"] {
-        let source = companion_path(&legacy, suffix);
-        if source.exists() {
-            fs::rename(&source, companion_path(&target, suffix)).map_err(legacy_io_error)?;
+    let target_exists = regular_file_if_present(&target, "categorized Relay database")?.is_some();
+    match (sources.first(), target_exists) {
+        (Some(source), true) => Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!(
+                "both legacy and categorized Relay databases exist: {} and {}",
+                source.display(),
+                target.display()
+            ),
+        )),
+        (Some(source), false) => move_database_and_sidecars(source, &legacy_paths, &target),
+        (None, true) => complete_database_sidecar_move(&legacy_paths, &target),
+        (None, false) => {
+            if legacy_sidecar_exists(&legacy_paths)? {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "legacy Relay database sidecars exist without a database file",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn move_database_and_sidecars(
+    source: &Path,
+    legacy_paths: &[PathBuf],
+    target: &Path,
+) -> Result<()> {
+    for other in legacy_paths.iter().filter(|path| path.as_path() != source) {
+        for suffix in SQLITE_SIDECAR_SUFFIXES {
+            let sidecar = companion_path(other, suffix);
+            if regular_file_if_present(&sidecar, "legacy Relay database sidecar")?.is_some() {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!(
+                        "legacy Relay database sidecar belongs to a different database: {}",
+                        sidecar.display()
+                    ),
+                ));
+            }
+        }
+    }
+    for suffix in SQLITE_SIDECAR_SUFFIXES {
+        let source_companion = companion_path(source, suffix);
+        let target_companion = companion_path(target, suffix);
+        regular_file_if_present(&source_companion, "legacy Relay database sidecar")?;
+        if regular_file_if_present(&target_companion, "categorized Relay database sidecar")?
+            .is_some()
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!(
+                    "categorized Relay database sidecar exists before its database: {}",
+                    target_companion.display()
+                ),
+            ));
+        }
+    }
+    fs::rename(source, target).map_err(legacy_io_error)?;
+    for suffix in SQLITE_SIDECAR_SUFFIXES {
+        let source_companion = companion_path(source, suffix);
+        if regular_file_if_present(&source_companion, "legacy Relay database sidecar")?.is_some() {
+            fs::rename(&source_companion, companion_path(target, suffix))
+                .map_err(legacy_io_error)?;
         }
     }
     Ok(())
+}
+
+/// A crash after moving the database but before its sidecars leaves a
+/// recoverable split layout. Finish only that exact move; a second copy is a
+/// conflict, never a reason to discard either sidecar.
+fn complete_database_sidecar_move(legacy_paths: &[PathBuf], target: &Path) -> Result<()> {
+    for suffix in SQLITE_SIDECAR_SUFFIXES {
+        let candidates = legacy_paths
+            .iter()
+            .map(|path| companion_path(path, suffix))
+            .filter_map(|path| {
+                regular_file_if_present(&path, "legacy Relay database sidecar").transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if candidates.len() > 1 {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "multiple legacy Relay database sidecars exist; recovery is required",
+            ));
+        }
+        let Some(source) = candidates.first() else {
+            continue;
+        };
+        let destination = companion_path(target, suffix);
+        if regular_file_if_present(&destination, "categorized Relay database sidecar")?.is_some() {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!(
+                    "both legacy and categorized Relay database sidecars exist: {} and {}",
+                    source.display(),
+                    destination.display()
+                ),
+            ));
+        }
+        fs::rename(source, destination).map_err(legacy_io_error)?;
+    }
+    Ok(())
+}
+
+fn legacy_sidecar_exists(legacy_paths: &[PathBuf]) -> Result<bool> {
+    for path in legacy_paths {
+        for suffix in SQLITE_SIDECAR_SUFFIXES {
+            if regular_file_if_present(
+                &companion_path(path, suffix),
+                "legacy Relay database sidecar",
+            )?
+            .is_some()
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn regular_file_if_present(path: &Path, description: &str) -> Result<Option<PathBuf>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            Ok(Some(path.to_path_buf()))
+        }
+        Ok(_) => Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("{description} is unsafe: {}", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(legacy_io_error(error)),
+    }
 }
 
 fn companion_path(path: &Path, suffix: &str) -> PathBuf {
@@ -725,6 +1057,9 @@ fn legacy_io_error(error: std::io::Error) -> LocalPoolError {
 
 #[cfg(test)]
 mod tests {
+    mod refresh;
+    mod rotation_upgrade;
+    mod source_refresh;
     use super::*;
     use crate::local_pool::models::{OwnershipOperationKind, OwnershipOperationPhase};
     use std::collections::{BTreeMap, BTreeSet};
@@ -737,7 +1072,7 @@ mod tests {
             AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
         },
         quota::{QuotaSnapshot, Subscription},
-        RoutingStrategy, WireApi,
+        WireApi,
     };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -757,8 +1092,8 @@ mod tests {
         let root = temp_root();
         let store = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(store.gateway().port, 14998);
-        assert_eq!(store.database().state_count().unwrap(), 7);
-        assert!(root.join("data/relay.sqlite").exists());
+        assert_eq!(store.database().state_count().unwrap(), 9);
+        assert!(root.join("data/database/relay.sqlite").exists());
         assert!(!root.join("data/metadata.json").exists());
         drop(store);
         assert_eq!(
@@ -773,10 +1108,11 @@ mod tests {
         let root = temp_root();
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let mut gateway = store.gateway().clone();
+        gateway.tool_policy = zenith_relay_core::ToolPolicy {
+            mode: zenith_relay_core::ToolPolicyMode::Automatic,
+        };
         gateway.quota_request_timeout_seconds = 10;
         gateway.chatgpt_interface_quota_reserve_basis_points = 700;
-        gateway.routing_strategy = RoutingStrategy::SubscriptionExpiry;
-        gateway.subscription_plan_order = vec!["business".into(), "plus".into()];
         gateway.image_base_model = Some("gpt-5.4-mini".into());
         gateway.model_price_overrides.insert(
             "GPT-5.4".into(),
@@ -792,20 +1128,20 @@ mod tests {
         drop(store);
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(
+            reopened.gateway().tool_policy.mode,
+            zenith_relay_core::ToolPolicyMode::Automatic
+        );
+        assert_eq!(
+            reopened.gateway().tool_policy.mode,
+            zenith_relay_core::ToolPolicyMode::Automatic
+        );
         assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
         assert_eq!(
             reopened
                 .gateway()
                 .chatgpt_interface_quota_reserve_basis_points,
             700
-        );
-        assert_eq!(
-            reopened.gateway().routing_strategy,
-            RoutingStrategy::SubscriptionExpiry
-        );
-        assert_eq!(
-            reopened.gateway().subscription_plan_order,
-            ["business", "plus"]
         );
         assert_eq!(
             reopened.gateway().image_base_model.as_deref(),
@@ -892,7 +1228,7 @@ mod tests {
         drop(store);
         let error = LocalPoolStore::open(root.clone()).err().unwrap();
         assert!(matches!(error.code, ErrorCode::RecoveryRequired));
-        assert!(root.join("data/relay.sqlite").exists());
+        assert!(root.join("data/database/relay.sqlite").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -926,7 +1262,7 @@ mod tests {
 
         let store = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(store.accounts()[0].account.id, "imported");
-        assert!(data.join("relay.sqlite").exists());
+        assert!(data.join("database/relay.sqlite").exists());
         assert!(!data.join("usage.sqlite").exists());
         for name in LEGACY_STATE_FILES {
             assert!(!data.join(name).exists());
@@ -937,6 +1273,91 @@ mod tests {
                 .account
                 .id,
             "imported"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn flat_relay_database_and_sidecars_move_together() {
+        let root = temp_root();
+        let data = root.join("data");
+        let database = data.join("database");
+        fs::create_dir_all(&database).unwrap();
+        fs::write(data.join("relay.sqlite"), "database").unwrap();
+        fs::write(data.join("relay.sqlite-wal"), "wal").unwrap();
+        fs::write(data.join("relay.sqlite-shm"), "shm").unwrap();
+        fs::write(data.join("relay.sqlite-journal"), "journal").unwrap();
+
+        migrate_database_file(&data, &database).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite")).unwrap(),
+            "database"
+        );
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite-wal")).unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite-shm")).unwrap(),
+            "shm"
+        );
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite-journal")).unwrap(),
+            "journal"
+        );
+        assert!(!data.join("relay.sqlite").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_database_move_finishes_the_remaining_sidecars() {
+        let root = temp_root();
+        let data = root.join("data");
+        let database = data.join("database");
+        fs::create_dir_all(&database).unwrap();
+        fs::write(database.join("relay.sqlite"), "database").unwrap();
+        fs::write(data.join("relay.sqlite-wal"), "wal").unwrap();
+        fs::write(data.join("relay.sqlite-shm"), "shm").unwrap();
+        fs::write(data.join("relay.sqlite-journal"), "journal").unwrap();
+
+        migrate_database_file(&data, &database).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite-wal")).unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite-shm")).unwrap(),
+            "shm"
+        );
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite-journal")).unwrap(),
+            "journal"
+        );
+        assert!(!data.join("relay.sqlite-wal").exists());
+        assert!(!data.join("relay.sqlite-shm").exists());
+        assert!(!data.join("relay.sqlite-journal").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn competing_flat_and_categorized_databases_are_not_merged() {
+        let root = temp_root();
+        let data = root.join("data");
+        let database = data.join("database");
+        fs::create_dir_all(&database).unwrap();
+        fs::write(data.join("relay.sqlite"), "legacy").unwrap();
+        fs::write(database.join("relay.sqlite"), "current").unwrap();
+
+        assert!(migrate_database_file(&data, &database).is_err());
+        assert_eq!(
+            fs::read_to_string(data.join("relay.sqlite")).unwrap(),
+            "legacy"
+        );
+        assert_eq!(
+            fs::read_to_string(database.join("relay.sqlite")).unwrap(),
+            "current"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -957,6 +1378,7 @@ mod tests {
                 pricing_provider: None,
                 official_provider_family: None,
                 wire_api: WireApi::Responses,
+                protocol_config: Default::default(),
                 protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),
@@ -1032,6 +1454,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
@@ -1169,7 +1592,96 @@ mod tests {
             weight: 1,
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
+            client_auth_status: None,
+            last_client_login_redirect_at_ms: None,
         }
+    }
+
+    #[test]
+    fn client_auth_observation_is_durable_and_does_not_change_account_policy() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        let mut account = account_record("observed-account");
+        account.account.in_pool = true;
+        store.upsert_account(account).unwrap();
+
+        assert!(store
+            .update_client_auth_observation(
+                "observed-account",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap());
+        assert!(!store
+            .update_client_auth_observation(
+                "observed-account",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap());
+        let observed = store.account("observed-account").unwrap();
+        assert_eq!(
+            observed.client_auth_status.as_deref(),
+            Some("login_required")
+        );
+        assert_eq!(observed.last_client_login_redirect_at_ms, Some(123));
+        assert!(observed.account.enabled);
+        assert!(observed.account.in_pool);
+
+        drop(store);
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        let observed = reopened.account("observed-account").unwrap();
+        assert_eq!(
+            observed.client_auth_status.as_deref(),
+            Some("login_required")
+        );
+        assert_eq!(observed.last_client_login_redirect_at_ms, Some(123));
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conditional_account_rollback_keeps_other_account_changes_and_watchdog_state() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        let previous = account_record("rollback-target");
+        let mut attempted = previous.clone();
+        attempted.account.label = "Attempted account edit".into();
+        let mut unrelated = account_record("rollback-unrelated");
+        unrelated.account.last_error_code = Some("newer_quota_observation".into());
+        store
+            .replace_accounts_and_keys(vec![attempted.clone(), unrelated.clone()], Vec::new())
+            .unwrap();
+        store
+            .update_client_auth_observation(
+                "rollback-target",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap();
+
+        assert!(store
+            .restore_account_if_current(&previous, &attempted)
+            .unwrap());
+        let restored = store.account("rollback-target").unwrap();
+        assert_eq!(restored.account.label, previous.account.label);
+        assert_eq!(
+            restored.client_auth_status.as_deref(),
+            Some("login_required")
+        );
+        assert_eq!(restored.last_client_login_redirect_at_ms, Some(123));
+        assert_eq!(store.account("rollback-unrelated"), Some(&unrelated));
+
+        let mut newer = attempted.clone();
+        newer.account.token_generation = newer.account.token_generation.saturating_add(1);
+        store.upsert_account(newer.clone()).unwrap();
+        assert!(!store
+            .restore_account_if_current(&previous, &attempted)
+            .unwrap());
+        assert_eq!(store.account("rollback-target"), Some(&newer));
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn write_json(path: &Path, value: &impl Serialize) {

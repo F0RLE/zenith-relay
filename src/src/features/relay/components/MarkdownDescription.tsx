@@ -6,7 +6,7 @@ const allowedElements = [
   "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
 ];
 const components: Components = {
-  a: ({ href, children }) => <span className="markdown-safe-link" title={href}>{children}</span>,
+  a: ({ href, children }) => <span className="markdown-safe-link" data-relay-tooltip={href}>{children}</span>,
   img: () => null,
 };
 

@@ -17,15 +17,120 @@ use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, ErrorOrigin, GatewayRuntime,
-    GatewayRuntimeOptions, LocalGatewayKey, MessagesReasoningMode, ProviderSource, RuntimeLocalKey,
-    RuntimeSource, SourceAdapter, SourceProtocolBinding, UsageEvent, WireApi,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    CapabilityOrigin, CapabilityStatus, ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, MessagesReasoningMode, ModelEndpointCapability, ProviderSource,
+    RuntimeLocalKey, RuntimeSource, SourceAdapter, SourceProtocolBinding, SourceProtocolConfig,
+    UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "local-test-key";
 const SOURCE_KEY: &str = "upstream-test-key";
 const OVERSIZED_MODELS_CONTENT_LENGTH: &str = "4194305";
 const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+#[path = "support/protocol_matrix.rs"]
+mod protocol_matrix;
+
+#[path = "support/native_admission.rs"]
+mod native_admission;
+
+#[path = "support/tool_policy.rs"]
+mod tool_policy;
+
+#[tokio::test]
+async fn native_catalogs_details_and_generation_share_key_model_permissions() {
+    let sources = [WireApi::Messages, WireApi::Gemini]
+        .into_iter()
+        .map(|wire_api| {
+            RuntimeSource::unrestricted(ProviderSource {
+                id: format!("catalog-{wire_api:?}"),
+                name: "Synthetic catalog".into(),
+                base_url: "http://127.0.0.1:1/v1".into(),
+                api_key: SOURCE_KEY.into(),
+                wire_api,
+                models: vec!["shown".into(), "hidden".into()],
+            })
+        })
+        .collect();
+    let mut key = RuntimeLocalKey::unrestricted(LocalGatewayKey {
+        id: "restricted".into(),
+        secret: LOCAL_KEY.into(),
+    });
+    key.allowed_models = vec!["shown".into()];
+    let runtime = GatewayRuntime::from_pool(
+        sources,
+        vec![key],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let gateway = spawn(gateway::router(Arc::new(runtime))).await;
+    let client = reqwest::Client::new();
+    for (base, header, list_field, id_field, expected_id, path, body) in [
+        (
+            "/v1/models",
+            "x-api-key",
+            "data",
+            "id",
+            "shown",
+            "/v1/messages",
+            json!({"model":"hidden","max_tokens":8,"messages":[{"role":"user","content":"test"}]}),
+        ),
+        (
+            "/v1beta/models",
+            "x-goog-api-key",
+            "models",
+            "name",
+            "models/shown",
+            "/v1beta/models/hidden:generateContent",
+            json!({"contents":[{"role":"user","parts":[{"text":"test"}]}]}),
+        ),
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{}{base}", gateway.base_url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let list = client
+            .get(format!("{}{base}", gateway.base_url))
+            .header(header, LOCAL_KEY)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: Value = list.json().await.unwrap();
+        assert_eq!(list[list_field].as_array().unwrap().len(), 1);
+        assert_eq!(list[list_field][0][id_field], expected_id);
+        for (model, status) in [("shown", StatusCode::OK), ("hidden", StatusCode::NOT_FOUND)] {
+            assert_eq!(
+                client
+                    .get(format!("{}{base}/{model}", gateway.base_url))
+                    .header(header, LOCAL_KEY)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                status
+            );
+        }
+        assert_eq!(
+            client
+                .post(format!("{}{path}", gateway.base_url))
+                .header(header, LOCAL_KEY)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+}
 
 #[tokio::test]
 async fn responses_websocket_falls_back_to_http_sse_upstream() {
@@ -44,6 +149,7 @@ async fn responses_websocket_falls_back_to_http_sse_upstream() {
         .send(ClientWsMessage::Text(
             json!({
                 "type": "response.create",
+                "stream_id": "main_01-A.B",
                 "model": "gpt-test",
                 "input": "terminal-fragmented"
             })
@@ -62,6 +168,10 @@ async fn responses_websocket_falls_back_to_http_sse_upstream() {
             continue;
         };
         let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+        assert_eq!(
+            value["stream_id"], "main_01-A.B",
+            "named lane event was not scoped"
+        );
         if value["type"] == "response.completed" {
             saw_completed = true;
             break;
@@ -70,6 +180,204 @@ async fn responses_websocket_falls_back_to_http_sse_upstream() {
     assert!(saw_completed, "HTTP/SSE upstream was not bridged to WS");
     assert_eq!(state.requests.lock().unwrap().len(), 1);
     assert!(events.lock().unwrap().iter().any(|event| event.success));
+}
+
+#[tokio::test]
+async fn responses_websocket_fallback_does_not_silently_accept_done_without_a_terminal() {
+    let (upstream, state) = spawn_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create","stream_id":"main","model":"gpt-test","input":"done-only-stream"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let event: Value = loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("fallback must not leave the client waiting for a terminal")
+            .expect("fallback must return an error event")
+            .expect("WebSocket must be readable");
+        if let ClientWsMessage::Text(text) = message {
+            break serde_json::from_str(text.as_ref()).unwrap();
+        }
+    };
+    assert_eq!(event["type"], "response.failed");
+    assert_eq!(event["stream_id"], "main");
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("stream_incomplete")
+    );
+}
+
+#[tokio::test]
+async fn named_websocket_request_error_identifies_its_lane() {
+    let (upstream, state) = spawn_upstream().await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "stream_id": "planner",
+                "model": "missing-model",
+                "input": "hello"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let event: Value = loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let ClientWsMessage::Text(text) = message {
+            break serde_json::from_str(text.as_ref()).unwrap();
+        }
+    };
+    assert_eq!(event["type"], "error");
+    assert_eq!(event["error"]["code"], "model_not_found");
+    assert_eq!(event["stream_id"], "planner");
+    assert!(state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn responses_rejects_unknown_previous_response_id_even_with_plaintext_history() {
+    let state = UpstreamState::default();
+    let upstream = spawn(
+        Router::new()
+            .route("/v1/responses", post(recording_upstream_responses))
+            .with_state(state.clone()),
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_external_history",
+            "input": [
+                {"type":"message","role":"user","content":"What is the capital of France?"},
+                {"type":"message","role":"assistant","content":"Paris is the capital of France."},
+                {"type":"message","role":"user","content":"Name one landmark there."}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(state.bodies.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn responses_rejects_unknown_opaque_previous_response_before_upstream_execution() {
+    let state = UpstreamState::default();
+    let upstream = spawn(
+        Router::new()
+            .route("/v1/responses", post(recording_upstream_responses))
+            .with_state(state.clone()),
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_external_opaque",
+            "input": "continue"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
+    assert!(state.requests.lock().unwrap().is_empty());
+    assert!(state.bodies.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn responses_websocket_fallback_does_not_append_error_after_partial_output() {
+    let (upstream, _) = spawn_upstream().await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": "partial-truncated-stream"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_partial = false;
+    let mut saw_error = false;
+    let mut saw_close = false;
+    for _ in 0..8 {
+        let message = match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+            Ok(Some(Ok(message))) => message,
+            _ => break,
+        };
+        match message {
+            ClientWsMessage::Text(text) => {
+                let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+                saw_partial |= value["type"] == "response.output_text.delta";
+                saw_error |= value["type"] == "error" || value["type"] == "response.failed";
+            }
+            ClientWsMessage::Close { .. } => {
+                saw_close = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_partial, "fallback did not forward the partial output");
+    assert!(
+        !saw_error,
+        "fallback appended an error after partial output"
+    );
+    assert!(
+        saw_close,
+        "fallback did not close after an incomplete stream"
+    );
 }
 
 #[tokio::test]
@@ -151,6 +459,7 @@ async fn responses_websocket_fallback_locks_the_first_later_stream_id() {
         }
     }
     let rejection = rejection.expect("fallback did not emit an error event");
+    assert_eq!(rejection["stream_id"], "stream-b");
     assert_eq!(rejection["error"]["code"], "invalid_request");
     assert!(rejection["error"]["message"]
         .as_str()
@@ -240,6 +549,7 @@ async fn image_generation_for_api_source_preserves_requested_image_model() {
                 wire_api: WireApi::Responses,
                 models: vec!["gpt-image-1.5".to_string()],
             },
+            protocol_config: Default::default(),
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::Native,
@@ -449,7 +759,7 @@ async fn root_openai_discovery_does_not_guess_v1_after_auth_or_rate_limit_failur
 }
 
 #[tokio::test]
-async fn native_messages_model_discovery_uses_anthropic_headers() {
+async fn native_messages_model_discovery_preserves_inventory_and_uses_anthropic_headers() {
     let (upstream, state) = spawn_upstream().await;
     let models = discover_source_models_for_protocol_bindings(
         &ProviderSource {
@@ -470,7 +780,7 @@ async fn native_messages_model_discovery_uses_anthropic_headers() {
     )
     .await
     .unwrap();
-    assert_eq!(models, ["claude-test"]);
+    assert_eq!(models, ["claude-test", "claude-hidden"]);
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -703,6 +1013,125 @@ async fn native_model_discovery_keeps_each_protocol_catalog_separate() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn discovery_retains_prices_outside_legacy_binding_lists() {
+    let upstream = spawn(Router::new().route(
+        "/v1/models",
+        get(|headers: HeaderMap| async move {
+            let messages = has_messages_source_key(&headers);
+            Json(json!({"data": [
+                {"id": "saved"},
+                {"id": "new-model", "pricing": {
+                    "inputMicroUsdPerMillion": 3_000_000,
+                    "outputMicroUsdPerMillion": 15_000_000,
+                    "cacheWrite5mMicroUsdPerMillion": 3_750_000,
+                    "cacheWrite1hMicroUsdPerMillion": 6_000_000
+                }},
+                {"id": "conflicting", "pricing": {
+                    "inputMicroUsdPerMillion": if messages { 2_000_000 } else { 1_000_000 },
+                    "outputMicroUsdPerMillion": 4_000_000
+                }}
+            ]}))
+        }),
+    ))
+    .await;
+    let source = ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic priced catalog".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: SOURCE_KEY.into(),
+        wire_api: WireApi::Responses,
+        models: Vec::new(),
+    };
+    let bindings = [WireApi::Responses, WireApi::Messages].map(|wire_api| SourceProtocolBinding {
+        wire_api,
+        adapter: SourceAdapter::Native,
+        reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: Default::default(),
+        model_ids: vec!["saved".into()],
+    });
+    let discovery =
+        discover_source_with_protocol_config(&source, &bindings, &SourceProtocolConfig::default())
+            .await
+            .unwrap();
+    assert_eq!(discovery.models, ["saved", "new-model", "conflicting"]);
+    let price = &discovery.detected_model_prices["new-model"];
+    assert_eq!(price.input_micro_usd_per_million, 3_000_000);
+    assert_eq!(price.output_micro_usd_per_million, 15_000_000);
+    assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(3_750_000));
+    assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(6_000_000));
+    assert!(!discovery.detected_model_prices.contains_key("conflicting"));
+}
+
+#[tokio::test]
+async fn configured_discovery_hints_union_physical_catalogs_without_filtering_runtime_routes() {
+    let (upstream, _) = spawn_upstream().await;
+    let source = ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic mixed upstream".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: SOURCE_KEY.into(),
+        wire_api: WireApi::Responses,
+        models: Vec::new(),
+    };
+    let hints = [
+        SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: Vec::new(),
+        },
+        SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: Vec::new(),
+        },
+    ];
+
+    let discovery =
+        discover_source_with_protocol_config(&source, &hints, &SourceProtocolConfig::default())
+            .await
+            .unwrap();
+
+    assert_eq!(
+        discovery.models,
+        ["gpt-test", "hidden-model", "claude-test", "claude-hidden"]
+    );
+    assert_eq!(discovery.protocol_bindings.len(), 2);
+    let routes = SourceProtocolConfig {
+        capabilities: discovery.capabilities,
+        ..Default::default()
+    }
+    .resolve(
+        &source.base_url,
+        &discovery.models,
+        &discovery.protocol_bindings,
+        source.wire_api,
+    )
+    .unwrap();
+    for model in &discovery.models {
+        let upstream = if model.starts_with("claude-") {
+            WireApi::Messages
+        } else {
+            WireApi::Responses
+        };
+        assert!(routes
+            .iter()
+            .filter(|route| route.model_ids.contains(model))
+            .all(|route| route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream));
+        assert_eq!(
+            routes
+                .iter()
+                .filter(|route| route.model_ids.contains(model))
+                .count(),
+            WireApi::ALL.len()
+        );
+    }
 }
 
 #[tokio::test]
@@ -976,7 +1405,7 @@ async fn oversized_non_stream_response_is_rejected_and_recorded() {
 }
 
 #[tokio::test]
-async fn first_sse_bytes_commit_the_stream_without_waiting_for_text_output() {
+async fn stream_prelude_is_buffered_until_the_first_text_output() {
     let (upstream, state) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
 
@@ -990,9 +1419,10 @@ async fn first_sse_bytes_commit_the_stream_without_waiting_for_text_output() {
             .await
             .unwrap()
     });
+    state.release_stream.notify_one();
     let response = tokio::time::timeout(Duration::from_secs(1), response_task)
         .await
-        .expect("the first native SSE bytes should establish the stream")
+        .expect("the first native SSE output should establish the stream")
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -1006,26 +1436,20 @@ async fn first_sse_bytes_commit_the_stream_without_waiting_for_text_output() {
     let mut chunks = response.bytes_stream();
     let first = tokio::time::timeout(Duration::from_secs(1), chunks.next())
         .await
-        .expect("first native SSE chunk was not forwarded")
+        .expect("buffered native SSE frames were not forwarded")
         .unwrap()
         .unwrap();
-    assert_eq!(first, "data: {\"type\":\"response.created\"}\n\n");
-    state.release_stream.notify_one();
+    let first = std::str::from_utf8(&first).unwrap();
+    assert!(first.contains("data: {\"type\":\"response.created\"}\n\n"));
+    assert!(
+        first.contains("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+    );
     let second = tokio::time::timeout(Duration::from_secs(1), chunks.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(
-        second,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
-    );
-    let third = tokio::time::timeout(Duration::from_secs(1), chunks.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(third, "data: [DONE]\n\n");
+    assert_eq!(second, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\"}}\n\n");
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();
@@ -1094,6 +1518,50 @@ async fn fragmented_terminal_sse_records_usage_before_client_disconnect() {
 }
 
 #[tokio::test]
+async fn coalesced_terminal_sse_does_not_forward_later_output_or_record_it_twice() {
+    let (upstream, state) = spawn_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    for input in ["coalesced-terminal", "coalesced-terminal-after-output"] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model": "gpt-test", "input": input, "stream": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(Duration::from_secs(2), response.text())
+            .await
+            .unwrap()
+            .unwrap();
+        let frames = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| frame["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "response.created",
+                "response.output_text.delta",
+                "response.completed"
+            ],
+            "{input}"
+        );
+        assert_eq!(frames[1]["delta"], "once", "{input}");
+    }
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.success && event.total_tokens == Some(3)));
+}
+
+#[tokio::test]
 async fn failed_terminal_sse_is_not_recorded_as_success() {
     let (upstream, _) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
@@ -1121,7 +1589,7 @@ async fn failed_terminal_sse_is_not_recorded_as_success() {
 }
 
 #[tokio::test]
-async fn responses_never_bridge_to_chat_completions_sources() {
+async fn responses_route_to_chat_completions_sources() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let usage_events = events.clone();
     let runtime = GatewayRuntime::new(
@@ -1154,12 +1622,23 @@ async fn responses_never_bridge_to_chat_completions_sources() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    for (index, event) in events.iter().enumerate() {
+        assert!(!event.success);
+        assert_eq!(event.wire_api, WireApi::Responses);
+        assert_eq!(
+            event.error_category.as_deref(),
+            Some("upstream_transport_connect")
+        );
+        assert_eq!(usize::from(event.attempt), index + 1);
+        assert_eq!(event.request_id, events[0].request_id);
+    }
 }
 
 #[tokio::test]
-async fn truncated_started_stream_reports_failure_in_sse_and_is_recorded_as_incomplete() {
+async fn truncated_prelude_stream_returns_one_terminal_error_and_is_recorded_as_incomplete() {
     let (upstream, _) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let response = reqwest::Client::new()
@@ -1173,11 +1652,9 @@ async fn truncated_started_stream_reports_failure_in_sse_and_is_recorded_as_inco
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.text().await.unwrap();
-    assert!(body.contains("data: {\"type\":\"response.created\"}"));
-    assert!(body.contains("event: response.failed"));
-    assert!(body.contains("stream_incomplete"));
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "stream_incomplete");
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
@@ -1208,12 +1685,13 @@ async fn non_success_stream_done_does_not_override_upstream_status() {
     let _ = response.bytes().await.unwrap();
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(!events[0].success);
-    assert_eq!(
-        events[0].http_status,
-        StatusCode::TOO_MANY_REQUESTS.as_u16()
-    );
+    assert_eq!(events.len(), 3);
+    for (index, event) in events.iter().enumerate() {
+        assert!(!event.success);
+        assert_eq!(event.http_status, StatusCode::TOO_MANY_REQUESTS.as_u16());
+        assert_eq!(usize::from(event.attempt), index + 1);
+        assert_eq!(event.request_id, events[0].request_id);
+    }
     assert_eq!(
         events[0].error_category.as_deref(),
         Some("upstream_rate_limited")
@@ -1443,7 +1921,7 @@ async fn native_responses_replays_tool_continuation_after_zenith_gateway_invalid
     assert!(!events[1].success);
     assert_eq!(
         events[1].error_category.as_deref(),
-        Some("upstream_invalid_request")
+        Some("upstream_candidate_rejected")
     );
     assert!(events[2].success);
 }
@@ -1511,7 +1989,7 @@ async fn native_responses_stream_replays_tool_continuation_after_zenith_gateway_
     assert!(!events[1].success);
     assert_eq!(
         events[1].error_category.as_deref(),
-        Some("upstream_invalid_request")
+        Some("upstream_candidate_rejected")
     );
     assert!(events[2].success);
 }
@@ -1621,6 +2099,148 @@ async fn native_responses_repair_call_prefixed_function_item_ids_after_strict_re
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
+}
+
+#[tokio::test]
+async fn native_responses_repair_legacy_call_ids_after_explicit_strict_rejection() {
+    let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": [
+                {"type": "function_call", "id": "fc_legacy", "name": "lookup", "namespace": "functions", "arguments": "{}"},
+                {"type": "function_call_output", "output": "lookup result"},
+                {"type": "function_call_output", "name": "heartbeat", "output": "standalone"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "resp_strict_call_id"
+    );
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"].as_array().unwrap().len(), 3);
+    let repaired = bodies[1]["input"].as_array().unwrap();
+    assert_eq!(repaired.len(), 3);
+    assert_eq!(repaired[0]["type"], "function_call");
+    assert_eq!(repaired[0]["id"], "fc_legacy");
+    assert_eq!(repaired[0]["namespace"], "functions");
+    assert_eq!(repaired[1]["call_id"], repaired[0]["call_id"]);
+    assert_eq!(repaired[2]["name"], "heartbeat");
+    assert!(repaired[2].get("call_id").is_none());
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
+async fn native_responses_stream_repairs_legacy_call_ids_after_terminal_error() {
+    let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "stream": true,
+            "input": [
+                {"type": "custom_tool_call", "name": "patch", "input": "{}"},
+                {"type": "custom_tool_call_output", "output": "done"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("History accepted"));
+    assert!(body.contains("response.completed"));
+    assert!(!body.contains("Missing required field"));
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[0]["input"][0].get("call_id").is_none());
+    assert_eq!(
+        bodies[1]["input"][0]["call_id"],
+        bodies[1]["input"][1]["call_id"]
+    );
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
+async fn native_tool_links_recover_item_ids_without_losing_results_in_json_and_sse() {
+    for streaming in [false, true] {
+        for kind in ["function_call", "custom_tool_call"] {
+            for call_id in [None, Some("call_stable")] {
+                let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+                let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+                let mut call = json!({"type":kind,"id":"ctc_item","name":"patch","input":"synthetic","arguments":"{}"});
+                if let Some(id) = call_id {
+                    call["call_id"] = json!(id);
+                }
+                let input = json!([call,
+                    {"type":format!("{kind}_output"),"call_id":"ctc_item","output":"synthetic result"}
+                ]);
+                let response = reqwest::Client::new()
+                    .post(format!("{}/v1/responses", gateway.base_url))
+                    .bearer_auth(LOCAL_KEY)
+                    .json(&json!({"model":"gpt-test","stream":streaming,"input":input}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(response.text().await.unwrap().contains("History accepted"));
+                let bodies = state.bodies.lock().unwrap();
+                assert_eq!(bodies.len(), 2);
+                assert_eq!(bodies[0]["input"], input);
+                let mut expected = input;
+                expected[0]["call_id"] = json!(call_id.unwrap_or("ctc_item"));
+                expected[1]["call_id"] = expected[0]["call_id"].clone();
+                assert_eq!(bodies[1]["input"], expected);
+                assert!(events.lock().unwrap().iter().all(|event| event.success));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_tool_repair_never_drops_an_orphan_result_to_make_a_retry_succeed() {
+    let (upstream, state) = spawn_strict_missing_call_id_upstream().await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let input = json!([
+        {"type":"function_call","name":"lookup","arguments":"{}"},
+        {"type":"function_call_output","output":"paired"},
+        {"type":"custom_tool_call_output","output":"unresolved"}
+    ]);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-test","input":input}))
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["input"], input);
 }
 
 #[tokio::test]
@@ -1853,8 +2473,12 @@ async fn bridge_skips_incompatible_candidate_without_cooling_it() {
             name: format!("Synthetic {id}"),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.to_string(),
-            wire_api: WireApi::Responses,
+            wire_api: WireApi::Messages,
             models: vec!["claude-test".to_string()],
+        },
+        protocol_config: SourceProtocolConfig {
+            endpoint_hint: Some(WireApi::Messages),
+            ..SourceProtocolConfig::default()
         },
         protocol_bindings: vec![SourceProtocolBinding {
             wire_api: WireApi::Responses,
@@ -2199,6 +2823,186 @@ async fn responses_to_gemini_bridge_uses_native_routes_for_plain_and_streaming_r
 }
 
 #[tokio::test]
+async fn gemini_terminal_without_output_reaches_responses_bridge_and_native_stream() {
+    for (name, upstream_body, reason) in [
+        (
+            "prompt_blocked",
+            json!({"promptFeedback":{"blockReason":"SAFETY"},"candidates":[],"usageMetadata":{"promptTokenCount":3}}),
+            "content_filter",
+        ),
+        (
+            "candidate_filtered",
+            json!({"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":3}}),
+            "content_filter",
+        ),
+        (
+            "candidate_token_limit",
+            json!({"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":3}}),
+            "max_output_tokens",
+        ),
+    ] {
+        let frame = format!("data: {upstream_body}\n\n");
+        let upstream = spawn(Router::new().route(
+            "/v1/models/gemini-test:streamGenerateContent",
+            post(move || {
+                let frame = frame.clone();
+                async move {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(frame))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let (gateway, events) = spawn_gemini_bridge_gateway(&upstream.base_url).await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model":"gemini-test","input":"Synthetic request","stream":true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let text = response.text().await.unwrap();
+        assert!(
+            text.contains("event: response.incomplete"),
+            "{name}: {text}"
+        );
+        assert!(
+            text.contains(&format!("\"reason\":\"{reason}\"")),
+            "{name}: {text}"
+        );
+        assert!(
+            !text.contains("event: response.completed"),
+            "{name}: {text}"
+        );
+        {
+            {
+                let events = events.lock().unwrap();
+                assert_eq!(events.len(), 1, "{name}");
+                assert!(!events[0].success, "{name}");
+                assert_eq!(
+                    events[0].error_category.as_deref(),
+                    Some("response_incomplete"),
+                    "{name}"
+                );
+                assert_eq!(events[0].input_tokens, Some(3), "{name}");
+            }
+        }
+
+        let (native, events) = spawn_native_gemini_gateway(&upstream.base_url).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/v1beta/models/gemini-test:streamGenerateContent",
+                native.base_url
+            ))
+            .header("x-goog-api-key", LOCAL_KEY)
+            .json(&json!({"contents":[{"role":"user","parts":[{"text":"Synthetic request"}]}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "native {name}");
+        let text = response.text().await.unwrap();
+        assert!(
+            text.contains(&upstream_body.to_string()),
+            "native {name}: {text}"
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "native {name}");
+        assert!(!events[0].success, "native {name}");
+        assert_eq!(
+            events[0].error_category.as_deref(),
+            Some("response_incomplete"),
+            "native {name}"
+        );
+        assert_eq!(events[0].input_tokens, Some(3), "native {name}");
+    }
+}
+
+#[tokio::test]
+async fn native_gemini_truncated_stream_is_not_recorded_as_success() {
+    let upstream = spawn(Router::new().route(
+        "/v1/models/gemini-test:streamGenerateContent",
+        post(|| async {
+            Response::builder()
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Partial reply\"}]}}]}\n\n",
+                ))
+                .unwrap()
+        }),
+    ))
+    .await;
+    let (gateway, events) = spawn_native_gemini_gateway(&upstream.base_url).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1beta/models/gemini-test:streamGenerateContent",
+            gateway.base_url
+        ))
+        .header("x-goog-api-key", LOCAL_KEY)
+        .json(&json!({"contents":[{"role":"user","parts":[{"text":"Synthetic request"}]}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("Partial reply"));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("stream_incomplete")
+    );
+}
+
+#[tokio::test]
+async fn native_gemini_stream_forwards_media_part_and_records_terminal_usage() {
+    let upstream_body = json!({
+        "candidates": [{"content": {"role": "model", "parts": [
+            {"inlineData": {"mimeType": "image/png", "data": "YQ=="}}
+        ]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 4}
+    });
+    let frame = format!("data: {upstream_body}\n\n");
+    let upstream = spawn(Router::new().route(
+        "/v1/models/gemini-test:streamGenerateContent",
+        post(move || {
+            let frame = frame.clone();
+            async move {
+                Response::builder()
+                    .header(CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from(frame))
+                    .unwrap()
+            }
+        }),
+    ))
+    .await;
+    let (gateway, events) = spawn_native_gemini_gateway(&upstream.base_url).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1beta/models/gemini-test:streamGenerateContent",
+            gateway.base_url
+        ))
+        .header("x-goog-api-key", LOCAL_KEY)
+        .json(&json!({"contents":[{"role":"user","parts":[{"text":"Synthetic request"}]}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.text().await.unwrap(),
+        format!("data: {upstream_body}\n\n")
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+    assert_eq!(events[0].input_tokens, Some(2));
+    assert_eq!(events[0].output_tokens, Some(4));
+}
+
+#[tokio::test]
 async fn native_gemini_client_route_keeps_native_body_and_response_contract() {
     let (upstream, state) = spawn_gemini_upstream().await;
     let (gateway, events) = spawn_native_gemini_gateway(&upstream.base_url).await;
@@ -2243,7 +3047,7 @@ async fn native_gemini_client_route_keeps_native_body_and_response_contract() {
 }
 
 #[tokio::test]
-async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperature() {
+async fn responses_to_messages_bridge_preserves_effort_and_rejects_incompatible_sampling() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
         spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Adaptive)
@@ -2254,32 +3058,48 @@ async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperatur
         .json(&json!({
             "model": "claude-test",
             "input": "answer",
-            "reasoning": {"effort": "minimal"},
-            "temperature": 0.2,
-            "top_p": 0.9
+            "reasoning": {"effort": "high"}
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bodies = state.bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
-    assert_eq!(bodies[0]["output_config"]["effort"], "low");
-    assert!(bodies[0].get("temperature").is_none());
-    assert!(bodies[0].get("top_p").is_none());
-    drop(bodies);
-    let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(
-        events[0].requested_reasoning_effort.as_deref(),
-        Some("minimal")
-    );
-    assert_eq!(events[0].effective_reasoning_effort.as_deref(), Some("low"));
+    {
+        let bodies = state.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
+        assert_eq!(bodies[0]["output_config"]["effort"], "high");
+        assert!(bodies[0].get("temperature").is_none());
+        assert!(bodies[0].get("top_p").is_none());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].requested_reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            events[0].effective_reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+    for parameter in ["temperature", "top_p"] {
+        let mut request =
+            json!({"model":"claude-test","input":"answer","reasoning":{"effort":"high"}});
+        request[parameter] = json!(0.2);
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.bodies.lock().unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]
-async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_omitted() {
+async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
         spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
@@ -2310,13 +3130,14 @@ async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_omitted(
         .send()
         .await
         .unwrap();
-    assert_eq!(opaque_tool.status(), StatusCode::OK);
+    assert_eq!(opaque_tool.status(), StatusCode::BAD_REQUEST);
+    let body: Value = opaque_tool.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "adapter_tool_unsupported");
     let requests = state.requests.lock().unwrap();
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(bodies.len(), 2);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
-    assert!(bodies[1].get("tools").is_none());
 }
 
 #[tokio::test]
@@ -2340,9 +3161,9 @@ async fn missing_bridge_continuation_is_rejected_without_context_free_tool_outpu
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "adapter_continuation_missing");
+    assert_eq!(body["error"]["code"], "response_continuation_unavailable");
     assert!(state.requests.lock().unwrap().is_empty());
     assert!(state.bodies.lock().unwrap().is_empty());
 }
@@ -2533,24 +3354,22 @@ async fn spawn_messages_bridge_gateway(
         name: "Synthetic Messages source".to_string(),
         base_url: format!("{upstream_base_url}/v1"),
         api_key: SOURCE_KEY.to_string(),
-        wire_api: WireApi::Responses,
+        wire_api: WireApi::Messages,
         models: vec!["claude-test".to_string()],
     };
     let mut options = GatewayRuntimeOptions::default();
     if reasoning_mode != MessagesReasoningMode::Disabled {
-        options.model_reasoning_allowed_levels.insert(
-            "claude-test".to_string(),
-            vec![if reasoning_mode == MessagesReasoningMode::Adaptive {
-                "minimal"
-            } else {
-                "high"
-            }
-            .to_string()],
-        );
+        options
+            .model_reasoning_allowed_levels
+            .insert("claude-test".to_string(), vec!["high".to_string()]);
     }
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource {
             source,
+            protocol_config: SourceProtocolConfig {
+                endpoint_hint: Some(WireApi::Messages),
+                ..SourceProtocolConfig::default()
+            },
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
                 adapter: SourceAdapter::ResponsesToMessages,
@@ -2598,6 +3417,30 @@ async fn spawn_mixed_responses_gateway(
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource {
             source,
+            protocol_config: SourceProtocolConfig {
+                capabilities: vec![
+                    ModelEndpointCapability {
+                        model_id: "gpt-test".to_string(),
+                        upstream_wire_api: WireApi::Responses,
+                        status: CapabilityStatus::Declared,
+                        origin: CapabilityOrigin::Catalog,
+                        checked_at_ms: 1,
+                        features: Default::default(),
+                        reasoning_efforts: Vec::new(),
+                    },
+                    ModelEndpointCapability {
+                        model_id: "claude-test".to_string(),
+                        upstream_wire_api: WireApi::Messages,
+                        status: CapabilityStatus::Declared,
+                        origin: CapabilityOrigin::Catalog,
+                        checked_at_ms: 1,
+                        features: Default::default(),
+                        reasoning_efforts: Vec::new(),
+                    },
+                ],
+                endpoint_hint: None,
+                ..SourceProtocolConfig::default()
+            },
             protocol_bindings: vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
@@ -2671,8 +3514,12 @@ async fn spawn_gemini_bridge_gateway(
                 name: "Synthetic Gemini source".to_string(),
                 base_url: format!("{upstream_base_url}/v1"),
                 api_key: SOURCE_KEY.to_string(),
-                wire_api: WireApi::Responses,
+                wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
+            },
+            protocol_config: SourceProtocolConfig {
+                endpoint_hint: Some(WireApi::Gemini),
+                ..SourceProtocolConfig::default()
             },
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Responses,
@@ -2716,6 +3563,7 @@ async fn spawn_native_gemini_gateway(
                 wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
             },
+            protocol_config: Default::default(),
             protocol_bindings: vec![SourceProtocolBinding {
                 wire_api: WireApi::Gemini,
                 adapter: SourceAdapter::Native,
@@ -2806,6 +3654,17 @@ async fn spawn_strict_message_item_id_upstream() -> (TestServer, UpstreamState) 
         .route(
             "/v1/responses",
             post(strict_message_item_id_upstream_responses),
+        )
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
+async fn spawn_strict_missing_call_id_upstream() -> (TestServer, UpstreamState) {
+    let state = UpstreamState::default();
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(strict_missing_call_id_upstream_responses),
         )
         .with_state(state.clone());
     (spawn(app).await, state)
@@ -2951,6 +3810,30 @@ async fn upstream_responses(
             .unwrap();
     }
 
+    if request.get("input").and_then(Value::as_str) == Some("done-only-stream") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from("data: [DONE]\n\n"))
+            .unwrap();
+    }
+
+    if request.get("input").and_then(Value::as_str) == Some("partial-truncated-stream") {
+        let chunks = stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"partial-response\"}}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            )),
+        ]);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(chunks))
+            .unwrap();
+    }
+
     if request.get("input").and_then(Value::as_str) == Some("limited-stream") {
         let chunks = stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"))]);
         return Response::builder()
@@ -2992,6 +3875,37 @@ async fn upstream_responses(
             .unwrap();
     }
 
+    let input = request.get("input").and_then(Value::as_str);
+    if matches!(
+        input,
+        Some("coalesced-terminal" | "coalesced-terminal-after-output")
+    ) {
+        let prefix = Bytes::from_static(
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_once\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"once\"}\n\n",
+            )
+            .as_bytes(),
+        );
+        let terminal_and_tail = Bytes::from_static(concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_once\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"duplicate\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_once\"}}\n\n",
+        ).as_bytes());
+        let chunks = if input == Some("coalesced-terminal") {
+            vec![Ok::<_, Infallible>(Bytes::from(
+                [prefix.as_ref(), terminal_and_tail.as_ref()].concat(),
+            ))]
+        } else {
+            vec![Ok::<_, Infallible>(prefix), Ok(terminal_and_tail)]
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(stream::iter(chunks)))
+            .unwrap();
+    }
+
     let release_stream = state.release_stream;
     let chunks = stream::unfold(0_u8, move |step| {
         let release_stream = release_stream.clone();
@@ -3013,7 +3927,9 @@ async fn upstream_responses(
                     ))
                 }
                 2 => Some((
-                    Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n")),
+                    Ok::<_, Infallible>(Bytes::from_static(
+                        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\"}}\n\n",
+                    )),
                     3,
                 )),
                 _ => None,
@@ -3026,6 +3942,128 @@ async fn upstream_responses(
         .header(CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(chunks))
         .unwrap()
+}
+
+#[tokio::test]
+async fn original_errors_reach_usage_for_http_failed_json_and_sse() {
+    for (status, streaming) in [(422, false), (200, false), (200, true)] {
+        let payload = json!({"error": {"code": "future_validation_error", "type": "invalid_request_error", "message": "Invalid field: temperature"}});
+        let body = if streaming {
+            format!(
+                "data: {}\n\n",
+                json!({"type": "response.failed", "response": payload})
+            )
+        } else {
+            payload.to_string()
+        };
+        let upstream = spawn(Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let body = body.clone();
+                async move {
+                    Response::builder()
+                        .status(status)
+                        .header(
+                            CONTENT_TYPE,
+                            if streaming {
+                                "text/event-stream"
+                            } else {
+                                "application/json"
+                            },
+                        )
+                        .body(Body::from(body))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model":"gpt-test", "input":"synthetic input", "stream":streaming}))
+            .send()
+            .await
+            .unwrap();
+        let response = response.text().await.unwrap();
+        assert!(response.contains("Invalid field: temperature"));
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(!event.success);
+        assert_eq!(
+            event.error_category.as_deref(),
+            Some("upstream_invalid_request")
+        );
+        assert!(event.cooldown_scope.is_none());
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(status));
+        assert_eq!(details.code.as_deref(), Some("future_validation_error"));
+        assert_eq!(
+            details.message.as_deref(),
+            Some("Invalid field: temperature")
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_sse_records_parser_diagnostics_before_output() {
+    let upstream = spawn(Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            Response::builder()
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(
+                    "event: synthetic-private\ndata: {\"synthetic-private\":\n\n",
+                ))
+                .unwrap()
+        }),
+    ))
+    .await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-test", "input":"synthetic input", "stream":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(response["error"]["code"], "stream_invalid");
+    let events = events.lock().unwrap();
+    assert!(!events.is_empty());
+    for event in events.iter() {
+        assert!(!event.success);
+        assert_eq!(event.error_category.as_deref(), Some("stream_invalid"));
+        assert!(event.ttft_ms.is_none());
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.http_status, Some(200));
+        assert_eq!(details.error_type.as_deref(), Some("relay_stream_parser"));
+        let message = details.message.as_deref().unwrap();
+        assert!(message.contains("category=Eof"));
+        assert!(!message.contains("synthetic-private"));
+    }
+}
+
+async fn recording_upstream_responses(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    observe(&state, "/v1/responses", &headers);
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = serde_json::from_slice(&body).unwrap();
+    state.bodies.lock().unwrap().push(request.clone());
+    Json(json!({
+        "id": "resp_test",
+        "object": "response",
+        "model": request["model"],
+        "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+    }))
+    .into_response()
 }
 
 async fn native_replay_upstream_responses(
@@ -3286,6 +4324,117 @@ async fn strict_message_item_id_upstream_responses(
     .into_response()
 }
 
+async fn strict_missing_call_id_upstream_responses(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    state.bodies.lock().unwrap().push(request.clone());
+    let input = request.get("input").and_then(Value::as_array);
+    let has_missing_call_id = input.is_some_and(|input| {
+        input.iter().any(|item| {
+            let item_type = item.get("type").and_then(Value::as_str);
+            let named_standalone_output = item_type == Some("function_call_output")
+                && item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.trim().is_empty());
+            !named_standalone_output
+                && matches!(
+                    item_type,
+                    Some(
+                        "function_call"
+                            | "function_call_output"
+                            | "custom_tool_call"
+                            | "custom_tool_call_output"
+                    )
+                )
+                && item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|call_id| call_id.trim().is_empty())
+        })
+    });
+    let missing_output = input.and_then(|input| {
+        input.iter().find(|call| {
+            let kind = call.get("type").and_then(Value::as_str).unwrap_or_default();
+            matches!(kind, "function_call" | "custom_tool_call")
+                && !input.iter().any(|result| {
+                    result.get("type").and_then(Value::as_str)
+                        == Some(format!("{kind}_output").as_str())
+                        && result.get("call_id").is_some()
+                        && result.get("call_id") == call.get("call_id")
+                })
+        })
+    });
+    let message = if has_missing_call_id {
+        Some("Missing required field: call_id".to_string())
+    } else {
+        missing_output.map(|call| {
+            format!(
+                "No tool output found for {} call {}.",
+                if call["type"] == "custom_tool_call" {
+                    "custom tool"
+                } else {
+                    "function"
+                },
+                call["call_id"].as_str().unwrap_or_default()
+            )
+        })
+    };
+    if let Some(message) = message {
+        if request.get("stream").and_then(Value::as_bool) == Some(true) {
+            let error = json!({"type":"response.failed","response":{"status":"failed"},"error":{"message":message}});
+            let chunks = stream::iter([Ok::<_, Infallible>(Bytes::from(format!(
+                "data: {error}\n\n"
+            )))]);
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(chunks))
+                .unwrap();
+        }
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": message}})),
+        )
+            .into_response();
+    }
+    if request.get("stream").and_then(Value::as_bool) == Some(true) {
+        let chunks = stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"History accepted\"}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_strict_call_id\",\"status\":\"completed\"}}\n\n",
+            )),
+        ]);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(chunks))
+            .unwrap();
+    }
+    Json(json!({
+        "id": "resp_strict_call_id",
+        "object": "response",
+        "model": request["model"],
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "History accepted"}]
+        }]
+    }))
+    .into_response()
+}
+
 fn native_replay_final_response(streaming: bool, response_id: &str) -> Response<Body> {
     if !streaming {
         return Json(json!({
@@ -3360,7 +4509,7 @@ async fn upstream_messages(
                 b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
-                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\n\n",
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
                 b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
@@ -3387,7 +4536,7 @@ async fn upstream_messages(
                 b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
-                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}\n\n",
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
                 b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
@@ -3437,6 +4586,7 @@ async fn upstream_messages(
     if has_tool_result {
         return Json(json!({
             "id": "msg_tool_2",
+            "stop_reason": "end_turn",
             "type": "message",
             "role": "assistant",
             "model": "claude-test",
@@ -3453,6 +4603,7 @@ async fn upstream_messages(
         if request["tools"][0]["name"] == "PowerShell" {
             return Json(json!({
                 "id": "msg_custom_tool_1",
+                "stop_reason": "tool_use",
                 "type": "message",
                 "role": "assistant",
                 "model": "claude-test",
@@ -3468,6 +4619,7 @@ async fn upstream_messages(
         }
         return Json(json!({
             "id": "msg_tool_1",
+            "stop_reason": "tool_use",
             "type": "message",
             "role": "assistant",
             "model": "claude-test",
@@ -3483,6 +4635,7 @@ async fn upstream_messages(
     }
     Json(json!({
         "id": "msg_text_1",
+        "stop_reason": "end_turn",
         "type": "message",
         "role": "assistant",
         "model": "claude-test",

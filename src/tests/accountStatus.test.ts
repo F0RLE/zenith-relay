@@ -53,6 +53,7 @@ describe("account status policy", () => {
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" }, lastErrorCode: "models_prepare" }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("provider_timeout");
+    expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", authState: { state: "active" }, health: "healthy" }))).toBeNull();
   });
 
   test("does not let a stale quota result hide a required sign-in", () => {
@@ -64,6 +65,19 @@ describe("account status policy", () => {
       quotaRefreshStatus: "updated",
       authState: { state: "requires_reauth", reason: "reused_refresh_token" },
     }))).toBe("updated");
+  });
+
+  test("keeps the account failure visible when quota monitoring also fails", () => {
+    for (const lastErrorCode of ["workspace_disabled", "upstream_unauthorized", "checkpoint", "captcha"]) {
+      const unavailable = account({
+        operationalStatus: "unavailable",
+        lastErrorCode,
+        quotaRefreshStatus: "failed",
+        quota: { error: { code: "quota_timeout" } },
+      });
+      expect(currentAccountErrorCode(unavailable)).toBe(lastErrorCode);
+      expect(accountQuotaRefreshState(unavailable)).toBe("failed");
+    }
   });
 
   test("maps safe error codes to stable translation keys", () => {

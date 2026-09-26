@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { InputHTMLAttributes, ReactNode } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
@@ -8,14 +8,13 @@ import { useTranslation } from "react-i18next";
 import type { QuotaSnapshot, QuotaWindow } from "../api/types";
 import { accountErrorTranslationKey } from "../accountStatus";
 import { formatDetailedRemainingTime, formatSupplementalQuotaLabel, isFastSupplementalQuota, quotaWindowLabel } from "../quotaFormatting";
-import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
+import { accountPlanOption, compareAccountPlans, formatAccountPlan } from "../routingOrder";
 import type { FeedbackError } from "../state/feedback";
 import { useTransientFlag } from "../hooks/useTransientFlag";
 
 export { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../quotaFormatting";
 
-export { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan };
-export type { ApiSourceRole };
+export { accountPlanOption, compareAccountPlans, formatAccountPlan };
 // Compatibility exports keep existing feature and test imports stable while
 // the status policy itself lives in its domain module.
 export {
@@ -81,6 +80,11 @@ export function useConfirm() {
   return confirm;
 }
 
+export function mergeDescribedBy(...values: Array<string | undefined>) {
+  const ids = new Set(values.flatMap((value) => value?.split(/\s+/).filter(Boolean) ?? []));
+  return ids.size ? [...ids].join(" ") : undefined;
+}
+
 export function Button({ children, icon, variant = "secondary", busy, className, title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
   const tooltip = useTooltip<HTMLElement>(title ?? "");
   const hasTooltip = Boolean(title);
@@ -89,8 +93,8 @@ export function Button({ children, icon, variant = "secondary", busy, className,
     ref={hasTooltip && !disabled ? (node) => { tooltip.anchorRef.current = node; } : undefined}
     type={props.type ?? "button"}
     className={`relay-button ${variant}${className ? ` ${className}` : ""}`}
-    aria-describedby={hasTooltip ? tooltip.describedBy : props["aria-describedby"]}
     {...props}
+    aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
     disabled={disabled}
     onMouseEnter={disabled ? undefined : (event) => { if (hasTooltip) tooltip.show(); onMouseEnter?.(event); }}
     onMouseLeave={disabled ? undefined : (event) => { if (hasTooltip) tooltip.hideAfterHover(); onMouseLeave?.(event); }}
@@ -101,10 +105,13 @@ export function Button({ children, icon, variant = "secondary", busy, className,
     {busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span>
   </button>;
   return <>
-    {hasTooltip && disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hide}>{button}</span> : button}
+    {hasTooltip && disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" tabIndex={0} aria-describedby={tooltip.describedBy} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover}>{button}</span> : button}
     {hasTooltip ? tooltip.tooltip : null}
   </>;
 }
+
+// Both component-owned and delegated hints share one visible tooltip.
+let dismissActiveTooltip: (() => void) | undefined;
 
 export function useTooltip<T extends HTMLElement>(label: string) {
   const anchorRef = useRef<T>(null);
@@ -112,27 +119,29 @@ export function useTooltip<T extends HTMLElement>(label: string) {
   const tooltipId = useId();
   const [visible, setVisible] = useState(false);
   const [instant, setInstant] = useState(false);
+  const [activation, setActivation] = useState(0);
   const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom"; arrowLeft: number } | null>(null);
 
-  const showNow = () => {
-    setInstant(true);
-    setPosition(null);
-    setVisible(true);
-  };
-  const show = () => {
-    setInstant(false);
-    setPosition(null);
-    setVisible(true);
-  };
-  const hide = () => {
+  const hide = useCallback(() => {
     setVisible(false);
-  };
+    if (dismissActiveTooltip === hide) dismissActiveTooltip = undefined;
+  }, []);
+  const activate = useCallback((immediate: boolean) => {
+    if (dismissActiveTooltip !== hide) dismissActiveTooltip?.();
+    dismissActiveTooltip = hide;
+    setInstant(immediate);
+    setPosition(null);
+    setActivation((value) => value + 1);
+    setVisible(true);
+  }, [hide]);
+  const showNow = useCallback(() => activate(true), [activate]);
+  const show = useCallback(() => activate(false), [activate]);
   const pointerStart = () => {
     hide();
   };
 
   useLayoutEffect(() => {
-    if (!visible) return;
+    if (!visible || !label) return;
     const anchor = anchorRef.current?.getBoundingClientRect();
     const tooltip = tooltipRef.current;
     if (!anchor || !tooltip) return;
@@ -156,23 +165,42 @@ export function useTooltip<T extends HTMLElement>(label: string) {
       arrowInset,
       Math.min(anchorCenter - left, tooltip.offsetWidth - arrowInset),
     );
+    top = Math.max(margin, Math.min(top, window.innerHeight - tooltip.offsetHeight - margin));
     setPosition({ left, top, placement, arrowLeft });
-  }, [label, visible]);
+  }, [label, visible, activation]);
+
+  useEffect(() => () => {
+    if (dismissActiveTooltip === hide) dismissActiveTooltip = undefined;
+  }, [hide]);
 
   useEffect(() => {
     if (!visible) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") hide(); };
-    window.addEventListener("resize", hide);
-    window.addEventListener("scroll", hide, true);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("resize", hide);
-      window.removeEventListener("scroll", hide, true);
-      document.removeEventListener("keydown", onKeyDown);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || dismissActiveTooltip !== hide) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      hide();
     };
-  }, [visible]);
+    window.addEventListener("resize", hide);
+    window.addEventListener("blur", hide);
+    window.addEventListener("scroll", hide, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("pointerdown", hide, true);
+    const observer = new MutationObserver(() => {
+      if (!anchorRef.current?.isConnected) hide();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", hide);
+      window.removeEventListener("blur", hide);
+      window.removeEventListener("scroll", hide, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("pointerdown", hide, true);
+    };
+  }, [hide, visible]);
 
-  const tooltip = visible && typeof document !== "undefined" ? createPortal(
+  const tooltip = visible && label && typeof document !== "undefined" ? createPortal(
     <div
       ref={tooltipRef}
       id={tooltipId}
@@ -194,36 +222,39 @@ export function useTooltip<T extends HTMLElement>(label: string) {
 
   return {
     anchorRef,
-    describedBy: visible ? tooltipId : undefined,
+    describedBy: visible && label ? tooltipId : undefined,
     hide,
-    hideAfterHover: () => { if (document.activeElement !== anchorRef.current) hide(); },
+    hideAfterHover: () => { if (!anchorRef.current?.matches(":focus-visible")) hide(); },
     show,
+    showNow,
     showAfterFocus: () => { if (anchorRef.current?.matches(":focus-visible")) showNow(); },
     pointerStart,
     tooltip,
   };
 }
 
-export function IconButton({ label, icon, className = "", title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode }) {
+export function IconButton({ label, icon, busy = false, className = "", title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode; busy?: boolean }) {
   const tooltip = useTooltip<HTMLElement>(title ?? label);
-  const disabled = Boolean(props.disabled);
+  const disabled = Boolean(busy || props.disabled);
   const button = <button
     ref={disabled ? undefined : (node) => { tooltip.anchorRef.current = node; }}
     type={props.type ?? "button"}
     className={`relay-icon-button ${className}`.trim()}
     aria-label={label}
-    aria-describedby={tooltip.describedBy}
     {...props}
+    disabled={disabled}
+    aria-busy={busy || props["aria-busy"]}
+    aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
     onMouseEnter={disabled ? undefined : (event) => { tooltip.show(); onMouseEnter?.(event); }}
     onMouseLeave={disabled ? undefined : (event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
     onFocus={disabled ? undefined : (event) => { tooltip.showAfterFocus(); onFocus?.(event); }}
     onBlur={disabled ? undefined : (event) => { tooltip.hide(); onBlur?.(event); }}
     onPointerDown={disabled ? undefined : (event) => { tooltip.pointerStart(); onPointerDown?.(event); }}
   >
-    {icon}
+    {busy ? <Loader2 className="spin" aria-hidden /> : icon}
   </button>;
   return <>
-    {disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hide}>{button}</span> : button}
+    {disabled ? <span ref={(node) => { tooltip.anchorRef.current = node; }} className="relay-disabled-tooltip-anchor" tabIndex={0} aria-describedby={tooltip.describedBy} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover}>{button}</span> : button}
     {tooltip.tooltip}
   </>;
 }
@@ -240,21 +271,68 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
   const { t } = useTranslation();
   const resolvedLabel = label ?? t("common.actions");
   const tooltip = useTooltip<HTMLElement>(resolvedLabel);
-  return <details className={`relay-action-menu ${className}`.trim()}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div role="menu">{children}</div></details>;
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => { if (menuRef.current) menuRef.current.open = false; };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      close();
+      menuRef.current?.querySelector("summary")?.focus({ preventScroll: true });
+    };
+    // Capture the dismissal before a native <details> toggle or another
+    // control handles the same pointer event. This keeps outside clicks
+    // deterministic across Chromium platform/font layouts.
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [open]);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const anchor = menuRef.current?.getBoundingClientRect();
+      const panel = panelRef.current;
+      if (!anchor || !panel || !menuRef.current?.open) return;
+      panel.style.maxHeight = `${Math.max(0, innerHeight - 50)}px`;
+      const { width, height } = panel.getBoundingClientRect();
+      const below = anchor.bottom + 4;
+      const top = below + height <= innerHeight - 8 ? below : anchor.top - height - 4;
+      panel.style.top = `${Math.max(42, Math.min(top, innerHeight - height - 8)) - anchor.top}px`;
+      panel.style.left = `${Math.max(8, Math.min(anchor.right - width, innerWidth - width - 8)) - anchor.left}px`;
+      panel.style.right = "auto";
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, children]);
+  return <details ref={menuRef} className={`relay-action-menu ${className}`.trim()} onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div ref={panelRef} className="relay-popover-panel" role="menu">{children}</div></details>;
 }
 
 export function ActionMenuItem({ children, icon, danger = false, className = "", title, onClick, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
   const tooltip = useTooltip<HTMLButtonElement>(title ?? "");
   const hasTooltip = Boolean(title);
-  const classes = [danger ? "danger" : "", className].filter(Boolean).join(" ");
+  const classes = ["relay-popover-item", danger ? "danger" : "", className].filter(Boolean).join(" ");
   return <>
     <button
       ref={hasTooltip ? tooltip.anchorRef : undefined}
       type="button"
       role="menuitem"
       className={classes || undefined}
-      aria-describedby={hasTooltip ? tooltip.describedBy : props["aria-describedby"]}
       {...props}
+      aria-describedby={mergeDescribedBy(props["aria-describedby"], tooltip.describedBy)}
       onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}
       onMouseEnter={(event) => { if (hasTooltip) tooltip.show(); onMouseEnter?.(event); }}
       onMouseLeave={(event) => { if (hasTooltip) tooltip.hideAfterHover(); onMouseLeave?.(event); }}
@@ -385,7 +463,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     {open && typeof document !== "undefined" ? createPortal(
       <div
         ref={listRef}
-        className="relay-option-list"
+        className="relay-option-list relay-popover-panel"
         role="listbox"
         aria-label={label}
         data-positioned={Boolean(position)}
@@ -394,6 +472,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         {options.map((option, index) => <button
           key={option.value}
           type="button"
+          className="relay-popover-item"
           role="option"
           data-value={option.value}
           aria-selected={option.value === value}
@@ -431,7 +510,7 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
 }
 
-export function Dialog({ title, children, onClose, footer, wide = false, className = "", closeOnBackdrop = false, layer = "default" }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; closeOnBackdrop?: boolean; layer?: "default" | "top" }) {
+export function Dialog({ title, children, onClose, footer, wide = false, className = "", layer = "default" }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; layer?: "default" | "top" }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
@@ -516,7 +595,7 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
       }
     };
   }, []);
-  return <div className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}`} role="presentation" onPointerDown={closeOnBackdrop ? (event) => { if (event.target === event.currentTarget) onClose(); } : undefined}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
+  return <div className={`relay-modal-backdrop${layer === "top" ? " relay-modal-backdrop-top" : ""}`} role="presentation" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
 }
 
 export function ErrorDetailsDialog({ error, message, onClose }: { error: FeedbackError; message: string; onClose: () => void }) {
@@ -548,6 +627,14 @@ export function EmptyState({ title, description, action }: { title: string; desc
   return <div className="relay-empty"><CircleHelp aria-hidden /><strong>{title}</strong><p>{description}</p>{action}</div>;
 }
 
+export function ToggleSwitch({ label, checked, onChange, className = "", ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "checked" | "defaultChecked" | "onChange"> & {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return <input {...props} className={`relay-switch${className ? ` ${className}` : ""}`} type="checkbox" checked={checked} aria-label={label} data-relay-tooltip={label} onChange={(event) => onChange(event.target.checked)} />;
+}
+
 export function SettingToggle({ label, description, checked, disabled = false, onChange, className = "", tone = "default" }: {
   label: string;
   description: string;
@@ -559,7 +646,7 @@ export function SettingToggle({ label, description, checked, disabled = false, o
 }) {
   return <label className={`setting-toggle ${tone}${className ? ` ${className}` : ""}`}>
     <span><strong>{label}</strong><small>{description}</small></span>
-    <input type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={(event) => onChange(event.target.checked)} />
+    <ToggleSwitch label={label} checked={checked} disabled={disabled} onChange={onChange} />
   </label>;
 }
 
@@ -635,8 +722,13 @@ export async function copyText(value: string) {
   await navigator.clipboard.writeText(value);
 }
 
-export function CopyButton({ value, label }: { value: string; label: string }) {
+export function CopyButton({ value, label, children }: { value: string; label: string; children?: ReactNode }) {
   const { t } = useTranslation();
   const [copied, showCopied] = useTransientFlag(1_500);
-  return <IconButton label={copied ? `${label}: ${t("feedback.copied")}` : label} icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />} onClick={async () => { await copyText(value); showCopied(); }} />;
+  const accessibleLabel = copied ? `${label}: ${t("feedback.copied")}` : label;
+  const icon = copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />;
+  const onClick = async () => { await copyText(value); showCopied(); };
+  return children !== undefined
+    ? <Button aria-label={accessibleLabel} icon={icon} onClick={onClick}>{children}</Button>
+    : <IconButton label={accessibleLabel} icon={icon} onClick={onClick} />;
 }

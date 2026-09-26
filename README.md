@@ -26,29 +26,40 @@ Download the package for your platform from
 - **Windows:** use the Setup installer. The portable EXE runs without
   installation, but its folder must be writable for in-place updates.
 - **Linux:** choose AppImage, DEB, or RPM.
-- **macOS:** choose the DMG for Intel or Apple Silicon.
+- **macOS:** choose the DMG for Intel or Apple Silicon. This build is ad-hoc
+  signed and is not Apple notarized; follow the one-time [English](docs/help/en/README.md#install-on-macos)
+  or [Russian](docs/help/ru/README.md#установка-на-macos) installation steps.
 
-The first launch opens Quick Setup. Choose where Relay should run, add a
-connection, and select the client that will use the endpoint. Quick Setup can
-be opened again from **Help**.
+The first launch opens Quick Setup. Choose whether the shared pool runs on
+this computer or your server, add accounts and API sources to it, then select
+the client. You can add more connections later. Quick Setup can be opened
+again from **Help**.
 
 ## Choose a mode
 
 | Mode | Use it when | What remains running |
 | --- | --- | --- |
-| **This computer** | You want to combine personal accounts without deploying a server. | Relay and the local endpoint must stay open. |
-| **Choose API** | You already have a compatible hosted API and its key. | The provider runs the requests. |
-| **My server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. |
+| **Computer** | You want to combine personal accounts and API sources without deploying a server. | Relay and the local endpoint must stay open. |
+| **Choose API** | You want to connect an application directly to one saved API source; select this mode after setup. | The provider runs the requests. |
+| **On your server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. |
 
 ## Everyday workflow
 
-1. Open **Connections** and add a ChatGPT account, an API source, or a proxy.
+For a pool in **Computer** mode:
+
+1. Open **Connections** and add a ChatGPT account or an API source. Configure
+   a proxy there if needed.
 2. In **Pool**, include the connections and models that may receive traffic.
-3. Start the endpoint in **API**, open the **Application** tab, and connect
-   ChatGPT or OpenCode when needed.
+3. Start the endpoint in **API**, then use **Pool → Connect** to connect
+   ChatGPT or OpenCode. Other compatible clients use the displayed API address
+   and request key.
 4. Use **Overview** for status and performance, **Usage** for request history,
    and **Recovery** to restore Relay-managed ChatGPT settings or the saved
    OpenCode configuration.
+
+**Choose API** connects directly to the selected provider without pool
+rotation. The ChatGPT interface account is separate from the member chosen
+to serve a request through the pool.
 
 The complete behavior and troubleshooting guidance are kept in the in-app
 **Help** section and the [English guide](docs/help/en/README.md).
@@ -66,6 +77,13 @@ The complete behavior and troubleshooting guidance are kept in the in-app
   </tr>
 </table>
 
+<details>
+<summary>ChatGPT account and connection settings</summary>
+
+![ChatGPT settings](docs/screenshots/chatgpt-settings.png)
+
+</details>
+
 ## Help
 
 The same user guide is available in the application and in the repository:
@@ -81,6 +99,11 @@ Development and release checks are documented in
 [CONTRIBUTING.md](CONTRIBUTING.md). Current product boundaries live in
 [PLANNING.md](docs/project/PLANNING.md); unfinished work is tracked in the
 [roadmap](docs/project/ROADMAP.md).
+
+The project is licensed under [AGPL-3.0-only](LICENSE). Before submitting a PR,
+read the [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md): accepted
+original contributions are assigned to the project owner, with a license back
+to their authors. Existing AGPL grants and third-party rights remain unchanged.
 
 ```powershell
 cd src

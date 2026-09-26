@@ -1,6 +1,5 @@
 use crate::{
     app::{account_proxy_config, prepare_server_account_authorization},
-    jobs::quota_refresh,
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
 use futures_util::StreamExt;
@@ -14,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{sync::watch, task::JoinHandle};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountIdentity, AccountRecord},
     automations::{
@@ -112,7 +112,7 @@ async fn execute_inner(
         .accounts()?
         .into_iter()
         .find(|record| record.id == permit.account_id)
-        .ok_or_else(|| "wake_account_missing".to_string())?;
+        .ok_or_else(|| error_codes::WAKE_ACCOUNT_MISSING.to_string())?;
     if account.last_used_at_ms.is_some_and(|value| {
         value
             >= permit
@@ -129,14 +129,14 @@ async fn execute_inner(
         .ok_or_else(|| "wake_secret_missing".to_string())?;
     let credential: AccountCredential =
         serde_json::from_str(&secret).map_err(|_| "wake_secret_invalid".to_string())?;
-    let (mut credential, mut authorization) =
+    let (mut credential, mut authorization, _) =
         prepare_server_account_authorization(state, &account, credential, None)
             .await
             .map_err(|_| "wake_authorization_prepare".to_string())?;
     let identity = CodexIdentityEnvelope::standard(&credential.chatgpt_account_id)
         .map_err(|_| "wake_account_id_invalid".to_string())?;
     let proxy = account_proxy_config(state, &account, &credential)
-        .map_err(|_| "wake_proxy_unavailable".to_string())?;
+        .map_err(|_| error_codes::WAKE_PROXY_UNAVAILABLE.to_string())?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
@@ -163,7 +163,7 @@ async fn execute_inner(
         )
     {
         let expected_task_id = credential.agent_task_id.clone().unwrap_or_default();
-        (credential, authorization) = prepare_server_account_authorization(
+        (credential, authorization, _) = prepare_server_account_authorization(
             state,
             &account,
             credential,
@@ -182,9 +182,9 @@ async fn execute_inner(
     }
     if !status.is_success() {
         return Err(match status.as_u16() {
-            401 => "wake_unauthorized",
-            403 => "wake_forbidden",
-            429 => "wake_rate_limited",
+            401 => error_codes::WAKE_UNAUTHORIZED,
+            403 => error_codes::WAKE_FORBIDDEN,
+            429 => error_codes::WAKE_RATE_LIMITED,
             _ => "wake_upstream_failed",
         }
         .to_string());
@@ -194,7 +194,13 @@ async fn execute_inner(
         .and_then(|value| value.get("usage").cloned());
     drop(bytes);
     tokio::time::sleep(Duration::from_millis(permit.verification_delay_ms)).await;
-    let (updated, _) = quota_refresh::refresh_one(state, account, false).await?;
+    let updated = super::refresh::request(
+        state,
+        &account.id,
+        zenith_relay_core::scheduler::refresh::RefreshKind::Quota,
+    )
+    .await?
+    .account;
     let after = updated.quota.window(permit.window_kind);
     let outcome = match verify_wake_countdown(permit.verification.baseline_window.as_ref(), after) {
         zenith_relay_core::automations::WakeVerificationOutcome::ConfirmedQuotaConsumed
@@ -223,33 +229,38 @@ async fn send_wake_request(
     authorization: HeaderValue,
     permit: &WakePermit,
 ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
-    let response = identity
-        .apply(
-            client
-                .post(responses_url)
-                .header(AUTHORIZATION, authorization)
-                .json(&serde_json::json!({
-                    "model": permit.model_id,
-                    "input": WAKE_PROMPT,
-                    "stream": false,
-                    "max_output_tokens": permit.output_token_cap,
-                    "reasoning": { "effort": "minimal" },
-                    "tools": []
-                })),
-        )
-        .send()
-        .await
-        .map_err(|_| "wake_transport".to_string())?;
+    let (response, http_permit) =
+        zenith_relay_core::scheduler::refresh::http::management_http_gate()
+            .send(
+                client,
+                identity.apply(
+                    client
+                        .post(responses_url)
+                        .header(AUTHORIZATION, authorization)
+                        .json(&serde_json::json!({
+                            "model": permit.model_id,
+                            "input": WAKE_PROMPT,
+                            "stream": false,
+                            "max_output_tokens": permit.output_token_cap,
+                            "reasoning": { "effort": "minimal" },
+                            "tools": []
+                        })),
+                ),
+                zenith_relay_core::scheduler::refresh::http::HttpClass::Ordinary,
+            )
+            .await
+            .map_err(|_| error_codes::WAKE_TRANSPORT.to_string())?;
     let status = response.status();
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "wake_transport".to_string())?;
+        let chunk = chunk.map_err(|_| error_codes::WAKE_TRANSPORT.to_string())?;
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err("wake_response_too_large".to_string());
+            return Err(error_codes::WAKE_RESPONSE_TOO_LARGE.to_string());
         }
         bytes.extend_from_slice(&chunk);
     }
+    drop(http_permit);
     Ok((status, bytes))
 }
 

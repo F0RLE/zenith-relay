@@ -1,8 +1,7 @@
 use super::{
     apply_source_policies_if_running, apply_source_policy_if_running, cleanup_created_secret,
-    core_error, record_catalog_refresh_result, refresh_active_codex_catalog_in_background,
-    refresh_local_gateway_key_scope_if_running, restart_after_secret_change,
-    sync_records_or_rollback,
+    core_error, fence_runtime_candidates, refresh_active_codex_catalog_in_background,
+    refresh_local_gateway_key_scope_if_running, sync_records_or_rollback,
 };
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
@@ -16,9 +15,9 @@ use std::collections::BTreeMap;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, fetch_source_provider_stats, normalize_model_ids,
-    normalize_source_protocol_bindings, source_points_to_gateway, ApiModelPriceOverride,
-    ProviderSource, SourceDiscovery, SourceProtocolBinding, SourceProviderStats, WireApi,
+    discover_source_with_protocol_config, normalize_model_ids, normalize_source_protocol_bindings,
+    source_points_to_gateway, ApiModelPriceOverride, ProviderSource, SourceDiscovery,
+    SourceProtocolBinding, SourceProtocolConfig, SourceProviderStats, WireApi,
 };
 #[cfg(test)]
 use zenith_relay_core::{MessagesReasoningMode, SourceAdapter};
@@ -108,10 +107,12 @@ pub async fn create_local_source(
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
     let manual_models = normalize_model_ids(&runtime_source.models);
+    let mut protocol_config = SourceProtocolConfig::automatic(&runtime_source.base_url);
     let (discovery, last_test_status, last_error) = if manual_models.is_empty() {
-        match discover_source_models_and_protocol_bindings(
+        match discover_source_with_protocol_config(
             &runtime_source,
             &input.protocol_bindings,
+            &protocol_config,
         )
         .await
         {
@@ -132,18 +133,21 @@ pub async fn create_local_source(
         // A manual catalog is an explicit operator assertion for providers
         // that do not expose GET /models. Protocol bindings still go through
         // the same validation as an automatically discovered catalog.
-        let protocol_bindings = normalize_source_protocol_bindings(
-            input.protocol_bindings.clone(),
-            runtime_source.wire_api,
-            &manual_models,
-        )
-        .map_err(LocalPoolError::invalid_state)?;
+        let protocol_bindings = protocol_config
+            .resolve(
+                &runtime_source.base_url,
+                &manual_models,
+                &input.protocol_bindings,
+                runtime_source.wire_api,
+            )
+            .map_err(LocalPoolError::invalid_state)?;
         (
             SourceDiscovery {
                 models: manual_models,
                 protocol_bindings,
                 resolved_base_url: None,
                 detected_model_prices: BTreeMap::new(),
+                capabilities: Vec::new(),
             },
             "manual",
             None,
@@ -153,6 +157,7 @@ pub async fn create_local_source(
         runtime_source.base_url = base_url.to_string();
     }
     runtime_source.models = discovery.models;
+    protocol_config.merge_catalog(discovery.capabilities);
     let mut record = ProviderSourceRecord {
         id,
         name: runtime_source.name,
@@ -165,6 +170,7 @@ pub async fn create_local_source(
         official_provider_family: normalize_pricing_identity(input.official_provider_family)?,
         wire_api: runtime_source.wire_api,
         protocol_bindings: discovery.protocol_bindings,
+        protocol_config,
         models: runtime_source.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -180,7 +186,7 @@ pub async fn create_local_source(
     };
     record.normalize();
     record
-        .normalize_protocol_bindings()
+        .validate_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let (old_sources, old_keys) = current_records(&state)?;
     secret_store::save(&secret_ref, &runtime_source.api_key)?;
@@ -223,6 +229,7 @@ fn empty_source_discovery(
         protocol_bindings,
         resolved_base_url: None,
         detected_model_prices: BTreeMap::new(),
+        capabilities: Vec::new(),
     })
 }
 
@@ -241,6 +248,10 @@ pub async fn update_local_source(
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     let detected_model_prices =
         detected_prices_for_upstream(&current, &input.base_url, &input.wire_api);
+    let mut protocol_config = current.protocol_config.clone();
+    if input.base_url.trim() != current.base_url {
+        protocol_config.invalidate(&input.base_url);
+    }
     let mut updated = ProviderSourceRecord {
         id: current.id.clone(),
         name: input.name,
@@ -261,6 +272,7 @@ pub async fn update_local_source(
         )?,
         wire_api: input.wire_api,
         protocol_bindings: input.protocol_bindings.unwrap_or(current.protocol_bindings),
+        protocol_config,
         models: input.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -281,7 +293,7 @@ pub async fn update_local_source(
     }
     updated.normalize();
     updated
-        .normalize_protocol_bindings()
+        .validate_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
@@ -293,6 +305,18 @@ pub async fn update_local_source(
     *target = updated;
     apply_source_priorities(&mut next_sources, &source_priorities)?;
     let catalog_changed = source_catalog_visibility_changed(&old_sources, &next_sources);
+    let changed_source_ids = old_sources
+        .iter()
+        .filter(|source| {
+            next_sources
+                .iter()
+                .find(|candidate| candidate.id == source.id)
+                .is_some_and(|candidate| source_dispatch_configuration_changed(source, candidate))
+        })
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &[], &changed_source_ids);
     state
         .store()?
         .replace_records(next_sources.clone(), old_keys.clone())?;
@@ -341,6 +365,9 @@ pub async fn set_local_source_enabled(
     let (old_sources, old_keys) = current_records(&state)?;
     source.enabled = enabled;
     let catalog_changed = source.in_pool;
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
     state.store()?.upsert_source(source.clone())?;
     let updated_in_place = if apply_source_policy_if_running(&state, &old_sources, &source).await {
         refresh_local_gateway_key_scope_if_running(&state)
@@ -378,6 +405,9 @@ pub async fn delete_local_source(
         .filter(|candidate| candidate.id != source_id)
         .cloned()
         .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
     state.store()?.replace_records(sources, old_keys.clone())?;
     sync_records_or_rollback(&state, old_sources.clone(), old_keys.clone()).await?;
 
@@ -439,8 +469,22 @@ pub async fn rotate_local_source_key(
     ensure_not_gateway_self_source(&state, &source.base_url)?;
     let old_secret = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    let mut invalidated = source.clone();
+    invalidated.protocol_config.invalidate(&source.base_url);
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
+    state.store()?.invalidate_source_refresh(&source_id)?;
     secret_store::save(&source.secret_ref, &api_key)?;
-    restart_after_secret_change(&state, &source.secret_ref, &old_secret).await?;
+    if let Err(error) = state.store()?.upsert_source(invalidated) {
+        secret_store::save(&source.secret_ref, &old_secret)?;
+        return Err(error.into());
+    }
+    super::runtime::restart_or_rollback(&state, || {
+        secret_store::save(&source.secret_ref, &old_secret)?;
+        state.store()?.upsert_source(source)
+    })
+    .await?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -449,7 +493,92 @@ pub async fn test_local_source(
     source_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
-    refresh_local_source_models(&state, &source_id, SourceRefreshMode::Manual).await
+    crate::local_pool::refresh::sources::request_models(&state, &source_id, true)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn probe_local_source(
+    source_id: String,
+    input: zenith_relay_core::SourceProbeInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<zenith_relay_core::SourceProbeResult> {
+    let source = state
+        .store()?
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    if input.expected_revision != source.protocol_config.revision {
+        return Err(LocalPoolError::new(
+            ErrorCode::SourceProbeStale,
+            "source configuration changed; refresh before checking",
+        )
+        .into());
+    }
+    let api_key = secret_store::load(&source.secret_ref)?
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    ensure_not_gateway_self_source(&state, &source.base_url)?;
+    let runtime_source = ProviderSource {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        base_url: source.base_url.clone(),
+        api_key: api_key.clone(),
+        wire_api: source.wire_api,
+        models: source.models.clone(),
+    };
+    let (_, refresh_fence) = state.store()?.source_refresh_scope(&source_id)?;
+    let refresh_state = state.inner().clone();
+    let refresh_fence_for_http = refresh_fence.clone();
+    let http_scope =
+        zenith_relay_core::scheduler::refresh::http::ManagementHttpScope::checked(move || {
+            refresh_state.store().is_ok_and(|store| {
+                store
+                    .ensure_source_refresh_current(&refresh_fence_for_http)
+                    .is_ok()
+            })
+        });
+    let result =
+        zenith_relay_core::probe_source_generation_with_scope(&runtime_source, &input, http_scope)
+            .await
+            .map_err(core_error)?;
+    let _mutation = state.setup_guard().await;
+    let (mut current, same_incarnation) = {
+        let store = state.store()?;
+        let current = store
+            .source(&source_id)
+            .cloned()
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+        (
+            current,
+            store.ensure_source_refresh_current(&refresh_fence).is_ok(),
+        )
+    };
+    // Visible configuration can be identical after delete/re-add. The probe
+    // still belongs to the prior durable source incarnation in that case.
+    if !same_incarnation
+        || !source_probe_matches(&source, &current)
+        || secret_store::load(&current.secret_ref)?.as_deref() != Some(api_key.as_str())
+        || !current
+            .protocol_config
+            .apply_probe(input.expected_revision, result.capability.clone())
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::SourceProbeStale,
+            "source changed during generation check; result discarded",
+        )
+        .into());
+    }
+    let (old_sources, old_keys) = current_records(&state)?;
+    current
+        .validate_protocol_bindings()
+        .map_err(LocalPoolError::invalid_state)?;
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
+    state.store()?.upsert_source(current)?;
+    sync_records_or_rollback(&state, old_sources, old_keys).await?;
+    Ok(result)
 }
 
 /// Refresh the source model catalog from the management view without
@@ -460,147 +589,9 @@ pub async fn refresh_local_source_data(
     source_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
-    refresh_local_source_models(&state, &source_id, SourceRefreshMode::OnDemand).await
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SourceRefreshMode {
-    Background,
-    Manual,
-    OnDemand,
-}
-
-impl SourceRefreshMode {
-    fn replaces_manual_catalog(self) -> bool {
-        matches!(self, Self::Manual)
-    }
-
-    fn refreshes_active_catalog(self) -> bool {
-        matches!(self, Self::Manual | Self::OnDemand)
-    }
-}
-
-pub(crate) async fn refresh_local_source_models(
-    state: &DesktopState,
-    source_id: &str,
-    refresh_mode: SourceRefreshMode,
-) -> CommandResult<ProviderSourceRecord> {
-    let source = state
-        .store()?
-        .source(source_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    if !refresh_mode.replaces_manual_catalog()
-        && source.last_test_status.as_deref() == Some("manual")
-    {
-        // Manual catalogs are intentionally not re-probed by the background
-        // scheduler. An explicit "Refresh models" action can still opt back
-        // into discovery and replace the operator's list when supported.
-        return Ok(source);
-    }
-    let api_key = secret_store::load(&source.secret_ref)?
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    let runtime_source = ProviderSource {
-        id: source.id.clone(),
-        name: source.name.clone(),
-        base_url: source.base_url.clone(),
-        api_key: api_key.clone(),
-        wire_api: source.wire_api,
-        models: source.models.clone(),
-    };
-    ensure_not_gateway_self_source(state, &runtime_source.base_url)?;
-    let discovery =
-        discover_source_models_and_protocol_bindings(&runtime_source, &source.protocol_bindings)
-            .await
-            .map_err(core_error);
-
-    let _mutation = state.setup_guard().await;
-    let current = state
-        .store()?
-        .source(source_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    let current_api_key = secret_store::load(&current.secret_ref)?;
-    if !source_probe_matches(&source, &current)
-        || current_api_key.as_deref() != Some(api_key.as_str())
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "source changed while its models were being refreshed",
-        )
-        .into());
-    }
-
-    let discovery = match discovery {
-        Ok(discovery) => discovery,
-        Err(error) => {
-            // A transient discovery failure must not erase the last confirmed
-            // catalog. Keep routing on that snapshot and surface the error so
-            // the next refresh can recover it.
-            return persist_source_discovery_failure(state, current, &error).await;
-        }
-    };
-    let resolved_base_url = discovery.resolved_base_url.clone();
-    let runtime_changed = resolved_base_url
-        .as_deref()
-        .is_some_and(|base_url| current.base_url != base_url)
-        || current.models != discovery.models
-        || current.protocol_bindings != discovery.protocol_bindings
-        || current.detected_model_prices != discovery.detected_model_prices;
-    let mut updated = current;
-    if let Some(base_url) = resolved_base_url {
-        updated.base_url = base_url;
-    }
-    updated.models = discovery.models;
-    updated.protocol_bindings = discovery.protocol_bindings;
-    updated.detected_model_prices = discovery.detected_model_prices;
-    updated.last_test_at = Some(Utc::now().to_rfc3339());
-    updated.last_test_status = Some("ok".into());
-    updated.last_error = None;
-    updated.normalize();
-    updated
-        .normalize_protocol_bindings()
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
-    let (old_sources, old_keys) = current_records(state)?;
-    state.store()?.upsert_source(updated.clone())?;
-    if runtime_changed {
-        sync_records_or_rollback(state, old_sources, old_keys).await?;
-    }
-    if refresh_mode.refreshes_active_catalog() {
-        refresh_active_catalog_after_source_update(state, source_id, refresh_mode).await;
-    }
-    Ok(updated)
-}
-
-async fn refresh_active_catalog_after_source_update(
-    state: &DesktopState,
-    source_id: &str,
-    refresh_mode: SourceRefreshMode,
-) {
-    if !refresh_mode.refreshes_active_catalog() {
-        return;
-    }
-    if let Some(runtime) = state.gateway.runtime().await {
-        runtime
-            .refresh_source_model_metadata_for_source(source_id)
-            .await;
-    }
-    let catalog_result = super::profiles::refresh_active_codex_catalog(state).await;
-    record_catalog_refresh_result(state, &catalog_result);
-}
-
-/// Records a transient discovery failure without destroying the last known
-/// model catalog. The catalog is stale, but remains usable for routing.
-async fn persist_source_discovery_failure(
-    state: &DesktopState,
-    mut source: ProviderSourceRecord,
-    error: &LocalPoolError,
-) -> CommandResult<ProviderSourceRecord> {
-    source.last_test_at = Some(Utc::now().to_rfc3339());
-    source.last_test_status = Some("error".into());
-    source.last_error = Some(error.to_string());
-    state.store()?.upsert_source(source.clone())?;
-    Ok(source)
+    crate::local_pool::refresh::sources::request_models(&state, &source_id, false)
+        .await
+        .map_err(Into::into)
 }
 
 fn source_probe_matches(before: &ProviderSourceRecord, current: &ProviderSourceRecord) -> bool {
@@ -608,7 +599,20 @@ fn source_probe_matches(before: &ProviderSourceRecord, current: &ProviderSourceR
         && before.secret_ref == current.secret_ref
         && before.wire_api == current.wire_api
         && before.protocol_bindings == current.protocol_bindings
+        && before.protocol_config == current.protocol_config
         && before.models == current.models
+}
+
+fn source_dispatch_configuration_changed(
+    previous: &ProviderSourceRecord,
+    next: &ProviderSourceRecord,
+) -> bool {
+    !source_probe_matches(previous, next)
+        || previous.enabled != next.enabled
+        || previous.in_pool != next.in_pool
+        || previous.draining != next.draining
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
 }
 
 fn source_runtime_policy_compatible(
@@ -643,19 +647,12 @@ fn source_catalog_visibility_changed(
 #[tauri::command]
 pub async fn get_local_source_stats(
     source_id: String,
+    force: Option<bool>,
     state: State<'_, DesktopState>,
 ) -> CommandResult<SourceProviderStats> {
-    let source = state
-        .store()?
-        .source(&source_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    let api_key = secret_store::load(&source.secret_ref)?
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    ensure_not_gateway_self_source(&state, &source.base_url)?;
-    fetch_source_provider_stats(&source.base_url, &api_key)
+    crate::local_pool::refresh::sources::request_stats(&state, &source_id, force.unwrap_or(false))
         .await
-        .map_err(|message| LocalPoolError::new(ErrorCode::GatewayUnavailable, message).into())
+        .map_err(Into::into)
 }
 
 pub(crate) fn validate_source_record(
@@ -700,7 +697,10 @@ fn detected_prices_for_upstream(
     }
 }
 
-fn ensure_not_gateway_self_source(state: &DesktopState, base_url: &str) -> LocalResult<()> {
+pub(in crate::local_pool) fn ensure_not_gateway_self_source(
+    state: &DesktopState,
+    base_url: &str,
+) -> LocalResult<()> {
     let gateway = state.store()?.gateway().clone();
     let gateway_base_url = format!("http://{}:{}/v1", gateway.client_host, gateway.port);
     if source_points_to_gateway(base_url, &gateway_base_url) {
@@ -781,6 +781,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["model-a".into()],
             allowed_models: Vec::new(),
@@ -810,12 +811,12 @@ mod tests {
         }];
 
         source.normalize();
-        source.normalize_protocol_bindings().unwrap();
+        source.validate_protocol_bindings().unwrap();
         assert!(source.validate_protocol_bindings().is_ok());
     }
 
     #[test]
-    fn source_wide_catalog_binding_remains_automatic_after_normalization() {
+    fn source_wide_catalog_binding_is_preserved_when_validated() {
         let mut source = source_record();
         source.protocol_bindings = vec![SourceProtocolBinding {
             wire_api: WireApi::Responses,
@@ -825,7 +826,7 @@ mod tests {
             model_ids: Vec::new(),
         }];
 
-        source.normalize_protocol_bindings().unwrap();
+        source.validate_protocol_bindings().unwrap();
 
         assert!(source.protocol_bindings[0].model_ids.is_empty());
         assert_eq!(
@@ -935,7 +936,7 @@ mod tests {
         ];
         source.models = vec!["claude-native".into(), "gpt-native".into()];
 
-        source.normalize_protocol_bindings().unwrap();
+        source.validate_protocol_bindings().unwrap();
 
         assert_eq!(source.wire_api, WireApi::Responses);
         assert!(!source
@@ -960,12 +961,23 @@ mod tests {
     }
 
     #[test]
-    fn on_demand_source_refresh_preserves_manual_catalogs_but_rebuilds_active_catalog() {
-        assert!(!SourceRefreshMode::OnDemand.replaces_manual_catalog());
-        assert!(SourceRefreshMode::OnDemand.refreshes_active_catalog());
-        assert!(SourceRefreshMode::Manual.replaces_manual_catalog());
-        assert!(SourceRefreshMode::Manual.refreshes_active_catalog());
-        assert!(!SourceRefreshMode::Background.refreshes_active_catalog());
+    fn source_dispatch_fence_only_tracks_permission_and_transport_edits() {
+        let before = source_record();
+        let mut current = before.clone();
+        current.priority += 1;
+        current.weight += 1;
+        current.name.push_str(" renamed");
+        assert!(!source_dispatch_configuration_changed(&before, &current));
+
+        let mut current = before.clone();
+        current.in_pool = !current.in_pool;
+        assert!(source_dispatch_configuration_changed(&before, &current));
+        let mut current = before.clone();
+        current.base_url = "https://another.example.test/v1".into();
+        assert!(source_dispatch_configuration_changed(&before, &current));
+        let mut current = before.clone();
+        current.allowed_models.push("model-b".into());
+        assert!(source_dispatch_configuration_changed(&before, &current));
     }
 
     #[test]

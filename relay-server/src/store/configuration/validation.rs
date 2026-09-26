@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     is_valid_model_id, normalize_image_base_model, normalize_model_ids,
     normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, normalize_subscription_plan_order,
-    protocol::ConfigurationPresetSettings,
+    normalize_model_service_tier_overrides, protocol::ConfigurationPresetSettings,
 };
 
 const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
@@ -13,16 +12,15 @@ pub(super) fn validate_configuration_settings(
     settings: &ConfigurationPresetSettings,
 ) -> Result<(), String> {
     validate_quota_request_timeout(settings.quota.request_timeout_seconds)?;
-    validate_routing_policy(
-        settings.routing.max_retry_candidates,
-        settings.routing.cooldown_after_failures,
-    )?;
-    if normalize_subscription_plan_order(settings.routing.subscription_plan_order.clone())
-        .map_err(str::to_string)?
-        != settings.routing.subscription_plan_order
-        || normalize_image_base_model(settings.routing.image_base_model.clone())
-            .map_err(|error| error.to_string())?
-            != settings.routing.image_base_model
+    validate_routing_policy(settings.routing.max_retry_candidates)?;
+    if let Some(policy) = &settings.routing.tool_policy {
+        if &policy.clone().normalized().map_err(str::to_string)? != policy {
+            return Err("tool policy is not normalized".to_string());
+        }
+    }
+    if normalize_image_base_model(settings.routing.image_base_model.clone())
+        .map_err(|error| error.to_string())?
+        != settings.routing.image_base_model
         || normalize_validated_model_ids(settings.hidden_models.clone())? != settings.hidden_models
         || normalize_model_price_overrides(settings.model_price_overrides.clone())?
             != settings.model_price_overrides
@@ -81,15 +79,9 @@ pub(super) fn validate_quota_request_timeout(request_timeout_seconds: u64) -> Re
     Ok(())
 }
 
-pub(super) fn validate_routing_policy(
-    max_retry_candidates: u8,
-    cooldown_after_failures: u8,
-) -> Result<(), String> {
+pub(super) fn validate_routing_policy(max_retry_candidates: u8) -> Result<(), String> {
     if !(1..=8).contains(&max_retry_candidates) {
         return Err("max retry candidates is invalid".to_string());
-    }
-    if !(1..=8).contains(&cooldown_after_failures) {
-        return Err("cooldown after failures is invalid".to_string());
     }
     Ok(())
 }

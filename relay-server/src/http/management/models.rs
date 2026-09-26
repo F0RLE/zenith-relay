@@ -1,14 +1,17 @@
 use super::{runtime_error, store_error, ManagementError};
-use crate::state::AppState;
+use crate::state::{AppState, ServerAccountRecord, SourceRecord};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+use zenith_relay_core::error_codes;
 use zenith_relay_core::{
-    is_valid_model_id, model_supports_fast_service_tier, normalize_model_reasoning_allowed_levels,
-    protocol::RuntimeStateSnapshot, reasoning_policy_key, ApiModelPriceOverride,
-    DefaultServiceTier,
+    protocol::{
+        canonical_pool_model_id, complete_model_display_order, update_model_reasoning_policy,
+        ModelPolicyError, RuntimeStateSnapshot,
+    },
+    ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -63,7 +66,7 @@ pub async fn set_model_enabled(
     Json(input): Json<SetModelEnabledInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = canonical_model_id(&snapshot, &input.model_id)?;
+    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
     let old_hidden = state.store.hidden_models().map_err(store_error)?;
     let mut hidden = old_hidden.clone();
     hidden.retain(|model| !model.eq_ignore_ascii_case(&canonical));
@@ -103,9 +106,9 @@ pub async fn set_model_price(
         input.cache_write_1h_micro_usd_per_million,
         input.output_micro_usd_per_million,
     )
-    .map_err(|message| ManagementError::validation("model_price_invalid", message))?;
+    .map_err(|message| ManagementError::validation(error_codes::MODEL_PRICE_INVALID, message))?;
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
+    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?.to_ascii_lowercase();
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
     let mut overrides = previous_overrides.clone();
     if let Some(price) = price {
@@ -148,11 +151,17 @@ pub async fn set_model_service_tier(
     Json(input): Json<SetModelServiceTierInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = canonical_model_id(&snapshot, &input.model_id)?;
-    if !model_supports_fast_service_tier(&canonical) {
+    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
+    let runtime = state.runtime().map_err(runtime_error)?;
+    if input.service_tier != DefaultServiceTier::Standard
+        && !snapshot.gateway.models.iter().any(|model| {
+            model.id.eq_ignore_ascii_case(&canonical)
+                && model.speed_tiers.contains(&input.service_tier)
+        })
+    {
         return Err(ManagementError::validation(
-            "model_service_tier_unsupported",
-            "request speed is available only for OpenAI models",
+            error_codes::MODEL_SERVICE_TIER_UNSUPPORTED,
+            "requested service tier is not available under the Relay model-family policy",
         ));
     }
     let previous = state
@@ -169,7 +178,7 @@ pub async fn set_model_service_tier(
         .store
         .set_model_service_tier_overrides(next.clone())
         .map_err(store_error)?;
-    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+    if let Some(runtime) = runtime {
         if let Err(error) = runtime.set_model_service_tier_overrides(next) {
             state
                 .store
@@ -185,38 +194,22 @@ pub async fn set_model_order(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelOrderInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
     let snapshot = state.snapshot().map_err(store_error)?;
-    let current = snapshot
-        .gateway
-        .models
-        .iter()
-        .map(|model| (model.id.to_ascii_lowercase(), model.id.clone()))
-        .collect::<BTreeMap<_, _>>();
-    if input.model_ids.len() != current.len() {
-        return Err(ManagementError::validation(
-            "model_order_invalid",
-            "model order must contain every current pool model exactly once",
-        ));
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut order = Vec::with_capacity(input.model_ids.len());
-    for requested in input.model_ids {
-        let key = requested.trim().to_ascii_lowercase();
-        let Some(canonical) = current.get(&key) else {
-            return Err(ManagementError::not_found(
-                "model_not_found",
-                "pool model not found",
-            ));
-        };
-        if !seen.insert(key) {
-            return Err(ManagementError::validation(
-                "model_order_invalid",
-                "model order contains duplicates",
-            ));
-        }
-        order.push(canonical.clone());
-    }
+    let sources = state.store.sources().map_err(store_error)?;
+    let accounts = state.store.accounts().map_err(store_error)?;
     let previous = state.store.model_display_order().map_err(store_error)?;
+    let order = complete_model_display_order(
+        snapshot
+            .gateway
+            .models
+            .iter()
+            .map(|model| &model.id)
+            .chain(configured_pool_model_ids(&sources, &accounts)),
+        &input.model_ids,
+        &previous,
+    )
+    .map_err(model_policy_error)?;
     if previous == order {
         return Ok(Json(snapshot));
     }
@@ -235,17 +228,7 @@ pub async fn set_model_reasoning(
     Json(input): Json<SetModelReasoningInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
-    let policy_key = reasoning_policy_key(&canonical);
-    let mut normalized_allowed_levels =
-        normalize_model_reasoning_allowed_levels(BTreeMap::from([(
-            policy_key.clone(),
-            input.allowed_levels,
-        )]))
-        .map_err(|message| ManagementError::validation("reasoning_levels_invalid", message))?;
-    let allowed_levels = normalized_allowed_levels
-        .remove(&policy_key)
-        .unwrap_or_default();
+    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?.to_ascii_lowercase();
     let runtime = state.runtime().map_err(runtime_error)?;
 
     let previous = state
@@ -253,10 +236,9 @@ pub async fn set_model_reasoning(
         .model_reasoning_allowed_levels()
         .map_err(store_error)?;
     let mut configured = previous.clone();
-    configured.remove(&canonical);
-    // Keep an explicit empty override so the user can disable every
-    // provider-reported mode without losing that choice on the next refresh.
-    configured.insert(policy_key, allowed_levels);
+    update_model_reasoning_policy(&mut configured, &canonical, input.allowed_levels).map_err(
+        |message| ManagementError::validation(error_codes::REASONING_LEVELS_INVALID, message),
+    )?;
     if configured == previous {
         return Ok(Json(snapshot));
     }
@@ -271,7 +253,7 @@ pub async fn set_model_reasoning(
                 .set_model_reasoning_allowed_levels(previous)
                 .map_err(|rollback| {
                     ManagementError::internal(
-                        "model_reasoning_recovery_failed",
+                        error_codes::MODEL_REASONING_RECOVERY_FAILED,
                         format!("{error}; failed to restore model reasoning levels: {rollback}"),
                     )
                 })?;
@@ -282,21 +264,54 @@ pub async fn set_model_reasoning(
 }
 
 fn canonical_model_id(
+    state: &AppState,
     snapshot: &RuntimeStateSnapshot,
     requested: &str,
 ) -> Result<String, ManagementError> {
-    let requested = requested.trim();
-    if !is_valid_model_id(requested) {
-        return Err(ManagementError::validation(
-            "model_id_invalid",
-            "model id is invalid",
-        ));
+    match canonical_pool_model_id(
+        snapshot.gateway.models.iter().map(|model| &model.id),
+        requested,
+    ) {
+        Ok(model) => return Ok(model.to_string()),
+        Err(ModelPolicyError::NotFound) => {}
+        Err(error) => return Err(model_policy_error(error)),
     }
-    snapshot
-        .gateway
-        .models
+    let sources = state.store.sources().map_err(store_error)?;
+    let accounts = state.store.accounts().map_err(store_error)?;
+    canonical_pool_model_id(configured_pool_model_ids(&sources, &accounts), requested)
+        .map(str::to_owned)
+        .map_err(model_policy_error)
+}
+
+/// Read the editable model inventory from configured pool members so actions
+/// remain usable even with old or incomplete runtime projections.
+fn configured_pool_model_ids<'a>(
+    sources: &'a [SourceRecord],
+    accounts: &'a [ServerAccountRecord],
+) -> impl Iterator<Item = &'a String> {
+    let source_models = sources
         .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.clone())
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))
+        .filter(|source| source.in_pool)
+        .flat_map(|source| {
+            source.models.iter().chain(
+                source
+                    .protocol_bindings
+                    .iter()
+                    .flat_map(|binding| &binding.model_ids),
+            )
+        });
+    let account_models = accounts
+        .iter()
+        .filter(|account| account.in_pool)
+        .flat_map(ServerAccountRecord::effective_models);
+    source_models.chain(account_models)
+}
+
+fn model_policy_error(error: ModelPolicyError) -> ManagementError {
+    match error {
+        ModelPolicyError::NotFound => ManagementError::not_found(error.code(), error.to_string()),
+        ModelPolicyError::InvalidId | ModelPolicyError::DuplicateOrderEntry => {
+            ManagementError::validation(error.code(), error.to_string())
+        }
+    }
 }

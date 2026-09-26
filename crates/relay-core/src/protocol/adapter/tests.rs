@@ -25,6 +25,7 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
     let request = json!({
         "model": "alias",
         "input": "inspect",
+        "reasoning": {"effort": "high", "summary": "auto"},
         "tools": [{
             "type": "computer_use_preview",
             "name": "PowerShell",
@@ -48,11 +49,134 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
 
     assert!(prepared.is_passthrough());
     assert_eq!(prepared.upstream_body()["model"], "resolved-model");
+    assert_eq!(prepared.upstream_body()["reasoning"], request["reasoning"]);
     assert_eq!(prepared.upstream_body()["tools"], request["tools"]);
     assert!(prepared
         .translate_response_bytes(br#"{}"#)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn native_context_management_remains_client_owned() {
+    let request = json!({
+        "model": "alias",
+        "input": "hello",
+        "context_management": [{"type": "compaction", "compact_threshold": 1000}]
+    });
+
+    let responses = SourceAdapter::Native
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &request,
+            model: "resolved-model",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            previous: None,
+            response_scope: "responses-route",
+            response_id_seed: "request-context-management",
+        })
+        .unwrap();
+    assert_eq!(
+        responses.upstream_body()["context_management"],
+        request["context_management"]
+    );
+
+    for wire_api in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        let prepared = SourceAdapter::Native
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: wire_api,
+                request: &request,
+                model: "resolved-model",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                previous: None,
+                response_scope: "non-responses-route",
+                response_id_seed: "request-context-management",
+            })
+            .unwrap();
+        assert_eq!(
+            prepared.upstream_body()["context_management"],
+            request["context_management"]
+        );
+    }
+}
+
+#[test]
+fn response_bridges_reject_context_management_before_translation() {
+    let request = json!({
+        "model": "alias",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "context_management": [{"type": "compaction", "compact_threshold": 1000}]
+    });
+
+    for adapter in [
+        SourceAdapter::ResponsesToChatCompletions,
+        SourceAdapter::ResponsesToMessages,
+        SourceAdapter::ResponsesToGemini,
+    ] {
+        let error = adapter
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &request,
+                model: "resolved-model",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: Default::default(),
+                previous: None,
+                response_scope: "bridge-route",
+                response_id_seed: "request-context-management",
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "adapter_compaction_unsupported");
+        assert!(error.is_route_incompatible());
+    }
+}
+
+#[test]
+fn compaction_history_requires_native_responses_without_mutating_input() {
+    for kind in ["compaction", "compaction_summary"] {
+        for input in [
+            json!([{ "type": kind, "encrypted_content": "opaque-fixture" }]),
+            json!({ "type": kind, "encrypted_content": "opaque-fixture" }),
+        ] {
+            let request = json!({"model": "alias", "input": input});
+            let original = request.clone();
+            for adapter in [
+                SourceAdapter::Native,
+                SourceAdapter::ResponsesToChatCompletions,
+                SourceAdapter::ResponsesToMessages,
+                SourceAdapter::ResponsesToGemini,
+            ] {
+                let result = adapter.prepare_request(AdapterRequestContext {
+                    client_wire_api: WireApi::Responses,
+                    request: &request,
+                    model: "resolved-model",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
+                    previous: None,
+                    response_scope: "compaction-route",
+                    response_id_seed: "compaction-request",
+                });
+                match result {
+                    Ok(prepared) => {
+                        assert_eq!(adapter, SourceAdapter::Native);
+                        assert_eq!(prepared.upstream_body()["input"], original["input"]);
+                    }
+                    Err(error) => {
+                        assert_ne!(adapter, SourceAdapter::Native);
+                        assert_eq!(error.code(), "adapter_compaction_unsupported");
+                        assert!(error.is_route_incompatible());
+                        assert!(!error.is_upstream_failure());
+                    }
+                }
+                assert_eq!(request, original);
+            }
+        }
+    }
 }
 
 #[test]
@@ -351,6 +475,7 @@ fn messages_bridge_preserves_custom_tool_call_and_output_shapes() {
         first,
         &json!({
             "id": "msg_custom",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_custom",
@@ -417,6 +542,7 @@ fn messages_bridge_converts_multimodal_function_output_to_anthropic_blocks() {
         first,
         &json!({
             "id": "msg_image",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_image",
@@ -477,6 +603,7 @@ fn messages_bridge_keeps_regular_function_output_arrays_as_json_text() {
         first,
         &json!({
             "id": "msg_json_output",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_json_output",
@@ -523,6 +650,7 @@ fn messages_bridge_rejects_invalid_tool_output_image_data() {
         first,
         &json!({
             "id": "msg_invalid_image",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_invalid_image",
@@ -573,6 +701,7 @@ fn messages_bridge_rejects_non_text_custom_tool_output() {
         first,
         &json!({
             "id": "msg_custom_output",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_custom_output",
@@ -654,6 +783,7 @@ fn messages_bridge_rejects_an_upstream_tool_that_was_not_declared() {
         prepared,
         &json!({
             "id": "msg_unknown_tool",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_unknown",
@@ -680,6 +810,7 @@ fn messages_bridge_preserves_text_and_tool_output_order() {
         prepared,
         &json!({
             "id": "msg_ordered",
+            "stop_reason": "tool_use",
             "content": [
                 {"type": "text", "text": "before"},
                 {"type": "tool_use", "id": "tool_ordered", "name": "run_command", "input": {"command": "pwd"}},
@@ -709,6 +840,7 @@ fn messages_bridge_rejects_tool_result_for_an_unknown_call() {
         first,
         &json!({
             "id": "msg_01",
+            "stop_reason": "tool_use",
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_01",
@@ -779,8 +911,8 @@ fn messages_bridge_maps_case_insensitive_reasoning_only_when_binding_supports_it
 }
 
 #[test]
-fn messages_bridge_omits_hosted_tools_without_rejecting_the_request() {
-    let prepared = prepare_responses_to_messages(
+fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
+    let error = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
             "input": "hello",
@@ -792,14 +924,13 @@ fn messages_bridge_omits_hosted_tools_without_rejecting_the_request() {
         MessagesReasoningMode::Disabled,
         None,
     )
-    .unwrap();
-    assert!(prepared.upstream_body().get("tools").is_none());
-    assert!(prepared.upstream_body().get("tool_choice").is_none());
+    .unwrap_err();
+    assert_eq!(error.code(), "adapter_tool_unsupported");
 }
 
 #[test]
-fn messages_bridge_keeps_client_tools_when_hosted_tools_are_also_present() {
-    let prepared = prepare_responses_to_messages(
+fn messages_bridge_rejects_mixed_hosted_and_client_tools_before_sending_the_request() {
+    let error = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
             "input": "inspect",
@@ -817,15 +948,8 @@ fn messages_bridge_keeps_client_tools_when_hosted_tools_are_also_present() {
         MessagesReasoningMode::Disabled,
         None,
     )
-    .unwrap();
-
-    assert_eq!(
-        prepared.upstream_body()["tools"],
-        json!([{
-            "name": "run_command",
-            "input_schema": {"type": "object"}
-        }])
-    );
+    .unwrap_err();
+    assert_eq!(error.code(), "adapter_tool_unsupported");
 }
 
 #[test]
@@ -957,6 +1081,7 @@ fn scoped_bridge_ids_keep_same_upstream_id_isolated_between_routes() {
     .unwrap();
     let upstream = json!({
         "id": "msg_same",
+        "stop_reason": "end_turn",
         "content": [{"type": "text", "text": "ok"}]
     });
     let first = translate_messages_response(first, &upstream).unwrap();
@@ -971,6 +1096,88 @@ fn scoped_bridge_ids_keep_same_upstream_id_isolated_between_routes() {
         second.response_body["output"][0]["id"],
         format!("msg_{}", second.response_id)
     );
+}
+
+#[test]
+fn messages_bridge_preserves_output_limit_and_rejects_unknown_terminal_reason() {
+    let request = || {
+        prepare_responses_to_messages(
+            &request(Value::String("continue".to_string())),
+            "claude-test",
+            false,
+            MessagesReasoningMode::Disabled,
+            None,
+        )
+        .unwrap()
+    };
+    let limited = translate_messages_response(
+        request(),
+        &json!({"id":"msg_limited","stop_reason":"max_tokens","content":[{"type":"text","text":"partial"}]}),
+    )
+    .unwrap();
+    assert_eq!(limited.response_body["status"], "incomplete");
+    assert_eq!(
+        limited.response_body["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    for reason in [None, Some("pause_turn")] {
+        let mut upstream = json!({"id":"msg_unknown","content":[{"type":"text","text":"partial"}]});
+        if let Some(reason) = reason {
+            upstream["stop_reason"] = reason.into();
+        }
+        assert_eq!(
+            translate_messages_response(request(), &upstream)
+                .unwrap_err()
+                .code(),
+            "adapter_upstream_response_invalid"
+        );
+    }
+}
+
+#[test]
+fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
+    let make_request = |stream| {
+        prepare_responses_to_messages(
+            &request(Value::String("hello".to_string())),
+            "claude-test",
+            stream,
+            MessagesReasoningMode::Disabled,
+            None,
+        )
+        .unwrap()
+    };
+    let json = translate_messages_response(
+        make_request(false),
+        &json!({"id":"msg_empty_refusal","stop_reason":"refusal","content":[]}),
+    )
+    .unwrap();
+    assert_eq!(json.response_body["status"], "incomplete");
+    assert_eq!(json.response_body["output"], json!([]));
+    assert_eq!(
+        json.response_body["incomplete_details"]["reason"],
+        "content_filter"
+    );
+
+    let mut stream = MessagesStreamBridge::new(make_request(true));
+    for event in [
+        json!({"type":"message_start","message":{"id":"msg_empty_refusal","usage":{"input_tokens":2}}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}),
+        json!({"type":"message_stop"}),
+    ] {
+        stream.push(format!("data: {event}\n\n").as_bytes());
+    }
+    let completed = stream.completed().expect("empty refusal should complete");
+    assert_eq!(completed.response_body["status"], "incomplete");
+    assert_eq!(completed.response_body["output"], json!([]));
+    assert_eq!(
+        completed.response_body["incomplete_details"]["reason"],
+        "content_filter"
+    );
+    let events = std::iter::from_fn(|| stream.pop_output())
+        .map(|chunk| String::from_utf8(chunk).unwrap())
+        .collect::<String>();
+    assert!(events.contains("response.incomplete"));
+    assert!(!events.contains("response.failed"));
 }
 
 #[test]
@@ -1002,6 +1209,9 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta",
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
 
 event: message_stop
 data: {"type":"message_stop"}
@@ -1048,6 +1258,8 @@ data: {"type":"content_block_start","index":2,"content_block":{"type":"text"}}
 data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"after"}}
 
 data: {"type":"content_block_stop","index":2}
+
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
 
 data: {"type":"message_stop"}
 
@@ -1170,6 +1382,8 @@ data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text
 
 data: {"type":"content_block_stop","index":1}
 
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
 data: {"type":"message_stop"}
 
 "#,
@@ -1228,7 +1442,7 @@ fn native_responses_replay_materializes_tool_turn_without_protocol_conversion() 
     assert_eq!(replayed["stream"], false);
     assert!(replayed.get("previous_response_id").is_none());
     assert_eq!(replayed["max_output_tokens"], 128);
-    assert_eq!(replayed["tools"], initial["tools"]);
+    assert!(replayed.get("tools").is_none());
     let input = replayed["input"]
         .as_array()
         .expect("replayed input is an array");
@@ -1237,6 +1451,60 @@ fn native_responses_replay_materializes_tool_turn_without_protocol_conversion() 
     assert_eq!(input[0]["content"][0]["text"], "inspect the workspace");
     assert_eq!(input[1], upstream["output"][0]);
     assert_eq!(input[2], continuation["input"][0]);
+}
+
+#[test]
+fn native_responses_replay_preserves_current_turn_options() {
+    let initial = json!({
+        "model": "gpt-test",
+        "input": "first",
+        "text": {"format": {"type": "text"}},
+        "prompt_cache_key": "old-cache",
+        "metadata": {"turn": "first"},
+        "instructions": "Use the first-turn format",
+        "type": "response.create",
+        "stream_id": "old-lane",
+        "generate": false,
+        "max_output_tokens": 1
+    });
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &initial,
+        "gpt-test",
+        &json!({"id": "resp_first", "output": []}),
+    )
+    .unwrap();
+    let continuation = json!({
+        "model": "alias",
+        "previous_response_id": "resp_first",
+        "input": "second",
+        "text": {"format": {"type": "json_object"}},
+        "context_management": [{"type": "compaction", "compact_threshold": 1000}],
+        "prompt_cache_key": "new-cache",
+        "prompt_cache_retention": "24h",
+        "metadata": null,
+        "provider_extension": {"value": true}
+    });
+    let replayed = replay
+        .replay_request(&continuation, "gpt-test", true)
+        .unwrap();
+    for (key, value) in continuation.as_object().unwrap() {
+        if !matches!(key.as_str(), "model" | "input" | "previous_response_id") {
+            assert_eq!(replayed.get(key), Some(value), "lost current option: {key}");
+        }
+    }
+    assert_eq!(replayed["model"], "gpt-test");
+    assert_eq!(replayed["stream"], true);
+    assert!(replayed.get("previous_response_id").is_none());
+    for key in [
+        "instructions",
+        "type",
+        "stream_id",
+        "generate",
+        "max_output_tokens",
+    ] {
+        assert!(replayed.get(key).is_none(), "inherited old option: {key}");
+    }
+    assert_eq!(replayed["input"].as_array().unwrap().len(), 2);
 }
 
 #[test]
@@ -1423,6 +1691,77 @@ fn native_responses_replay_store_is_route_scoped_bounded_and_expiring() {
     assert!(store
         .get("key-a", "resp_store_02", "route-a", 112)
         .is_none());
+}
+
+#[test]
+fn native_replay_does_not_store_an_unresolved_previous_response_reference() {
+    let request = json!({
+        "model": "alias",
+        "input": "continue",
+        "previous_response_id": "resp_missing"
+    });
+    let upstream = json!({"id": "resp_next", "output": []});
+    assert!(NativeResponsesReplayState::from_response(&request, "gpt-test", &upstream).is_none());
+}
+
+#[test]
+fn native_replay_rejects_provider_managed_history() {
+    let upstream = json!({"id": "resp_next", "output": []});
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &json!({"input": "first"}),
+        "gpt-test",
+        &upstream,
+    )
+    .unwrap();
+    for request in [
+        json!({"input": "continue", "conversation": "conv_external"}),
+        json!({"input": "continue", "conversation": {"id": "conv_external"}}),
+        json!({"input": [{"type": "item_reference", "id": "msg_external"}]}),
+        json!({"input": [{"id": "msg_external"}]}),
+    ] {
+        assert!(
+            NativeResponsesReplayState::from_response(&request, "gpt-test", &upstream).is_none(),
+            "provider-managed history cannot become a portable replay"
+        );
+        assert!(replay.replay_request(&request, "gpt-test", false).is_err());
+    }
+}
+
+#[test]
+fn native_replay_requires_the_matching_tool_call_for_every_output() {
+    let call =
+        json!({"type":"function_call", "call_id":"call_1", "name":"lookup", "arguments":"{}"});
+    let output = json!({"type":"function_call_output", "call_id":"call_1", "output":"value"});
+    let completed = json!({"id":"resp_complete", "output":[]});
+    for input in [
+        json!([output]),
+        json!([output, call]),
+        json!([call, {"type":"custom_tool_call_output", "call_id":"call_1", "output":"value"}]),
+        json!([call, output, output]),
+    ] {
+        assert!(NativeResponsesReplayState::from_response(
+            &json!({"input":input}),
+            "model",
+            &completed
+        )
+        .is_none());
+    }
+    assert!(NativeResponsesReplayState::from_response(
+        &json!({"input":[call, output]}),
+        "model",
+        &completed
+    )
+    .is_some());
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &json!({"input":"start"}),
+        "model",
+        &json!({"id":"resp_call", "output":[call]}),
+    )
+    .unwrap();
+    assert!(replay
+        .replay_request(&json!({"input":[output]}), "model", false)
+        .is_ok());
+    assert!(replay.replay_request(&json!({"input":[output, {"type":"function_call_output", "call_id":"missing", "output":"value"}]}), "model", false).is_err());
 }
 
 #[test]

@@ -21,6 +21,7 @@ use crate::local_pool::state::DesktopState;
 use std::time::Duration;
 use uuid::Uuid;
 use zenith_relay_core::accounts::{parse_import, ParsedImportItem};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     CodexModelsClient, CodexQuotaClient, QuotaRefreshOutcome,
 };
@@ -75,11 +76,12 @@ pub(crate) async fn stage_returned_remote_account(
         true,
         true,
         &configured_models,
+        state.account_check_url(),
     )
     .await
     .map_err(|error| {
         LocalPoolError::new(
-            if error.code == "recovery_required" {
+            if error.code == error_codes::RECOVERY_REQUIRED {
                 ErrorCode::RecoveryRequired
             } else {
                 ErrorCode::InvalidState
@@ -110,14 +112,27 @@ pub(super) async fn import_account_item(
     discover_models: bool,
     probe_quota: bool,
     configured_models: &[String],
+    account_check_endpoint: &url::Url,
 ) -> ItemResult<(LocalAccountRecord, AccountQuotaOutcome)> {
     ensure_account_import_item(&item)?;
+    let item_hash = crate::diagnostics::hash_identifier(&item.item_id);
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "item_processing_started",
+        &[("item", item_hash.clone())],
+    );
     let issued_at_ms = current_time_ms();
     let item_label = item.label.clone();
+    let imported_tags = item.tags.clone();
     let item_priority = item.priority;
     let settings = state
         .store()
-        .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::ACCOUNT_STORE_FAILED,
+                "account store is unavailable",
+            )
+        })?
         .gateway()
         .clone();
     let common_proxy = common_proxy_config(&settings).map_err(proxy_item_error)?;
@@ -131,11 +146,17 @@ pub(super) async fn import_account_item(
         context.subscription_active_until_ms,
         import_proxy,
         settings.quota_request_timeout_seconds,
+        account_check_endpoint,
     )
     .await?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "credentials_resolved",
+        &[("item", item_hash.clone())],
+    );
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
         ImportItemError::new(
-            "provider_account_id_missing",
+            error_codes::PROVIDER_ACCOUNT_ID_MISSING,
             "ChatGPT account id is missing from imported credentials",
         )
     })?;
@@ -189,7 +210,7 @@ pub(super) async fn import_account_item(
     let proxy = effective_proxy_config(&settings, &credentials).map_err(proxy_item_error)?;
     let provider_account_id = credentials.provider_account_id().ok_or_else(|| {
         ImportItemError::new(
-            "provider_account_id_missing",
+            error_codes::PROVIDER_ACCOUNT_ID_MISSING,
             "ChatGPT account id is missing from imported credentials",
         )
     })?;
@@ -198,13 +219,15 @@ pub(super) async fn import_account_item(
         .is_none_or(|agent| agent.task_id().is_some());
     let discovered_models = if discover_models && identity_is_registered {
         let client = CodexModelsClient::new_with_proxy(proxy.as_ref()).map_err(model_item_error)?;
+        let client_version =
+            zenith_relay_core::providers::chatgpt::configured_codex_client_version();
         let models = client
             .discover_authorized(
                 credentials
                     .authorization(issued_at_ms)
                     .map_err(credential_item_error)?,
                 provider_account_id,
-                zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
+                &client_version,
             )
             .await
             .map_err(model_item_error)?;
@@ -240,7 +263,12 @@ pub(super) async fn import_account_item(
         priority.unwrap_or_default(),
         issued_at_ms,
     )
-    .map_err(|_| ImportItemError::new("invalid_account", "imported account record is invalid"))?;
+    .map_err(|_| {
+        ImportItemError::new(
+            error_codes::INVALID_ACCOUNT,
+            "imported account record is invalid",
+        )
+    })?;
     account.discovered_models = discovered_models.or_else(|| {
         existing_account
             .as_ref()
@@ -261,8 +289,18 @@ pub(super) async fn import_account_item(
     if existing_account.is_none() && !item_label.trim().is_empty() {
         account.account.label = item_label;
     }
-    validate_label(&account.account.label)
-        .map_err(|_| ImportItemError::new("invalid_label", "imported account label is invalid"))?;
+    // Existing account metadata is authoritative. Imported tags initialize a
+    // new account only, so re-importing a credential cannot erase local tags
+    // selected for automation or operator notes.
+    if existing_account.is_none() {
+        account.account.tags = imported_tags;
+    }
+    validate_label(&account.account.label).map_err(|_| {
+        ImportItemError::new(
+            error_codes::INVALID_LABEL,
+            "imported account label is invalid",
+        )
+    })?;
     account.normalize();
     let quota = if probe_quota && identity_is_registered {
         probe_import_quota(
@@ -275,6 +313,11 @@ pub(super) async fn import_account_item(
     } else {
         AccountQuotaOutcome::Skipped
     };
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "persist_ready",
+        &[("item", item_hash.clone())],
+    );
     persist_imported_account(
         state,
         credential_store,
@@ -283,6 +326,11 @@ pub(super) async fn import_account_item(
         account.clone(),
     )
     .await?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "item_processing_completed",
+        &[("item", item_hash)],
+    );
     Ok((account, quota))
 }
 
@@ -322,7 +370,7 @@ async fn probe_import_quota(
 ) -> AccountQuotaOutcome {
     let now_ms = current_time_ms();
     let Some(provider_account_id) = credentials.provider_account_id() else {
-        let failure = QuotaRefreshFailure::new("invalid_chatgpt_account_id", false);
+        let failure = QuotaRefreshFailure::new(error_codes::INVALID_CHATGPT_ACCOUNT_ID, false);
         apply_quota_failure(account, &failure, now_ms);
         return AccountQuotaOutcome::Failed {
             code: failure.code,
@@ -346,7 +394,8 @@ async fn probe_import_quota(
             match credentials.authorization(now_ms) {
                 Ok(authorization) => authorization,
                 Err(_) => {
-                    let failure = QuotaRefreshFailure::new("invalid_access_token", false);
+                    let failure =
+                        QuotaRefreshFailure::new(error_codes::INVALID_ACCESS_TOKEN, false);
                     apply_quota_failure(account, &failure, now_ms);
                     return AccountQuotaOutcome::Failed {
                         code: failure.code,
@@ -364,7 +413,7 @@ async fn probe_import_quota(
     {
         Ok(outcome) => outcome,
         Err(_) => QuotaRefreshOutcome::Failed {
-            failure: QuotaRefreshFailure::new("quota_timeout", true),
+            failure: QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true),
             subscription: account.account.subscription.clone(),
         },
     };

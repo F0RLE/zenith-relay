@@ -1,8 +1,14 @@
+use crate::error_codes;
 use crate::{Error, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+};
+
+use super::{MAX_ACCOUNT_TAGS, MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS};
 
 pub const MAX_ACCOUNT_EXPORT_ITEMS: usize = 256;
 pub const MAX_ACCOUNT_EXPORT_BYTES: usize = 4 * 1024 * 1024;
@@ -114,6 +120,8 @@ pub struct AccountExportCredential {
     pub created_at_ms: u64,
     pub priority: i32,
     pub enabled: bool,
+    /// User metadata preserved by the Cockpit portable format.
+    pub tags: BTreeSet<String>,
 }
 
 impl fmt::Debug for AccountExportCredential {
@@ -136,6 +144,7 @@ impl fmt::Debug for AccountExportCredential {
             .field("issued_at_ms", &self.issued_at_ms)
             .field("priority", &self.priority)
             .field("enabled", &self.enabled)
+            .field("tag_count", &self.tags.len())
             .finish()
     }
 }
@@ -358,7 +367,7 @@ fn cpa_account_value(values: &AccountExportValues<'_>) -> Value {
         "access_token": account.access_token,
         "refresh_token": account.refresh_token.as_deref().unwrap_or(""),
         "last_refresh": values.exported_at,
-        "expired": values.expires_at,
+        error_codes::EXPIRED: values.expires_at,
         "disabled": (!account.enabled).then_some(true),
     })
 }
@@ -388,7 +397,7 @@ fn sub2api_account_value(values: &AccountExportValues<'_>) -> Value {
 
 fn cockpit_account_value(values: &AccountExportValues<'_>) -> Value {
     let account = values.account;
-    json!({
+    let mut value = json!({
         "type": "codex",
         "id_token": account.id_token,
         "access_token": account.access_token,
@@ -396,8 +405,55 @@ fn cockpit_account_value(values: &AccountExportValues<'_>) -> Value {
         "account_id": account.account_id,
         "last_refresh": values.exported_at,
         "email": account.email,
-        "expired": values.expires_at,
-    })
+        error_codes::EXPIRED: values.expires_at,
+    });
+    if let Value::Object(object) = &mut value {
+        // Cockpit v1.3.52+ uses account_name/tags as portable, optional
+        // metadata. Relay has no account-folder model, so only copy the
+        // metadata that has a native representation here.
+        object.insert(
+            "account_name".to_string(),
+            Value::String(account.label.clone()),
+        );
+        let tags = safe_cockpit_tags(account);
+        if !tags.is_empty() {
+            object.insert("tags".to_string(), json!(tags));
+        }
+    }
+    value
+}
+
+fn safe_cockpit_tags(account: &AccountExportCredential) -> Vec<String> {
+    let sensitive_values = [
+        Some(account.access_token.as_str()),
+        account.refresh_token.as_deref(),
+        account.id_token.as_deref(),
+        account.email.as_deref(),
+        account.account_id.as_deref(),
+        account.user_id.as_deref(),
+        account.organization_id.as_deref(),
+    ];
+    let mut tags = Vec::new();
+    let mut total_bytes = 0usize;
+    for raw in account.tags.iter().take(MAX_ACCOUNT_TAGS) {
+        let tag = raw.trim();
+        if tag.is_empty()
+            || tag.chars().count() > MAX_ACCOUNT_TAG_CHARS
+            || tag.chars().any(char::is_control)
+            || sensitive_values
+                .iter()
+                .flatten()
+                .filter(|sensitive| sensitive.len() >= 4)
+                .any(|sensitive| tag.contains(sensitive))
+            || tags.iter().any(|existing| existing == tag)
+            || total_bytes.saturating_add(tag.len()) > MAX_ACCOUNT_TAG_BYTES
+        {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(tag.len());
+        tags.push(tag.to_string());
+    }
+    tags
 }
 
 fn nine_router_account_value(values: &AccountExportValues<'_>) -> Value {
@@ -621,6 +677,27 @@ mod tests {
     }
 
     #[test]
+    fn cockpit_export_carries_safe_name_and_tags() {
+        let document = build_account_export(
+            AccountExportFormat::Cockpit,
+            &[fixture()],
+            1_788_000_000_000,
+            None,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&document.content).unwrap();
+
+        assert_eq!(value["account_name"], "Synthetic Plus");
+        assert_eq!(value["tags"], json!(["team", "work"]));
+
+        let parsed = crate::accounts::parse_import(&document.content, None, &[]).unwrap();
+        assert_eq!(
+            parsed.items[0].tags,
+            BTreeSet::from(["team".to_string(), "work".to_string()])
+        );
+    }
+
+    #[test]
     fn single_exports_are_objects_and_bulk_exports_are_arrays() {
         for format in AccountExportFormat::all().into_iter().filter(|format| {
             !matches!(
@@ -806,6 +883,7 @@ mod tests {
             created_at_ms: 1_787_000_000_000,
             priority: 10,
             enabled: true,
+            tags: BTreeSet::from(["work".into(), "team".into()]),
         }
     }
 }

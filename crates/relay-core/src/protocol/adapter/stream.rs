@@ -14,6 +14,52 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub enum AdapterStreamBridge {
     Messages(Box<MessagesStreamBridge>),
     Gemini(Box<GeminiStreamBridge>),
+    Translated(Box<super::translation::TranslationStream>),
+}
+
+impl AdapterStreamBridge {
+    pub fn push(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Messages(bridge) => bridge.push(bytes),
+            Self::Gemini(bridge) => bridge.push(bytes),
+            Self::Translated(bridge) => bridge.push(bytes),
+        }
+    }
+    pub fn finish(&mut self) {
+        match self {
+            Self::Messages(bridge) => bridge.finish(),
+            Self::Gemini(bridge) => bridge.finish(),
+            Self::Translated(bridge) => bridge.finish(),
+        }
+    }
+    pub fn pop_output(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Self::Messages(bridge) => bridge.pop_output(),
+            Self::Gemini(bridge) => bridge.pop_output(),
+            Self::Translated(bridge) => bridge.pop_output(),
+        }
+    }
+    pub fn completed(&self) -> Option<&MessagesBridgeResponse> {
+        match self {
+            Self::Messages(bridge) => bridge.completed(),
+            Self::Gemini(bridge) => bridge.completed(),
+            Self::Translated(bridge) => bridge.completed(),
+        }
+    }
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Messages(bridge) => bridge.is_terminal(),
+            Self::Gemini(bridge) => bridge.is_terminal(),
+            Self::Translated(bridge) => bridge.is_terminal(),
+        }
+    }
+    pub fn take_upstream_error(&mut self) -> Option<Value> {
+        match self {
+            Self::Messages(bridge) => bridge.take_upstream_error(),
+            Self::Gemini(bridge) => bridge.take_upstream_error(),
+            Self::Translated(bridge) => bridge.take_upstream_error(),
+        }
+    }
 }
 
 /// Incremental Messages-to-Responses state machine. It owns no network
@@ -29,6 +75,7 @@ pub struct MessagesStreamBridge {
     response_id: Option<String>,
     upstream_id: Option<String>,
     usage: Option<Value>,
+    stop_reason: Option<String>,
     text_output: Option<TextOutput>,
     next_output_index: usize,
     next_message_index: usize,
@@ -91,6 +138,7 @@ impl MessagesStreamBridge {
             response_id: None,
             upstream_id: None,
             usage: None,
+            stop_reason: None,
             text_output: None,
             next_output_index: 0,
             next_message_index: 0,
@@ -163,8 +211,22 @@ impl MessagesStreamBridge {
             "content_block_delta" => self.handle_block_delta(&value),
             "content_block_stop" => self.handle_block_stop(&value),
             "message_delta" => {
+                if let Some(reason) = value
+                    .pointer("/delta/stop_reason")
+                    .filter(|reason| !reason.is_null())
+                {
+                    let Some(reason) = reason.as_str() else {
+                        self.fail(AdapterError::upstream_stream_invalid());
+                        return;
+                    };
+                    if super::messages::messages_response_terminal(Some(reason)).is_err() {
+                        self.fail(AdapterError::upstream_stream_invalid());
+                        return;
+                    }
+                    self.stop_reason = Some(reason.to_owned());
+                }
                 if let Some(usage) = value.get("usage") {
-                    self.usage = Some(usage.clone());
+                    merge_usage(&mut self.usage, usage);
                 }
             }
             "message_stop" => self.complete(),
@@ -207,7 +269,7 @@ impl MessagesStreamBridge {
         self.upstream_id = Some(upstream_id.to_string());
         self.response_id = Some(response_id.clone());
         if let Some(usage) = message.get("usage") {
-            self.usage = Some(usage.clone());
+            merge_usage(&mut self.usage, usage);
         }
         self.frame(
             "response.created",
@@ -884,7 +946,8 @@ impl MessagesStreamBridge {
 
     fn complete(&mut self) {
         if self.response_id.is_none()
-            || self.assistant_blocks.is_empty()
+            || (self.assistant_blocks.is_empty()
+                && !matches!(self.stop_reason.as_deref(), Some("refusal" | "max_tokens")))
             || self.closed_blocks.len() != self.assistant_blocks.len()
         {
             self.fail(AdapterError::upstream_stream_invalid());
@@ -893,6 +956,14 @@ impl MessagesStreamBridge {
         if !self.finish_active_text_output() {
             return;
         }
+        let (status, incomplete_reason) =
+            match super::messages::messages_response_terminal(self.stop_reason.as_deref()) {
+                Ok(terminal) => terminal,
+                Err(_) => {
+                    self.fail(AdapterError::upstream_stream_invalid());
+                    return;
+                }
+            };
         let Some(request) = self.request.take() else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -942,8 +1013,11 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        let (mut output, _) = match responses_output_from_messages_content(&content, &request.state)
-        {
+        let (mut output, _) = match responses_output_from_messages_content(
+            &content,
+            &request.state,
+            status == "incomplete",
+        ) {
             Ok(value) => value,
             Err(error) => {
                 self.fail(error);
@@ -963,7 +1037,8 @@ impl MessagesStreamBridge {
             "id": response_id,
             "object": "response",
             "created_at": 0,
-            "status": "completed",
+            "status": status,
+            "incomplete_details": incomplete_reason.map(|reason| json!({"reason": reason})),
             "model": self.model,
             "output": output,
             "usage": responses_usage(self.usage.as_ref()),
@@ -975,10 +1050,15 @@ impl MessagesStreamBridge {
             response_id,
             continuation,
         });
+        let event = if status == "completed" {
+            "response.completed"
+        } else {
+            "response.incomplete"
+        };
         self.frame(
-            "response.completed",
+            event,
             json!({
-                "type": "response.completed",
+                "type": event,
                 "response": response_body,
             }),
         );
@@ -1015,18 +1095,47 @@ impl MessagesStreamBridge {
     }
 
     fn frame(&mut self, event: &str, payload: Value) {
-        let Ok(payload) = serde_json::to_vec(&payload) else {
+        if !push_sse_frame(&mut self.output, event, &payload) {
             self.terminal = true;
-            return;
-        };
-        let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
-        frame.extend_from_slice(b"event: ");
-        frame.extend_from_slice(event.as_bytes());
-        frame.extend_from_slice(b"\ndata: ");
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(b"\n\n");
-        self.output.push_back(frame);
+        }
     }
+}
+
+fn merge_usage(target: &mut Option<Value>, next: &Value) {
+    let Some(next_object) = next.as_object() else {
+        *target = Some(next.clone());
+        return;
+    };
+    let Some(previous) = target.as_mut().and_then(Value::as_object_mut) else {
+        *target = Some(next.clone());
+        return;
+    };
+    for (key, value) in next_object {
+        if let (Some(previous_object), Some(next_object)) = (
+            previous.get_mut(key).and_then(Value::as_object_mut),
+            value.as_object(),
+        ) {
+            for (nested_key, nested_value) in next_object {
+                previous_object.insert(nested_key.clone(), nested_value.clone());
+            }
+        } else {
+            previous.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn push_sse_frame(output: &mut VecDeque<Vec<u8>>, event: &str, payload: &Value) -> bool {
+    let Ok(payload) = serde_json::to_vec(payload) else {
+        return false;
+    };
+    let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
+    frame.extend_from_slice(b"event: ");
+    frame.extend_from_slice(event.as_bytes());
+    frame.extend_from_slice(b"\ndata: ");
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(b"\n\n");
+    output.push_back(frame);
+    true
 }
 
 /// Incrementally converts Gemini's native `streamGenerateContent` SSE frames
@@ -1165,6 +1274,17 @@ impl GeminiStreamBridge {
         if let Some(usage) = value.get("usageMetadata") {
             self.usage = Some(usage.clone());
         }
+        match super::gemini::prompt_blocked(&value) {
+            Ok(true) => {
+                self.complete_prompt_block(&value);
+                return;
+            }
+            Err(()) => {
+                self.fail(AdapterError::upstream_stream_invalid());
+                return;
+            }
+            Ok(false) => {}
+        }
         let Some(candidate) = value
             .get("candidates")
             .and_then(Value::as_array)
@@ -1176,11 +1296,8 @@ impl GeminiStreamBridge {
             .pointer("/content/parts")
             .and_then(Value::as_array)
         else {
-            if candidate
-                .get("finishReason")
-                .and_then(Value::as_str)
-                .is_some()
-            {
+            if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+                self.finish_reason = Some(reason.to_string());
                 self.finished_upstream = true;
                 self.complete();
             } else {
@@ -1282,6 +1399,44 @@ impl GeminiStreamBridge {
             self.finished_upstream = true;
             self.complete();
         }
+    }
+
+    fn complete_prompt_block(&mut self, upstream: &Value) {
+        // A blocked prompt has no model output. Do not turn a partial stream
+        // that already emitted data into a successful filtered response.
+        if self.started
+            || !self.text.is_empty()
+            || !self.thinking.is_empty()
+            || !self.calls.is_empty()
+        {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
+        let mut upstream = upstream.clone();
+        if upstream.get("usageMetadata").is_none() {
+            if let Some(usage) = &self.usage {
+                upstream["usageMetadata"] = usage.clone();
+            }
+        }
+        let response =
+            match super::gemini::translate_gemini_response(self.request.clone(), &upstream) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            };
+        self.ensure_started();
+        self.frame(
+            "response.incomplete",
+            json!({"type":"response.incomplete","response":response.response_body}),
+        );
+        self.completed = Some(MessagesBridgeResponse {
+            response_body: response.response_body,
+            response_id: response.response_id,
+            continuation: response.continuation,
+        });
+        self.terminal = true;
     }
 
     fn ensure_started(&mut self) {
@@ -1532,12 +1687,20 @@ impl GeminiStreamBridge {
         if self.terminal {
             return;
         }
-        if !self.started
-            || (self.text.is_empty() && self.thinking.is_empty() && self.calls.is_empty())
+        let incomplete =
+            match super::gemini::candidate_incomplete_reason(self.finish_reason.as_deref()) {
+                Ok(reason) => reason.is_some(),
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            };
+        if self.text.is_empty() && self.thinking.is_empty() && self.calls.is_empty() && !incomplete
         {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
+        self.ensure_started();
         let mut parts = Vec::new();
         for item in &self.order {
             match item {
@@ -1603,9 +1766,14 @@ impl GeminiStreamBridge {
             response_id: response.response_id.clone(),
             continuation: response.continuation,
         });
+        let kind = if incomplete {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
         self.frame(
-            "response.completed",
-            json!({"type": "response.completed", "response": response.response_body}),
+            kind,
+            json!({"type": kind, "response": response.response_body}),
         );
         self.terminal = true;
     }
@@ -1636,23 +1804,14 @@ impl GeminiStreamBridge {
     }
 
     fn frame(&mut self, event: &str, payload: Value) {
-        let Ok(payload) = serde_json::to_vec(&payload) else {
+        if !push_sse_frame(&mut self.output, event, &payload) {
             self.terminal = true;
-            return;
-        };
-        let mut frame = Vec::with_capacity(event.len() + payload.len() + 20);
-        frame.extend_from_slice(b"event: ");
-        frame.extend_from_slice(event.as_bytes());
-        frame.extend_from_slice(b"\ndata: ");
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(b"\n\n");
-        self.output.push_back(frame);
+        }
     }
 }
 
 fn sse_done(event: &[u8]) -> bool {
-    event.split(|byte| *byte == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+    crate::protocol::sse_lines(event).any(|line| {
         line.strip_prefix(b"data:")
             .map(|value| value.trim_ascii() == b"[DONE]")
             .unwrap_or(false)
@@ -1667,25 +1826,14 @@ fn incremental_delta(previous: &str, incoming: &str) -> String {
 }
 
 fn parse_sse_data(event: &[u8]) -> Option<Value> {
-    let mut data = Vec::new();
-    for line in event.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(value) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push(b'\n');
-        }
-        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
-    }
+    let data = crate::protocol::sse_data(event);
     (!data.is_empty())
         .then(|| serde_json::from_slice(&data).ok())
         .flatten()
 }
 
 fn sse_event_has_data(event: &[u8]) -> bool {
-    event.split(|byte| *byte == b'\n').any(|line| {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+    crate::protocol::sse_lines(event).any(|line| {
         line.strip_prefix(b"data:")
             .is_some_and(|value| value.iter().any(|byte| !byte.is_ascii_whitespace()))
     })

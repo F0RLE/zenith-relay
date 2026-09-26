@@ -9,10 +9,13 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
+use reqwest::header::{ACCEPT, AUTHORIZATION};
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use url::{Host, Url};
 use zenith_relay_core::accounts::{
     combine_import_documents, parse_import, AccountAuthState, AccountHealthState, ImportAuthMode,
@@ -20,8 +23,12 @@ use zenith_relay_core::accounts::{
     ImportPreviewStatus, ImportQuotaStatus, ImportWarning, ImportWarningCode, ParsedImport,
     ParsedImportItem, MAX_IMPORT_ITEMS,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{valid_generated_id, AccountSummary};
-use zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms;
+use zenith_relay_core::providers::chatgpt::{
+    parse_subscription_timestamp_ms, resolve_account_check_account_id,
+    unverified_chatgpt_account_id_hints, AccountCheckIdentityError,
+};
 use zenith_relay_core::quota::{Subscription, SubscriptionInput};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -59,7 +66,8 @@ pub struct AccountImportInput {
     expires_at_ms: Option<u64>,
     plan_type: Option<String>,
     subscription_active_until_ms: Option<u64>,
-    chatgpt_account_id: String,
+    #[serde(default)]
+    chatgpt_account_id: Option<String>,
     responses_url: Option<String>,
     #[serde(default)]
     models: Vec<String>,
@@ -99,11 +107,11 @@ pub async fn preview_account_import(
     Json(input): Json<AccountImportInput>,
 ) -> Result<(StatusCode, Json<AccountImportPreview>), ManagementError> {
     cleanup_expired_imports(&state)?;
-    let preview = prepare_account_import(&state, input, None)?;
+    let preview = prepare_account_import(&state, input, None).await?;
     Ok((StatusCode::CREATED, Json(preview)))
 }
 
-fn prepare_account_import(
+async fn prepare_account_import(
     state: &AppState,
     input: AccountImportInput,
     batch_session_id: Option<&str>,
@@ -127,10 +135,13 @@ fn prepare_account_import(
         }
         .map_err(|_| {
             ManagementError::validation(
-                "agent_identity_invalid",
+                error_codes::AGENT_IDENTITY_INVALID,
                 "Agent Identity credential is invalid",
             )
         })?;
+        if !input.access_token.is_empty() {
+            validate_secret(&input.access_token, "access token")?;
+        }
     } else {
         validate_secret(&input.access_token, "access token")?;
     }
@@ -140,6 +151,18 @@ fn prepare_account_import(
     if let Some(value) = input.id_token.as_deref() {
         validate_secret(value, "ID token")?;
     }
+    let account_id_hints = imported_account_id_hints(
+        input.chatgpt_account_id.as_deref(),
+        input.id_token.as_deref(),
+        &input.access_token,
+    )?;
+    let chatgpt_account_id = if has_agent_identity && input.access_token.is_empty() {
+        account_id_hints.first().cloned().ok_or_else(|| {
+            validation_error("ChatGPT account id is required for Agent Identity imports")
+        })?
+    } else {
+        authenticate_import_account(state, &input.access_token, &account_id_hints).await?
+    };
     let label = redact_import_label(
         clean_label(&input.label, "account label")?,
         &[
@@ -147,7 +170,7 @@ fn prepare_account_import(
             input.refresh_token.as_deref(),
             input.id_token.as_deref(),
             input.agent_private_key.as_deref(),
-            Some(input.chatgpt_account_id.as_str()),
+            Some(chatgpt_account_id.as_str()),
         ],
     );
     let plan_type = input
@@ -161,13 +184,13 @@ fn prepare_account_import(
                     input.refresh_token.as_deref(),
                     input.id_token.as_deref(),
                     input.agent_private_key.as_deref(),
-                    Some(input.chatgpt_account_id.as_str()),
+                    Some(chatgpt_account_id.as_str()),
                 ],
             )
         })
         .map(str::to_string)
         .and_then(safe_plan_type);
-    let chatgpt_account_id = clean_identifier(&input.chatgpt_account_id, "account id")?;
+    let chatgpt_account_id = clean_identifier(&chatgpt_account_id, "account id")?;
     let responses_url = validate_account_responses_url(input.responses_url.as_deref())?;
     let identity_hint = identity_hint(&chatgpt_account_id);
     let duplicate_account = state
@@ -186,7 +209,10 @@ fn prepare_account_import(
         Some(record) => match state.vault.load(&record.secret_ref).map_err(vault_error)? {
             Some(value) => Some(serde_json::from_str::<AccountCredential>(&value).map_err(
                 |_| {
-                    ManagementError::internal("account_secret_invalid", "account secret is invalid")
+                    ManagementError::internal(
+                        error_codes::ACCOUNT_SECRET_INVALID,
+                        "account secret is invalid",
+                    )
                 },
             )?),
             None => None,
@@ -252,14 +278,17 @@ fn prepare_account_import(
         .save(
             &secret_ref,
             &serde_json::to_string(&credential).map_err(|_| {
-                ManagementError::internal("import_serialize", "import could not be prepared")
+                ManagementError::internal(
+                    error_codes::IMPORT_SERIALIZE,
+                    "import could not be prepared",
+                )
             })?,
         )
         .map_err(vault_error)?;
     let pending = PendingImport {
         id: session_id,
         preview_json: serde_json::to_string(&preview).map_err(|_| {
-            ManagementError::internal("preview_serialize", "preview could not be saved")
+            ManagementError::internal(error_codes::PREVIEW_SERIALIZE, "preview could not be saved")
         })?,
         secret_ref,
         created_at_ms: now_ms(),
@@ -353,41 +382,46 @@ pub async fn preview_account_batch_import(
     let mut rows = Vec::with_capacity(parsed.preview.rows.len());
     for preview_row in parsed.preview.rows {
         let row = match items.remove(&preview_row.item_id) {
-            Some(item) => match parsed_account_import_input(item, &preview_row)
-                .and_then(|input| prepare_account_import(&state, input, Some(&session_id)))
-            {
-                Ok(preview) => BatchImportRow {
-                    item_id: preview.session_id.clone(),
-                    label: preview.label,
-                    identity: preview.identity_hint,
-                    auth_mode: preview_row.auth_mode.as_str().to_string(),
-                    source_name: preview_row.source_name.clone(),
-                    quota_status: import_quota_status_name(preview_row.quota_status).to_string(),
-                    status: if preview.duplicate_account_id.is_some() {
-                        "existing".to_string()
-                    } else {
-                        "ready".to_string()
+            Some(item) => {
+                let prepared = match parsed_account_import_input(item, &preview_row) {
+                    Ok(input) => prepare_account_import(&state, input, Some(&session_id)).await,
+                    Err(error) => Err(error),
+                };
+                match prepared {
+                    Ok(preview) => BatchImportRow {
+                        item_id: preview.session_id.clone(),
+                        label: preview.label,
+                        identity: preview.identity_hint,
+                        auth_mode: preview_row.auth_mode.as_str().to_string(),
+                        source_name: preview_row.source_name.clone(),
+                        quota_status: import_quota_status_name(preview_row.quota_status)
+                            .to_string(),
+                        status: if preview.duplicate_account_id.is_some() {
+                            "existing".to_string()
+                        } else {
+                            "ready".to_string()
+                        },
+                        plan: preview.plan_type,
+                        default_selected: preview.duplicate_account_id.is_none(),
+                        selectable: true,
+                        existing: preview.duplicate_account_id.is_some(),
+                        warnings: preview_row
+                            .warnings
+                            .iter()
+                            .map(batch_import_warning)
+                            .collect(),
+                        error: None,
                     },
-                    plan: preview.plan_type,
-                    default_selected: preview.duplicate_account_id.is_none(),
-                    selectable: true,
-                    existing: preview.duplicate_account_id.is_some(),
-                    warnings: preview_row
-                        .warnings
-                        .iter()
-                        .map(batch_import_warning)
-                        .collect(),
-                    error: None,
-                },
-                Err(error) => invalid_shared_batch_row(
-                    preview_row.item_id,
-                    preview_row.label,
-                    preview_row.identity,
-                    preview_row.source_name,
-                    error.code,
-                    error.message,
-                ),
-            },
+                    Err(error) => invalid_shared_batch_row(
+                        preview_row.item_id,
+                        preview_row.label,
+                        preview_row.identity,
+                        preview_row.source_name,
+                        error.code,
+                        error.message,
+                    ),
+                }
+            }
             None => batch_preview_row(preview_row),
         };
         rows.push(row);
@@ -415,7 +449,7 @@ fn parse_batch_import_input(
         content.unwrap_or_default()
     } else if content.is_some() {
         return Err(ManagementError::validation(
-            "import_input_conflict",
+            error_codes::IMPORT_INPUT_CONFLICT,
             "paste content and file documents cannot be imported together",
         ));
     } else if input.documents.len() == 1 {
@@ -432,16 +466,11 @@ fn parsed_account_import_input(
 ) -> Result<AccountImportInput, ManagementError> {
     if preview.auth_mode == ImportAuthMode::ApiKey {
         return Err(ManagementError::validation(
-            "unsupported_value",
+            error_codes::UNSUPPORTED_VALUE,
             "API keys must be imported as API sources, not pool accounts",
         ));
     }
-    let account_id = item.account_id.clone().ok_or_else(|| {
-        ManagementError::validation(
-            "missing_account_id",
-            "account import requires an account id",
-        )
-    })?;
+    let account_id = item.account_id.clone();
     let secrets = item.secrets();
     Ok(AccountImportInput {
         label: item.label.clone(),
@@ -531,7 +560,7 @@ fn import_error(error: ImportError) -> ManagementError {
         ImportErrorCode::JsonTooDeep => "import_too_deep",
         ImportErrorCode::MalformedJson => "import_malformed",
         ImportErrorCode::TooManyItems => "import_item_count",
-        ImportErrorCode::UnsupportedBundleVersion => "unsupported_bundle_version",
+        ImportErrorCode::UnsupportedBundleVersion => error_codes::UNSUPPORTED_BUNDLE_VERSION,
     };
     ManagementError::validation(code, error.message)
 }
@@ -571,20 +600,20 @@ fn import_warning_code_name(value: ImportWarningCode) -> &'static str {
         ImportWarningCode::ProxiesIgnored => "proxies_ignored",
         ImportWarningCode::RefreshExchangeRequired => "refresh_exchange_required",
         ImportWarningCode::UnusedCredentialsIgnored => "unused_credentials_ignored",
-        ImportWarningCode::UnknownAuthMode => "unknown_auth_mode",
+        ImportWarningCode::UnknownAuthMode => error_codes::UNKNOWN_AUTH_MODE,
     }
 }
 
 fn import_issue_code_name(value: ImportIssueCode) -> &'static str {
     match value {
-        ImportIssueCode::AmbiguousCredentials => "ambiguous_credentials",
-        ImportIssueCode::DuplicateItem => "duplicate_item",
-        ImportIssueCode::InvalidCredentials => "invalid_credentials",
-        ImportIssueCode::MalformedJson => "malformed_json",
-        ImportIssueCode::MissingCredentials => "missing_credentials",
-        ImportIssueCode::QuotaProbeFailed => "quota_probe_failed",
-        ImportIssueCode::RefreshExchangeFailed => "refresh_exchange_failed",
-        ImportIssueCode::UnsupportedValue => "unsupported_value",
+        ImportIssueCode::AmbiguousCredentials => error_codes::AMBIGUOUS_CREDENTIALS,
+        ImportIssueCode::DuplicateItem => error_codes::DUPLICATE_ITEM,
+        ImportIssueCode::InvalidCredentials => error_codes::INVALID_CREDENTIALS,
+        ImportIssueCode::MalformedJson => error_codes::MALFORMED_JSON,
+        ImportIssueCode::MissingCredentials => error_codes::MISSING_CREDENTIALS,
+        ImportIssueCode::QuotaProbeFailed => error_codes::QUOTA_PROBE_FAILED,
+        ImportIssueCode::RefreshExchangeFailed => error_codes::REFRESH_EXCHANGE_FAILED,
+        ImportIssueCode::UnsupportedValue => error_codes::UNSUPPORTED_VALUE,
     }
 }
 
@@ -629,13 +658,13 @@ pub async fn confirm_account_batch_import(
 ) -> Result<Json<BatchImportConfirmResponse>, ManagementError> {
     if !valid_generated_id(&input.session_id, "batch_") {
         return Err(ManagementError::validation(
-            "import_session_invalid",
+            error_codes::IMPORT_SESSION_INVALID,
             "batch import session is invalid",
         ));
     }
     if input.selected_item_ids.is_empty() || input.selected_item_ids.len() > MAX_IMPORT_ITEMS {
         return Err(ManagementError::validation(
-            "import_selection_invalid",
+            error_codes::IMPORT_SELECTION_INVALID,
             format!("import selection must contain between 1 and {MAX_IMPORT_ITEMS} items"),
         ));
     }
@@ -716,7 +745,7 @@ async fn confirm_one_account_import(
 ) -> Result<ConfirmedAccountImport, ManagementError> {
     if !valid_generated_id(session_id, "import_") {
         return Err(ManagementError::validation(
-            "import_session_invalid",
+            error_codes::IMPORT_SESSION_INVALID,
             "account import session is invalid",
         ));
     }
@@ -725,26 +754,34 @@ async fn confirm_one_account_import(
         .pending_import(session_id)
         .map_err(store_error)?
         .ok_or_else(|| {
-            ManagementError::not_found("import_not_found", "import session not found")
+            ManagementError::not_found(error_codes::IMPORT_NOT_FOUND, "import session not found")
         })?;
     if now_ms().saturating_sub(pending.created_at_ms) > 30 * 60 * 1_000 {
         let _ = state.store.delete_pending_import(session_id);
         let _ = state.vault.delete(&pending.secret_ref);
         return Err(ManagementError::validation(
-            "import_expired",
+            error_codes::IMPORT_EXPIRED,
             "import session expired",
         ));
     }
     let preview: AccountImportPreview =
         serde_json::from_str(&pending.preview_json).map_err(|_| {
-            ManagementError::internal("preview_invalid", "stored import preview is invalid")
+            ManagementError::internal(
+                error_codes::PREVIEW_INVALID,
+                "stored import preview is invalid",
+            )
         })?;
     if preview.batch_session_id.as_deref() != batch_session_id {
         return Err(ManagementError::not_found(
-            "import_not_found",
+            error_codes::IMPORT_NOT_FOUND,
             "import session not found",
         ));
     }
+    // Serialize the credential switch with token persistence/preparation.
+    // Never hold this lock across metadata HTTP or a runtime rebuild.
+    let configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
+    let credential = state.account_credential_lock.lock().await;
     let existing = state
         .store
         .accounts()
@@ -829,23 +866,36 @@ async fn confirm_one_account_import(
             .as_ref()
             .is_some_and(|value| value.bypass_common_proxy),
     };
+    // A replacement login must close pending final dispatches before its
+    // durable reference changes. The build lock prevents another publication;
+    // this fence closes the still-live runtime through commit and replacement.
+    let previous_runtime = state.runtime().map_err(super::runtime_error)?;
+    let _dispatch_fence = previous_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.fence_candidate_dispatch(&record.id));
     let created = state
         .store
         .save_account_and_consume_pending_import(&record, session_id)
         .map_err(store_error)?;
+    state.token_authority.remove(&record.id);
+    if let Some(runtime) = previous_runtime.as_ref() {
+        runtime.remove_candidate(&record.id);
+    }
+    drop(credential);
+    drop(configuration);
+    // Publish the new incarnation before metadata HTTP. A build that captured
+    // the old login finished before our commit; newer builds wait for this one.
+    let rebuilt = build.rebuild(state).await.is_ok();
+    drop(build);
     if probe_metadata {
         match jobs::refresh_account_now(state, record.clone()).await {
             Ok(updated) => record = updated,
             Err(_) => {
-                record.health = AccountHealthState::Degraded;
-                record.last_error_code = Some("metadata_refresh_failed".to_string());
-                let _ = state.store.save_account(&record);
+                mark_import_failure(state, &record, "metadata_refresh_failed");
             }
         }
-    } else if state.rebuild_runtime().await.is_err() {
-        record.health = AccountHealthState::Degraded;
-        record.last_error_code = Some("runtime_rebuild_failed".to_string());
-        let _ = state.store.save_account(&record);
+    } else if !rebuilt {
+        mark_import_failure(state, &record, "runtime_rebuild_failed");
     }
     if let Some(previous) = existing {
         if previous.secret_ref != record.secret_ref {
@@ -858,6 +908,20 @@ async fn confirm_one_account_import(
     })
 }
 
+fn mark_import_failure(state: &AppState, imported: &ServerAccountRecord, code: &str) {
+    // A later import may already have installed another credential under the
+    // same account id. Never save the captured pre-HTTP record over it.
+    if let Ok((current, fence)) = state.store.account_refresh_scope(&imported.id) {
+        if current.secret_ref == imported.secret_ref {
+            let _ = state.store.apply_account_refresh(&fence, |record| {
+                record.health = AccountHealthState::Degraded;
+                record.last_error_code = Some(code.to_string());
+                Ok(())
+            });
+        }
+    }
+}
+
 fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {
     let cutoff = now_ms().saturating_sub(30 * 60 * 1_000);
     for secret_ref in state
@@ -868,6 +932,141 @@ fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {
         let _ = state.vault.delete(&secret_ref);
     }
     Ok(())
+}
+
+const MAX_ACCOUNT_CHECK_RESPONSE_BYTES: usize = 256 * 1024;
+
+fn imported_account_id_hints(
+    explicit_account_id: Option<&str>,
+    id_token: Option<&str>,
+    access_token: &str,
+) -> Result<Vec<String>, ManagementError> {
+    let mut hints = Vec::new();
+    if let Some(account_id) = explicit_account_id {
+        let account_id = clean_identifier(account_id, "account id")?;
+        push_account_id_hint(&mut hints, account_id);
+    }
+    for token in [id_token, (!access_token.is_empty()).then_some(access_token)]
+        .into_iter()
+        .flatten()
+    {
+        for account_id in unverified_chatgpt_account_id_hints(token).into_iter() {
+            push_account_id_hint(&mut hints, account_id);
+        }
+    }
+    if hints.len() > 1 {
+        return Err(ManagementError::validation(
+            error_codes::ACCOUNT_IDENTITY_CLAIM_CONFLICT,
+            "imported account identity claims do not agree",
+        ));
+    }
+    Ok(hints)
+}
+
+fn push_account_id_hint(hints: &mut Vec<String>, value: String) {
+    let value = value.trim();
+    if !value.is_empty()
+        && !hints
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(value))
+    {
+        hints.push(value.to_string());
+    }
+}
+
+async fn authenticate_import_account(
+    state: &AppState,
+    access_token: &str,
+    claimed_account_ids: &[String],
+) -> Result<String, ManagementError> {
+    let authorization = zenith_relay_core::providers::chatgpt::bearer_authorization(access_token)
+        .map_err(|_| {
+        ManagementError::validation(
+            error_codes::ACCESS_TOKEN_REJECTED,
+            "access token is invalid",
+        )
+    })?;
+    let http = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(20))
+        .user_agent("Zenith Relay Server")
+        .build()
+        .map_err(|_| {
+            ManagementError::validation(
+                error_codes::ACCOUNT_CHECK_UNAVAILABLE,
+                "ChatGPT account lookup client could not be created",
+            )
+        })?;
+    let (response, permit) = zenith_relay_core::scheduler::refresh::http::management_http_gate()
+        .send(
+            &http,
+            http.get(state.config.account_check_url.clone())
+                .header(AUTHORIZATION, authorization)
+                .header(ACCEPT, "application/json"),
+            zenith_relay_core::scheduler::refresh::http::HttpClass::Auth,
+        )
+        .await
+        .map_err(|_| {
+            ManagementError::validation(
+                error_codes::ACCOUNT_CHECK_FAILED,
+                "ChatGPT account lookup request failed",
+            )
+        })?;
+    let status = response.status();
+    let body = response.bytes().await.map_err(|_| {
+        ManagementError::validation(
+            error_codes::ACCOUNT_CHECK_FAILED,
+            "ChatGPT account lookup response could not be read",
+        )
+    })?;
+    drop(permit);
+    if body.len() > MAX_ACCOUNT_CHECK_RESPONSE_BYTES {
+        return Err(ManagementError::validation(
+            error_codes::ACCOUNT_CHECK_RESPONSE_TOO_LARGE,
+            "ChatGPT account lookup response was too large",
+        ));
+    }
+    if !status.is_success() {
+        let (code, message) = match status.as_u16() {
+            401 | 403 => (
+                error_codes::ACCESS_TOKEN_REJECTED,
+                "ChatGPT rejected the imported access token",
+            ),
+            429 => (
+                "account_check_rate_limited",
+                "ChatGPT rate limited the account lookup request",
+            ),
+            _ => (
+                error_codes::ACCOUNT_CHECK_FAILED,
+                "ChatGPT account lookup returned an unexpected status",
+            ),
+        };
+        return Err(ManagementError::validation(code, message));
+    }
+    let payload: Value = serde_json::from_slice(&body).map_err(|_| {
+        ManagementError::validation(
+            error_codes::ACCOUNT_CHECK_FAILED,
+            "ChatGPT account lookup returned invalid JSON",
+        )
+    })?;
+    let claimed_account_ids = claimed_account_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let account_id =
+        resolve_account_check_account_id(&payload, &claimed_account_ids).map_err(|error| {
+            match error {
+                AccountCheckIdentityError::Missing => ManagementError::validation(
+                    error_codes::PROVIDER_ACCOUNT_ID_MISSING,
+                    "ChatGPT account lookup did not return an account id",
+                ),
+                AccountCheckIdentityError::Mismatch => ManagementError::validation(
+                    error_codes::ACCOUNT_IDENTITY_MISMATCH,
+                    "imported account identity does not match the authenticated account",
+                ),
+            }
+        })?;
+    clean_identifier(&account_id, "account id")
 }
 
 fn safe_plan_type(value: String) -> Option<String> {
@@ -939,6 +1138,177 @@ fn nonempty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_batch_import_input, BatchImportPreviewInput};
+
+    #[tokio::test]
+    async fn import_and_delete_wait_for_old_build_before_changing_account_incarnation() {
+        use super::{confirm_one_account_import, AccountImportPreview};
+        use crate::{
+            config::Config,
+            state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
+            store::{PendingImport, Store, Vault},
+        };
+        use std::{sync::Arc, time::Duration};
+        use tempfile::TempDir;
+        use zenith_relay_core::accounts::{AccountAuthState, TokenSet};
+
+        let root = TempDir::new().unwrap();
+        let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        let state = AppState::new(config, store, vault).unwrap();
+        let old: ServerAccountRecord = serde_json::from_value(serde_json::json!({
+            "id": "synthetic", "label": "Synthetic", "identityHint": "synthetic",
+            "enabled": true, "inPool": true, "draining": false,
+            "sourceId": "openai_codex", "secretRef": "account:synthetic:old",
+            "authState": AccountAuthState::Active, "health": "healthy", "models": ["test"],
+            "allowedModels": [], "excludedModels": [], "priority": 0, "weight": 1,
+            "subscription": zenith_relay_core::quota::Subscription::default(),
+            "quota": zenith_relay_core::quota::QuotaSnapshot::default(),
+            "cooldowns": {}, "consecutiveFailures": 0
+        }))
+        .unwrap();
+        let credential = |access_token: &str, generation| AccountCredential {
+            access_token: access_token.into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: Some(now_ms() + 3_600_000),
+            issued_at_ms: now_ms(),
+            generation,
+            chatgpt_account_id: "synthetic-provider-account".into(),
+            responses_url: "https://provider.example.test/v1/responses".into(),
+            proxy_url: None,
+            agent_private_key: None,
+            agent_runtime_id: None,
+            agent_task_id: None,
+        };
+        state.store.save_account(&old).unwrap();
+        state
+            .vault
+            .save(
+                &old.secret_ref,
+                &serde_json::to_string(&credential("old-access", 7)).unwrap(),
+            )
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+        let old_runtime = state.runtime().unwrap().unwrap();
+        assert_eq!(
+            state
+                .token_authority
+                .tokens(&old.id)
+                .await
+                .unwrap()
+                .generation(),
+            7
+        );
+
+        let session_id = format!("import_{}", uuid::Uuid::new_v4().simple());
+        let new_ref = "account:synthetic:new";
+        let preview = AccountImportPreview {
+            session_id: session_id.clone(),
+            account_id: old.id.clone(),
+            duplicate_account_id: Some(old.id.clone()),
+            label: old.label.clone(),
+            identity_hint: old.identity_hint.clone(),
+            models: old.models.clone(),
+            auth_state: AccountAuthState::Active,
+            expires_at_ms: None,
+            plan_type: None,
+            subscription_active_until_ms: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            batch_session_id: None,
+        };
+        state
+            .vault
+            .save(
+                new_ref,
+                &serde_json::to_string(&credential("new-access", 0)).unwrap(),
+            )
+            .unwrap();
+        state
+            .store
+            .save_pending_import(&PendingImport {
+                id: session_id.clone(),
+                preview_json: serde_json::to_string(&preview).unwrap(),
+                secret_ref: new_ref.into(),
+                created_at_ms: now_ms(),
+            })
+            .unwrap();
+
+        let old_build = state.lock_runtime_rebuild().await;
+        let worker_state = state.clone();
+        let worker = tokio::spawn(async move {
+            confirm_one_account_import(&worker_state, &session_id, None, false, false).await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.store.account(&old.id).unwrap().unwrap().secret_ref,
+            old.secret_ref
+        );
+        assert!(!worker.is_finished());
+        // Complete a build using the old snapshot while the import is queued.
+        // Its publication must precede, not follow, the new login's commit.
+        old_build.rebuild(&state).await.unwrap();
+        assert_eq!(
+            state
+                .token_authority
+                .tokens(&old.id)
+                .await
+                .unwrap()
+                .generation(),
+            7
+        );
+        drop(old_build);
+
+        let confirmed = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed.account.secret_ref, new_ref);
+        assert_eq!(
+            state.store.account(&old.id).unwrap().unwrap().secret_ref,
+            new_ref
+        );
+        assert!(state.vault.load(&old.secret_ref).unwrap().is_none());
+        assert!(!Arc::ptr_eq(
+            &old_runtime,
+            &state.runtime().unwrap().unwrap()
+        ));
+        let current: TokenSet = state.token_authority.tokens(&old.id).await.unwrap();
+        assert_eq!(current.generation(), 0);
+        assert_eq!(current.access_token(), "new-access");
+
+        let active_build = state.lock_runtime_rebuild().await;
+        let delete_state = state.clone();
+        let account_id = old.id.clone();
+        let deletion = tokio::spawn(async move {
+            crate::http::management::accounts::delete_account(
+                axum::extract::State(delete_state),
+                axum::extract::Path(account_id),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(state.store.account(&old.id).unwrap().is_some());
+        assert!(!deletion.is_finished());
+        drop(active_build);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), deletion)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            axum::http::StatusCode::NO_CONTENT
+        );
+        assert!(state.store.account(&old.id).unwrap().is_none());
+        assert!(state.token_authority.tokens(&old.id).await.is_none());
+        assert!(state.runtime().unwrap().is_none());
+        state.shutdown_runtime().await.unwrap();
+        state.refresh.shutdown().await;
+    }
 
     #[test]
     fn batch_import_parses_raw_token_lines() {

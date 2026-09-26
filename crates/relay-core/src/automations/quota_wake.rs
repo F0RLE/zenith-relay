@@ -179,6 +179,16 @@ impl WakeAutomationState {
     pub fn history(&self) -> &VecDeque<WakeHistory> {
         &self.history
     }
+
+    /// Migrate a task's unfinished cycles without changing attempts, due times,
+    /// or completed history. Used when a host retires manual execution.
+    pub fn clear_task_confirmation_requirement(&mut self, task_id: &str) {
+        for cycle in &mut self.cycles {
+            if cycle.task_id == task_id && cycle.status != WakeCycleStatus::Completed {
+                cycle.requires_confirmation = false;
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

@@ -3,99 +3,206 @@ use crate::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
-use crate::catalog::source_reasoning_capabilities;
-use crate::{CandidateHealth, CandidateQuota, ToolUseDiagnostics, QUOTA_STALE_AFTER_MS};
-use axum::extract::State;
-use axum::routing::get;
-use axum::{Json, Router};
+use crate::{
+    CandidateHealth, CandidateQuota, CapabilityOrigin, CapabilityStatus, ModelEndpointCapability,
+    ToolUseDiagnostics, QUOTA_STALE_AFTER_MS,
+};
 use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 
-#[derive(Clone)]
-struct MetadataServerState {
-    response: serde_json::Value,
-    request_count: Arc<AtomicUsize>,
-    release: Option<Arc<AtomicBool>>,
+#[test]
+fn basis_points_headers_match_excel_client_contract() {
+    let headers = basis_points_headers("account-1");
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-client-host")
+            .unwrap(),
+        "office"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-office-host")
+            .unwrap(),
+        "Excel"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-office-platform")
+            .unwrap(),
+        "PC"
+    );
+    assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
+    assert_eq!(
+        headers.get("x-stainless-package-version").unwrap(),
+        "6.31.0"
+    );
+    assert_eq!(headers.get("x-stainless-retry-count").unwrap(), "0");
+    assert_eq!(
+        headers.get("x-stainless-runtime").unwrap(),
+        "browser:chrome"
+    );
+    assert!(headers
+        .get("x-openai-internal-basispoints-oiiice-host")
+        .is_none());
 }
 
-struct MetadataTestServer {
-    url: String,
-    request_count: Arc<AtomicUsize>,
-    task: JoinHandle<()>,
+#[test]
+fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    runtime.remember_codex_model_manifest("account-1", serde_json::json!({"models":[
+        {"slug":"gpt-test", "input_modalities":["text"], "supported_reasoning_levels":[{"effort":"high","description":"high"}]}
+    ]}), current_time_ms());
+    let capabilities = runtime.model_capabilities("gpt-test");
+    assert_eq!(capabilities.input_modalities, ["text", "image"]);
+    assert!(capabilities.reasoning_effort_levels.is_empty());
+    assert_eq!(capabilities.tool_call, Some(true));
 }
 
-impl Drop for MetadataTestServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+#[test]
+fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
+    let sources = [
+        ("messages", WireApi::Messages),
+        ("native", WireApi::Responses),
+    ]
+    .map(|(id, upstream)| {
+        let mut configured = RuntimeSource::unrestricted(source(id, "synthetic", &["test"]));
+        configured.protocol_config.capabilities = vec![ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: upstream,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: vec!["low".into(), "xhigh".into()],
+        }];
+        configured
+    });
+    let runtime = GatewayRuntime::from_pool(
+        sources.into(),
+        vec![RuntimeLocalKey {
+            source_ids: Some(vec!["messages".into()]),
+            ..RuntimeLocalKey::unrestricted(key("key", "synthetic-pool"))
+        }],
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    r#"{"test/test":{"reasoning":true,"reasoning_effort_levels":["low","xhigh"]}}"#,
+                )
+                .unwrap(),
+            )),
+            ..GatewayRuntimeOptions::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer synthetic-pool")))
+        .unwrap();
+    assert_eq!(
+        runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
+        ["low"]
+    );
+    assert_eq!(
+        runtime.client_reasoning_levels(&key, "test", WireApi::Messages),
+        ["low", "xhigh"]
+    );
+    runtime.update_key_scope(
+        "key",
+        CandidateScope {
+            source_ids: Some(BTreeSet::from(["native".into()])),
+            account_ids: None,
+            ..CandidateScope::default()
+        },
+    );
+    assert_eq!(
+        runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
+        ["low", "xhigh"]
+    );
+    assert!(runtime
+        .client_reasoning_levels(&key, "missing", WireApi::Responses)
+        .is_empty());
 }
 
-async fn metadata_models(State(state): State<MetadataServerState>) -> Json<serde_json::Value> {
-    state.request_count.fetch_add(1, AtomicOrdering::AcqRel);
-    if let Some(release) = state.release {
-        while !release.load(AtomicOrdering::Acquire) {
-            tokio::task::yield_now().await;
+#[test]
+fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
+    use crate::scheduler::CooldownReason;
+    let mut configured = RuntimeSource::unrestricted(source("multi", "synthetic", &["test"]));
+    configured.protocol_config.capabilities = vec![
+        ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: WireApi::Responses,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: Vec::new(),
+        },
+        ModelEndpointCapability {
+            model_id: "test".into(),
+            upstream_wire_api: WireApi::Messages,
+            status: CapabilityStatus::Declared,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: Vec::new(),
+        },
+    ];
+    let runtime = GatewayRuntime::from_pool(
+        vec![configured],
+        vec![RuntimeLocalKey::unrestricted(key("key", "synthetic-pool"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let route_upstreams = runtime
+        .source_candidate_bindings
+        .iter()
+        .filter(|(_, binding)| binding.source_id == "multi")
+        .map(|(id, binding)| {
+            (
+                id.clone(),
+                binding.adapter.upstream_protocol(binding.wire_api),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(route_upstreams.len(), WireApi::ALL.len());
+    let seed_upstream = route_upstreams
+        .iter()
+        .find(|(id, _)| id == "multi")
+        .map(|(_, upstream)| *upstream)
+        .unwrap();
+    assert!(route_upstreams
+        .iter()
+        .any(|(id, upstream)| id != "multi" && *upstream == seed_upstream));
+    assert!(route_upstreams
+        .iter()
+        .any(|(_, upstream)| *upstream != seed_upstream));
+    for (reason, scope, shared) in [
+        (CooldownReason::Mandatory, "test", false),
+        (CooldownReason::RateLimit, "test", true),
+        (CooldownReason::Mandatory, "*", true),
+    ] {
+        assert!(runtime.set_cooldown_with_reason_for_model_at(
+            "multi",
+            CooldownRequest {
+                scope,
+
+                retry_at_ms: 1000,
+                reason,
+            }
+        ));
+        let mut scheduler = runtime.lock_scheduler();
+        for (id, upstream) in &route_upstreams {
+            let cooled = scheduler
+                .candidate(id)
+                .unwrap()
+                .cooldowns
+                .contains_key(scope);
+            assert_eq!(cooled, shared || *upstream == seed_upstream, "{id}");
+            scheduler.clear_cooldown(id, scope);
         }
     }
-    Json(state.response)
-}
-
-async fn spawn_metadata_server(
-    response: serde_json::Value,
-    release: Option<Arc<AtomicBool>>,
-) -> MetadataTestServer {
-    let request_count = Arc::new(AtomicUsize::new(0));
-    let state = MetadataServerState {
-        response,
-        request_count: request_count.clone(),
-        release: release.clone(),
-    };
-    let app = Router::new()
-        .route("/v1/models", get(metadata_models))
-        .with_state(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    MetadataTestServer {
-        url: format!("http://{address}"),
-        request_count,
-        task,
-    }
-}
-
-fn runtime_for_metadata_server(server: &MetadataTestServer) -> GatewayRuntime {
-    let mut provider = source("source-1", "upstream-secret", &["provider/fable"]);
-    provider.base_url = format!("{}/v1", server.url);
-    GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(provider)],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap()
-}
-
-fn runtime_for_metadata_sources(server: &MetadataTestServer) -> GatewayRuntime {
-    let mut first = source("source-1", "upstream-secret", &["provider/fable"]);
-    first.base_url = format!("{}/v1", server.url);
-    let mut second = source("source-2", "upstream-secret", &["provider/ember"]);
-    second.base_url = format!("{}/v1", server.url);
-    GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(first),
-            RuntimeSource::unrestricted(second),
-        ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap()
 }
 
 struct NeverRefresh;
@@ -189,7 +296,7 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
 }
 
 #[test]
-fn messages_source_models_stay_on_the_explicit_messages_route() {
+fn messages_source_models_are_automatically_available_to_responses_clients() {
     let mut provider = source("anthropic-source", "provider-secret", &["claude-test"]);
     provider.wire_api = WireApi::Messages;
     let runtime = GatewayRuntime::from_pool(
@@ -203,7 +310,7 @@ fn messages_source_models_stay_on_the_explicit_messages_route() {
     assert_eq!(
         runtime
             .visible_models_for_secret("local-secret", &[WireApi::Responses], current_time_ms(),),
-        Vec::<String>::new()
+        ["claude-test"]
     );
     assert_eq!(
         runtime.visible_models_for_secret("local-secret", &[WireApi::Messages], current_time_ms(),),
@@ -216,7 +323,7 @@ fn messages_source_models_stay_on_the_explicit_messages_route() {
         .map(|route| route.candidate_id)
         .collect::<Vec<_>>();
     assert!(route_ids.iter().any(|id| id == "anthropic-source"));
-    assert!(!route_ids
+    assert!(route_ids
         .iter()
         .any(|id| id == "anthropic-source::responses_to_messages"));
 }
@@ -227,6 +334,7 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
         source_id: "openai-codex".to_string(),
         chatgpt_account_id: "account-1".to_string(),
         responses_url: "https://example.test/v1/responses".to_string(),
+        basis_points_enabled: false,
         models: vec!["gpt-test".to_string()],
         enabled: true,
         draining: false,
@@ -248,9 +356,575 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
 }
 
 fn quota_runtime(snapshot: QuotaSnapshot) -> GatewayRuntime {
+    quota_runtime_with_agent(snapshot, None)
+}
+
+fn quota_runtime_with_agent(
+    snapshot: QuotaSnapshot,
+    agent: Option<AgentIdentityCredential>,
+) -> GatewayRuntime {
     GatewayRuntime::from_mixed_pool(
         Vec::new(),
         vec![quota_account(snapshot)],
+        vec![RuntimeMixedLocalKey {
+            key: key("key-1", "local-secret"),
+            enabled: true,
+            source_ids: None,
+            account_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: None,
+        }],
+        RuntimeChatGptAuth {
+            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
+            refresh_adapter: Arc::new(NeverRefresh),
+            persistence_adapter: Arc::new(NoopPersistence),
+            refresh_skew_ms: 60_000,
+            agent_identities: agent
+                .into_iter()
+                .map(|agent| ("account-1".to_string(), agent))
+                .collect(),
+        },
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap()
+}
+
+#[test]
+fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
+    let oauth = quota_runtime(QuotaSnapshot::default());
+    let key = oauth.authenticate_secret("local-secret").unwrap();
+    let transport = || {
+        oauth
+            .executor_route(
+                "account-1",
+                "gpt-test",
+                &key.scope_snapshot(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap()
+            .account_transport
+    };
+    assert_eq!(transport(), AccountTransport::NativeResponses);
+    oauth.set_basis_points_enabled(true);
+    assert_eq!(transport(), AccountTransport::ExcelBasisPoints);
+    oauth.set_basis_points_enabled(false);
+    assert_eq!(transport(), AccountTransport::NativeResponses);
+
+    let agent = AgentIdentityCredential::new(
+        "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
+        "synthetic-runtime".into(),
+        "synthetic-task".into(),
+    )
+    .unwrap();
+    let identity_runtime = quota_runtime_with_agent(QuotaSnapshot::default(), Some(agent));
+    let key = identity_runtime
+        .authenticate_secret("local-secret")
+        .unwrap();
+    identity_runtime.set_basis_points_enabled(true);
+    assert_eq!(
+        identity_runtime
+            .executor_route(
+                "account-1",
+                "gpt-test",
+                &key.scope_snapshot(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap()
+            .account_transport,
+        AccountTransport::NativeResponses,
+    );
+}
+
+#[tokio::test]
+async fn prepared_oauth_replacement_cannot_dispatch_an_old_lease() {
+    use crate::accounts::{AccountAuthState, TokenSet};
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let first = TokenSet::access_only("synthetic-first", None, 1).unwrap();
+    authority
+        .register("account-1", first.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+
+    // Reuse the visible token fields and generation: a credential snapshot is
+    // not a slot incarnation. Neither HTTP nor WebSocket may debit a stale send.
+    authority
+        .register("account-1", first, AccountAuthState::Active)
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    assert!(budget.attempted_members().is_empty());
+    assert_eq!(
+        lease.begin_rotation_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+}
+
+#[tokio::test]
+async fn removed_and_readded_oauth_slot_rejects_pending_http_and_websocket_dispatch() {
+    use crate::accounts::{AccountAuthState, TokenSet};
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let token = TokenSet::access_only("synthetic-access", None, 1).unwrap();
+    authority
+        .register("account-1", token.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    assert!(authority.remove("account-1"));
+    authority
+        .register("account-1", token, AccountAuthState::Active)
+        .await
+        .unwrap();
+    let replacement = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.credential_fingerprint(),
+        replacement.credential_fingerprint()
+    );
+    assert_ne!(prepared.incarnation(), replacement.incarnation());
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(
+        lease.begin_rotation_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    assert!(budget.attempted_members().is_empty());
+    lease
+        .begin_rotation_http_dispatch_for(&replacement, &runtime)
+        .unwrap();
+    assert_eq!(budget.dispatches(), 1);
+    lease.settle_rotation_success(crate::unix_time_ms());
+}
+
+#[tokio::test]
+async fn agent_task_replacement_and_aba_revoke_prepared_dispatch() {
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let agent = AgentIdentityCredential::new(
+        "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
+        "synthetic-runtime".into(),
+        "synthetic-task".into(),
+    )
+    .unwrap();
+    let runtime = quota_runtime_with_agent(QuotaSnapshot::default(), Some(agent.clone()));
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    let account = &runtime.chatgpt_accounts["account-1"];
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    // Mimic the in-runtime task update without calling a real provider.
+    for task in ["other-task", "synthetic-task"] {
+        let mut identity = account.agent_identity.write().unwrap();
+        *identity = Some(agent.with_task_id(task.into()).unwrap());
+        account
+            .agent_identity_revision
+            .fetch_add(1, Ordering::Release);
+    }
+    let replacement = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.credential_fingerprint(),
+        replacement.credential_fingerprint()
+    );
+    assert_ne!(prepared.incarnation(), replacement.incarnation());
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(
+        lease.begin_rotation_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    lease
+        .begin_rotation_dispatch_for(&replacement, &runtime)
+        .unwrap();
+    assert_eq!(budget.dispatches(), 1);
+    lease.settle_rotation_success(crate::unix_time_ms());
+}
+
+#[tokio::test]
+async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_ownership() {
+    use crate::scheduler::rotation::SharedRequestBudget;
+    use crate::{PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy};
+
+    async fn reserve_account(
+        runtime: &GatewayRuntime,
+        key: &AuthenticatedKey,
+        model: &str,
+        budget: &SharedRequestBudget,
+        now: u64,
+    ) -> Option<(crate::Selection, CandidateLease)> {
+        runtime
+            .select_and_reserve_with_budget(
+                key,
+                model,
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                now,
+                budget,
+            )
+            .await
+    }
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let now = crate::unix_time_ms();
+    let started_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, started) = reserve_account(&runtime, &key, "gpt-test", &started_budget, now)
+        .await
+        .unwrap();
+    started.begin_rotation_http_dispatch().unwrap();
+
+    // An unstarted lease for the removed route must not become a stale send.
+    let pending_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, pending) = reserve_account(&runtime, &key, "gpt-test", &pending_budget, now)
+        .await
+        .unwrap();
+    runtime
+        .lock_scheduler()
+        .set_pool_routing(PoolRoutingPolicy {
+            mode: PoolRoutingMode::InOrder,
+            members: vec![PoolRoutingMember {
+                kind: PoolMemberKind::Account,
+                id: "account-1".into(),
+                weight: 1,
+                max_concurrency: 1,
+            }],
+            ..PoolRoutingPolicy::default()
+        })
+        .unwrap();
+    assert!(runtime.update_account_models("account-1", &["gpt-added".into()]));
+    assert!(runtime
+        .visible_models(&key, &[WireApi::Responses], now)
+        .contains(&"gpt-added".to_string()));
+    assert_eq!(
+        pending.begin_rotation_http_dispatch(),
+        Err(crate::scheduler::rotation::DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(pending_budget.dispatches(), 0);
+    drop(pending);
+
+    let added_budget = SharedRequestBudget::for_incoming_request(3);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            reserve_account(&runtime, &key, "gpt-added", &added_budget, now)
+        )
+        .await
+        .is_err(),
+        "new inventory must not bypass the old physical lease"
+    );
+    assert!(started
+        .settle_rotation(
+            crate::scheduler::rotation::AttemptObservation {
+                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                health: crate::scheduler::rotation::HealthObservation::Success,
+            },
+            crate::unix_time_ms(),
+        )
+        .unwrap()
+        .is_some());
+    assert!(started
+        .settle_rotation(
+            crate::scheduler::rotation::AttemptObservation {
+                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                health: crate::scheduler::rotation::HealthObservation::Success,
+            },
+            crate::unix_time_ms(),
+        )
+        .unwrap()
+        .is_none());
+    let (_, added) = reserve_account(&runtime, &key, "gpt-added", &added_budget, now)
+        .await
+        .unwrap();
+    added.begin_rotation_http_dispatch().unwrap();
+    added.settle_rotation_success(crate::unix_time_ms());
+
+    assert!(runtime.set_candidate_health("account-1", CandidateHealth::Blocked));
+    assert!(runtime.update_account_models("account-1", &["gpt-added".into(), "gpt-new".into()]));
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .health,
+        CandidateHealth::Blocked,
+        "inventory edits are not positive health evidence"
+    );
+    assert!(reserve_account(
+        &runtime,
+        &key,
+        "gpt-new",
+        &SharedRequestBudget::for_incoming_request(3),
+        now
+    )
+    .await
+    .is_none());
+}
+
+#[test]
+fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_evidence() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let scope = key.scope_snapshot();
+    runtime.remember_codex_model_manifest(
+        "account-1",
+        serde_json::json!({"models": [{"slug": "gpt-test"}]}),
+        1,
+    );
+    runtime.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
+    assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
+    assert!(runtime
+        .stale_codex_model_manifests(["account-1"])
+        .is_empty());
+    assert!(runtime
+        .codex_model_responses_lite_candidates("gpt-test")
+        .is_empty());
+    assert_eq!(
+        runtime
+            .image_executor_route(
+                "account-1",
+                IMAGE_API_MODEL,
+                &scope,
+                &[WireApi::ChatCompletions],
+            )
+            .unwrap()
+            .source_model,
+        "gpt-5.6-sol"
+    );
+    assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
+    assert!(runtime
+        .image_executor_route(
+            "account-1",
+            IMAGE_API_MODEL,
+            &scope,
+            &[WireApi::ChatCompletions],
+        )
+        .is_none());
+}
+
+#[tokio::test]
+async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let now = crate::unix_time_ms();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let reserve = |budget: SharedRequestBudget| {
+        let runtime = &runtime;
+        let key = &key;
+        async move {
+            runtime
+                .select_and_reserve_with_budget(
+                    key,
+                    "gpt-test",
+                    &[WireApi::Responses],
+                    &HashSet::new(),
+                    (None, None),
+                    crate::unix_time_ms(),
+                    &budget,
+                )
+                .await
+                .unwrap()
+                .1
+        }
+    };
+    let pending = reserve(budget.clone()).await;
+    assert!(runtime.update_account_models("account-1", &["gpt-other".into()]));
+    assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
+    assert_eq!(
+        pending.begin_rotation_http_dispatch(),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    drop(pending);
+
+    let current = reserve(budget.clone()).await;
+    current.begin_rotation_http_dispatch().unwrap();
+    current.settle_rotation_success(now);
+    assert_eq!(budget.dispatches(), 1);
+}
+
+#[tokio::test]
+async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_generation() {
+    use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    assert!(runtime.update_account_models("account-1", &["gpt-5.4".into(), "gpt-5.6-sol".into()]));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let scope = key.scope_snapshot();
+    let protocols = [WireApi::ChatCompletions];
+    let now = crate::unix_time_ms();
+    let pending_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, pending) = runtime
+        .select_and_reserve_image_with_budget(
+            &key,
+            IMAGE_API_MODEL,
+            &protocols,
+            &HashSet::new(),
+            now,
+            &pending_budget,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
+            .unwrap()
+            .source_model,
+        "gpt-5.4"
+    );
+    assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
+    assert_eq!(
+        pending.begin_rotation_http_dispatch(),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(pending_budget.dispatches(), 0);
+    assert_eq!(
+        pending_budget.with_budget(|budget| budget.wire_attempts()),
+        0
+    );
+    drop(pending);
+
+    let fresh_budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, fresh) = runtime
+        .select_and_reserve_image_with_budget(
+            &key,
+            IMAGE_API_MODEL,
+            &protocols,
+            &HashSet::new(),
+            now,
+            &fresh_budget,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
+            .unwrap()
+            .source_model,
+        "gpt-5.6-sol"
+    );
+    fresh.begin_rotation_http_dispatch().unwrap();
+    fresh.settle_rotation_success(crate::unix_time_ms());
+    assert_eq!(fresh_budget.dispatches(), 1);
+}
+
+#[test]
+fn automatic_responses_lite_requires_every_configured_route_to_confirm_support() {
+    let account_only = quota_runtime(QuotaSnapshot::default());
+    let account_only_key = account_only
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    assert!(
+        !account_only.codex_model_responses_routes_all_support_lite(&account_only_key, "gpt-test")
+    );
+    account_only.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
+    assert!(
+        account_only.codex_model_responses_routes_all_support_lite(&account_only_key, "gpt-test")
+    );
+
+    let first = quota_account(QuotaSnapshot::default());
+    let mut second = first.clone();
+    second.id = "account-2".to_string();
+    second.chatgpt_account_id = "account-2".to_string();
+    let all_accounts = GatewayRuntime::from_mixed_pool(
+        Vec::new(),
+        vec![first, second],
         vec![RuntimeMixedLocalKey {
             key: key("key-1", "local-secret"),
             enabled: true,
@@ -271,7 +945,271 @@ fn quota_runtime(snapshot: QuotaSnapshot) -> GatewayRuntime {
         GatewayRuntimeOptions::default(),
         Arc::new(|_| {}),
     )
-    .unwrap()
+    .unwrap();
+    let all_accounts_key = all_accounts
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    all_accounts.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
+    assert!(
+        !all_accounts.codex_model_responses_routes_all_support_lite(&all_accounts_key, "gpt-test")
+    );
+    all_accounts.set_codex_model_uses_responses_lite("account-2", "gpt-test", true);
+    assert!(
+        all_accounts.codex_model_responses_routes_all_support_lite(&all_accounts_key, "gpt-test")
+    );
+    assert!(all_accounts
+        .codex_model_account_responses_routes_all_support_lite(&all_accounts_key, "gpt-test"));
+
+    let mixed = GatewayRuntime::from_mixed_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "api-source",
+            "upstream-secret",
+            &["gpt-test"],
+        ))],
+        vec![quota_account(QuotaSnapshot::default())],
+        vec![RuntimeMixedLocalKey {
+            key: key("key-1", "local-secret"),
+            enabled: true,
+            source_ids: None,
+            account_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: None,
+        }],
+        RuntimeChatGptAuth {
+            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
+            refresh_adapter: Arc::new(NeverRefresh),
+            persistence_adapter: Arc::new(NoopPersistence),
+            refresh_skew_ms: 60_000,
+            agent_identities: HashMap::new(),
+        },
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let mixed_key = mixed
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    mixed.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
+    assert!(!mixed.codex_model_responses_routes_all_support_lite(&mixed_key, "gpt-test"));
+    assert!(mixed.codex_model_account_responses_routes_all_support_lite(&mixed_key, "gpt-test"));
+}
+
+#[tokio::test]
+async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
+    let mut policy = crate::resolve_pool_routing(
+        Some(&crate::PoolRoutingPolicy::default()),
+        vec![
+            (crate::PoolMemberKind::Source, "source-a".into(), 0, 1),
+            (crate::PoolMemberKind::Source, "source-b".into(), 0, 1),
+        ],
+    );
+    policy.mode = crate::PoolRoutingMode::InOrder;
+    for member in &mut policy.members {
+        member.max_concurrency = 1;
+    }
+    let runtime = GatewayRuntime::from_pool(
+        ["source-a", "source-b"]
+            .into_iter()
+            .map(|id| RuntimeSource::unrestricted(source(id, "synthetic-upstream", &["gpt-test"])))
+            .collect(),
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions {
+            pool_routing: Some(policy.clone()),
+            max_retry_candidates: 2,
+            ..Default::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    assert_eq!(runtime.request_dispatch_budget(), 2);
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let tried = HashSet::new();
+    let select = || {
+        runtime.select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            &tried,
+            (None, None),
+            100,
+        )
+    };
+    let (first, first_lease) = select().await.unwrap();
+    let (second, second_lease) = select().await.unwrap();
+    assert_eq!(first.candidate_id, "source-a");
+    assert_eq!(second.candidate_id, "source-b");
+
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    drop(first_lease);
+    let (released, released_lease) = tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.candidate_id, "source-a");
+
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    policy.members[1].max_concurrency = 2;
+    assert!(runtime.set_pool_routing_policy(policy.clone(), 0).is_err());
+    assert_eq!(runtime.request_dispatch_budget(), 2);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    runtime.set_pool_routing_policy(policy, 6).unwrap();
+    assert_eq!(runtime.request_dispatch_budget(), 6);
+    let (expanded, expanded_lease) = tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expanded.candidate_id, "source-b");
+
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    assert!(runtime.update_key_scope(
+        "key-1",
+        CandidateScope {
+            source_ids: Some(Default::default()),
+            account_ids: Some(Default::default()),
+            ..Default::default()
+        }
+    ));
+    assert!(tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .map(|candidate| candidate.active_request_count)
+            .sum::<u32>(),
+        3
+    );
+    drop((second_lease, released_lease, expanded_lease));
+    assert!(runtime
+        .candidate_runtime_order()
+        .iter()
+        .all(|candidate| candidate.active_request_count == 0));
+}
+
+#[tokio::test]
+async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_versions() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let key = runtime.authenticated_key(&runtime.keys[0]);
+    let tried = HashSet::new();
+    let now = current_time_ms();
+    let budget = crate::scheduler::rotation::SharedRequestBudget::for_incoming_request(3);
+    let (_, failed) = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &tried,
+            (None, None),
+            now - 1_000,
+            &budget,
+        )
+        .await
+        .unwrap();
+    failed.begin_rotation_dispatch().unwrap();
+    failed.settle_rotation_transient(None, now - 1_000);
+    drop(failed);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    runtime.set_activity_callback(move |event| captured.lock().unwrap().push(event));
+    let select = || {
+        runtime.select_and_reserve(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &tried,
+            (None, None),
+            now,
+        )
+    };
+    let (_, probe) = select().await.unwrap();
+    let mut waiting = Box::pin(select());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    let snapshot = runtime.candidate_runtime_order();
+    let event = events.lock().unwrap()[0].clone();
+    assert_eq!(snapshot[0].activity_revision, event.revision);
+    assert_eq!(snapshot[0].runtime_id, event.runtime_id);
+    assert_eq!(event.member_key, "account:account-1");
+    assert!(event.runtime_id > 0);
+    drop(probe);
+    let (_, next_probe) = tokio::time::timeout(Duration::from_millis(500), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(next_probe);
+    let rebuilt = quota_runtime(QuotaSnapshot::default());
+    assert!(rebuilt.candidate_runtime_order()[0].runtime_id > event.runtime_id);
+    assert_eq!(rebuilt.candidate_runtime_order()[0].activity_revision, 0);
+}
+
+#[tokio::test]
+async fn source_activity_reports_its_physical_member_on_admission_and_release() {
+    let mut configured =
+        RuntimeSource::unrestricted(source("source-1", "synthetic-upstream", &["gpt-test"]));
+    configured.protocol_config.capabilities = vec![ModelEndpointCapability {
+        model_id: "gpt-test".into(),
+        upstream_wire_api: WireApi::Messages,
+        status: CapabilityStatus::Declared,
+        origin: CapabilityOrigin::Catalog,
+        checked_at_ms: 1,
+        features: BTreeMap::new(),
+        reasoning_efforts: Vec::new(),
+    }];
+    let runtime = GatewayRuntime::from_pool(
+        vec![configured],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let events = captured.clone();
+    runtime.set_activity_callback(move |event| events.lock().unwrap().push(event));
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let (selection, lease) = runtime
+        .select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Messages],
+            &HashSet::new(),
+            (None, None),
+            current_time_ms(),
+        )
+        .await
+        .unwrap();
+    assert!(selection.candidate_id.starts_with("source-1::"));
+    assert_eq!(
+        runtime.active_member_keys(current_time_ms(), 0),
+        BTreeSet::from(["source:source-1".into()])
+    );
+    lease.begin_rotation_dispatch().unwrap();
+    drop(lease);
+    assert!(runtime.active_member_keys(current_time_ms(), 0).is_empty());
+    assert_eq!(
+        runtime.active_member_keys(current_time_ms(), 600_000),
+        BTreeSet::from(["source:source-1".into()])
+    );
+    assert!(runtime
+        .active_member_keys(current_time_ms() + 600_000, 600_000)
+        .is_empty());
+    let events = captured.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events
+        .iter()
+        .all(|event| event.candidate_id == selection.candidate_id
+            && event.member_key == "source:source-1"));
+    assert!(events[0].in_flight > 0);
+    assert_eq!(events[1].in_flight, 0);
 }
 
 #[test]
@@ -387,6 +1325,45 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 }
 
 #[test]
+fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
+    let initial = QuotaSnapshot {
+        available_credits_micro_units: Some(100),
+        provider_credits_available: true,
+        updated_at_ms: Some(1_000),
+        ..QuotaSnapshot::default()
+    };
+    let runtime = quota_runtime(initial);
+    let refreshed = QuotaSnapshot {
+        available_credits_micro_units: Some(200),
+        provider_credits_available: true,
+        updated_at_ms: Some(2_000),
+        ..QuotaSnapshot::default()
+    };
+
+    assert!(runtime.sync_account_quota_snapshot("account-1", &refreshed, 2_000));
+
+    // Response headers do not carry the provider credit ledger. They must be
+    // merged into the refreshed snapshot rather than the pre-refresh one.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("10"),
+    );
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000,
+    ));
+
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 8_000)
+        .expect("header merge should become persistable");
+    assert_eq!(merged.available_credits_micro_units, Some(200));
+    assert!(merged.provider_credits_available);
+}
+
+#[test]
 fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     runtime.apply_usage_event(
@@ -397,6 +1374,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             source_id: "openai-codex".into(),
             candidate_id: Some("account-1".into()),
             account_id: Some("account-1".into()),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -423,6 +1401,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         },
         1_000,
@@ -531,6 +1510,49 @@ fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
 }
 
 #[tokio::test]
+async fn incomplete_response_affinity_is_connection_scoped_and_never_persisted() {
+    let store = Arc::new(RecordedResponseAffinityStore::default());
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-a",
+            "secret-a",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions {
+            response_affinity_store: Some(store.clone()),
+            ..Default::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let normal_key = runtime.response_affinity_key(Some("resp_partial")).unwrap();
+    let connection_key = runtime
+        .bind_volatile_response_affinity(Some("resp_partial"), "source-a", "request-1", 123)
+        .unwrap();
+    assert!(!runtime.has_response_affinity_binding(&normal_key, 123));
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let (selection, lease) = runtime
+        .select_and_reserve(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (Some(&connection_key), None),
+            124,
+        )
+        .await
+        .unwrap();
+    assert!(selection.response_affinity_hit);
+    drop(lease);
+    assert!(store.upserts.lock().unwrap().is_empty());
+    assert!(runtime.invalidate_response_affinity(Some(&connection_key)));
+    assert!(!runtime.has_response_affinity_binding(&normal_key, 125));
+}
+
+#[tokio::test]
 async fn saving_bridge_continuation_binds_its_response_to_the_creating_candidate() {
     let runtime = GatewayRuntime::from_pool(
         vec![
@@ -555,6 +1577,7 @@ async fn saving_bridge_continuation_binds_its_response_to_the_creating_candidate
         bridge_request,
         &serde_json::json!({
             "id": "msg-1",
+            "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "hello"}]
         }),
     )
@@ -744,7 +1767,7 @@ async fn selection_restores_persisted_prompt_affinity_before_reserving() {
         "source-a",
         true,
         CandidateHealth::Healthy,
-        CandidateQuota::Available(1_000),
+        CandidateQuota::Available(6_500),
         Some(123),
     ));
     assert!(runtime.update_candidate_availability_at(
@@ -956,6 +1979,118 @@ fn runtime_updates_key_scope_without_rebuild() {
 }
 
 #[test]
+fn response_affinity_owner_tracks_live_key_scope() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("source-a", "a", &["gpt-test"])),
+            RuntimeSource::unrestricted(source("source-b", "b", &["gpt-test"])),
+        ],
+        vec![RuntimeLocalKey {
+            key: key("key-1", "local-secret"),
+            enabled: true,
+            source_ids: Some(vec!["source-a".into()]),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+        }],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    runtime.bind_response_affinity(Some("resp-1"), "source-a", 1);
+    let affinity_key = runtime.response_affinity_key(Some("resp-1")).unwrap();
+
+    assert_eq!(
+        runtime.response_affinity_owner_supports_route(
+            &authenticated,
+            &affinity_key,
+            "gpt-test",
+            &[WireApi::Responses],
+            2,
+        ),
+        Some(true)
+    );
+    assert!(runtime.update_key_scope(
+        "key-1",
+        CandidateScope {
+            source_ids: Some(BTreeSet::from(["source-b".to_string()])),
+            ..CandidateScope::default()
+        },
+    ));
+    assert_eq!(
+        runtime.response_affinity_owner_supports_route(
+            &authenticated,
+            &affinity_key,
+            "gpt-test",
+            &[WireApi::Responses],
+            2,
+        ),
+        Some(false),
+        "removing a provider from the key scope must release its chat affinity"
+    );
+}
+
+#[test]
+fn optional_response_affinity_is_released_when_owner_needs_reauthentication() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("source-a", "a", &["gpt-test"])),
+            RuntimeSource::unrestricted(source("source-b", "b", &["gpt-test"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    runtime.bind_response_affinity(Some("resp-1"), "source-a", 1);
+    let affinity_key = runtime.response_affinity_key(Some("resp-1")).unwrap();
+    assert!(runtime.set_candidate_health("source-a", CandidateHealth::ReauthRequired));
+    assert_eq!(
+        runtime.response_affinity_owner_supports_route(
+            &authenticated,
+            &affinity_key,
+            "gpt-test",
+            &[WireApi::Responses],
+            2,
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        runtime.response_affinity_owner_is_eligible(
+            &authenticated,
+            &affinity_key,
+            "gpt-test",
+            &[WireApi::Responses],
+            2,
+        ),
+        Some(false)
+    );
+
+    let mut optional_affinity = Some(affinity_key.clone());
+    assert!(runtime.release_unroutable_response_affinity(
+        &authenticated,
+        &mut optional_affinity,
+        "gpt-test",
+        &[WireApi::Responses],
+        2,
+    ));
+    assert!(optional_affinity.is_none());
+    assert!(runtime.has_response_affinity_binding(&affinity_key, 2));
+    assert_eq!(
+        runtime
+            .response_affinity_candidate(&affinity_key, 2)
+            .as_deref(),
+        Some("source-a")
+    );
+}
+
+#[test]
 fn active_responses_scope_uses_live_candidate_policy() {
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
@@ -1043,6 +2178,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             source_id: "source-1".into(),
             candidate_id: Some("source-1".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -1069,6 +2205,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
         },
         now_ms,
@@ -1085,42 +2222,6 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
         )
         .await;
     assert!(selection.is_some());
-}
-
-#[tokio::test]
-async fn direct_source_rate_limit_uses_the_shared_model_storm_breaker() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-test"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions {
-            provider_storm_breaker: true,
-            ..GatewayRuntimeOptions::default()
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-
-    assert!(!runtime.record_provider_rate_limit("source-1", "gpt-test", 123));
-    assert!(!runtime.record_provider_rate_limit("source-1", "gpt-test", 124));
-    assert!(runtime.record_provider_rate_limit("source-1", "gpt-test", 125));
-    assert!(runtime
-        .select_and_reserve(
-            &authenticated,
-            "gpt-test",
-            &[WireApi::Responses],
-            &HashSet::new(),
-            (None, None),
-            125,
-        )
-        .await
-        .is_none());
 }
 
 #[test]
@@ -1172,98 +2273,49 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
         .any(|binding| binding.wire_api == WireApi::ChatCompletions));
 }
 
-#[tokio::test]
-async fn generic_source_reasoning_metadata_survives_a_codex_catalog_cache_update() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["provider/fable"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "context_window": 1_000_000,
-                "reasoningEffortModes": ["low", "high"],
-                "defaultReasoningLevel": "high",
-            }]
-        }),
-        now_ms,
-    );
-    // Codex asks the same source for a different payload shape. It must
-    // not overwrite the generic source metadata that powers the selector.
-    runtime.remember_codex_model_manifest(
-        "source-1",
-        serde_json::json!({"models": [{"slug": "provider/fable"}]}),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert_eq!(
-        metadata.context_windows,
-        BTreeMap::from([("provider/fable".to_string(), 1_000_000)])
-    );
-    assert_eq!(
-        metadata.reasoning_catalog_templates["provider/fable"],
-        serde_json::json!({
-            "supported_reasoning_levels": [
-                {"effort": "low", "description": "low"},
-                {"effort": "high", "description": "high"}
-            ]
-        })
-        .as_object()
-        .unwrap()
-        .clone()
-    );
-}
-
 #[test]
-fn fast_service_tier_is_applied_only_to_openai_models() {
+fn speed_choices_and_preferences_are_independent_of_source_metadata_and_health() {
+    let model = "gpt-future-synthetic";
     let runtime = GatewayRuntime::from_pool(
         vec![
-            RuntimeSource::unrestricted(source("source-1", "upstream-secret", &["provider/gpt-5"])),
-            RuntimeSource::unrestricted(source("source-2", "other-secret", &["provider/claude-5"])),
+            RuntimeSource::unrestricted(source("source-1", "synthetic-one", &[model])),
+            RuntimeSource::unrestricted(source("source-2", "synthetic-two", &[model])),
         ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-pool",
+        ))],
         GatewayRuntimeOptions::default(),
         Arc::new(|_| {}),
     )
     .unwrap();
-
+    let tiers = [
+        DefaultServiceTier::Standard,
+        DefaultServiceTier::Fast,
+        DefaultServiceTier::Ultrafast,
+    ];
+    assert_eq!(runtime.model_supported_service_tiers(model), tiers);
     runtime
         .set_model_service_tier_overrides(BTreeMap::from([(
-            "provider/gpt-5".to_string(),
-            DefaultServiceTier::Fast,
+            model.into(),
+            DefaultServiceTier::Ultrafast,
         )]))
         .unwrap();
+    runtime.set_candidate_cooldown("source-1", model, current_time_ms() + 60_000);
+    runtime.remove_candidate("source-2");
     assert_eq!(
-        runtime.model_service_tier("provider/gpt-5"),
-        DefaultServiceTier::Fast
+        runtime.model_effective_service_tier(model),
+        DefaultServiceTier::Ultrafast
     );
-    runtime.set_default_service_tier(DefaultServiceTier::Fast);
+    assert_eq!(runtime.model_supported_service_tiers(model), tiers);
     assert_eq!(
-        runtime.model_service_tier("provider/claude-5"),
-        DefaultServiceTier::Standard
+        runtime.model_supported_service_tiers("claude-synthetic"),
+        [DefaultServiceTier::Standard]
     );
 }
 
 #[test]
-fn service_tier_normalization_discards_legacy_non_openai_overrides() {
+fn service_tier_normalization_preserves_valid_ids_for_model_policy() {
     let normalized = normalize_model_service_tier_overrides(BTreeMap::from([
         ("provider/gpt-5".to_string(), DefaultServiceTier::Fast),
         ("provider/claude-5".to_string(), DefaultServiceTier::Fast),
@@ -1272,970 +2324,11 @@ fn service_tier_normalization_discards_legacy_non_openai_overrides() {
 
     assert_eq!(
         normalized,
-        BTreeMap::from([("provider/gpt-5".to_string(), DefaultServiceTier::Fast)])
-    );
-}
-
-#[tokio::test]
-async fn fresh_source_metadata_does_not_wait_for_another_refresh() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["provider/fable"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"],
-            }]
-        }),
-        now_ms,
-    );
-
-    let guard = runtime.model_metadata.refresh_lock.lock().await;
-    let metadata = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        runtime.codex_source_model_metadata(&key, &[WireApi::Responses], now_ms),
-    )
-    .await
-    .expect("fresh metadata must not wait for the refresh lock");
-    drop(guard);
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("provider/fable"));
-}
-
-#[tokio::test]
-async fn explicit_source_metadata_refresh_bypasses_active_prefetch_throttle() {
-    let server = spawn_metadata_server(
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"]
-            }]
-        }),
-        None,
-    )
-    .await;
-    let runtime = Arc::new(runtime_for_metadata_server(&server));
-    let now_ms = current_time_ms();
-    runtime
-        .model_metadata
-        .prefetch_not_before_ms
-        .store(now_ms.saturating_add(60_000), AtomicOrdering::Release);
-
-    runtime.refresh_source_model_metadata().await;
-
-    assert_eq!(
-        server.request_count.load(AtomicOrdering::Acquire),
-        1,
-        "an explicit refresh must ignore the background prefetch throttle"
-    );
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn explicit_source_metadata_refresh_only_discovers_the_selected_source() {
-    let server = spawn_metadata_server(
-        serde_json::json!({
-            "data": [
-                { "id": "provider/fable", "reasoningEffortModes": ["low"] },
-                { "id": "provider/ember", "reasoningEffortModes": ["high"] }
-            ]
-        }),
-        None,
-    )
-    .await;
-    let runtime = Arc::new(runtime_for_metadata_sources(&server));
-
-    runtime
-        .refresh_source_model_metadata_for_source("source-1")
-        .await;
-
-    assert_eq!(server.request_count.load(AtomicOrdering::Acquire), 1);
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string()]
-    );
-    assert!(runtime
-        .declared_source_reasoning_levels("provider/ember")
-        .is_empty());
-
-    runtime
-        .refresh_source_model_metadata_for_source("source-2")
-        .await;
-
-    assert_eq!(server.request_count.load(AtomicOrdering::Acquire), 2);
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/ember"),
-        vec!["high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn simultaneous_explicit_source_refreshes_share_one_upstream_request() {
-    let release = Arc::new(AtomicBool::new(false));
-    let server = spawn_metadata_server(
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["medium"]
-            }]
-        }),
-        Some(release.clone()),
-    )
-    .await;
-    let runtime = Arc::new(runtime_for_metadata_server(&server));
-
-    let first_runtime = runtime.clone();
-    let first = tokio::spawn(async move {
-        first_runtime.refresh_source_model_metadata().await;
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while server.request_count.load(AtomicOrdering::Acquire) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first refresh reaches the upstream server");
-
-    let second_runtime = runtime.clone();
-    let second = tokio::spawn(async move {
-        second_runtime.refresh_source_model_metadata().await;
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(
-        server.request_count.load(AtomicOrdering::Acquire),
-        1,
-        "a refresh waiting for the lock must not start a duplicate request"
-    );
-
-    release.store(true, AtomicOrdering::Release);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        first.await.unwrap();
-        second.await.unwrap();
-    })
-    .await
-    .expect("both refresh callers complete");
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["medium".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_populates_reasoning_before_codex_catalog_request() {
-    let runtime = Arc::new(
-        GatewayRuntime::from_pool(
-            vec![RuntimeSource::unrestricted(source(
-                "source-1",
-                "upstream-secret",
-                &["provider/fable"],
-            ))],
-            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "medium", "high"],
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("management prefetch completes");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-    let not_before = runtime
-        .model_metadata
-        .prefetch_not_before_ms
-        .load(Ordering::Acquire);
-    assert!(not_before > runtime_now_ms());
-    runtime.prefetch_source_model_metadata();
-    assert_eq!(
-        runtime
-            .model_metadata
-            .prefetch_not_before_ms
-            .load(Ordering::Acquire),
-        not_before
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_reports_chat_completions_reasoning_as_catalog_metadata() {
-    let mut chat_source = source("chat-source", "upstream-secret", &["provider/fable"]);
-    chat_source.wire_api = WireApi::ChatCompletions;
-    let runtime = Arc::new(
-        GatewayRuntime::from_pool(
-            vec![RuntimeSource::unrestricted(chat_source)],
-            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    runtime.remember_source_model_manifest(
-        "chat-source",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["high"],
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("management prefetch reports the Chat Completions route");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_ignores_sources_outside_the_active_key_scope() {
-    let runtime = Arc::new(
-        GatewayRuntime::from_pool(
-            vec![
-                RuntimeSource::unrestricted(source(
-                    "source-in-pool",
-                    "in-pool-secret",
-                    &["provider/fable"],
-                )),
-                RuntimeSource::unrestricted(source(
-                    "source-outside-pool",
-                    "outside-pool-secret",
-                    &["provider/fable"],
-                )),
-            ],
-            vec![RuntimeLocalKey {
-                key: key("key-1", "local-secret"),
-                enabled: true,
-                source_ids: Some(vec!["source-in-pool".into()]),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-            }],
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-in-pool",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-outside-pool",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["ultra"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("management prefetch completes");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn management_prefetch_includes_sources_for_an_account_only_key_scope() {
-    let runtime = Arc::new(
-        GatewayRuntime::build(
-            vec![RuntimeSource::unrestricted(source(
-                "source-shared",
-                "shared-secret",
-                &["provider/fable"],
-            ))],
-            Vec::new(),
-            vec![RuntimeMixedLocalKey {
-                key: key("key-account-only", "local-secret"),
-                enabled: true,
-                source_ids: None,
-                account_ids: Some(vec!["account-only".into()]),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: None,
-            }],
-            None,
-            ReachabilityRequirement::AllowUnroutable,
-            GatewayRuntimeOptions::default(),
-            Arc::new(|_| {}),
-        )
-        .unwrap(),
-    );
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-shared",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime.prefetch_source_model_metadata();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runtime
-            .declared_source_reasoning_levels("provider/fable")
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("an account-only key leaves source access unrestricted");
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn scoped_catalog_refresh_keeps_reasoning_declared_by_another_route() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(source("source-a", "source-a-secret", &["provider/fable"])),
-            RuntimeSource::unrestricted(source("source-b", "source-b-secret", &["provider/fable"])),
-        ],
-        vec![
-            RuntimeLocalKey::unrestricted(key("key-all", "all-secret")),
-            RuntimeLocalKey {
-                key: key("key-a", "source-a-only-secret"),
-                enabled: true,
-                source_ids: Some(vec!["source-a".to_string()]),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-            },
-        ],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let all_key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer all-secret")))
-        .unwrap();
-    let source_a_key = runtime
-        .authenticate(Some(&HeaderValue::from_static(
-            "Bearer source-a-only-secret",
-        )))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-a",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-b",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["ultra"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime
-        .codex_source_model_metadata(&all_key, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "ultra".to_string()]
-    );
-
-    let scoped_metadata = runtime
-        .codex_source_model_metadata(&source_a_key, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        scoped_metadata.reasoning_catalog_templates["provider/fable"]["supported_reasoning_levels"],
-        serde_json::json!([{"effort": "low", "description": "low"}])
-    );
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "ultra".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn provider_reasoning_metadata_is_catalog_only_for_each_route() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(source("source-a", "source-a-secret", &["provider/fable"])),
-            RuntimeSource::unrestricted(source("source-b", "source-b-secret", &["provider/fable"])),
-        ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-a",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-b",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low"],
-            }]
-        }),
-        now_ms,
-    );
-
-    runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-    assert_eq!(
-        metadata.reasoning_catalog_templates["provider/fable"]["supported_reasoning_levels"],
-        serde_json::json!([
-            {"effort": "low", "description": "low"},
-            {"effort": "high", "description": "high"}
+        BTreeMap::from([
+            ("provider/gpt-5".to_string(), DefaultServiceTier::Fast),
+            ("provider/claude-5".to_string(), DefaultServiceTier::Fast),
         ])
     );
-}
-
-#[tokio::test]
-async fn stale_source_metadata_survives_a_transient_models_failure() {
-    let mut unavailable_source = source("source-1", "upstream-secret", &["provider/fable"]);
-    unavailable_source.base_url = "http://127.0.0.1:1/v1".to_string();
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(unavailable_source)],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "medium", "high"],
-            }]
-        }),
-        now_ms.saturating_sub(CODEX_SOURCE_MODEL_MANIFEST_TTL_MS + 1),
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("provider/fable"));
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn source_reasoning_union_keeps_unknown_route_in_catalog() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![
-            RuntimeSource::unrestricted(source(
-                "source-confirmed",
-                "confirmed-secret",
-                &["provider/fable"],
-            )),
-            RuntimeSource::unrestricted(source(
-                "source-unknown",
-                "unknown-secret",
-                &["provider/fable"],
-            )),
-        ],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-    runtime.remember_source_model_manifest(
-        "source-confirmed",
-        serde_json::json!({
-            "data": [{
-                "id": "provider/fable",
-                "reasoningEffortModes": ["low", "high"],
-            }]
-        }),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-unknown",
-        serde_json::json!({"data": [{"id": "provider/fable"}]}),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("provider/fable"));
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("provider/fable"),
-        vec!["low".to_string(), "high".to_string()]
-    );
-    assert_eq!(
-        runtime.api_source_candidate_ids(),
-        HashSet::from(["source-confirmed".to_string(), "source-unknown".to_string(),])
-    );
-}
-
-#[tokio::test]
-async fn non_claude_source_catalog_preserves_source_declared_efforts_and_uses_medium_auto_default()
-{
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["grok-4.5", "glm-5.2"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {
-                    "id": "grok-4.5",
-                    "reasoningEffortModes": [
-                        "low", "medium", "high", "xhigh", "max", "very_high"
-                    ],
-                    "defaultReasoningLevel": "very_high",
-                },
-                {
-                    "id": "glm-5.2",
-                    "reasoningEffortModes": ["low", "medium", "high", "xhigh", "max"],
-                    "defaultReasoningLevel": "max",
-                }
-            ]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    for (model_id, expected) in [
-        (
-            "grok-4.5",
-            serde_json::json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"},
-                    {"effort": "medium", "description": "medium"},
-                    {"effort": "high", "description": "high"},
-                    {"effort": "xhigh", "description": "xhigh"},
-                    {"effort": "max", "description": "max"},
-                    {"effort": "very_high", "description": "very_high"}
-                ],
-                "default_reasoning_level": "medium"
-            }),
-        ),
-        (
-            "glm-5.2",
-            serde_json::json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"},
-                    {"effort": "medium", "description": "medium"},
-                    {"effort": "high", "description": "high"},
-                    {"effort": "xhigh", "description": "xhigh"},
-                    {"effort": "max", "description": "max"}
-                ],
-                "default_reasoning_level": "medium"
-            }),
-        ),
-    ] {
-        assert_eq!(
-            metadata.reasoning_catalog_templates[model_id],
-            expected.as_object().unwrap().clone()
-        );
-    }
-}
-
-#[tokio::test]
-async fn source_catalog_does_not_cross_model_reasoning_metadata() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["grok-4.5", "glm-5.2"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {
-                    "id": "grok-4.5",
-                    "reasoningEffortModes": ["low", "very_high"],
-                    "defaultReasoningLevel": "very_high",
-                },
-                {"id": "glm-5.2"}
-            ]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata
-        .reasoning_catalog_templates
-        .contains_key("grok-4.5"));
-    assert!(!metadata.reasoning_catalog_templates.contains_key("glm-5.2"));
-}
-
-#[tokio::test]
-async fn known_group_modes_reach_codex_without_being_reported_as_detected() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["vendor/claude-fable-5", "vendor/gpt-future"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [
-                {"id": "vendor/claude-fable-5"},
-                {"id": "vendor/gpt-future"}
-            ]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(!metadata
-        .reasoning_catalog_templates
-        .contains_key("vendor/claude-fable-5"));
-    assert!(runtime
-        .declared_source_reasoning_levels("vendor/claude-fable-5")
-        .is_empty());
-    assert!(!metadata
-        .reasoning_catalog_templates
-        .contains_key("vendor/gpt-future"));
-    assert!(runtime
-        .declared_source_reasoning_levels("vendor/gpt-future")
-        .is_empty());
-}
-
-#[tokio::test]
-async fn provider_reasoning_modes_override_known_model_fallback_for_catalog() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-5.6-terra"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "gpt-5.6-terra",
-                "reasoningEffortModes": ["ultra"],
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], current_time_ms())
-        .await;
-
-    assert_eq!(
-        runtime.declared_source_reasoning_levels("gpt-5.6-terra"),
-        vec!["ultra".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn explicit_empty_reasoning_metadata_suppresses_known_model_fallback() {
-    let runtime = GatewayRuntime::from_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "source-1",
-            "upstream-secret",
-            &["gpt-5.6-terra"],
-        ))],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let authenticated = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    runtime.remember_source_model_manifest(
-        "source-1",
-        serde_json::json!({
-            "data": [{
-                "id": "gpt-5.6-terra",
-                "reasoningEffortModes": []
-            }]
-        }),
-        current_time_ms(),
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&authenticated, &[WireApi::Responses], current_time_ms())
-        .await;
-
-    assert_eq!(
-        metadata.reasoning_catalog_templates["gpt-5.6-terra"]["supported_reasoning_levels"],
-        serde_json::json!([])
-    );
-    assert_eq!(
-        runtime.source_declared_reasoning_levels("gpt-5.6-terra"),
-        Some(Vec::new())
-    );
-}
-
-#[tokio::test]
-async fn codex_source_metadata_marks_bridge_images_but_requires_native_declaration() {
-    let mut bridged = RuntimeSource::unrestricted(source(
-        "source-bridge",
-        "bridge-secret",
-        &["vendor/claude-fable-5"],
-    ));
-    bridged.protocol_bindings = vec![SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::ResponsesToMessages,
-        reasoning_mode: MessagesReasoningMode::Disabled,
-        cache_write_ttl: Default::default(),
-        model_ids: vec!["vendor/claude-fable-5".into()],
-    }];
-    let mut native = RuntimeSource::unrestricted(source(
-        "source-native",
-        "native-secret",
-        &["provider/text-only"],
-    ));
-    native.protocol_bindings = vec![SourceProtocolBinding {
-        wire_api: WireApi::Responses,
-        adapter: SourceAdapter::Native,
-        reasoning_mode: MessagesReasoningMode::Disabled,
-        cache_write_ttl: Default::default(),
-        model_ids: vec!["provider/text-only".into()],
-    }];
-    let runtime = GatewayRuntime::from_pool(
-        vec![bridged, native],
-        vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let key = runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    let now_ms = current_time_ms();
-
-    runtime.remember_source_model_manifest(
-        "source-bridge",
-        serde_json::json!({"data": [{"id": "vendor/claude-fable-5"}]}),
-        now_ms,
-    );
-    runtime.remember_source_model_manifest(
-        "source-native",
-        serde_json::json!({
-            "data": [{"id": "provider/text-only", "input_modalities": ["text"]}]
-        }),
-        now_ms,
-    );
-
-    let metadata = runtime
-        .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
-        .await;
-
-    assert!(metadata.image_models.contains("vendor/claude-fable-5"));
-    assert!(!metadata.image_models.contains("provider/text-only"));
-}
-
-#[test]
-fn messages_bridge_hides_provider_efforts_it_cannot_translate() {
-    let configured_models = ["provider/fable"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    let manifest = serde_json::json!({
-        "data": [{
-            "id": "provider/fable",
-            "reasoningEffortModes": ["low", "provider-defined"],
-            "supportsReasoningSummaryParameter": true,
-            "supportsReasoningSummaries": true,
-            "defaultReasoningSummary": "detailed",
-        }]
-    });
-    let capabilities = source_reasoning_capabilities(&manifest, &configured_models)
-        .remove("provider/fable")
-        .unwrap();
-
-    for reasoning_mode in [
-        MessagesReasoningMode::Budget,
-        MessagesReasoningMode::Adaptive,
-    ] {
-        let template = source_reasoning_for_route(
-            capabilities.clone(),
-            SourceAdapter::ResponsesToMessages,
-            reasoning_mode,
-        )
-        .unwrap()
-        .codex_catalog_template();
-
-        assert_eq!(
-            template,
-            serde_json::json!({
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "low"}
-                ]
-            })
-            .as_object()
-            .unwrap()
-            .clone()
-        );
-    }
 }
 
 #[test]
@@ -2443,6 +2536,43 @@ fn codex_aliases_resolve_without_shadowing_exact_model_ids() {
             .as_deref(),
         Some("vendor/model")
     );
+}
+
+#[test]
+fn configured_model_resolution_accepts_temporary_health_outage_but_not_unknown_models() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source",
+            "upstream-secret",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let authenticated = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+        .unwrap();
+    assert!(runtime.set_candidate_health("source", CandidateHealth::Unhealthy));
+
+    assert!(runtime
+        .resolve_visible_model(
+            &authenticated,
+            "gpt-test",
+            &[WireApi::Responses],
+            current_time_ms(),
+        )
+        .is_none());
+    assert_eq!(
+        runtime
+            .resolve_configured_model(&authenticated, "gpt-test", &[WireApi::Responses])
+            .as_deref(),
+        Some("gpt-test")
+    );
+    assert!(runtime
+        .resolve_configured_model(&authenticated, "unknown", &[WireApi::Responses])
+        .is_none());
 }
 
 #[test]

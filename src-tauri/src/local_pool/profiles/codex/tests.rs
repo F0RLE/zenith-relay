@@ -26,6 +26,305 @@ impl SecretBackend for MemorySecrets {
 #[derive(Default)]
 struct FailingDeleteSecrets(MemorySecrets);
 
+#[derive(Default)]
+struct SwitchFaultSecrets {
+    memory: MemorySecrets,
+    fail_projection_save: Mutex<bool>,
+    fail_delete_at: Mutex<Option<usize>>,
+    external_config: Mutex<Option<PathBuf>>,
+}
+
+impl SecretBackend for SwitchFaultSecrets {
+    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
+        if secret_ref.starts_with("profile:codex:projection:")
+            && std::mem::take(&mut *self.fail_projection_save.lock().unwrap())
+        {
+            if let Some(path) = self.external_config.lock().unwrap().take() {
+                fs::write(path, "model_provider = 'external'\n").map_err(io_error)?;
+            }
+            return Err(LocalPoolError::new(
+                ErrorCode::SecretStoreUnavailable,
+                "injected save failure",
+            ));
+        }
+        self.memory.save(secret_ref, value)
+    }
+
+    fn load(&self, secret_ref: &str) -> Result<Option<String>> {
+        self.memory.load(secret_ref)
+    }
+
+    fn delete(&self, secret_ref: &str) -> Result<()> {
+        let mut countdown = self.fail_delete_at.lock().unwrap();
+        if let Some(remaining) = countdown.as_mut() {
+            *remaining -= 1;
+            if *remaining == 0 {
+                *countdown = None;
+                return Err(LocalPoolError::new(
+                    ErrorCode::SecretStoreUnavailable,
+                    "injected delete failure",
+                ));
+            }
+        }
+        self.memory.delete(secret_ref)
+    }
+}
+
+#[test]
+fn failed_switch_restores_files_credentials_and_backup_in_both_directions() {
+    for from_account in [false, true] {
+        let (root, home, backups) = profile_dirs("switch-failure-rollback");
+        fs::write(home.join(CONFIG_FILE), "model_provider = 'original'\n").unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            r#"{"OPENAI_API_KEY":"original-fixture"}"#,
+        )
+        .unwrap();
+        let secrets = SwitchFaultSecrets::default();
+        let tokens = TokenSet::new(
+            "fixture-access",
+            Some("fixture-refresh".into()),
+            None,
+            None,
+            1,
+            1,
+        )
+        .unwrap();
+        if from_account {
+            attach_account_with(
+                &home,
+                &backups,
+                "account",
+                &tokens,
+                "provider-account",
+                &secrets,
+            )
+            .unwrap();
+        } else {
+            attach_with(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "fixture-key",
+                &secrets,
+            )
+            .unwrap();
+        }
+        let config = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let auth = fs::read(home.join(AUTH_FILE)).unwrap();
+        let path = if from_account {
+            account_backup_for_profile(&home, &backups)
+                .unwrap()
+                .unwrap()
+        } else {
+            backup_path(&backups)
+        };
+        let backup = fs::read(&path).unwrap();
+        let stored = secrets.memory.0.lock().unwrap().clone();
+        *secrets.fail_projection_save.lock().unwrap() = true;
+        let error = if from_account {
+            switch_to_local_with(
+                &home,
+                &backups,
+                "key",
+                "http://127.0.0.1:14998/v1",
+                "fixture-next",
+                LocalAttachOptions::default(),
+                &secrets,
+            )
+            .unwrap_err()
+        } else {
+            switch_to_account_with(&home, &backups, "next", &tokens, "provider-next", &secrets)
+                .unwrap_err()
+        };
+        assert_eq!(error.code, ErrorCode::SecretStoreUnavailable);
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config);
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth);
+        assert_eq!(fs::read(&path).unwrap(), backup);
+        assert_eq!(*secrets.memory.0.lock().unwrap(), stored);
+        assert_eq!(profile_backup_count(&backups), 1);
+        if from_account {
+            restore_account_with(&home, &backups, &secrets).unwrap();
+        } else {
+            restore_with(&home, &backups, &secrets).unwrap();
+        }
+        assert!(secrets.memory.0.lock().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn failed_switch_does_not_overwrite_a_new_external_profile() {
+    let (root, home, backups) = profile_dirs("switch-external-writer");
+    let secrets = SwitchFaultSecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "fixture-key",
+        &secrets,
+    )
+    .unwrap();
+    let tokens = TokenSet::new("fixture-access", None, None, None, 1, 1).unwrap();
+    *secrets.fail_projection_save.lock().unwrap() = true;
+    *secrets.external_config.lock().unwrap() = Some(home.join(CONFIG_FILE));
+    let error = switch_to_account_with(&home, &backups, "next", &tokens, "provider-next", &secrets)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::RecoveryRequired);
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        "model_provider = 'external'\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn partial_secret_cleanup_keeps_restore_retryable() {
+    for account in [false, true] {
+        let (root, home, backups) = profile_dirs("partial-secret-cleanup");
+        let secrets = SwitchFaultSecrets::default();
+        fs::write(
+            home.join(AUTH_FILE),
+            r#"{"OPENAI_API_KEY":"original-fixture"}"#,
+        )
+        .unwrap();
+        if account {
+            let tokens = TokenSet::new("fixture-access", None, None, None, 1, 1).unwrap();
+            attach_account_with(
+                &home,
+                &backups,
+                "account",
+                &tokens,
+                "provider-account",
+                &secrets,
+            )
+            .unwrap();
+        } else {
+            attach_with(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "fixture-key",
+                &secrets,
+            )
+            .unwrap();
+        }
+        let stored = secrets.memory.0.lock().unwrap().clone();
+        *secrets.fail_delete_at.lock().unwrap() = Some(2);
+        let restore = || {
+            if account {
+                restore_account_with(&home, &backups, &secrets).map(|_| ())
+            } else {
+                restore_with(&home, &backups, &secrets)
+            }
+        };
+        assert!(restore().is_err());
+        assert_eq!(*secrets.memory.0.lock().unwrap(), stored);
+        assert_eq!(profile_backup_count(&backups), 1);
+        restore().unwrap();
+        assert!(secrets.memory.0.lock().unwrap().is_empty());
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn websocket_change_preserves_user_settings_on_restore_and_failed_save() {
+    let (root, home, backups) = profile_dirs("websocket-undo-projection");
+    let secrets = SwitchFaultSecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "fixture-key",
+        &secrets,
+    )
+    .unwrap();
+    let path = home.join(CONFIG_FILE);
+    let current = format!(
+        "user_setting = 'keep'\n{}",
+        fs::read_to_string(&path).unwrap()
+    );
+    fs::write(&path, &current).unwrap();
+    *secrets.fail_projection_save.lock().unwrap() = true;
+    assert!(
+        set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).is_err()
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), current);
+    set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    assert!(restored.get("model_providers").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn websocket_change_is_scoped_to_the_expected_connection() {
+    let (root, home, backups) = profile_dirs("websocket-connection-scope");
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "fixture-key",
+        &secrets,
+    )
+    .unwrap();
+    let config = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let backup = fs::read(backup_path(&backups)).unwrap();
+    assert_eq!(
+        set_local_gateway_websockets_with_backend(
+            &home,
+            &backups,
+            false,
+            Some("another-pool"),
+            &secrets,
+        )
+        .unwrap(),
+        None,
+    );
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config);
+    assert_eq!(fs::read(backup_path(&backups)).unwrap(), backup);
+    assert_eq!(
+        set_local_gateway_websockets_with_backend(
+            &home,
+            &backups,
+            false,
+            Some("local_gateway"),
+            &secrets,
+        )
+        .unwrap(),
+        Some(true),
+    );
+    let document = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        document["model_providers"][PROVIDER_ID]["supports_websockets"].as_bool(),
+        Some(false)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn websocket_change_does_not_create_an_absent_codex_home() {
+    let (root, home, backups) = profile_dirs("websocket-missing-home");
+    fs::remove_dir_all(&home).unwrap();
+
+    let previous = set_local_gateway_websockets_with_backend(
+        &home,
+        &backups,
+        false,
+        None,
+        &MemorySecrets::default(),
+    )
+    .unwrap();
+
+    assert_eq!(previous, None);
+    assert!(!home.exists());
+    assert!(!backups.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
 impl SecretBackend for FailingDeleteSecrets {
     fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
         self.0.save(secret_ref, value)
@@ -168,7 +467,7 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
     )
     .unwrap();
 
-    set_local_gateway_websockets(&home, &backups, false).unwrap();
+    set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
     assert!(fs::read_to_string(home.join(CONFIG_FILE))
         .unwrap()
         .contains("supports_websockets = false"));
@@ -177,7 +476,7 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
         serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
     assert_eq!(backup["managedSupportsWebsockets"], false);
 
-    set_local_gateway_websockets(&home, &backups, true).unwrap();
+    set_local_gateway_websockets_with_backend(&home, &backups, true, None, &secrets).unwrap();
     assert!(fs::read_to_string(home.join(CONFIG_FILE))
         .unwrap()
         .contains("supports_websockets = true"));
@@ -189,6 +488,104 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
     let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
     assert!(restored.contains("model_provider = \"openai\""));
     assert!(!restored.contains("[model_providers.zenith_relay_local]"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ready_api_websocket_setting_and_restore_use_its_managed_provider_id() {
+    let (root, home, backups) = profile_dirs("ready-api-websocket-toggle");
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\n",
+    )
+    .unwrap();
+    let secrets = MemorySecrets::default();
+    switch_to_local_with(
+        &home,
+        &backups,
+        "ready-api",
+        "https://api.zenithmarket.dev/v1",
+        "fixture-api-key",
+        LocalAttachOptions {
+            provider_id: READY_API_PROVIDER_ID,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+
+    set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
+    let managed = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        managed["model_providers"][READY_API_PROVIDER_ID]["name"].as_str(),
+        Some("OpenAI")
+    );
+    assert_eq!(
+        managed["model_providers"][READY_API_PROVIDER_ID]["supports_websockets"].as_bool(),
+        Some(false)
+    );
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(restored["model_provider"].as_str(), Some("custom"));
+    assert!(restored["model_providers"]
+        .get(READY_API_PROVIDER_ID)
+        .is_none());
+    assert_eq!(
+        restored["model_providers"]["custom"]["name"].as_str(),
+        Some("Custom")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ready_api_legacy_provider_name_is_migrated_to_openai() {
+    let (root, home, backups) = profile_dirs("ready-api-provider-name-migration");
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"Custom\"\n",
+    )
+    .unwrap();
+    let secrets = MemorySecrets::default();
+    let options = LocalAttachOptions {
+        provider_id: READY_API_PROVIDER_ID,
+        ..LocalAttachOptions::default()
+    };
+    switch_to_local_with(
+        &home,
+        &backups,
+        "ready-api",
+        "https://api.zenithmarket.dev/v1",
+        "fixture-api-key",
+        options,
+        &secrets,
+    )
+    .unwrap();
+
+    let legacy = fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .replace("name = \"OpenAI\"", "name = \"Zenith\"");
+    fs::write(home.join(CONFIG_FILE), legacy).unwrap();
+
+    switch_to_local_with(
+        &home,
+        &backups,
+        "ready-api",
+        "https://api.zenithmarket.dev/v1",
+        "fixture-api-key",
+        LocalAttachOptions {
+            provider_id: READY_API_PROVIDER_ID,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+
+    let migrated = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        migrated["model_providers"][READY_API_PROVIDER_ID]["name"].as_str(),
+        Some("OpenAI")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -220,6 +617,12 @@ fn legacy_backup_without_websocket_field_does_not_block_restore() {
         .as_object_mut()
         .unwrap()
         .remove("managedSupportsWebsockets");
+    // This fixture represents a pre-projection backup, not a new-format
+    // undo record whose expected provider settings were changed externally.
+    backup
+        .as_object_mut()
+        .unwrap()
+        .remove("projectionSecretRef");
     fs::write(&backup_file, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
 
     restore_with(&home, &backups, &secrets).unwrap();
@@ -376,9 +779,9 @@ fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
         models[0]["supported_reasoning_levels"][2]["effort"],
         "ultra"
     );
-    assert_eq!(models[0]["service_tiers"][0]["id"], "priority");
-    assert_eq!(models[0]["additional_speed_tiers"], json!(["fast"]));
-    assert_eq!(models[0]["default_service_tier"], "priority");
+    assert_eq!(models[0]["service_tiers"], json!([]));
+    assert_eq!(models[0]["additional_speed_tiers"], json!([]));
+    assert!(models[0].get("default_service_tier").is_none());
     assert_eq!(models[0]["supports_reasoning_summary_parameter"], true);
     assert_eq!(models[0]["supports_reasoning_summaries"], true);
     assert_eq!(models[0]["default_reasoning_summary"], "detailed");
@@ -447,7 +850,9 @@ fn direct_source_catalog_contains_only_selected_source_models_without_native_cap
             .collect::<Vec<_>>(),
         [1_000, 1_001, 1_002]
     );
-    for model in &models {
+    assert!(models[0].get("default_reasoning_level").is_none());
+    assert_eq!(models[0]["supported_reasoning_levels"], json!([]));
+    for model in &models[1..] {
         assert!(model.get("default_reasoning_level").is_none());
         assert_eq!(model["supported_reasoning_levels"], json!([]));
     }
@@ -455,7 +860,80 @@ fn direct_source_catalog_contains_only_selected_source_models_without_native_cap
 }
 
 #[test]
-fn direct_source_catalog_allows_images_for_every_routed_model() {
+fn direct_source_catalog_converts_provider_reasoning_metadata() {
+    let (root, home, _backups) = profile_dirs("direct-source-reasoning-metadata");
+    let manifest = json!({
+        "data": [
+            {
+                "id": "provider/reasoning",
+                "reasoningEffortModes": ["low", "medium", "high"],
+                "defaultReasoningLevel": "high"
+            },
+            {
+                "id": "gpt-5.6-sol",
+                "reasoningEffortModes": []
+            }
+        ]
+    });
+
+    let catalog = direct_source_model_catalog_with_manifest(
+        &home,
+        &["provider/reasoning".into(), "gpt-5.6-sol".into()],
+        Some(&manifest),
+    )
+    .unwrap()
+    .expect("direct catalog");
+    let models = serde_json::from_str::<Value>(&catalog).unwrap()["models"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    assert_eq!(
+        models[0]["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "low"},
+            {"effort": "medium", "description": "medium"},
+            {"effort": "high", "description": "high"}
+        ])
+    );
+    assert_eq!(models[0]["default_reasoning_level"], "medium");
+    assert_eq!(models[1]["supported_reasoning_levels"], json!([]));
+    assert!(models[1].get("default_reasoning_level").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn attach_removes_unsupported_persistent_reasoning_effort() {
+    let mut document: DocumentMut = r#"
+[desktop]
+enabled-reasoning-efforts = ["low", "persistent", "high"]
+"#
+    .parse()
+    .unwrap();
+
+    attach_config(
+        &mut document,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        None,
+        None,
+        None,
+        false,
+    );
+
+    assert_eq!(
+        document["desktop"]["enabled-reasoning-efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|effort| effort.as_str())
+            .collect::<Vec<_>>(),
+        ["low", "high"]
+    );
+}
+
+#[test]
+fn direct_source_catalog_preserves_each_models_declared_modalities() {
     let (root, home, _backups) = profile_dirs("direct-source-image-capability");
     let manifest = json!({
         "data": [
@@ -483,7 +961,7 @@ fn direct_source_catalog_allows_images_for_every_routed_model() {
     assert_eq!(models[0]["slug"], "provider/vision");
     assert_eq!(models[0]["input_modalities"], json!(["text", "image"]));
     assert_eq!(models[1]["slug"], "provider/text");
-    assert_eq!(models[1]["input_modalities"], json!(["text", "image"]));
+    assert_eq!(models[1]["input_modalities"], json!(["text"]));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -582,6 +1060,7 @@ fn managed_catalog_preserves_native_model_settings() {
     let mut native = routed_codex_catalog_entry(None, "gpt-native", 1, None);
     native["slug"] = Value::String("gpt-native".into());
     native["comp_hash"] = Value::String("official".into());
+    native["display_name"] = json!("Native model title");
     native["input_modalities"] = json!(["text", "image"]);
     native["default_reasoning_level"] = Value::String("ultra".into());
     native["supported_reasoning_levels"] = json!([
@@ -603,6 +1082,7 @@ fn managed_catalog_preserves_native_model_settings() {
     let managed = catalog::build_managed_model_catalog(&home, None, None, &catalog).unwrap();
     let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
 
+    assert_eq!(model["display_name"], "Native model title");
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["default_reasoning_level"], "ultra");
     assert_eq!(
@@ -618,6 +1098,56 @@ fn managed_catalog_preserves_native_model_settings() {
     assert_eq!(model["max_context_window"], 120_000);
     assert_eq!(model["auto_compact_token_limit"], 110_000);
     assert_eq!(model["native_setting"], "keep-me");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn managed_gpt_catalog_refresh_keeps_native_ids_without_copying_cached_capabilities() {
+    let (root, home, _backups) = profile_dirs("managed-gpt-identity-refresh");
+    let mut cached = routed_codex_catalog_entry(None, "gpt-6-astra", 1_000, None);
+    cached["slug"] = json!("gpt-6-astra");
+    cached["comp_hash"] = json!("official");
+    cached["default_reasoning_level"] = json!("ultra");
+    cached["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
+    cached["supports_parallel_tool_calls"] = json!(true);
+    fs::write(
+        home.join(MODELS_CACHE_FILE),
+        json!({"models": [cached]}).to_string(),
+    )
+    .unwrap();
+    let ids = ["gpt-6-astra", "gpt-5.6-sol"];
+    let previous = json!({"models": ids.iter().map(|id|
+        routed_codex_catalog_entry(None, id, 1_000, None)
+    ).collect::<Vec<_>>()})
+    .to_string();
+    let expected = ids
+        .iter()
+        .map(|id| {
+            let mut model = routed_codex_catalog_entry(None, id, 1_000, None);
+            model["slug"] = json!(id);
+            zenith_relay_core::model_metadata::ModelCapabilities::unknown_model()
+                .apply_to_codex(&mut model);
+            model
+        })
+        .collect::<Vec<_>>();
+    let catalog = json!({"models": expected}).to_string();
+
+    let managed =
+        catalog::build_managed_model_catalog(&home, None, Some(previous.as_bytes()), &catalog)
+            .unwrap();
+    let document: Value = serde_json::from_str(&managed).unwrap();
+    let models = document["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    for ((model, id), label) in models.iter().zip(ids).zip(["6 Astra", "5.6 Sol"]) {
+        assert_eq!(model["slug"], id);
+        assert_eq!(model["display_name"], label);
+        assert_eq!(model["comp_hash"], CODEX_RELAY_CATALOG_HASH);
+        assert_eq!(model["supported_reasoning_levels"], json!([]));
+        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert!(model.get("context_window").is_none());
+        assert!(model.get("default_reasoning_level").is_none());
+        assert!(!catalog::is_native_catalog_entry(model));
+    }
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -648,6 +1178,28 @@ fn generated_catalogs_do_not_require_cached_native_metadata() {
 }
 
 #[test]
+fn managed_catalog_does_not_add_context_to_an_incomplete_native_row() {
+    let (root, home, _backups) = profile_dirs("managed-native-context-fallback");
+
+    let managed = catalog::build_managed_model_catalog(
+        &home,
+        None,
+        None,
+        r#"{"models":[{"slug":"gpt-native","display_name":null}]}"#,
+    )
+    .unwrap();
+    let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
+
+    assert_eq!(model["slug"], "gpt-native");
+    assert!(model.get("context_window").is_none());
+    assert!(model.get("max_context_window").is_none());
+    assert!(model.get("auto_compact_token_limit").is_none());
+    assert!(model.get("effective_context_window_percent").is_none());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     let (root, home, backups) = profile_dirs("model-catalog-refresh");
     let cache_path = home.join(MODELS_CACHE_FILE);
@@ -667,10 +1219,13 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     )
     .unwrap();
 
-    assert!(
-        refresh_managed_model_catalog(&home, &backups, r#"{"models":[{"slug":"new-model"}]}"#)
-            .unwrap()
-    );
+    assert!(refresh_managed_model_catalog(
+        &home,
+        &backups,
+        r#"{"models":[{"slug":"new-model"}]}"#,
+        None
+    )
+    .unwrap());
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let catalog: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
@@ -683,9 +1238,187 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     assert!(!refresh_managed_model_catalog(
         &home,
         &backups,
-        r#"{"models":[{"slug":"new-model"}]}"#
+        r#"{"models":[{"slug":"new-model"}]}"#,
+        None,
     )
     .unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_catalog_refresh_cannot_replace_a_different_profile_binding() {
+    let (root, home, backups) = profile_dirs("catalog-owner-change");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"current-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+    let current = profile_bindings(&home, &backups)
+        .unwrap()
+        .into_iter()
+        .find(|binding| binding.active)
+        .unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let before = fs::read(&catalog_path).unwrap();
+    for account_changed in [false, true] {
+        let mut stale = current.clone();
+        if account_changed {
+            stale.bound_oauth_account_id = Some("synthetic-previous-account".into());
+        } else {
+            stale.credential_id = "synthetic-previous-key".into();
+        }
+        assert!(!refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"stale-model"}]}"#,
+            Some(&stale)
+        )
+        .unwrap());
+        assert_eq!(fs::read(&catalog_path).unwrap(), before);
+    }
+    assert!(refresh_managed_model_catalog(
+        &home,
+        &backups,
+        r#"{"models":[{"slug":"new-model"}]}"#,
+        Some(&current)
+    )
+    .unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repeated_attach_applies_changed_reasoning_catalog_to_an_active_profile() {
+    let (root, home, backups) = profile_dirs("repeated-attach-reasoning-policy");
+    let secrets = MemorySecrets::default();
+    let first_catalog = r#"{"models":[{"slug":"vendor/claude-opus-4-8","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low","description":"Low"},{"effort":"high","description":"High"}]}]}"#;
+    let updated_catalog = r#"{"models":[{"slug":"vendor/claude-opus-4-8","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low","description":"Low"}]}]}"#;
+
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        first_catalog,
+        &secrets,
+    )
+    .unwrap();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        updated_catalog,
+        &secrets,
+    )
+    .unwrap();
+
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let catalog: Value = serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
+    assert_eq!(
+        catalog["models"][0]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(config.contains("model_provider = \"zenith_relay_local\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repeated_oauth_pool_attach_refreshes_missing_and_empty_speed_tiers() {
+    let (root, home, backups) = profile_dirs("reattach-speed-tiers");
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new(
+        "fixture-access",
+        Some("fixture-refresh".into()),
+        Some("fixture-id".into()),
+        None,
+        1,
+        1,
+    )
+    .unwrap();
+    let mut models = ["gpt-future-a", "gpt-future-b"]
+        .iter()
+        .map(|id| {
+            let mut model = routed_codex_catalog_entry(None, id, 1_000, None);
+            model["slug"] = json!(id);
+            model
+        })
+        .collect::<Vec<_>>();
+    for key in ["service_tiers", "additional_speed_tiers"] {
+        models[0].as_object_mut().unwrap().remove(key);
+        models[1][key] = json!([]);
+    }
+    let attach = |catalog: &str| {
+        switch_to_local_with(
+            &home,
+            &backups,
+            "fixture-key-id",
+            "http://127.0.0.1:14998/v1",
+            "fixture-key",
+            LocalAttachOptions {
+                catalog_json: Some(catalog),
+                bound_oauth: Some(BoundOAuthProfile {
+                    account_id: "fixture-account",
+                    tokens: &tokens,
+                    provider_account_id: "fixture-provider-account",
+                }),
+                ..LocalAttachOptions::default()
+            },
+            &secrets,
+        )
+        .unwrap()
+    };
+    attach(&json!({"models": models}).to_string());
+    let auth_before = fs::read(home.join(AUTH_FILE)).unwrap();
+    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
+    fs::write(
+        home.join(MODELS_CACHE_FILE),
+        json!({"models": models}).to_string(),
+    )
+    .unwrap();
+    let tiers = json!([
+        {"id": "priority", "name": "Fast", "description": ""},
+        {"id": "ultrafast", "name": "Ultrafast", "description": ""}
+    ]);
+    for model in &mut models {
+        model["service_tiers"] = tiers.clone();
+        model["additional_speed_tiers"] = json!(["fast", "ultrafast"]);
+    }
+    let binding = attach(&json!({"models": models}).to_string());
+    assert!(binding.active);
+    assert_eq!(
+        binding.bound_oauth_account_id.as_deref(),
+        Some("fixture-account")
+    );
+    assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth_before);
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+    assert!(!home.join(MODELS_CACHE_FILE).exists());
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let saved = fs::read(&catalog_path).unwrap();
+    let catalog: Value = serde_json::from_slice(&saved).unwrap();
+    for (index, model) in catalog["models"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(model["slug"], models[index]["slug"]);
+        assert_eq!(model["service_tiers"], tiers);
+        assert_eq!(
+            model["additional_speed_tiers"],
+            json!(["fast", "ultrafast"])
+        );
+    }
+    let backup = local_backup(&home, &backups).unwrap().unwrap();
+    assert!(valid_managed_model_catalog(
+        &backup,
+        &catalog_path,
+        &Some(saved)
+    ));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -727,7 +1460,7 @@ fn catalog_refresh_recovers_an_interrupted_catalog_commit() {
     fs::write(&backup_path, serialize_backup(&backup).unwrap()).unwrap();
 
     assert!(
-        !refresh_managed_model_catalog(&home, &backups, next_source_catalog).unwrap(),
+        !refresh_managed_model_catalog(&home, &backups, next_source_catalog, None).unwrap(),
         "the recovered catalog already matches the requested catalog"
     );
     let recovered = local_backup(&home, &backups)
@@ -923,9 +1656,161 @@ fn missing_managed_catalog_is_migrated_for_safe_restore() {
 
     restore_with(&home, &backups, &secrets).unwrap();
     assert!(!backup_path(&backups).exists());
-    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
-    assert!(!restored.contains("zenith_relay_local"));
+    // The profile started without config.toml; restoring absence must not
+    // manufacture an empty configuration file.
+    assert!(!home.join(CONFIG_FILE).exists());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn externally_edited_managed_catalog_does_not_trap_profile_recovery() {
+    for (case, external_catalog) in [
+        ("json", r#"{"models":[{"slug":"external-model"}]}"#),
+        ("other", "externally changed"),
+    ] {
+        let (root, home, backups) = profile_dirs(&format!("edited-managed-catalog-{case}"));
+        let original_config = "model_provider = 'openai'\nuser_setting = 'keep'\n";
+        let original_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"original"}}"#;
+        fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+        fs::write(home.join(AUTH_FILE), original_auth).unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            r#"{"models":[{"slug":"managed-model"}]}"#,
+            &secrets,
+        )
+        .unwrap();
+
+        let catalog_path = managed_model_catalog_path(&backups).unwrap();
+        fs::write(&catalog_path, external_catalog).unwrap();
+        assert!(local_backup(&home, &backups).unwrap().is_some());
+        assert_eq!(
+            credential_kind_locked(&home, &backups).unwrap(),
+            Some(ProfileCredentialKind::LocalGateway)
+        );
+        assert_eq!(profile_bindings(&home, &backups).unwrap().len(), 1);
+        let error = refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model"}]}"#,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProfileRestoreBlocked);
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), external_catalog);
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            original_auth
+        );
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), external_catalog);
+        assert!(!backup_path(&backups).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn changed_catalog_and_newer_login_survive_restore() {
+    let (root, home, backups) = profile_dirs("edited-catalog-newer-login");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"managed-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let external_catalog = "externally changed";
+    fs::write(&catalog_path, external_catalog).unwrap();
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert!(!fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap_or_default()
+        .contains(PROVIDER_ID));
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert_eq!(fs::read_to_string(&catalog_path).unwrap(), external_catalog);
+    assert!(!backup_path(&backups).exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_catalog_backup_path_still_requires_recovery() {
+    let (root, home, backups) = profile_dirs("invalid-managed-catalog-path");
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"managed-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    fs::write(&catalog_path, "externally changed").unwrap();
+    let backup_path = backup_path(&backups);
+    let mut backup: Value = serde_json::from_slice(&fs::read(&backup_path).unwrap()).unwrap();
+    backup["managedModelCatalogPath"] = Value::String("other-catalog.json".into());
+    fs::write(&backup_path, serde_json::to_vec(&backup).unwrap()).unwrap();
+
+    let error = local_backup(&home, &backups).unwrap_err();
+    assert_eq!(error.code, ErrorCode::RecoveryRequired);
+    assert!(error.message.contains("model catalog reference"));
+    assert_eq!(
+        fs::read_to_string(&catalog_path).unwrap(),
+        "externally changed"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_backup_metadata_reports_which_invariant_failed_without_writing() {
+    for (field, replacement, reason) in [
+        ("version", json!(2), "unsupported backup version"),
+        ("managedKeyHash", json!("bad"), "managed key fingerprint"),
+        ("managedBaseUrl", json!(""), "managed gateway address"),
+    ] {
+        let (root, home, backups) = profile_dirs("invalid-backup-reason");
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "local-key",
+            &secrets,
+        )
+        .unwrap();
+        let config = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let auth = fs::read(home.join(AUTH_FILE)).unwrap();
+        let path = backup_path(&backups);
+        let mut backup: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        backup[field] = replacement;
+        let corrupted = serde_json::to_vec(&backup).unwrap();
+        fs::write(&path, &corrupted).unwrap();
+
+        let error = local_backup(&home, &backups).unwrap_err();
+        assert_eq!(error.code, ErrorCode::RecoveryRequired);
+        assert!(error.message.contains(reason), "{field}: {}", error.message);
+        assert_eq!(fs::read(&path).unwrap(), corrupted);
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config);
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -960,7 +1845,7 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
 }
 
 #[test]
-fn restore_blocks_fresh_login_without_touching_files() {
+fn restore_preserves_fresh_login_and_removes_only_relay_settings() {
     let (root, home, backups) = profile_dirs("fresh-login");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
     fs::write(home.join(AUTH_FILE), "{\"auth_mode\":\"chatgpt\"}").unwrap();
@@ -978,19 +1863,45 @@ fn restore_blocks_fresh_login_without_touching_files() {
         "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",
     )
     .unwrap();
-    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
     let auth_before = fs::read(home.join(AUTH_FILE)).unwrap();
 
-    let error = restore_with(&home, &backups, &secrets).unwrap_err();
-    assert!(matches!(error.code, ErrorCode::ProfileRestoreBlocked));
-    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        "model_provider = \"openai\"\n"
+    );
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth_before);
-    assert!(backup_path(&backups).exists());
+    assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn profile_bindings_fail_closed_when_managed_provider_has_no_backup() {
+fn restore_preserves_an_unrecognized_auth_document() {
+    for (case, external_auth) in [
+        ("non-json", b"not a JSON login".as_slice()),
+        ("non-utf8", &[0xff, 0xfe][..]),
+    ] {
+        let (root, home, backups) = profile_dirs(&format!("external-auth-format-{case}"));
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        fs::write(home.join(AUTH_FILE), external_auth).unwrap();
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), external_auth);
+        assert!(!backup_path(&backups).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn profile_bindings_reports_orphaned_managed_provider_without_blocking_inventory() {
     let (root, home, backups) = profile_dirs("missing-reset-backup");
     fs::write(
             home.join(CONFIG_FILE),
@@ -998,13 +1909,18 @@ fn profile_bindings_fail_closed_when_managed_provider_has_no_backup() {
         )
         .unwrap();
 
-    let error = profile_bindings(&home, &backups).unwrap_err();
-    assert!(matches!(error.code, ErrorCode::RecoveryRequired));
+    let bindings = profile_bindings(&home, &backups).unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(
+        bindings[0].credential_kind,
+        ProfileCredentialKind::LocalGateway
+    );
+    assert!(!bindings[0].active);
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn restore_blocks_changed_provider_origin() {
+fn restore_preserves_changed_provider_origin() {
     let (root, home, backups) = profile_dirs("changed-origin");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
     let secrets = MemorySecrets::default();
@@ -1020,15 +1936,17 @@ fn restore_blocks_changed_provider_origin() {
         .unwrap()
         .replace("14998", "14999");
     fs::write(home.join(CONFIG_FILE), changed).unwrap();
-    assert!(matches!(
-        restore_with(&home, &backups, &secrets).unwrap_err().code,
-        ErrorCode::ProfileRestoreBlocked
-    ));
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(restored.contains("model_provider = \"openai\""));
+    assert!(restored.contains("14999"));
+    assert!(!restored.contains("zlr_key"));
+    assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn restore_blocks_changed_gateway_bearer() {
+fn restore_preserves_changed_gateway_bearer() {
     let (root, home, backups) = profile_dirs("changed-bearer");
     let secrets = MemorySecrets::default();
     attach_with(
@@ -1044,10 +1962,11 @@ fn restore_blocks_changed_gateway_bearer() {
         .replace("zlr_key", "zlr_other");
     fs::write(home.join(CONFIG_FILE), changed).unwrap();
 
-    assert!(matches!(
-        restore_with(&home, &backups, &secrets).unwrap_err().code,
-        ErrorCode::ProfileRestoreBlocked
-    ));
+    restore_with(&home, &backups, &secrets).unwrap();
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(restored.contains("experimental_bearer_token = \"zlr_other\""));
+    assert!(!restored.contains("zlr_key"));
+    assert!(!backup_path(&backups).exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1127,6 +2046,295 @@ fn repeated_attach_blocks_after_fresh_login() {
     assert!(fs::read_to_string(home.join(AUTH_FILE))
         .unwrap()
         .contains("fresh"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn switching_to_an_account_does_not_replace_a_fresh_login() {
+    let (root, home, backups) = profile_dirs("switch-fresh-login");
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        &secrets,
+    )
+    .unwrap();
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+    let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let backup_before = fs::read(backup_path(&backups)).unwrap();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+
+    let error = switch_to_account_with(
+        &home,
+        &backups,
+        "account-local",
+        &tokens,
+        "provider-account",
+        &secrets,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ProfileRestoreBlocked);
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+    assert_eq!(fs::read(backup_path(&backups)).unwrap(), backup_before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_local_reconnect_uses_the_new_login_as_its_restore_baseline() {
+    let (root, home, backups) = profile_dirs("explicit-reconnect-fresh-login");
+    fs::write(home.join(CONFIG_FILE), "model_provider = 'openai'\n").unwrap();
+    fs::write(
+        home.join(AUTH_FILE),
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"old"}}"#,
+    )
+    .unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "first-key",
+        &secrets,
+    )
+    .unwrap();
+
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+    let mut config = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    config["user_setting"] = value("keep");
+    fs::write(home.join(CONFIG_FILE), config.to_string()).unwrap();
+
+    switch_to_local_with(
+        &home,
+        &backups,
+        "local_gateway",
+        "http://127.0.0.1:14998/v1",
+        "next-key",
+        LocalAttachOptions {
+            rebase_newer_login: true,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+    assert_eq!(
+        local_backup(&home, &backups)
+            .unwrap()
+            .unwrap()
+            .previous_auth_hash
+            .as_deref(),
+        Some(bytes_hash(fresh_auth.as_bytes()).as_str())
+    );
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some("openai"));
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_account_activation_rebases_new_login_from_either_managed_profile() {
+    for from_account in [false, true] {
+        let (root, home, backups) = profile_dirs("explicit-account-fresh-login");
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+        if from_account {
+            attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+        } else {
+            attach_with(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "local-key",
+                &secrets,
+            )
+            .unwrap();
+        }
+        let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+        fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+
+        switch_to_account_with_intent(&home, &backups, "next", &tokens, "provider", true, &secrets)
+            .unwrap();
+        restore_account_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            fresh_auth
+        );
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn explicit_account_activation_keeps_an_external_config_change() {
+    let (root, home, backups) = profile_dirs("explicit-account-external-config");
+    fs::write(home.join(CONFIG_FILE), "model_provider = 'original'\n").unwrap();
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+    attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model_provider = 'external'\nuser_setting = 'keep'\n",
+    )
+    .unwrap();
+
+    switch_to_account_with_intent(&home, &backups, "next", &tokens, "provider", true, &secrets)
+        .unwrap();
+    restore_account_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some("external"));
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    assert_eq!(profile_backup_count(&backups), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_local_activation_rebases_new_login_from_managed_account() {
+    let (root, home, backups) = profile_dirs("explicit-local-from-account-fresh-login");
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+    attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+
+    switch_to_local_with(
+        &home,
+        &backups,
+        "local_gateway",
+        "http://127.0.0.1:14998/v1",
+        "next-key",
+        LocalAttachOptions {
+            rebase_newer_login: true,
+            ..LocalAttachOptions::default()
+        },
+        &secrets,
+    )
+    .unwrap();
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert_eq!(profile_backup_count(&backups), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_explicit_reconnect_rolls_back_without_replacing_new_login() {
+    for from_account in [false, true] {
+        let (root, home, backups) = profile_dirs("failed-explicit-reconnect");
+        let secrets = SwitchFaultSecrets::default();
+        let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+        if from_account {
+            attach_account_with(&home, &backups, "old", &tokens, "provider", &secrets).unwrap();
+        } else {
+            attach_with(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "local-key",
+                &secrets,
+            )
+            .unwrap();
+        }
+        let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+        fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+        let original_config = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let backup_file = if from_account {
+            account_backup_for_profile(&home, &backups)
+                .unwrap()
+                .unwrap()
+        } else {
+            backup_path(&backups)
+        };
+        let original_backup = fs::read(&backup_file).unwrap();
+        let original_secrets = secrets.memory.0.lock().unwrap().clone();
+        *secrets.fail_projection_save.lock().unwrap() = true;
+
+        let error = switch_to_local_with(
+            &home,
+            &backups,
+            "next",
+            "http://127.0.0.1:14998/v1",
+            "next-key",
+            LocalAttachOptions {
+                rebase_newer_login: true,
+                ..LocalAttachOptions::default()
+            },
+            &secrets,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::SecretStoreUnavailable);
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            fresh_auth
+        );
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), original_config);
+        assert_eq!(fs::read(&backup_file).unwrap(), original_backup);
+        assert_eq!(*secrets.memory.0.lock().unwrap(), original_secrets);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn explicit_reconnect_does_not_overwrite_a_login_written_during_activation() {
+    let (root, home, backups) = profile_dirs("explicit-reconnect-concurrent-login");
+    let original_config = "model_provider = \"openai\"\n";
+    fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "first-key",
+        &secrets,
+    )
+    .unwrap();
+    let auth_path = home.join(AUTH_FILE);
+    fs::write(
+        &auth_path,
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"before-reconnect"}}"#,
+    )
+    .unwrap();
+    let concurrent_auth =
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"concurrent-login"}}"#;
+    let mutating = MutatingSecrets::new(auth_path.clone(), concurrent_auth.to_vec());
+    *mutating.values.lock().unwrap() = secrets.0.lock().unwrap().clone();
+
+    let error = switch_to_local_with(
+        &home,
+        &backups,
+        "local_gateway",
+        "http://127.0.0.1:14998/v1",
+        "next-key",
+        LocalAttachOptions {
+            rebase_newer_login: true,
+            ..LocalAttachOptions::default()
+        },
+        &mutating,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.code,
+        ErrorCode::ProfileRestoreBlocked | ErrorCode::RecoveryRequired
+    ));
+    assert_eq!(fs::read(auth_path).unwrap(), concurrent_auth);
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        original_config
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1445,6 +2653,43 @@ fn changed_backup_during_restore_rolls_profile_back() {
 }
 
 #[test]
+fn oauth_account_attach_uses_native_catalog_instead_of_foreign_managed_catalog() {
+    let (root, home, backups) = profile_dirs("oauth-account-native-catalog");
+    fs::write(
+        home.join(CONFIG_FILE),
+        format!(
+            "model_provider = \"{PROVIDER_ID}\"\nmodel_catalog_json = \"foreign-catalog.json\"\n\n[model_providers.{PROVIDER_ID}]\nname = \"Relay\"\n"
+        ),
+    )
+    .unwrap();
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("access", Some("refresh".into()), None, None, 1, 1).unwrap();
+
+    attach_account_with(
+        &home,
+        &backups,
+        "account-native-catalog",
+        &tokens,
+        "provider-account",
+        &secrets,
+    )
+    .unwrap();
+
+    let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert!(root_model_catalog_json(&attached).is_none());
+    assert!(root_model_provider(&attached).is_none());
+    assert!(!document_has_provider(&attached));
+    restore_account_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some(PROVIDER_ID));
+    assert_eq!(
+        root_model_catalog_json(&restored).as_deref(),
+        Some("foreign-catalog.json")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn oauth_account_attach_reuses_one_profile_binding_and_restores_previous_login() {
     let (root, home, backups) = profile_dirs("oauth-account");
     let previous_config = r#"model_provider = "custom"
@@ -1599,7 +2844,7 @@ fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
         &home,
         &backups,
         "account-local",
-        original.access_token(),
+        &original,
         "provider-account",
     )
     .unwrap()
@@ -1618,7 +2863,7 @@ fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
         &home,
         &backups,
         "account-local",
-        rotated.access_token(),
+        &rotated,
         "provider-account",
     )
     .unwrap()
@@ -1642,11 +2887,88 @@ fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
         &home,
         &backups,
         "account-local",
-        rotated.access_token(),
+        &rotated,
         "provider-account",
     )
     .unwrap()
     .is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn managed_profile_refresh_only_rotation_updates_other_bound_profiles() {
+    let (root, home, backups) = profile_dirs("managed-refresh-only-rotation");
+    let peer = root.join("peer-profile");
+    fs::create_dir_all(&peer).unwrap();
+    fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+    fs::write(peer.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+    let secrets = MemorySecrets::default();
+    let original = TokenSet::new(
+        "access-stable",
+        Some("refresh-original".into()),
+        Some("id-original".into()),
+        Some(60_000),
+        1,
+        1,
+    )
+    .unwrap();
+    for profile in [&home, &peer] {
+        attach_account_with(
+            profile,
+            &backups,
+            "account-local",
+            &original,
+            "provider-account",
+            &secrets,
+        )
+        .unwrap();
+    }
+
+    let rotated = TokenSet::new(
+        "access-stable",
+        Some("refresh-rotated".into()),
+        Some("id-rotated".into()),
+        Some(120_000),
+        2,
+        2,
+    )
+    .unwrap();
+    fs::write(
+        home.join(AUTH_FILE),
+        account_auth_content(&rotated, "provider-account").unwrap(),
+    )
+    .unwrap();
+
+    let update = managed_account_token_update(
+        &home,
+        &backups,
+        "account-local",
+        &original,
+        "provider-account",
+    )
+    .unwrap()
+    .expect("refresh-only rotation must be adopted");
+    assert_eq!(update.access_token, "access-stable");
+    assert_eq!(update.refresh_token, "refresh-rotated");
+    assert_eq!(update.id_token.as_deref(), Some("id-rotated"));
+
+    assert_eq!(
+        sync_account_bindings(&backups, "account-local", &rotated, "provider-account").unwrap(),
+        1
+    );
+    let peer_auth = fs::read_to_string(peer.join(AUTH_FILE)).unwrap();
+    assert!(peer_auth.contains("refresh-rotated"));
+    assert!(peer_auth.contains("id-rotated"));
+    assert!(managed_account_token_update(
+        &home,
+        &backups,
+        "account-local",
+        &rotated,
+        "provider-account",
+    )
+    .unwrap()
+    .is_none());
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1970,7 +3292,7 @@ fn local_gateway_restore_adopts_oauth_rotation_before_switching_to_chatgpt() {
         &home,
         &backups,
         "account-local",
-        original.access_token(),
+        &original,
         "provider-account",
     )
     .unwrap()
@@ -2094,7 +3416,7 @@ fn local_gateway_keeps_api_key_projection_when_bound_oauth_has_no_id_token() {
 }
 
 #[test]
-fn oauth_account_restore_refuses_a_fresh_manual_login() {
+fn oauth_account_restore_preserves_a_fresh_manual_login() {
     let (root, home, backups) = profile_dirs("oauth-fresh-login");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
     let secrets = MemorySecrets::default();
@@ -2117,15 +3439,56 @@ fn oauth_account_restore_refuses_a_fresh_manual_login() {
     )
     .unwrap();
 
-    assert!(matches!(
-        restore_account_with(&home, &backups, &secrets)
-            .unwrap_err()
-            .code,
-        ErrorCode::ProfileRestoreBlocked
-    ));
+    let restored = restore_account_with(&home, &backups, &secrets)
+        .unwrap()
+        .unwrap();
+    assert!(!restored.active);
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        "model_provider = \"custom\"\n"
+    );
     assert!(fs::read_to_string(home.join(AUTH_FILE))
         .unwrap()
         .contains("fresh"));
+    assert!(account_bindings(&backups).unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn oauth_restore_merges_external_toml_edits_and_keeps_new_login() {
+    let (root, home, backups) = profile_dirs("oauth-external-config-login");
+    let original_config =
+        "model_provider = 'custom'\nopenai_base_url = 'https://example.test/v1'\n";
+    fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+    let secrets = MemorySecrets::default();
+    let tokens = TokenSet::new("managed", None, None, Some(60_000), 1, 1).unwrap();
+    attach_account_with(
+        &home,
+        &backups,
+        "account-local",
+        &tokens,
+        "provider-account",
+        &secrets,
+    )
+    .unwrap();
+    let changed_config = "model_provider = 'other'\nuser_setting = 'keep'\n";
+    let fresh_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fresh"}}"#;
+    fs::write(home.join(CONFIG_FILE), changed_config).unwrap();
+    fs::write(home.join(AUTH_FILE), fresh_auth).unwrap();
+
+    restore_account_with(&home, &backups, &secrets).unwrap();
+    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&restored).as_deref(), Some("other"));
+    assert_eq!(restored["user_setting"].as_str(), Some("keep"));
+    assert_eq!(
+        root_openai_base_url(&restored).as_deref(),
+        Some("https://example.test/v1")
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+        fresh_auth
+    );
+    assert!(account_bindings(&backups).unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2189,6 +3552,10 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         config["desktop"][DESKTOP_DEFAULT_SERVICE_TIER_KEY].as_str(),
         Some("priority")
     );
+    assert_eq!(
+        config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(),
+        Some("priority")
+    );
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
     let state: Value =
         serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
@@ -2203,6 +3570,26 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         true
     );
 
+    sync_default_service_tier(&home, DefaultServiceTier::Ultrafast).unwrap();
+    let config = fs::read_to_string(home.join(CONFIG_FILE))
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    assert_eq!(
+        config["desktop"][DESKTOP_DEFAULT_SERVICE_TIER_KEY].as_str(),
+        Some("ultrafast")
+    );
+    assert_eq!(
+        config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(),
+        Some("ultrafast")
+    );
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY],
+        "ultrafast"
+    );
+
     sync_default_service_tier(&home, DefaultServiceTier::Standard).unwrap();
     let config = fs::read_to_string(home.join(CONFIG_FILE))
         .unwrap()
@@ -2213,6 +3600,7 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         .unwrap()
         .get(DESKTOP_DEFAULT_SERVICE_TIER_KEY)
         .is_none());
+    assert_eq!(config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(), Some("default"));
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
     let state: Value =
         serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
@@ -2260,4 +3648,37 @@ fn write_test_catalog_file(path: &Path, slug: &str) {
         serde_json::to_string_pretty(&json!({"models": [entry]})).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context() {
+    let (root, home, _backups) = profile_dirs("direct-source-models-dev");
+    ensure_test_native_catalog(&home);
+    let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{
+        "test/text-only":{"name":"Catalog Display Name","modalities":{"input":["text"],"output":["text"]},
+        "reasoning":true,"reasoning_effort_levels":["low","high"],"tool_call":true,"limit":{"context":64000}}
+    }"#).unwrap();
+    let catalog = direct_source_model_catalog_with_capabilities(
+        &home,
+        &["text-only".into(), "unknown".into()],
+        &metadata,
+    )
+    .unwrap()
+    .unwrap();
+    let value: Value = serde_json::from_str(&catalog).unwrap();
+    assert_eq!(value["models"][0]["display_name"], "Catalog Display Name");
+    assert_eq!(value["models"][0]["slug"], "text-only");
+    assert_eq!(value["models"][1]["display_name"], "Unknown");
+    assert_eq!(value["models"][0]["input_modalities"], json!(["text"]));
+    assert!(value["models"][0].get("context_window").is_none());
+    assert_eq!(
+        value["models"][1]["input_modalities"],
+        json!(["text", "image"])
+    );
+    assert_eq!(value["models"][1]["supported_reasoning_levels"], json!([]));
+    assert!(value["models"][1].get("context_window").is_none());
+    let managed = catalog::build_managed_model_catalog(&home, None, None, &catalog).unwrap();
+    let managed: Value = serde_json::from_str(&managed).unwrap();
+    assert_eq!(managed["models"], value["models"]);
+    fs::remove_dir_all(root).unwrap();
 }

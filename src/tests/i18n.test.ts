@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { parseSync } from "rolldown/utils";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/relay/api/types";
@@ -106,6 +107,24 @@ describe("Relay translations", () => {
     const nativeSelects = walk(join(import.meta.dir, "..", "src"))
       .filter((file) => readFileSync(file, "utf8").includes("<select"));
     expect(nativeSelects).toEqual([]);
+  });
+
+  test("DOM hints use themed tooltips, not browser title attributes", () => {
+    const nativeTitles: string[] = [];
+    for (const file of walk(join(import.meta.dir, "..", "src"))) {
+      const visit = (value: unknown) => {
+        if (!value || typeof value !== "object") return;
+        const node = value as { type?: string; name?: { name?: string }; attributes?: Array<{ type: string; name?: { name?: string } }> };
+        if (node.type === "JSXOpeningElement" && /^[a-z]/.test(node.name?.name ?? "")
+          && node.attributes?.some((attribute) => attribute.type === "JSXAttribute" && attribute.name?.name === "title")) nativeTitles.push(file);
+        for (const child of Object.values(value)) {
+          if (Array.isArray(child)) child.forEach(visit);
+          else visit(child);
+        }
+      };
+      visit(parseSync(file, readFileSync(file, "utf8")).program);
+    }
+    expect(nativeTitles).toEqual([]);
   });
 
   test("remaining time keeps only the useful short units", () => {

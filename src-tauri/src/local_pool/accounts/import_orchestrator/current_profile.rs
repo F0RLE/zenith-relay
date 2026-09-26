@@ -1,6 +1,5 @@
 use super::{existing_identity_index, imported_identity, read_import_documents};
 use crate::local_pool::accounts::credentials::CredentialStore;
-use crate::local_pool::accounts::quota_refresh::TOKEN_REFRESH_SKEW_MS;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result as LocalResult};
@@ -72,16 +71,17 @@ fn current_codex_profile_is_managed(bindings: &[codex::ProfileBinding]) -> bool 
 
 pub(in crate::local_pool::accounts) fn is_usable_current_chatgpt_profile(
     parsed: &ParsedImport,
-    now_ms: u64,
+    _now_ms: u64,
 ) -> bool {
     let ([row], [item]) = (parsed.preview.rows.as_slice(), parsed.items.as_slice()) else {
         return false;
     };
     let identity = imported_identity(item.secrets().id_token(), item.secrets().access_token());
-    let refreshable = item.secrets().refresh_token().is_some()
-        || identity.access_expires_at_ms.is_some_and(|expires_at_ms| {
-            expires_at_ms > now_ms.saturating_add(TOKEN_REFRESH_SKEW_MS)
-        });
+    // Match the official client's behavior: local JWT expiry is only a hint.
+    // A profile with an access token can still be usable, and a refresh token
+    // must be allowed to prove itself through the explicit refresh action.
+    let refreshable =
+        item.secrets().access_token().is_some() || item.secrets().refresh_token().is_some();
     row.auth_mode == ImportAuthMode::OAuth
         && row.status == ImportPreviewStatus::Ready
         && row.selectable

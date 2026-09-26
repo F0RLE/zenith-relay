@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { Camera, RotateCcw } from "lucide-react";
+import { Camera, FolderOpen, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../../api/commands";
 import type { OpenCodeConfigStatus } from "../../../api/types";
 import { Button, StatusIcon } from "../../../components/Ui";
 import { useRelayState } from "../../../state/RelayStateProvider";
 import { RecoveryConfirmationDialog, RecoveryEmptyState, RecoverySnapshotTable, RecoverySurface, type RecoverySnapshotRow } from "./RecoverySurface";
+
+export function OpenCodeRecoveryHeaderAction() {
+  const { t } = useTranslation();
+  const { busy, perform } = useRelayState();
+  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "opencode-open-folder"} onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened")}>{t("profiles.openFolder")}</Button>;
+}
 
 export function OpenCodeRecoveryTab() {
   const { i18n, t } = useTranslation();

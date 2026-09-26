@@ -1,10 +1,10 @@
 use super::contracts::{
-    custom_tool_item_id, request_tool_catalog, AdapterError, AdapterResult, ClientToolTarget,
-    MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
+    bridged_namespace_tool_name, custom_tool_item_id, prepare_bridge_state, request_tool_catalog,
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, MessagesReasoningMode,
+    ResponsesToolKind,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
@@ -71,36 +71,13 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
     response_scope: &str,
     response_id_seed: &str,
 ) -> AdapterResult<GeminiBridgeRequest> {
-    let object = request
-        .as_object()
-        .ok_or_else(AdapterError::invalid_request)?;
-    for key in ["background", "include"] {
-        if object.get(key).is_some_and(|value| !value.is_null()) {
-            return Err(AdapterError::unsupported_binding());
-        }
-    }
-    let previous_response_id = object
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let mut state = match (previous_response_id, previous) {
-        (Some(_), Some(state)) if state.model == model => state,
-        (Some(_), Some(_)) => return Err(AdapterError::continuation_mismatch()),
-        (Some(_), None) => return Err(AdapterError::continuation_missing()),
-        (None, _) => MessagesBridgeState::new(model, reasoning_mode),
-    };
-    if state.reasoning_mode != reasoning_mode {
-        return Err(AdapterError::continuation_mismatch());
-    }
-    if previous_response_id.is_none() {
-        if let Some(instructions) = object.get("instructions") {
-            let parts = content_parts(instructions)?;
-            append_system_parts(&mut state, parts)?;
-        }
-    } else if object.contains_key("instructions") {
-        return Err(AdapterError::continuation_mismatch());
-    }
+    let (object, mut state) = prepare_bridge_state(
+        request,
+        model,
+        reasoning_mode,
+        previous,
+        crate::WireApi::Gemini,
+    )?;
     if let Some(tools) = request_tool_catalog(object)? {
         let (declarations, targets) = translate_tools(&tools)?;
         state.tools = (!declarations.is_empty()).then_some(declarations);
@@ -121,6 +98,10 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
     )?;
     if state.messages.is_empty() {
         return Err(AdapterError::invalid_request());
+    }
+    state.historical_system = state.system.clone();
+    if let Some(instructions) = object.get("instructions").filter(|value| !value.is_null()) {
+        append_system_parts(&mut state, content_parts(instructions)?)?;
     }
 
     let mut body = Map::from_iter([("contents".to_string(), Value::Array(state.messages.clone()))]);
@@ -201,13 +182,35 @@ pub fn translate_gemini_response(
     request: GeminiBridgeRequest,
     upstream: &Value,
 ) -> AdapterResult<GeminiBridgeResponse> {
+    if prompt_blocked(upstream).map_err(|()| AdapterError::upstream_response_invalid())? {
+        let response_id = request.response_id.clone();
+        let mut response_body = responses_body_from_output(
+            &response_id,
+            &request.model,
+            Vec::new(),
+            upstream.get("usageMetadata"),
+        );
+        response_body["status"] = Value::String("incomplete".into());
+        response_body["incomplete_details"] = json!({"reason":"content_filter"});
+        return Ok(GeminiBridgeResponse {
+            response_body,
+            response_id,
+            continuation: request.state,
+        });
+    }
     let candidate = first_candidate(upstream)?;
-    let parts = candidate
+    let incomplete_reason =
+        candidate_incomplete_reason(candidate.get("finishReason").and_then(Value::as_str))?;
+    let parts = match candidate
         .pointer("/content/parts")
         .and_then(Value::as_array)
-        .ok_or_else(AdapterError::upstream_response_invalid)?;
+    {
+        Some(parts) => parts.as_slice(),
+        None if incomplete_reason.is_some() => &[],
+        None => return Err(AdapterError::upstream_response_invalid()),
+    };
     let (output, _) = responses_output_from_gemini_parts(&request, parts)?;
-    if output.is_empty() {
+    if output.is_empty() && incomplete_reason.is_none() {
         return Err(AdapterError::upstream_response_invalid());
     }
     let response_id = request.response_id.clone();
@@ -217,11 +220,9 @@ pub fn translate_gemini_response(
         output,
         upstream.get("usageMetadata"),
     );
-    if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
-        if !matches!(reason, "STOP" | "FINISH_REASON_UNSPECIFIED") {
-            response_body["status"] = Value::String("incomplete".to_string());
-            response_body["incomplete_details"] = json!({"reason": reason.to_ascii_lowercase()});
-        }
+    if let Some(reason) = incomplete_reason {
+        response_body["status"] = Value::String("incomplete".to_string());
+        response_body["incomplete_details"] = json!({"reason": reason});
     }
     let mut continuation = request.state.clone();
     append_message(&mut continuation, "model", parts.to_vec());
@@ -230,6 +231,64 @@ pub fn translate_gemini_response(
         response_id,
         continuation,
     })
+}
+
+pub(super) fn candidate_incomplete_reason(
+    reason: Option<&str>,
+) -> AdapterResult<Option<&'static str>> {
+    match reason {
+        None | Some("STOP") => Ok(None),
+        Some("MAX_TOKENS") => Ok(Some("max_output_tokens")),
+        Some(
+            "SAFETY"
+            | "RECITATION"
+            | "LANGUAGE"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_RECITATION"
+            | "ESCALATION",
+        ) => Ok(Some("content_filter")),
+        _ => Err(AdapterError::upstream_response_invalid()),
+    }
+}
+
+/// Gemini can block a prompt before producing candidates. Only an explicit
+/// block reason is a filtered terminal; missing candidates alone are not.
+pub(super) fn prompt_blocked(value: &Value) -> Result<bool, ()> {
+    let Some(reason) = value.pointer("/promptFeedback/blockReason") else {
+        return Ok(false);
+    };
+    if !matches!(
+        reason.as_str(),
+        Some("SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY")
+    ) || value
+        .get("candidates")
+        .is_some_and(|candidates| candidates.as_array().is_none_or(|items| !items.is_empty()))
+    {
+        return Err(());
+    }
+    Ok(true)
+}
+
+/// Recognize only Gemini terminal reasons the response adapter can translate.
+/// The gateway uses this before releasing a stream with no generated output.
+pub(crate) fn gemini_incomplete(value: &Value) -> bool {
+    let Ok(blocked) = prompt_blocked(value) else {
+        return false;
+    };
+    blocked
+        || value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("finishReason"))
+            .and_then(Value::as_str)
+            .is_some_and(|reason| {
+                candidate_incomplete_reason(Some(reason)).is_ok_and(|reason| reason.is_some())
+            })
 }
 
 pub(super) fn responses_body_from_output(
@@ -243,23 +302,25 @@ pub(super) fn responses_body_from_output(
 }
 
 pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
-    let input = usage
+    let mut result = Map::new();
+    if let Some(input) = usage
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let output = usage
+    {
+        result.insert("input_tokens".to_string(), Value::from(input));
+    }
+    if let Some(output) = usage
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let total = usage
+    {
+        result.insert("output_tokens".to_string(), Value::from(output));
+    }
+    if let Some(total) = usage
         .and_then(|u| u.get("totalTokenCount"))
         .and_then(Value::as_u64)
-        .unwrap_or_else(|| input.saturating_add(output));
-    let mut result = Map::from_iter([
-        ("input_tokens".to_string(), Value::from(input)),
-        ("output_tokens".to_string(), Value::from(output)),
-        ("total_tokens".to_string(), Value::from(total)),
-    ]);
+    {
+        result.insert("total_tokens".to_string(), Value::from(total));
+    }
     if let Some(cached) = usage
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)
@@ -330,7 +391,7 @@ fn translate_tools(
             Some("function" | "custom") | None if tool.get("name").is_some() => {
                 translate_gemini_tool(&mut declarations, &mut targets, tool, None)?;
             }
-            _ => {}
+            _ => return Err(AdapterError::unsupported_tool()),
         }
     }
     Ok((declarations, targets))
@@ -391,10 +452,10 @@ fn translate_gemini_tool(
     if !parameters.is_object() {
         return Err(AdapterError::invalid_request());
     }
-    declaration.insert(
-        "parameters".to_string(),
-        sanitize_gemini_schema(&parameters),
-    );
+    if tool.get("strict").and_then(Value::as_bool) == Some(true) {
+        return Err(AdapterError::parameter_unsupported());
+    }
+    declaration.insert("parametersJsonSchema".to_string(), parameters);
     declarations.push(Value::Object(declaration));
     targets.insert(
         upstream_name,
@@ -407,23 +468,16 @@ fn translate_gemini_tool(
     Ok(())
 }
 
-fn bridged_namespace_tool_name(namespace: &str, name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((namespace.len() as u64).to_le_bytes());
-    hasher.update(namespace.as_bytes());
-    hasher.update((name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
-    let digest = hasher.finalize();
-    format!("relay_ns_{}", hex::encode(&digest[..12]))
-}
-
 fn translate_tool_choice(
     choice: &Value,
     state: &MessagesBridgeState,
 ) -> AdapterResult<(Option<Value>, Option<BTreeSet<String>>)> {
-    let mode = choice
-        .as_str()
-        .or_else(|| choice.get("mode").and_then(Value::as_str));
+    let mode = choice.as_str().or_else(|| {
+        choice
+            .get("mode")
+            .filter(|_| choice.get("type").and_then(Value::as_str) != Some("allowed_tools"))
+            .and_then(Value::as_str)
+    });
     if let Some(mode) = mode {
         let mode = match mode.to_ascii_lowercase().as_str() {
             "none" => "NONE",
@@ -827,6 +881,13 @@ fn apply_response_format(
             generation.insert("responseMimeType".to_string(), json!("application/json"));
         }
         "json_schema" => {
+            if format
+                .get("strict")
+                .or_else(|| format.pointer("/json_schema/strict"))
+                == Some(&Value::Bool(true))
+            {
+                return Err(AdapterError::parameter_unsupported());
+            }
             generation.insert("responseMimeType".to_string(), json!("application/json"));
             let schema = format
                 .get("schema")
@@ -836,53 +897,12 @@ fn apply_response_format(
                         .and_then(|value| value.get("schema"))
                 })
                 .ok_or_else(AdapterError::invalid_request)?;
-            generation.insert("responseSchema".to_string(), sanitize_gemini_schema(schema));
+            generation.insert("responseJsonSchema".to_string(), schema.clone());
         }
         "text" => {}
         _ => return Err(AdapterError::unsupported_binding()),
     }
     Ok(())
-}
-
-/// Gemini's structured-output schema is a deliberately small subset of JSON
-/// Schema. Bridge requests must remove draft keywords before they reach the
-/// provider; native Gemini requests are never passed through this function.
-fn sanitize_gemini_schema(schema: &Value) -> Value {
-    const SUPPORTED_FIELDS: [&str; 8] = [
-        "type",
-        "description",
-        "properties",
-        "required",
-        "items",
-        "enum",
-        "title",
-        "nullable",
-    ];
-
-    let Value::Object(object) = schema else {
-        return schema.clone();
-    };
-    let mut sanitized = Map::new();
-    for field in SUPPORTED_FIELDS {
-        let Some(value) = object.get(field) else {
-            continue;
-        };
-        let value = match field {
-            "properties" => match value.as_object() {
-                Some(properties) => Value::Object(
-                    properties
-                        .iter()
-                        .map(|(name, property)| (name.clone(), sanitize_gemini_schema(property)))
-                        .collect(),
-                ),
-                None => value.clone(),
-            },
-            "items" => sanitize_gemini_schema(value),
-            _ => value.clone(),
-        };
-        sanitized.insert(field.to_string(), value);
-    }
-    Value::Object(sanitized)
 }
 
 fn apply_reasoning(
@@ -894,15 +914,27 @@ fn apply_reasoning(
         .and_then(Value::as_object)
         .and_then(|value| value.get("effort"))
         .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| value != "none");
+        .map(|value| value.trim().to_ascii_lowercase());
     let Some(effort) = effort else {
         return Ok(());
     };
     if mode == MessagesReasoningMode::Disabled {
         return Err(AdapterError::reasoning_unsupported());
     }
+    if mode == MessagesReasoningMode::Adaptive {
+        if !super::contracts::SourceAdapter::ResponsesToGemini
+            .supports_reasoning_effort(mode, &effort)
+        {
+            return Err(AdapterError::reasoning_unsupported());
+        }
+        generation.insert(
+            "thinkingConfig".to_string(),
+            json!({"thinkingLevel":effort,"includeThoughts":true}),
+        );
+        return Ok(());
+    }
     let budget = match effort.as_str() {
+        "none" => 0,
         "minimal" => 1_024,
         "low" => 4_096,
         "medium" => 8_192,
@@ -1395,7 +1427,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_sanitizes_json_schema_for_gemini_without_touching_nested_shape() {
+    fn bridge_preserves_json_schema_constraints_for_gemini() {
         let prepared = prepare_responses_to_gemini_with_reasoning(
             &json!({
                 "input": "structured",
@@ -1454,27 +1486,24 @@ mod tests {
         )
         .unwrap();
 
-        let schema = &prepared.upstream_body["generationConfig"]["responseSchema"];
+        let schema = &prepared.upstream_body["generationConfig"]["responseJsonSchema"];
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["title"], "Answer");
         assert_eq!(schema["description"], "Structured answer");
         assert_eq!(schema["properties"]["answer"]["type"], "string");
-        assert!(schema.get("$defs").is_none());
-        assert!(schema.get("$schema").is_none());
-        assert!(schema.get("additionalProperties").is_none());
-        assert!(schema["properties"]["answer"].get("$ref").is_none());
-        assert!(schema["properties"]["answer"].get("minLength").is_none());
+        assert_eq!(schema["$defs"], json!({"unused":{"type":"string"}}));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["answer"]["$ref"], "#/defs/answer");
+        assert_eq!(schema["properties"]["answer"]["minLength"], 1);
         assert_eq!(schema["properties"]["scores"]["items"]["type"], "number");
-        assert!(schema["properties"]["scores"]["items"]
-            .get("minimum")
-            .is_none());
+        assert_eq!(schema["properties"]["scores"]["items"]["minimum"], 0);
 
         let parameters =
-            &prepared.upstream_body["tools"][0]["functionDeclarations"][0]["parameters"];
+            &prepared.upstream_body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
         assert_eq!(parameters["properties"]["query"]["type"], "string");
-        assert!(parameters["properties"]["query"].get("pattern").is_none());
-        assert!(parameters["properties"]["query"].get("$ref").is_none());
-        assert!(parameters.get("additionalProperties").is_none());
+        assert_eq!(parameters["properties"]["query"]["pattern"], ".+");
+        assert_eq!(parameters["properties"]["query"]["$ref"], "#/defs/query");
+        assert_eq!(parameters["additionalProperties"], false);
     }
 
     #[test]

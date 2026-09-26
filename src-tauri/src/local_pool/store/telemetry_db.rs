@@ -14,8 +14,8 @@ use zenith_relay_core::pricing::PriceEvidence;
 use zenith_relay_core::{
     pricing::{PriceSource, PricingCatalog, PricingContext, PricingMetadata, PricingSourceSummary},
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
-    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, RoutingDiagnostics,
+    ToolUseDiagnostics, UsageEvent,
 };
 #[cfg(test)]
 use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
@@ -84,6 +84,7 @@ pub struct UsageLog {
     pub http_status: u16,
     pub error_category: Option<String>,
     pub error_origin: Option<ErrorOrigin>,
+    pub upstream_error: Option<zenith_relay_core::usage::UpstreamErrorDetails>,
     pub tool_use: Option<ToolUseDiagnostics>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
@@ -91,7 +92,7 @@ pub struct UsageLog {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
-    pub cache_write_ttl: Option<CacheWriteTtl>,
+    pub cache_write_ttl: Option<String>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -355,6 +356,9 @@ impl TelemetryDb {
         if version <= 27 {
             connection.execute_batch(MIGRATION_028).map_err(db_error)?;
         }
+        if version <= 28 {
+            connection.execute_batch(MIGRATION_029).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -487,7 +491,7 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 mod tests {
     use super::*;
     use zenith_relay_core::{
-        CacheWriteTtl, ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
+        ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
     };
 
     fn aggregate_test_event(
@@ -495,7 +499,7 @@ mod tests {
         attempt: u16,
         input_tokens: u64,
         cache_write_input_tokens: u64,
-        cache_write_ttl: Option<CacheWriteTtl>,
+        cache_write_ttl: Option<String>,
         output_tokens: u64,
     ) -> UsageEvent {
         UsageEvent {
@@ -505,6 +509,7 @@ mod tests {
             source_id: "source".into(),
             candidate_id: Some("source".into()),
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),
@@ -531,8 +536,25 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(output_tokens),
             total_tokens: Some(input_tokens + output_tokens),
+            upstream_error: None,
             quota_snapshot: None,
         }
+    }
+
+    fn private_model_source_event(request_id: &str, source_id: &str) -> UsageEvent {
+        let mut event = aggregate_test_event(request_id, 1, 1_000_000, 0, None, 100_000);
+        event.local_key_id = "key_1".into();
+        event.source_id = source_id.into();
+        event.candidate_id = Some(source_id.into());
+        event.requested_model = Some("private-model".into());
+        event.resolved_model = Some("private-model".into());
+        event.consecutive_failures = Some(0);
+        event.latency_ms = 100;
+        event.ttft_ms = Some(10);
+        event.generation_ms = Some(90);
+        event.cached_input_tokens = Some(0);
+        event.reasoning_tokens = Some(0);
+        event
     }
 
     #[test]
@@ -547,6 +569,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            account_token_generation: None,
             client_context_id: Some("client_0123456789ab".into()),
             routing: Some(RoutingDiagnostics {
                 reason: SelectionReason::QuotaHeadroom,
@@ -567,12 +590,19 @@ mod tests {
             http_status: 200,
             error_category: None,
             tool_use: ToolUseDiagnostics {
-                client_tool_count: 3,
-                forwarded_tool_count: 3,
+                client_tool_count: 73,
+                forwarded_tool_count: 73,
                 tool_choice: ToolChoiceMode::Auto,
                 tool_call_count: 1,
                 text_output: false,
                 terminal_output: TerminalOutputKind::ToolCall,
+                client_schema_bytes: Some(12345),
+                forwarded_schema_bytes: Some(12345),
+                filtered_tool_count: 0,
+                policy_mode: Some(zenith_relay_core::ToolPolicyMode::Automatic),
+                policy_outcome: Some(zenith_relay_core::ToolPolicyOutcome::Deferred),
+                policy_fallback: false,
+                deferred_tool_search: true,
             },
             cooldown_scope: None,
             retry_at_ms: None,
@@ -587,12 +617,14 @@ mod tests {
             reasoning_tokens: Some(2),
             output_tokens: Some(3),
             total_tokens: Some(5),
+            upstream_error: None,
             quota_snapshot: None,
         };
         TelemetryDb::open(&path).unwrap().record(&event).unwrap();
         let database = TelemetryDb::open(&path).unwrap();
         let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_use.as_ref(), Some(&event.tool_use));
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
         assert_eq!(
@@ -682,7 +714,7 @@ mod tests {
                 1,
                 10,
                 5,
-                Some(CacheWriteTtl::FiveMinutes),
+                Some("5m".to_string()),
                 4,
             ))
             .unwrap();
@@ -692,7 +724,7 @@ mod tests {
                 2,
                 20,
                 7,
-                Some(CacheWriteTtl::OneHour),
+                Some("1h".to_string()),
                 8,
             ))
             .unwrap();
@@ -1238,41 +1270,20 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-usage-page-{}", uuid::Uuid::new_v4()));
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        let mut event = UsageEvent {
-            request_id: "req_page_1".into(),
-            attempt: 1,
-            local_key_id: "key_1".into(),
-            source_id: "openai-codex".into(),
-            candidate_id: Some("account_1".into()),
-            account_id: Some("account_1".into()),
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("gpt-5.4".into()),
-            resolved_model: Some("gpt-5.4".into()),
-            requested_reasoning_effort: None,
-            effective_reasoning_effort: None,
-            wire_api: WireApi::Responses,
-            service_tier: DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: true,
-            http_status: 200,
-            error_category: None,
-            tool_use: ToolUseDiagnostics::default(),
-            cooldown_scope: None,
-            retry_at_ms: None,
-            consecutive_failures: Some(0),
-            latency_ms: 428,
-            ttft_ms: Some(128),
-            generation_ms: Some(300),
-            input_tokens: Some(20),
-            cached_input_tokens: Some(12),
-            cache_write_input_tokens: None,
-            cache_write_ttl: None,
-            reasoning_tokens: Some(5),
-            output_tokens: Some(8),
-            total_tokens: Some(28),
-            quota_snapshot: None,
-        };
+        let mut event = aggregate_test_event("req_page_1", 1, 20, 0, None, 8);
+        event.local_key_id = "key_1".into();
+        event.source_id = "openai-codex".into();
+        event.candidate_id = Some("account_1".into());
+        event.account_id = Some("account_1".into());
+        event.requested_model = Some("gpt-5.4".into());
+        event.resolved_model = Some("gpt-5.4".into());
+        event.consecutive_failures = Some(0);
+        event.latency_ms = 428;
+        event.ttft_ms = Some(128);
+        event.generation_ms = Some(300);
+        event.cached_input_tokens = Some(12);
+        event.cache_write_input_tokens = None;
+        event.reasoning_tokens = Some(5);
         database.record(&event).unwrap();
         event.request_id = "req_page_2".into();
         event.candidate_id = Some("account_2".into());
@@ -1369,7 +1380,7 @@ mod tests {
         event.resolved_model = Some("gpt-5.4".into());
         event.input_tokens = Some(20);
         event.cache_write_input_tokens = Some(5);
-        event.cache_write_ttl = Some(CacheWriteTtl::FiveMinutes);
+        event.cache_write_ttl = Some("5m".to_string());
         event.output_tokens = Some(4);
         event.total_tokens = Some(24);
         database.record(&event).unwrap();
@@ -1454,94 +1465,15 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn usage_keeps_only_the_terminal_fallback_attempt() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-usage-attempts-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let path = root.join("usage.sqlite");
-        let database = TelemetryDb::open(&path).unwrap();
-        let mut event = UsageEvent {
-            request_id: "req_fallback".into(),
+    fn failed_fallback_test_event(request_id: &str) -> UsageEvent {
+        UsageEvent {
+            request_id: request_id.into(),
             attempt: 1,
             local_key_id: "key_1".into(),
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("gpt-test".into()),
-            resolved_model: Some("gpt-test".into()),
-            requested_reasoning_effort: Some("max".into()),
-            effective_reasoning_effort: Some("max".into()),
-            wire_api: WireApi::Responses,
-            service_tier: DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: false,
-            http_status: 503,
-            error_category: Some("upstream_unavailable".into()),
-            tool_use: ToolUseDiagnostics::default(),
-            cooldown_scope: Some("*".into()),
-            retry_at_ms: Some(60_000),
-            consecutive_failures: Some(1),
-            latency_ms: 5,
-            ttft_ms: None,
-            generation_ms: None,
-            input_tokens: None,
-            cached_input_tokens: None,
-            cache_write_input_tokens: None,
-            cache_write_ttl: None,
-            reasoning_tokens: None,
-            output_tokens: None,
-            total_tokens: None,
-            quota_snapshot: None,
-        };
-        database.record(&event).unwrap();
-        event.attempt = 2;
-        event.source_id = "source_2".into();
-        event.candidate_id = Some("source_2".into());
-        event.success = true;
-        event.http_status = 200;
-        event.error_category = None;
-        event.effective_reasoning_effort = Some("low".into());
-        event.cooldown_scope = None;
-        event.retry_at_ms = None;
-        event.consecutive_failures = Some(0);
-        database.record(&event).unwrap();
-
-        event.attempt = 1;
-        event.source_id = "source_stale".into();
-        event.success = false;
-        event.http_status = 503;
-        event.error_category = Some("upstream_unavailable".into());
-        database.record(&event).unwrap();
-
-        let logs = database.list(10).unwrap();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].attempt, 2);
-        assert!(logs[0].success);
-        assert_eq!(logs[0].source_id, "source_2");
-        assert_eq!(logs[0].requested_reasoning_effort.as_deref(), Some("max"));
-        assert_eq!(logs[0].effective_reasoning_effort.as_deref(), Some("low"));
-        drop(database);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-usage-failed-attempts-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        let mut event = UsageEvent {
-            request_id: "req_failed".into(),
-            attempt: 1,
-            local_key_id: "key_1".into(),
-            source_id: "source_1".into(),
-            candidate_id: Some("source_1".into()),
-            account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -1568,9 +1500,86 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            upstream_error: None,
             quota_snapshot: None,
-        };
+        }
+    }
+
+    #[test]
+    fn usage_keeps_only_the_terminal_fallback_attempt() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-attempts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = root.join("usage.sqlite");
+        let database = TelemetryDb::open(&path).unwrap();
+        let mut event = failed_fallback_test_event("req_fallback");
+        event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ));
+        event.requested_reasoning_effort = Some("max".into());
+        event.effective_reasoning_effort = Some("max".into());
         database.record(&event).unwrap();
+        assert_eq!(
+            database.list(10).unwrap()[0].upstream_error,
+            event.upstream_error
+        );
+        event.attempt = 2;
+        event.source_id = "source_2".into();
+        event.candidate_id = Some("source_2".into());
+        event.success = true;
+        event.http_status = 200;
+        event.error_category = None;
+        event.effective_reasoning_effort = Some("low".into());
+        event.cooldown_scope = None;
+        event.retry_at_ms = None;
+        event.consecutive_failures = Some(0);
+        database.record(&event).unwrap();
+
+        event.attempt = 1;
+        event.source_id = "source_stale".into();
+        event.success = false;
+        event.http_status = 503;
+        event.error_category = Some("upstream_unavailable".into());
+        database.record(&event).unwrap();
+
+        let logs = database.list(10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].attempt, 2);
+        assert!(logs[0].success);
+        assert!(logs[0].upstream_error.is_none());
+        assert_eq!(logs[0].source_id, "source_2");
+        assert_eq!(logs[0].requested_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(logs[0].effective_reasoning_effort.as_deref(), Some("low"));
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-failed-attempts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut event = failed_fallback_test_event("req_failed");
+        event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ));
+        event.upstream_error.as_mut().unwrap().message =
+            Some("Capacity exhausted; Bearer synthetic-private".into());
+        database.record(&event).unwrap();
+        let stored: String = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT upstream_error_json FROM request_logs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!stored.contains("synthetic-private"));
         event.attempt = 2;
         event.source_id = "source_2".into();
         event.candidate_id = Some("source_2".into());
@@ -1582,6 +1591,13 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].attempt, 2);
         assert!(!logs[0].success);
+        assert_eq!(
+            logs[0].upstream_error,
+            event
+                .upstream_error
+                .as_ref()
+                .map(|details| details.sanitized())
+        );
         assert_eq!(logs[0].http_status, 429);
         assert_eq!(logs[0].source_id, "source_2");
         assert_eq!(logs[0].error_origin, Some(ErrorOrigin::Provider));
@@ -1603,6 +1619,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-5.4".into()),
@@ -1629,6 +1646,7 @@ mod tests {
             reasoning_tokens: Some(3),
             output_tokens: Some(8),
             total_tokens: Some(28),
+            upstream_error: None,
             quota_snapshot: None,
         };
         database.record(&event).unwrap();
@@ -1653,43 +1671,8 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        database
-            .record(&UsageEvent {
-                request_id: "req_custom_price".into(),
-                attempt: 1,
-                local_key_id: "key_1".into(),
-                source_id: "source_1".into(),
-                candidate_id: Some("source_1".into()),
-                account_id: None,
-                client_context_id: None,
-                routing: None,
-                requested_model: Some("private-model".into()),
-                resolved_model: Some("private-model".into()),
-                requested_reasoning_effort: None,
-                effective_reasoning_effort: None,
-                wire_api: WireApi::Responses,
-                service_tier: DefaultServiceTier::Standard,
-                applied_service_tier: None,
-                success: true,
-                http_status: 200,
-                error_category: None,
-                tool_use: ToolUseDiagnostics::default(),
-                cooldown_scope: None,
-                retry_at_ms: None,
-                consecutive_failures: Some(0),
-                latency_ms: 100,
-                ttft_ms: Some(10),
-                generation_ms: Some(90),
-                input_tokens: Some(1_000_000),
-                cached_input_tokens: Some(0),
-                cache_write_input_tokens: Some(0),
-                cache_write_ttl: None,
-                reasoning_tokens: Some(0),
-                output_tokens: Some(100_000),
-                total_tokens: Some(1_100_000),
-                quota_snapshot: None,
-            })
-            .unwrap();
+        let event = private_model_source_event("req_custom_price", "source_1");
+        database.record(&event).unwrap();
 
         assert_eq!(
             database
@@ -1737,41 +1720,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
-        let mut event = UsageEvent {
-            request_id: "req_source_cheap".into(),
-            attempt: 1,
-            local_key_id: "key_1".into(),
-            source_id: "source_cheap".into(),
-            candidate_id: Some("source_cheap".into()),
-            account_id: None,
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("private-model".into()),
-            resolved_model: Some("private-model".into()),
-            requested_reasoning_effort: None,
-            effective_reasoning_effort: None,
-            wire_api: WireApi::Responses,
-            service_tier: DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: true,
-            http_status: 200,
-            error_category: None,
-            tool_use: ToolUseDiagnostics::default(),
-            cooldown_scope: None,
-            retry_at_ms: None,
-            consecutive_failures: Some(0),
-            latency_ms: 100,
-            ttft_ms: Some(10),
-            generation_ms: Some(90),
-            input_tokens: Some(1_000_000),
-            cached_input_tokens: Some(0),
-            cache_write_input_tokens: Some(0),
-            cache_write_ttl: None,
-            reasoning_tokens: Some(0),
-            output_tokens: Some(100_000),
-            total_tokens: Some(1_100_000),
-            quota_snapshot: None,
-        };
+        let mut event = private_model_source_event("req_source_cheap", "source_cheap");
         database.record(&event).unwrap();
         event.request_id = "req_source_expensive".into();
         event.source_id = "source_expensive".into();
@@ -2002,6 +1951,7 @@ mod tests {
                 "ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
                  ALTER TABLE request_logs DROP COLUMN client_context_id;
+                 ALTER TABLE request_logs DROP COLUMN upstream_error_json;
                  ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_5m_tokens;
                  ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_1h_tokens;
                  ALTER TABLE usage_candidate_rollups DROP COLUMN unknown_cache_write_tokens;",
@@ -2177,6 +2127,7 @@ mod tests {
                 source_id: "source".into(),
                 candidate_id: None,
                 account_id: None,
+                account_token_generation: None,
                 client_context_id: None,
                 routing: None,
                 requested_model: None,
@@ -2203,6 +2154,7 @@ mod tests {
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
+                upstream_error: None,
                 quota_snapshot: None,
             })
             .unwrap();

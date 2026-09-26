@@ -1,21 +1,40 @@
+mod capabilities;
 mod connector;
 mod discovery;
+mod observations;
+mod probe;
+pub use observations::SourceRead;
 mod stats;
 
+pub use probe::{
+    probe_source_generation, probe_source_generation_with_scope, SourceProbeInput,
+    SourceProbeResult,
+};
+
+pub use capabilities::{
+    endpoint_url_protocol, service_protocol, CapabilityOrigin, CapabilityStatus,
+    ModelEndpointCapability, ProtocolFeature, SourceProtocolConfig,
+};
 pub use connector::SourceConnector;
 pub(crate) use discovery::discover_models_with_client;
 pub use discovery::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, SourceDiscovery,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    discover_source_with_protocol_config_with_scope, read_source_models,
+    read_source_models_with_scope, SourceDiscovery,
 };
-pub use stats::{fetch_source_provider_stats, SourceProviderStats, SourceStatsProvider};
+pub use stats::{
+    fetch_source_provider_stats, read_source_provider_stats, read_source_provider_stats_with_scope,
+    SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
+    SourceStatsProvider, SourceStatsStatus,
+};
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};
 
 use crate::{Error, MessagesReasoningMode, Result, SourceAdapter, UpstreamProtocol};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use url::{Host, Url};
 
@@ -148,7 +167,8 @@ impl SourceProtocolBinding {
     /// upstream contract. Native routes preserve provider-defined values;
     /// bridges are limited to their explicit translation mode.
     pub fn supports_reasoning_effort(&self, effort: &str) -> bool {
-        self.adapter.is_passthrough() || self.reasoning_mode.supports_effort(effort)
+        self.adapter
+            .supports_reasoning_effort(self.reasoning_mode, effort)
     }
 }
 
@@ -176,7 +196,6 @@ pub fn normalize_source_protocol_bindings(
         bindings
     };
     let mut seen_routes = BTreeSet::new();
-    let mut assigned_models = BTreeMap::<WireApi, HashSet<String>>::new();
     let mut normalized = Vec::with_capacity(bindings.len());
 
     let expand_empty_models = bindings.len() == 1 && bindings[0].adapter.is_passthrough();
@@ -187,10 +206,7 @@ pub fn normalize_source_protocol_bindings(
         // source-level values while normalizing persisted records. Both
         // bridge adapters have an explicit local translation policy; native
         // routes stay opaque and therefore do not advertise a synthetic mode.
-        let reasoning_mode = if matches!(
-            binding.adapter,
-            SourceAdapter::ResponsesToMessages | SourceAdapter::ResponsesToGemini
-        ) {
+        let reasoning_mode = if !binding.adapter.is_passthrough() {
             MessagesReasoningMode::Adaptive
         } else {
             MessagesReasoningMode::Disabled
@@ -227,16 +243,6 @@ pub fn normalize_source_protocol_bindings(
         {
             return Err(Error::Validation(
                 "source protocol binding references a model not exposed by the source".to_string(),
-            ));
-        }
-        let assigned_for_protocol = assigned_models.entry(binding.wire_api).or_default();
-        if model_ids
-            .iter()
-            .any(|model| !assigned_for_protocol.insert(model.to_ascii_lowercase()))
-        {
-            return Err(Error::Validation(
-                "a model may be assigned to only one source route for the same client protocol"
-                    .to_string(),
             ));
         }
         normalized.push(SourceProtocolBinding {
@@ -330,6 +336,24 @@ pub fn runtime_source_models_for_any_wire_api(
         }
     }
     Ok(models)
+}
+
+/// Returns models with a confirmed Anthropic-style Messages upstream route.
+/// Cache creation pricing is valid only for these model/route combinations.
+pub fn runtime_source_models_with_cache_write_pricing(
+    protocol_bindings: &[SourceProtocolBinding],
+    fallback_wire_api: WireApi,
+    source_models: &[String],
+) -> BTreeSet<String> {
+    runtime_source_protocol_bindings(protocol_bindings.to_vec(), fallback_wire_api, source_models)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|binding| {
+            binding.adapter.upstream_protocol(binding.wire_api) == UpstreamProtocol::Messages
+        })
+        .flat_map(|binding| binding.model_ids)
+        .map(|model| model.to_ascii_lowercase())
+        .collect()
 }
 
 /// Reports whether a confirmed route exposes at least one model through the
@@ -471,9 +495,14 @@ pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
         .is_some_and(|segment| matches!(*segment, "models" | "responses" | "messages"))
     {
         1
-    } else if segments.len() >= 2
+    } else if (segments.len() >= 2
         && segments[segments.len() - 2] == "chat"
-        && segments[segments.len() - 1] == "completions"
+        && segments[segments.len() - 1] == "completions")
+        || (segments.len() >= 2
+            && segments[segments.len() - 2] == "models"
+            && segments.last().is_some_and(|segment| {
+                segment.ends_with(":generateContent") || segment.ends_with(":streamGenerateContent")
+            }))
     {
         2
     } else {
@@ -836,8 +865,8 @@ mod tests {
     }
 
     #[test]
-    fn model_cannot_be_assigned_to_two_routes_for_the_same_client_protocol() {
-        let error = normalize_source_protocol_bindings(
+    fn model_can_use_two_distinct_routes_for_the_same_client_protocol() {
+        let routes = normalize_source_protocol_bindings(
             vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
@@ -857,11 +886,11 @@ mod tests {
             WireApi::Responses,
             &["shared-model".to_string()],
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("only one source route for the same client protocol"));
+        assert_eq!(routes.len(), 2);
+        assert_ne!(routes[0].key(), routes[1].key());
+        assert_eq!(routes[0].model_ids, routes[1].model_ids);
     }
 
     #[test]
@@ -1034,7 +1063,7 @@ mod tests {
             )
             .unwrap()
             .as_str(),
-            "https://openrouter.ai/api/v1/credits"
+            "https://openrouter.ai/api/v1/key"
         );
         assert_eq!(
             source_stats_provider("https://api.zenithmarket.dev/v1"),

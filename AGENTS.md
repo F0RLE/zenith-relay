@@ -1,95 +1,52 @@
-# AGENTS.md
+# Relay instructions
 
-## Rules
+Relay is a separate local-first desktop and personal-pool product. Read the
+workspace [AGENTS.md](../AGENTS.md); production Zenith rules do not define Relay.
 
-- Default branch is `main`; open PRs into `main` when review is needed.
-- Do not commit, push, open or update PRs, deploy, publish, send external messages, or use subagents unless the user gives explicit authorization in the current request. Local edits and verification are allowed.
-- Use stable dependencies only. No beta, alpha, nightly, or prerelease packages unless explicitly approved.
-- Keep UI text in `src/src/i18n`.
-- Keep React in `src/src` display-only: local state, components, and Tauri command wrappers.
-- Keep API calls, key storage, Codex config writes, validation, formatting, top-up intents, and process control in `src-tauri/src`.
-- Keep local pool, remote pool, and hosted API selection paths separate.
-- Configure Codex/OpenCode through reversible profile attach/restore commands.
-- Render local and remote runtime snapshots returned by Rust commands. Render
-  hosted API state returned by the selected provider integration.
-- Do not hardcode provider, model, price, routing, or admin assumptions in the desktop UI.
-- Keep public local-pool features local-first. User-owned accounts must stay on
-  the user's device by default and must not be uploaded into the Zenith
-  production account-pool.
-- Zenith Relay is separate from the production Zenith Gateway and Control API.
-  Do not bring production credentials, customer keys, backend tokens, account
-  inventory, or internal production routing/business logic into this repository.
-- Transfer a user-owned secret only through an explicit, confirmed operation to
-  a server operated by that same user. Never make that transfer implicit.
-- Keep snapshots, telemetry, logs, exports, diagnostics, screenshots, and
-  management API
-  responses redacted: no raw credentials, cookies, authorization headers,
-  prompts, response bodies, or provider session material.
-- Local gateway mode should expose a generated local API key and local
-  OpenAI-compatible base URL, then configure Codex/OpenCode through reversible
-  config attach/restore.
-- Local provider sources are generic user-owned records: display name, base URL,
-  secret reference, protocol mode, model filters, priority, and weight.
-- A user's Zenith API key is one preset personal local-pool source. Treat it as
-  user-owned local configuration, not internal Zenith provider routing. Do not
-  hardcode local pool behavior around Zenith API only.
-- Keep hosted API selection, personal local pool, and user-managed server
-  transfer mode separate in UI, storage, and docs.
-- Use the existing key storage path.
-- Create top-up links through the project helper endpoint.
-- Treat `docs/project/PLANNING.md` as the canonical source for public boundaries, target
-  paths, package ownership, and supported behavior. Do not invent parallel
-  module trees.
+## Sources of truth
 
-## Checks
+- Source code and focused tests define implemented behavior.
+- [PLANNING.md](docs/project/PLANNING.md) describes current contracts;
+  [ROADMAP.md](docs/project/ROADMAP.md) describes open work and acceptance.
+- Localized Help describes user steps; `CONTRIBUTING.md` owns development and
+  release procedures. The pool rotation core is connected; its design includes
+  unfinished host/acceptance gates tracked in ROADMAP, not a completed contract.
+- Memory is recall context, never authority. Explicit user requests take
+  precedence over skill recommendations.
 
-Run before committing:
+When sources conflict, inspect the owning code and correct each affected
+document in scope. Avoid copying architecture details into multiple files.
 
-```bash
-cd src
-bun run verify
-bun run test:e2e
-```
+## Ownership
 
-For shared runtime or server changes, also run the strict Rust checks documented
-in `CONTRIBUTING.md`.
+| Area | Owns |
+| --- | --- |
+| `src/src` | React rendering, i18n, UI state, typed Tauri wrappers |
+| `src-tauri/src` | Desktop I/O, credentials, OAuth, profiles, process lifecycle |
+| `crates/relay-core` | Shared discovery, scheduling, protocols, gateway, quota, usage |
+| `relay-server` | User-managed runtime, encrypted vault, persistence, management API |
 
-The repository CI additionally runs `scripts/check-agent-guardrails.ps1` and
-`scripts/check-duplicate-code.ps1`. The duplicate check compares the working
-tree with the Git base and rejects only newly introduced Rust or TypeScript
-clones.
+Keep validation and side effects in Rust. Keep hosted API, local pool, and
+user-managed server distinct. Never import production credentials, customer
+inventory, or internal Gateway/Control logic. Accounts stay on the user's device
+by default. Store secrets only in the credential store or that user's encrypted
+server vault; transfer requires explicit confirmation. Management tokens and
+pool request keys are distinct. Redact snapshots, logs, exports, and diagnostics.
 
-For packaging/updater changes, also run or verify the Tauri build path:
+Preserve account inventory; resolve model meaning from Relay's validated
+reference catalog, not participant capability declarations. Price evidence,
+quota monitoring, and route eligibility are separate concerns; detailed rules
+live in `PLANNING.md`. Retry only after a proven pre-execution rejection or
+not-sent outcome, before response bytes reach the client, and with preserved
+ownership. Complete history does not make unknown execution safe to repeat.
+Server migrations are append-only. Profile
+recovery follows inspect, snapshot, attach, verify, and restore, preserving
+newer user logins.
 
-```bash
-cd src
-bun run app:build
-```
+Check branch, status, and local changes before editing. Change the owning layer,
+update callers when its contract changes, and run the relevant `CONTRIBUTING.md`
+checks. Do not commit, push, create PRs, merge, deploy, or publish without
+explicit current authorization.
 
-## Map
-
-- `src`: Vite frontend package.
-- `src/src`: React UI, components, Tauri wrappers, and i18n strings.
-- `src-tauri/src`: Rust/Tauri backend, API client, config writes, key storage, launcher, updater hooks.
-- `src-tauri/capabilities`: Tauri permissions.
-- `src-tauri/icons`: app and installer icons.
-- `crates/relay-core`: shared local/server scheduler, gateway, quota,
-  automation, protocol, usage, and redaction logic.
-- `relay-server`: standalone encrypted user-managed runtime.
-- `.github/workflows`: CI builds and releases.
-- `.github/tools`: local/CI build helpers.
-
-## Contracts
-
-- API selection writes the chosen compatible endpoint through reversible
-  profile operations.
-- Local and Remote Pool modes write their selected OpenAI-compatible endpoint
-  and generated pool key through reversible profile operations.
-- The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
-- Model and balance displays come from the selected provider when available.
-- UI copy should describe Zenith Relay behavior.
-- Current product direction and supported behavior live in
-  `docs/project/PLANNING.md`; incomplete work and acceptance gates live in
-  `docs/project/ROADMAP.md`.
-- Personal local-pool account data is local user data. It is not Zenith
-  customer billing state and not production account-pool inventory.
+Develop on `release/1.1.3` by default. Leave `main` untouched unless the user
+explicitly directs otherwise.

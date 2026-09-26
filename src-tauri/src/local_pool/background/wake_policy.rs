@@ -5,7 +5,7 @@ use zenith_relay_core::{
     quota::QuotaAdapterCapabilities,
 };
 
-pub(super) fn codex_wake_policy(
+pub(in crate::local_pool) fn codex_wake_policy(
     account: &LocalAccountRecord,
     capabilities: &QuotaAdapterCapabilities,
 ) -> WakeAdapterPolicy {

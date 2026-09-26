@@ -1,12 +1,96 @@
 use super::*;
 
 pub(super) fn parse_config(content: &str) -> Result<DocumentMut> {
-    content.parse::<DocumentMut>().map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!("ChatGPT config is not valid TOML: {error}"),
-        )
-    })
+    match content.parse::<DocumentMut>() {
+        Ok(document) => Ok(document),
+        Err(original_error) => {
+            // Older Codex builds wrote Windows paths into basic TOML strings
+            // without escaping backslashes (for example `C:\\Users`). Repair
+            // only path-like strings so a stale config can still be migrated
+            // safely; unrelated TOML errors remain fail-closed.
+            let repaired = repair_windows_basic_strings(content);
+            if repaired == content {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("ChatGPT config is not valid TOML: {original_error}"),
+                ));
+            }
+            repaired.parse::<DocumentMut>().map_err(|error| {
+                LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("ChatGPT config is not valid TOML: {error}"),
+                )
+            })
+        }
+    }
+}
+
+fn repair_windows_basic_strings(content: &str) -> String {
+    let bytes = content.as_bytes();
+    let mut repaired = String::with_capacity(content.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'"' {
+            let next = content[cursor..]
+                .find('"')
+                .map_or(bytes.len(), |offset| cursor + offset);
+            repaired.push_str(&content[cursor..next]);
+            cursor = next;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        let mut end = cursor;
+        while end < bytes.len() {
+            if bytes[end] == b'"' {
+                let mut slashes = 0;
+                let mut index = end;
+                while index > start + 1 && bytes[index - 1] == b'\\' {
+                    slashes += 1;
+                    index -= 1;
+                }
+                if slashes % 2 == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        if end >= bytes.len() {
+            repaired.push_str(&content[start..]);
+            break;
+        }
+        let value = &content[cursor..end];
+        repaired.push('"');
+        if value.contains(":\\") {
+            let mut index = 0;
+            while index < value.len() {
+                let byte = value.as_bytes()[index];
+                if byte != b'\\' {
+                    let next = value[index..]
+                        .find('\\')
+                        .map_or(value.len(), |offset| index + offset);
+                    repaired.push_str(&value[index..next]);
+                    index = next;
+                    continue;
+                }
+                let run_start = index;
+                while index < value.len() && value.as_bytes()[index] == b'\\' {
+                    index += 1;
+                }
+                let run = &value[run_start..index];
+                if run.len() == 1 {
+                    repaired.push_str("\\\\");
+                } else {
+                    repaired.push_str(run);
+                }
+            }
+        } else {
+            repaired.push_str(value);
+        }
+        repaired.push('"');
+        cursor = end + 1;
+    }
+    repaired
 }
 
 pub(super) fn validate_config_shape(document: &DocumentMut) -> Result<()> {
@@ -58,6 +142,7 @@ pub(super) fn attach_config(
     // Codex reads the active effort from its root config, while the managed
     // catalog supplies the model-specific list of valid levels. Keep both in
     // sync when Relay activates a profile.
+    remove_unsupported_reasoning_efforts(document);
     restore_root_string(document, "model_reasoning_effort", model_reasoning_effort);
     document["model_provider"] = value(PROVIDER_ID);
     restore_root_string(
@@ -82,11 +167,31 @@ pub(super) fn attach_config(
     provider["supports_websockets"] = value(supports_websockets);
 }
 
-pub(super) fn set_managed_websockets(document: &mut DocumentMut, enabled: bool) -> bool {
+fn remove_unsupported_reasoning_efforts(document: &mut DocumentMut) {
+    let Some(desktop) = document
+        .get_mut("desktop")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    let Some(efforts) = desktop
+        .get_mut("enabled-reasoning-efforts")
+        .and_then(Item::as_array_mut)
+    else {
+        return;
+    };
+    efforts.retain(|effort| effort.as_str() != Some("persistent"));
+}
+
+pub(super) fn set_managed_websockets(
+    document: &mut DocumentMut,
+    provider_id: &str,
+    enabled: bool,
+) -> bool {
     let Some(provider) = document
         .get_mut("model_providers")
         .and_then(Item::as_table_like_mut)
-        .and_then(|providers| providers.get_mut(PROVIDER_ID))
+        .and_then(|providers| providers.get_mut(provider_id))
         .and_then(Item::as_table_like_mut)
     else {
         return false;
@@ -97,10 +202,11 @@ pub(super) fn set_managed_websockets(document: &mut DocumentMut, enabled: bool) 
 
 pub(super) fn restore_config(
     document: &mut DocumentMut,
+    managed_provider_id: &str,
     previous_model_provider: Option<&str>,
     previous_model_catalog: Option<&str>,
 ) {
-    remove_managed_provider(document);
+    remove_managed_provider(document, managed_provider_id);
     restore_root_string(document, "model_provider", previous_model_provider);
     restore_root_string(document, "model_catalog_json", previous_model_catalog);
 }
@@ -113,6 +219,7 @@ pub(super) fn restore_local_config(
 ) {
     restore_config(
         document,
+        &backup.managed_provider_id,
         backup.previous_model_provider.as_deref(),
         previous_model_catalog,
     );
@@ -189,9 +296,9 @@ pub(super) fn restore_root_string(document: &mut DocumentMut, key: &str, previou
     }
 }
 
-pub(super) fn remove_managed_provider(document: &mut DocumentMut) {
+pub(super) fn remove_managed_provider(document: &mut DocumentMut, provider_id: &str) {
     if let Some(model_providers) = document["model_providers"].as_table_mut() {
-        model_providers.remove(PROVIDER_ID);
+        model_providers.remove(provider_id);
         if model_providers.is_empty() {
             document.remove("model_providers");
         }
@@ -251,7 +358,7 @@ pub(super) fn document_has_provider(document: &DocumentMut) -> bool {
 }
 
 pub(super) fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
-    root_model_provider(document).as_deref() == Some(PROVIDER_ID)
+    root_model_provider(document).as_deref() == Some(backup.managed_provider_id.as_str())
         && (backup.managed_model_catalog_path.is_none()
             || root_model_catalog_json(document)
                 .as_deref()
@@ -280,7 +387,7 @@ pub(super) fn model_catalog_to_restore(
 }
 
 pub(super) fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
-    root_model_provider(document).is_some_and(|provider| provider != PROVIDER_ID)
+    root_model_provider(document).is_some_and(|provider| provider != backup.managed_provider_id)
         && managed_provider_matches(document, backup)
 }
 
@@ -296,13 +403,15 @@ pub(super) fn managed_provider_matches(document: &DocumentMut, backup: &ProfileB
     document
         .get("model_providers")
         .and_then(Item::as_table)
-        .and_then(|providers| providers.get(PROVIDER_ID))
+        .and_then(|providers| providers.get(&backup.managed_provider_id))
         .and_then(Item::as_table)
         .is_some_and(|provider| {
             provider
                 .get("name")
                 .and_then(Item::as_str)
-                .is_some_and(|name| name == "Zenith Relay Local")
+                .is_some_and(|name| {
+                    managed_provider_name_matches(name, &backup.managed_provider_id)
+                })
                 && provider
                     .get("base_url")
                     .and_then(Item::as_str)
@@ -325,6 +434,36 @@ pub(super) fn managed_provider_matches(document: &DocumentMut, backup: &ProfileB
         })
 }
 
+fn managed_provider_name_matches(name: &str, provider_id: &str) -> bool {
+    if provider_id == READY_API_PROVIDER_ID {
+        name == READY_API_PROVIDER_NAME || name == LEGACY_READY_API_PROVIDER_NAME
+    } else {
+        name == "Zenith Relay Local"
+    }
+}
+
+pub(super) fn normalize_managed_provider_name(
+    document: &mut DocumentMut,
+    backup: &ProfileBackup,
+) -> bool {
+    if backup.managed_provider_id != READY_API_PROVIDER_ID {
+        return false;
+    }
+    let Some(provider) = document
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(&backup.managed_provider_id))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    if provider.get("name").and_then(Item::as_str) != Some(LEGACY_READY_API_PROVIDER_NAME) {
+        return false;
+    }
+    provider.insert("name", value(READY_API_PROVIDER_NAME));
+    true
+}
+
 pub(super) fn auth_content(local_key: &str) -> String {
     format!(
         "{{\n  \"OPENAI_API_KEY\": \"{}\",\n  \"auth_mode\": \"apikey\"\n}}\n",
@@ -334,13 +473,10 @@ pub(super) fn auth_content(local_key: &str) -> String {
 
 pub(super) fn auth_matches_snapshot(
     snapshot: &Option<Vec<u8>>,
-    path: &Path,
+    _path: &Path,
     expected_hash: &str,
 ) -> Result<bool> {
-    let Some(content) = snapshot_text(snapshot, path)? else {
-        return Ok(false);
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Some(value) = auth_snapshot_json(snapshot) else {
         return Ok(false);
     };
     Ok(value

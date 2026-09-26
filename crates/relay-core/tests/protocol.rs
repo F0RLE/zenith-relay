@@ -15,6 +15,9 @@ fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
     assert!(capabilities.supports(Feature::Sources));
     assert!(capabilities.supports(Feature::ModelPricing));
     assert!(capabilities.supports(Feature::ProfileAttach));
+    // Keep the negotiated token stable for already installed clients/servers.
+    assert!(capabilities.supports(Feature::Rotation));
+    assert!(capabilities.features.contains("rotation_v2"));
 }
 
 #[test]

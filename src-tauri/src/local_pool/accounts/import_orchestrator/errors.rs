@@ -1,6 +1,7 @@
 use crate::local_pool::accounts::credentials::{CredentialError, CredentialErrorCode};
 use crate::local_pool::accounts::import_session::{ImportSessionError, ImportSessionErrorCode};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::normalize_error_code;
 use zenith_relay_core::providers::chatgpt::ModelDiscoveryFailure;
 
@@ -18,13 +19,14 @@ pub struct ImportItemError {
 impl ImportItemError {
     pub(in crate::local_pool::accounts) fn new(code: &str, message: &str) -> Self {
         Self {
-            code: normalize_error_code(code).unwrap_or_else(|| "operation_failed".to_string()),
+            code: normalize_error_code(code)
+                .unwrap_or_else(|| error_codes::OPERATION_FAILED.to_string()),
             message: message.to_string(),
         }
     }
 
     pub(in crate::local_pool::accounts) fn recovery(message: &str) -> Self {
-        Self::new("recovery_required", message)
+        Self::new(error_codes::RECOVERY_REQUIRED, message)
     }
 }
 
@@ -32,12 +34,12 @@ pub(in crate::local_pool::accounts) fn credential_item_error(
     error: CredentialError,
 ) -> ImportItemError {
     let code = match error.code {
-        CredentialErrorCode::InvalidIdentity => "invalid_account_identity",
+        CredentialErrorCode::InvalidIdentity => error_codes::INVALID_ACCOUNT_IDENTITY,
         CredentialErrorCode::InvalidSecret | CredentialErrorCode::InvalidVersion => {
-            "invalid_credentials"
+            error_codes::INVALID_CREDENTIALS
         }
-        CredentialErrorCode::SecretMissing => "credentials_missing",
-        CredentialErrorCode::SecretStoreUnavailable => "credential_store_unavailable",
+        CredentialErrorCode::SecretMissing => error_codes::CREDENTIALS_MISSING,
+        CredentialErrorCode::SecretStoreUnavailable => error_codes::CREDENTIAL_STORE_UNAVAILABLE,
     };
     ImportItemError::new(code, &error.message)
 }
@@ -45,7 +47,7 @@ pub(in crate::local_pool::accounts) fn credential_item_error(
 pub(in crate::local_pool::accounts) fn import_item_command_error(
     error: ImportItemError,
 ) -> CommandError {
-    let code = if error.code == "recovery_required" {
+    let code = if error.code == error_codes::RECOVERY_REQUIRED {
         ErrorCode::RecoveryRequired
     } else {
         ErrorCode::InvalidState
@@ -54,7 +56,7 @@ pub(in crate::local_pool::accounts) fn import_item_command_error(
 }
 
 pub(in crate::local_pool::accounts) fn proxy_item_error(error: LocalPoolError) -> ImportItemError {
-    ImportItemError::new("proxy_unavailable", &error.message)
+    ImportItemError::new(error_codes::PROXY_UNAVAILABLE, &error.message)
 }
 
 pub(in crate::local_pool::accounts) fn model_item_error(

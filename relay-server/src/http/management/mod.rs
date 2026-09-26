@@ -1,3 +1,4 @@
+use zenith_relay_core::error_codes;
 mod accounts;
 mod automations;
 mod error;
@@ -10,6 +11,7 @@ mod proxies;
 mod quota;
 mod routing;
 mod sources;
+mod tool_policy;
 mod usage;
 
 pub use error::ManagementError;
@@ -53,6 +55,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .merge(models::routes())
         .merge(usage::routes())
         .merge(gateway::routes())
+        .merge(tool_policy::routes())
         .merge(automations::routes())
 }
 
@@ -76,9 +79,6 @@ pub async fn capabilities(
 pub async fn state_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
-    if let Ok(Some(runtime)) = state.runtime() {
-        runtime.prefetch_source_model_metadata();
-    }
     Ok(Json(state.snapshot().map_err(store_error)?))
 }
 
@@ -122,7 +122,9 @@ fn find_account(state: &AppState, id: &str) -> Result<ServerAccountRecord, Manag
         .map_err(store_error)?
         .into_iter()
         .find(|record| record.id == id)
-        .ok_or_else(|| ManagementError::not_found("account_not_found", "account not found"))
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::ACCOUNT_NOT_FOUND, "account not found")
+        })
 }
 
 fn account_summary(
@@ -135,7 +137,9 @@ fn account_summary(
         .accounts
         .into_iter()
         .find(|value| value.id == record.id)
-        .ok_or_else(|| ManagementError::internal("snapshot_missing", "account snapshot missing"))
+        .ok_or_else(|| {
+            ManagementError::internal(error_codes::SNAPSHOT_MISSING, "account snapshot missing")
+        })
 }
 
 fn validate_secret(value: &str, name: &str) -> Result<(), ManagementError> {
@@ -171,50 +175,53 @@ fn valid_weight(value: u32) -> Result<u32, ManagementError> {
 }
 
 fn validation_error(message: impl Into<String>) -> ManagementError {
-    ManagementError::validation("invalid_request", message)
+    ManagementError::validation(error_codes::INVALID_REQUEST, message)
 }
 
 fn preset_error(error: PresetError) -> ManagementError {
     match error {
         PresetError::Invalid(message) => {
-            ManagementError::validation("configuration_preset_invalid", message)
+            ManagementError::validation(error_codes::CONFIGURATION_PRESET_INVALID, message)
         }
         PresetError::Missing(message) => ManagementError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "configuration_reference_missing",
+            error_codes::CONFIGURATION_REFERENCE_MISSING,
             message,
             "configuration",
             false,
         ),
         PresetError::Stale(current_revision) => ManagementError::new(
             StatusCode::CONFLICT,
-            "configuration_revision_stale",
+            error_codes::CONFIGURATION_REVISION_STALE,
             format!("server configuration changed; current revision is {current_revision}"),
             "configuration",
             true,
         ),
         PresetError::Store(_) => ManagementError::internal(
-            "configuration_store_failed",
+            error_codes::CONFIGURATION_STORE_FAILED,
             "server configuration could not be read or saved",
         ),
         PresetError::Runtime(_) => ManagementError::internal(
-            "configuration_runtime_failed",
+            error_codes::CONFIGURATION_RUNTIME_FAILED,
             "server configuration could not be activated",
         ),
     }
 }
 
 fn store_error(_error: String) -> ManagementError {
-    ManagementError::internal("store_failed", "server storage operation failed")
+    ManagementError::internal(error_codes::STORE_FAILED, "server storage operation failed")
 }
 
 fn vault_error(_error: String) -> ManagementError {
-    ManagementError::internal("vault_failed", "encrypted secret storage operation failed")
+    ManagementError::internal(
+        error_codes::VAULT_FAILED,
+        "encrypted secret storage operation failed",
+    )
 }
 
 fn runtime_error(_error: String) -> ManagementError {
     ManagementError::internal(
-        "runtime_reload_failed",
+        error_codes::RUNTIME_RELOAD_FAILED,
         "runtime could not reload the new state",
     )
 }

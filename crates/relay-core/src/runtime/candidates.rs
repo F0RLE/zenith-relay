@@ -1,16 +1,96 @@
 use super::{
-    apply_candidate_policy, declared_source_reasoning_levels, model_rules, runtime_now_ms,
-    ExecutionFence, GatewayRuntime, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
+    apply_candidate_policy, images::select_image_main_model_with_catalog, model_rules,
+    normalized_set, runtime_now_ms, AccountModelInventory, ExecutionFence, GatewayRuntime,
+    RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate, IMAGE_API_MODEL,
 };
+use crate::error_codes;
 use crate::quota::QuotaSnapshot;
-use crate::{CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, UsageEvent};
+use crate::{
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateScope, UsageEvent,
+};
 use reqwest::{header::HeaderMap, StatusCode};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 
 impl GatewayRuntime {
+    /// Reconcile only the discovered OAuth model inventory. Keep this runtime's
+    /// scheduler and executor identity: an inventory read is not fresh auth,
+    /// quota or health evidence and must not discard live physical leases.
+    /// The scheduler lock also serializes this edit with final dispatch and
+    /// model-list projection; old unstarted leases are rechecked there.
+    pub fn update_account_models(&self, account_id: &str, models: &[String]) -> bool {
+        let Some(account) = self.chatgpt_accounts.get(account_id) else {
+            return false;
+        };
+        let configured_models = normalized_set(models.iter());
+        let image_main_model = select_image_main_model_with_catalog(
+            &configured_models,
+            self.image_base_model.as_deref(),
+            self.image_pricing_catalog.as_deref(),
+        );
+        let mut candidate_models = configured_models.clone();
+        let mut published_models = models.to_vec();
+        if image_main_model.is_some() {
+            candidate_models.insert(IMAGE_API_MODEL.to_string());
+            published_models.push(IMAGE_API_MODEL.to_string());
+        }
+        let mut scheduler = self.lock_scheduler();
+        if scheduler.is_retired() {
+            return false;
+        }
+        let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
+            return false;
+        };
+        if candidate.kind != CandidateKind::OAuthAccount
+            || candidate.account_id.as_deref() != Some(account_id)
+        {
+            return false;
+        }
+        candidate.models = candidate_models;
+        // Never publish a model that the executor cannot resolve. Hold the
+        // scheduler lock until all three views name the same inventory.
+        let mut inventory = account
+            .model_inventory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = inventory.configured_models != configured_models;
+        let image_bridge_changed = inventory.image_main_model != image_main_model;
+        *inventory = AccountModelInventory {
+            configured_models,
+            image_main_model,
+        };
+        drop(inventory);
+        if image_bridge_changed {
+            // A virtual image route retains its public model id even when its
+            // underlying Responses model changes. Revoke pending old leases.
+            account.image_bridge_revision.fetch_add(1, Ordering::AcqRel);
+        }
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(account_id, published_models.iter());
+        scheduler.upsert(candidate);
+        if changed {
+            // Transport cards and Lite support describe the old inventory.
+            // A removed and later reintroduced slug needs fresh evidence.
+            self.model_metadata
+                .codex_manifests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(account_id);
+            self.codex_responses_lite_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(id, _)| id != account_id);
+        }
+        drop(scheduler);
+        self.candidate_availability.notify_waiters();
+        self.admission_changed.notify_waiters();
+        true
+    }
+
     /// Immediately blocks sibling OAuth candidates that share the same
     /// ChatGPT Team/workspace identity. This is intentionally an in-memory
     /// circuit breaker; the owning local/server store persists the triggering
@@ -55,32 +135,49 @@ impl GatewayRuntime {
         changed
     }
 
+    /// Hold while a host commits a credential or permission edit and applies
+    /// it to this runtime. Acquire before the durable edit; release only after
+    /// the new runtime state is published or the old state is restored.
+    pub fn fence_candidate_dispatch(&self, candidate_id: &str) -> Option<ExecutionFence> {
+        let epoch = self.lock_scheduler().begin_execution_fence(candidate_id)?;
+        self.candidate_availability.notify_waiters();
+        Some(ExecutionFence {
+            scheduler: self.scheduler.clone(),
+            availability: self.candidate_availability.clone(),
+            candidate_id: candidate_id.to_string(),
+            epoch,
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Fence every physical protocol route of one API source while its host
+    /// changes the source's credential, endpoint or permission policy.
+    pub fn fence_source_dispatch(&self, source_id: &str) -> Vec<ExecutionFence> {
+        self.source_candidate_bindings
+            .iter()
+            .filter(|(_, binding)| binding.source_id == source_id)
+            .filter_map(|(candidate_id, _)| self.fence_candidate_dispatch(candidate_id))
+            .collect()
+    }
+
     pub(crate) fn fence_execution(&self, candidate_id: &str) -> Option<ExecutionFence> {
-        self.lock_scheduler()
-            .set_execution_fence(candidate_id, true)
-            .then(|| ExecutionFence {
-                scheduler: self.scheduler.clone(),
-                candidate_id: candidate_id.to_string(),
-                released: AtomicBool::new(false),
-            })
+        self.fence_candidate_dispatch(candidate_id)
     }
 
     pub(crate) fn block_candidate_capability(&self, candidate_id: &str, model: &str) -> bool {
-        self.lock_scheduler().block_capability(candidate_id, model)
+        let changed = self.lock_scheduler().block_capability(candidate_id, model);
+        if changed {
+            self.candidate_availability.notify_waiters();
+        }
+        changed
     }
 
     pub(crate) fn clear_candidate_capability_blocks(&self, candidate_id: &str) -> bool {
-        self.lock_scheduler().clear_capability_blocks(candidate_id)
-    }
-
-    pub(crate) fn record_provider_rate_limit(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-    ) -> bool {
-        self.lock_scheduler()
-            .record_provider_rate_limit(candidate_id, model, now_ms)
+        let changed = self.lock_scheduler().clear_capability_blocks(candidate_id);
+        if changed {
+            self.candidate_availability.notify_waiters();
+        }
+        changed
     }
 
     pub(crate) fn observe_codex_quota_headers(
@@ -128,12 +225,151 @@ impl GatewayRuntime {
             );
         state.snapshot = merged;
         state.dirty = true;
-        self.lock_scheduler().update_candidate_quota_at(
+        let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
             quota,
             state.snapshot.updated_at_ms,
             state.snapshot.limiting_reset_at_ms(),
+            state.snapshot.available_credits_micro_units,
+            state.snapshot.provider_credits_unlimited,
+        );
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
+    }
+
+    /// Publishes a complete quota refresh to both the passive header cache and
+    /// the scheduler. Keeping the two views on one monotonic snapshot prevents
+    /// a later response header merge from resurrecting stale quota or credits.
+    pub(crate) fn sync_account_quota_snapshot(
+        &self,
+        candidate_id: &str,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+    ) -> bool {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
+            return false;
+        }
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let effective = quotas
+            .get_mut(candidate_id)
+            .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
+            .unwrap_or_else(|| snapshot.clone());
+        let quota =
+            CandidateQuota::from_snapshot(&effective, observed_at_ms, self.quota_stale_after_ms);
+        let updated = self.lock_scheduler().update_candidate_quota_at(
+            candidate_id,
+            quota,
+            effective.updated_at_ms,
+            effective.limiting_reset_at_ms(),
+            effective.available_credits_micro_units,
+            effective.provider_credits_unlimited,
+        );
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
+    }
+
+    /// Applies account policy and a complete refreshed quota snapshot while
+    /// retaining the same passive-cache ordering as header observations.
+    pub fn sync_account_availability_with_quota(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+    ) -> bool {
+        self.sync_account_availability_with_quota_inner(
+            candidate_id,
+            enabled,
+            health,
+            snapshot,
+            observed_at_ms,
+            false,
         )
+    }
+
+    /// A refresh without a durable health transition is not evidence that a
+    /// newer live auth or entitlement block recovered. Explicit transitions
+    /// use the ordinary sync method instead.
+    pub fn sync_account_refresh_availability_with_quota(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+    ) -> bool {
+        self.sync_account_availability_with_quota_inner(
+            candidate_id,
+            enabled,
+            health,
+            snapshot,
+            observed_at_ms,
+            true,
+        )
+    }
+
+    fn sync_account_availability_with_quota_inner(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        snapshot: &QuotaSnapshot,
+        observed_at_ms: u64,
+        preserve_live_block: bool,
+    ) -> bool {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
+            return false;
+        }
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let effective = quotas
+            .get_mut(candidate_id)
+            .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
+            .unwrap_or_else(|| snapshot.clone());
+        let quota_state = CandidateQuotaState {
+            quota: CandidateQuota::from_snapshot(
+                &effective,
+                observed_at_ms,
+                self.quota_stale_after_ms,
+            ),
+            updated_at_ms: effective.updated_at_ms,
+            reset_at_ms: effective.limiting_reset_at_ms(),
+            provider_credits_micro_units: effective.available_credits_micro_units,
+            provider_credits_unlimited: effective.provider_credits_unlimited,
+        };
+        let mut scheduler = self.lock_scheduler();
+        let effective_health = if preserve_live_block && health.is_eligible() {
+            scheduler
+                .candidate(candidate_id)
+                .filter(|candidate| !candidate.health.is_eligible())
+                .map_or(health, |candidate| candidate.health)
+        } else {
+            health
+        };
+        let updated = scheduler.update_candidate_availability_with_quota_at(
+            candidate_id,
+            enabled,
+            effective_health,
+            quota_state,
+        );
+        drop(scheduler);
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub(crate) fn take_passive_quota_snapshot(
@@ -164,12 +400,7 @@ impl GatewayRuntime {
             return;
         };
         if let Some(snapshot) = event.quota_snapshot.as_ref() {
-            self.lock_scheduler().update_candidate_quota_at(
-                candidate_id,
-                CandidateQuota::from_snapshot(snapshot, observed_at_ms, self.quota_stale_after_ms),
-                snapshot.updated_at_ms,
-                snapshot.limiting_reset_at_ms(),
-            );
+            self.sync_account_quota_snapshot(candidate_id, snapshot, observed_at_ms);
         }
         if event.success {
             self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
@@ -177,7 +408,7 @@ impl GatewayRuntime {
         }
 
         let category = event.error_category.as_deref().unwrap_or_default();
-        let model = if category == "image_generation_not_enabled" {
+        let model = if category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
             event.requested_model.as_deref()
         } else {
             event
@@ -197,9 +428,6 @@ impl GatewayRuntime {
             return;
         }
         if event.account_id.is_none() {
-            if event.http_status == StatusCode::TOO_MANY_REQUESTS.as_u16() {
-                self.record_provider_rate_limit(candidate_id, model, observed_at_ms);
-            }
             return;
         }
 
@@ -209,14 +437,14 @@ impl GatewayRuntime {
             // treating it as `Exhausted` keeps an otherwise healthy slot out
             // of rotation until a separate refresh happens to run. Only an
             // actual quota snapshot above may mark the candidate exhausted.
-            "upstream_quota_exhausted" => {}
-            "upstream_unauthorized" | "account_auth" => {
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED => {}
+            error_codes::UPSTREAM_UNAUTHORIZED | error_codes::ACCOUNT_AUTH => {
                 self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
             }
-            "upstream_account_disabled" => {
+            error_codes::UPSTREAM_ACCOUNT_DISABLED => {
                 self.set_candidate_health(candidate_id, CandidateHealth::Blocked);
             }
-            "upstream_account_verification_required" => {
+            error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED => {
                 self.set_candidate_health(candidate_id, CandidateHealth::Checkpoint);
             }
             _ => {}
@@ -230,8 +458,16 @@ impl GatewayRuntime {
         health: CandidateHealth,
         quota: CandidateQuota,
     ) -> bool {
-        self.lock_scheduler()
-            .update_candidate_availability(candidate_id, enabled, health, quota)
+        let updated = self.lock_scheduler().update_candidate_availability(
+            candidate_id,
+            enabled,
+            health,
+            quota,
+        );
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn update_candidate_availability_at(
@@ -242,13 +478,41 @@ impl GatewayRuntime {
         quota: CandidateQuota,
         quota_updated_at_ms: Option<u64>,
     ) -> bool {
-        self.lock_scheduler().update_candidate_availability_at(
+        let updated = self.lock_scheduler().update_candidate_availability_at(
             candidate_id,
             enabled,
             health,
             quota,
             quota_updated_at_ms,
-        )
+        );
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
+    }
+
+    /// Applies the complete refreshed account state without rebuilding the
+    /// gateway. Quota windows and provider credits originate from one provider
+    /// response and must reach the scheduler together.
+    pub fn update_candidate_availability_with_quota_at(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota_state: CandidateQuotaState,
+    ) -> bool {
+        let updated = self
+            .lock_scheduler()
+            .update_candidate_availability_with_quota_at(
+                candidate_id,
+                enabled,
+                health,
+                quota_state,
+            );
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     /// Applies source routing rules without rebuilding its HTTP executor.
@@ -373,6 +637,9 @@ impl GatewayRuntime {
             return true;
         }
         *current = scope;
+        // The scope write lock makes this revision atomic with the permission
+        // edit from the perspective of both reservation and final dispatch.
+        key.scope_revision.fetch_add(1, Ordering::AcqRel);
         drop(current);
         self.candidate_availability.notify_waiters();
         true
@@ -426,51 +693,54 @@ impl GatewayRuntime {
     }
 
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
-        self.lock_scheduler()
-            .set_candidate_health(candidate_id, health)
+        let updated = self
+            .lock_scheduler()
+            .set_candidate_health(candidate_id, health);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
+        let candidate_ids = {
+            let source_routes = self
+                .source_candidate_bindings
+                .iter()
+                .filter(|(_, binding)| binding.source_id == candidate_id)
+                .map(|(route_id, _)| route_id.clone())
+                .collect::<Vec<_>>();
+            if source_routes.is_empty() {
+                vec![candidate_id.to_string()]
+            } else {
+                source_routes
+            }
+        };
         // Scheduler removal is graceful when a lease is active: keep the
         // executor alive until the request reaches its terminal outcome.
         let (removed, deferred) = {
             let mut scheduler = self.lock_scheduler();
-            let removed = scheduler.remove(candidate_id).is_some();
-            let deferred = scheduler.candidate(candidate_id).is_some();
+            let mut removed = false;
+            let mut deferred = BTreeSet::new();
+            for route_id in &candidate_ids {
+                removed |= scheduler.remove(route_id).is_some();
+                if scheduler.candidate(route_id).is_some() {
+                    deferred.insert(route_id.clone());
+                }
+            }
             (removed, deferred)
         };
-        self.model_metadata
-            .codex_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(candidate_id);
-        self.model_metadata
-            .source_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(candidate_id);
         {
-            let mut declared = self
+            let mut manifests = self
                 .model_metadata
-                .declared_reasoning
+                .codex_manifests
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for routes in declared.efforts.values_mut() {
-                routes.remove(candidate_id);
+            for route_id in &candidate_ids {
+                manifests.remove(route_id);
             }
-            declared.efforts.retain(|_, routes| !routes.is_empty());
-            for routes in declared.empty_routes.values_mut() {
-                routes.remove(candidate_id);
-            }
-            declared.empty_routes.retain(|_, routes| !routes.is_empty());
-            let previous_levels = declared.levels.clone();
-            declared.levels = declared_source_reasoning_levels(
-                &declared.efforts,
-                &previous_levels,
-                &BTreeMap::new(),
-            );
         }
-        if !deferred {
+        if !deferred.contains(candidate_id) {
             self.passive_quotas
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -484,13 +754,68 @@ impl GatewayRuntime {
             }
         }
         if let Some(store) = self.response_affinity_store.as_ref() {
-            let _ = store.delete_candidate(candidate_id);
+            for route_id in &candidate_ids {
+                let _ = store.delete_candidate(route_id);
+            }
+        }
+        if removed {
+            self.candidate_availability.notify_waiters();
         }
         removed
     }
 
+    /// Refresh cadence follows physical members, not protocol-route aliases.
+    /// This read does not build the more expensive routing-preview projection.
+    pub fn active_member_keys(&self, now_ms: u64, recent_ms: u64) -> BTreeSet<String> {
+        self.lock_scheduler().active_member_keys(now_ms, recent_ms)
+    }
+
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
-        self.lock_scheduler().runtime_order(runtime_now_ms())
+        let scheduler = self.lock_scheduler();
+        let mut order = scheduler.runtime_order(runtime_now_ms());
+        let revision = self.activity_revision.load(Ordering::Acquire);
+        for candidate in &mut order {
+            candidate.runtime_id = self.activity_runtime_id;
+            candidate.activity_revision = revision;
+        }
+        order
+    }
+
+    pub fn candidate_runtime_order_for_key(
+        &self,
+        key_id: &str,
+    ) -> Vec<crate::CandidateRuntimeSnapshot> {
+        let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == key_id) else {
+            let mut order = self.candidate_runtime_order();
+            for candidate in &mut order {
+                candidate.next_for_new_request = false;
+            }
+            return order;
+        };
+        let scope = key
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let protocols = key.client_wire_apis.as_deref().map_or_else(
+            super::all_native_wire_apis,
+            super::client_wire_apis_to_native,
+        );
+        let scheduler = self.lock_scheduler();
+        let mut models = key.model_rules.clone();
+        models.excluded.extend(
+            scheduler
+                .candidates()
+                .flat_map(|candidate| &candidate.models)
+                .filter(|model| super::is_image_model_id(model))
+                .cloned(),
+        );
+        let mut order = scheduler.runtime_order_for(&scope, &models, &protocols, runtime_now_ms());
+        let revision = self.activity_revision.load(Ordering::Acquire);
+        for candidate in &mut order {
+            candidate.runtime_id = self.activity_runtime_id;
+            candidate.activity_revision = revision;
+        }
+        order
     }
 
     pub(crate) fn account_candidate_is_active(&self, candidate_id: &str) -> bool {
@@ -504,12 +829,21 @@ impl GatewayRuntime {
         candidate_id: Option<&str>,
         reserve_basis_points: u64,
     ) -> bool {
-        self.lock_scheduler()
-            .set_protected_candidate(candidate_id, reserve_basis_points)
+        let changed = self
+            .lock_scheduler()
+            .set_protected_candidate(candidate_id, reserve_basis_points);
+        if changed {
+            self.candidate_availability.notify_waiters();
+        }
+        changed
     }
 
     pub fn clear_candidate_cooldown(&self, candidate_id: &str, model: &str) -> bool {
-        self.lock_scheduler().clear_cooldown(candidate_id, model)
+        let updated = self.lock_scheduler().clear_cooldown(candidate_id, model);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 
     pub fn set_candidate_cooldown(
@@ -518,21 +852,48 @@ impl GatewayRuntime {
         model: &str,
         retry_at_ms: u64,
     ) -> bool {
-        self.lock_scheduler()
-            .set_cooldown(candidate_id, model, retry_at_ms)
-    }
-
-    pub fn reset_candidate_failures(&self, candidate_id: &str) -> bool {
-        self.lock_scheduler().reset_failures(candidate_id)
+        let updated = self
+            .lock_scheduler()
+            .set_cooldown(candidate_id, model, retry_at_ms);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 }
 
 fn is_model_capability_failure(category: &str) -> bool {
     matches!(
         category,
-        "upstream_model_not_found"
-            | "upstream_model_unsupported"
-            | "upstream_usage_not_included"
-            | "image_generation_not_enabled"
+        error_codes::UPSTREAM_MODEL_NOT_FOUND
+            | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+            | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+            | error_codes::IMAGE_GENERATION_NOT_ENABLED
     )
+}
+
+/// Merge a persisted refresh into the passive in-memory snapshot without
+/// allowing an older in-flight observation to win. A dirty snapshot with the
+/// same timestamp is retained because it may contain response headers that
+/// have not reached durable storage yet.
+fn reconcile_passive_quota_snapshot(
+    state: &mut super::PassiveQuotaState,
+    incoming: &QuotaSnapshot,
+    observed_at_ms: u64,
+) -> QuotaSnapshot {
+    let incoming_at = incoming.updated_at_ms.unwrap_or(observed_at_ms);
+    let current_at = state.snapshot.updated_at_ms.unwrap_or_default();
+    let incoming_wins = match (incoming.updated_at_ms, state.snapshot.updated_at_ms) {
+        (Some(incoming_at), Some(current_at)) if incoming_at < current_at => false,
+        (Some(incoming_at), Some(current_at)) if incoming_at == current_at => !state.dirty,
+        (None, Some(_)) => false,
+        _ => incoming_at >= current_at,
+    };
+    if incoming_wins {
+        state.snapshot = incoming.clone();
+        state.dirty = false;
+        state.force_persist = false;
+        state.last_persist_hint_ms = incoming.updated_at_ms.unwrap_or(observed_at_ms);
+    }
+    state.snapshot.clone()
 }

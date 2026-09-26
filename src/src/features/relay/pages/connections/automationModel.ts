@@ -1,9 +1,35 @@
+import type { TFunction } from "i18next";
+import { automationDefaultNames } from "../../../../i18n/automationNames";
 import type { AccountSummary, RuntimeSnapshot, WakeTask } from "../../api/types";
 import { defaultWakeInput } from "../../api/commands";
-import { sortModelIdsForLauncher } from "../../modelGroups";
+import { orderModelIdsBySnapshot, uniqueModelIds } from "../../modelGroups";
 
 export type AutomationSelectorKind = WakeTask["accountSelector"]["kind"];
 export type AutomationTriggerKind = WakeTask["trigger"]["kind"];
+
+export const automationTypes = [
+  { triggerKind: "quota_full", nameKey: "automations.defaultName", conditionKey: "automations.primaryRecovery", requiresModel: true },
+  { triggerKind: "weekly", nameKey: "automations.weeklyDefaultName", conditionKey: "automations.weeklyReset", requiresModel: false },
+] as const;
+
+export function automationType(triggerKind: AutomationTriggerKind) {
+  return automationTypes.find((type) => type.triggerKind === triggerKind) ?? automationTypes[0];
+}
+
+const defaultNames = new Set<string>(Object.values(automationDefaultNames).flatMap(Object.values));
+
+export function customAutomationName(name?: string): string | null {
+  return name === undefined || defaultNames.has(name.trim()) ? null : name;
+}
+
+export function defaultAutomationName(triggerKind: AutomationTriggerKind, t: TFunction): string {
+  return t(automationType(triggerKind).nameKey);
+}
+
+export function automationDisplayName(task: Pick<WakeTask, "name" | "trigger">, t: TFunction): string {
+  // Older weekly rules persisted the countdown's default name as well.
+  return customAutomationName(task.name) ?? defaultAutomationName(task.trigger.kind, t);
+}
 
 export function eligibleAutomationAccounts(accounts: readonly AccountSummary[]) {
   return accounts.filter((account) => account.inPool && account.enabled && !account.draining);
@@ -18,10 +44,7 @@ export function automationPoolModels(gateway: RuntimeSnapshot["gateway"]) {
   const rawModels = gateway.visibleModelIds.length
     ? gateway.visibleModelIds
     : (gateway.models ?? []).filter((model) => model.enabled).map((model) => model.id);
-  const uniqueModels = rawModels.filter((model, index) =>
-    rawModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index,
-  );
-  return sortModelIdsForLauncher(uniqueModels);
+  return orderModelIdsBySnapshot(uniqueModelIds(rawModels), gateway.models ?? []);
 }
 
 export function automationTargetModels(
@@ -66,8 +89,8 @@ export function resolveAutomationModel(availableModels: readonly string[], reque
     ?? "";
 }
 
-export function automationFormValid(name: string, accountsValid: boolean, weeklyReset: boolean, selectedModel: string) {
-  return Boolean(name.trim() && accountsValid && (weeklyReset || selectedModel));
+export function automationFormValid(name: string, accountsValid: boolean, requiresModel: boolean, selectedModel: string) {
+  return Boolean(name.trim() && accountsValid && (!requiresModel || selectedModel));
 }
 
 export type AutomationSubmission = {
@@ -79,14 +102,13 @@ export type AutomationSubmission = {
 export function buildAutomationSubmission(input: {
   task: WakeTask | null;
   name: string;
-  executionPolicy: WakeTask["executionPolicy"];
   triggerKind: AutomationTriggerKind;
   selectorKind: AutomationSelectorKind;
   accountIds: readonly string[];
   selectedModel: string;
   nowMs: number;
 }): AutomationSubmission {
-  const { task, name, executionPolicy, triggerKind, selectorKind, accountIds, selectedModel, nowMs } = input;
+  const { task, name, triggerKind, selectorKind, accountIds, selectedModel, nowMs } = input;
   const weeklyReset = triggerKind === "weekly";
   const accountSelector = selectorKind === "account_ids"
     ? { kind: selectorKind, values: [...accountIds] }
@@ -101,7 +123,7 @@ export function buildAutomationSubmission(input: {
     windowKinds: weeklyReset ? ["secondary" as const] : ["primary" as const],
     modelPolicy,
     trigger: { kind: triggerKind },
-    executionPolicy: weeklyReset ? "automatic" as const : executionPolicy,
+    executionPolicy: "automatic" as const,
     jitterSeconds: task?.jitterSeconds ?? 0,
     maxAttemptsPerCycle: task?.maxAttemptsPerCycle ?? 1,
   };

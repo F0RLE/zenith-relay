@@ -1,4 +1,5 @@
 import { Activity, CreditCard } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, UsageTotals } from "../../api/types";
 import { buildAccountValueProjection, formatAccountPayback } from "../../accountEconomics";
@@ -9,6 +10,8 @@ import { formatUsageApiEquivalent } from "./usageFormatting";
 
 export function AccountUsageSummary({ account, totals }: { account: AccountSummary; totals: UsageTotals }) {
   const { t, i18n } = useTranslation();
+  const [calculationOpen, setCalculationOpen] = useState(false);
+  const calculationRef = useRef<HTMLDetailsElement>(null);
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const nowMs = Date.now();
   const { purchaseCostMicroUsd: purchaseCost, remainingApiEquivalent, payback, approximate } = buildAccountValueProjection(
@@ -27,8 +30,28 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
     .map((kind) => ({ kind, quota: account.quota[kind] }))
     .filter(({ quota }) => Boolean(quota));
 
+  useEffect(() => {
+    if (!calculationOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || !calculationRef.current?.contains(target)) setCalculationOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setCalculationOpen(false);
+      calculationRef.current?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape, true);
+    };
+  }, [calculationOpen]);
+
   return <section className="usage-account-value" aria-label={t("usage.accountUsage", { account: account.label })}>
-    <header><div><span>{t("usage.selectedAccount")}</span><strong>{account.label}</strong></div><details><summary>{t("usage.howCalculated")}</summary><p>{t("usage.calculationHint")}</p></details></header>
+    <header><div><span>{t("usage.selectedAccount")}</span><strong>{account.label}</strong></div><details ref={calculationRef} open={calculationOpen}><summary onClick={(event) => { event.preventDefault(); setCalculationOpen((value) => !value); }}>{t("usage.howCalculated")}</summary><p className="relay-popover-panel">{t("usage.calculationHint")}</p></details></header>
     <div className="usage-account-metrics">
       <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.used")} value={formatUsageApiEquivalent(totals.apiEquivalent, locale)} title={t("accounts.accountValue.usedHint", { count: totals.apiEquivalent.unpricedTokens })} />
       {remainingApiEquivalent ? <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.remaining")} value={formatAccountValueMicroUsd(remainingApiEquivalent.microUsd, locale, remainingApiEquivalent.approximate)} title={t("accounts.accountValue.remainingHint")} /> : null}

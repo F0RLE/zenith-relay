@@ -1,4 +1,4 @@
-use super::{current_time_ms, restart_or_rollback};
+use super::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
         credentials::{
@@ -52,6 +52,7 @@ pub struct AssignFreeProxiesInput {
 pub struct ProxyPoolImportResult {
     pub added: usize,
     pub duplicates: usize,
+    pub added_proxy_ids: Vec<String>,
     pub pool: ProxyPoolSummary,
 }
 
@@ -89,13 +90,39 @@ pub async fn import_local_proxy_pool(
     let _mutation = state.setup_guard().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let mut pool = load_reconciled_pool(&state, &credentials)?;
+    let previous_ids: HashSet<_> = pool
+        .summary()
+        .entries
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
     let (added, duplicates) = pool.import(&input.proxy_urls, current_time_ms())?;
     pool.save()?;
+    let summary = pool.summary();
     Ok(ProxyPoolImportResult {
         added,
         duplicates,
-        pool: pool.summary(),
+        added_proxy_ids: summary
+            .entries
+            .iter()
+            .filter(|entry| !previous_ids.contains(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect(),
+        pool: summary,
     })
+}
+
+#[tauri::command]
+pub async fn check_local_stored_proxy(
+    proxy_id: String,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<crate::local_pool::accounts::proxy::check::ProxyCheckResult, CommandError>
+{
+    let proxy = {
+        let _mutation = state.setup_guard().await;
+        ProxyPool::load()?.config(proxy_id.trim())?
+    };
+    Ok(crate::local_pool::accounts::proxy::check::check(proxy_id, &proxy, current_time_ms()).await)
 }
 
 #[tauri::command]
@@ -272,6 +299,18 @@ async fn apply_choices(
             pool: pool.summary(),
         });
     }
+    let affected_accounts = updates
+        .iter()
+        .map(|(_, next)| next.local_account_id().to_string())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
+    state.store()?.invalidate_account_refresh(
+        &affected_accounts
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )?;
     save_credential_updates(&credentials, &updates)?;
     if let Err(error) = pool.save() {
         restore_credentials(&credentials, &updates)?;

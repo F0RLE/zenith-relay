@@ -32,7 +32,7 @@ use zenith_relay_core::providers::chatgpt::{
     CodexSubscriptionMetadata, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
     QuotaRefreshOutcome,
 };
-use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaWindow, QuotaWindowKind, Subscription};
+use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaWindowKind, Subscription};
 use zenith_relay_core::{
     MessagesReasoningMode, ProviderSource, SourceAdapter, SourceProtocolBinding, WireApi,
 };
@@ -63,6 +63,37 @@ fn account_record(account_id: &str) -> LocalAccountRecord {
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn bulk_quota_refresh_keeps_a_small_future_and_reports_every_failed_account() {
+    let root = std::env::temp_dir().join(format!("relay-quota-batch-{}", Uuid::new_v4()));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let ids = (0..QUOTA_REFRESH_BATCH_SIZE + 2)
+        .map(|_| format!("missing_{}", Uuid::new_v4().simple()))
+        .collect::<Vec<_>>();
+    let refresh = refresh_account_quotas(&state, ids.clone());
+
+    // Tauri constructs command futures on the Windows UI thread (1 MiB).
+    // Embedding five complete refreshes in this future multiplies its stack
+    // footprint again in the generated IPC dispatcher, even for other commands.
+    assert!(
+        std::mem::size_of_val(&refresh) < 16 * 1024,
+        "bulk quota refresh must keep concurrent account futures off the IPC stack"
+    );
+    let results = refresh.await;
+    assert_eq!(results.len(), ids.len());
+    for (result, id) in results.iter().zip(&ids) {
+        assert_eq!(&result.account_id, id);
+        assert_eq!(result.status, AccountQuotaRefreshStatus::Failed);
+        assert!(result.response.is_none());
+        assert!(result.error.is_some());
+        assert!(!state.quota_refresh_in_flight(id).unwrap());
+    }
+    assert!(refresh_account_quotas(&state, Vec::new()).await.is_empty());
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn wake_task(id: &str, account_ids: &[&str]) -> WakeTask {
     WakeTask {
         id: id.into(),
@@ -323,10 +354,19 @@ async fn hybrid_agent_import_preserves_oauth_for_subscription_metadata() {
         &[],
     )
     .unwrap();
-    let material =
-        build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 30)
-            .await
-            .unwrap();
+    let (account_check_endpoint, account_check_server) =
+        spawn_import_account_check_server("account-hybrid").await;
+    let material = build_import_credential_material(
+        parsed.items.remove(0),
+        1,
+        None,
+        None,
+        None,
+        30,
+        &account_check_endpoint,
+    )
+    .await
+    .unwrap();
 
     assert!(material
         .authorization(1_700_000_000_000)
@@ -347,6 +387,7 @@ async fn hybrid_agent_import_preserves_oauth_for_subscription_metadata() {
     assert!(stored.is_agent_identity());
     assert!(stored.has_oauth());
     assert_eq!(stored.refresh_token(), Some("refresh-hybrid"));
+    account_check_server.abort();
 }
 #[test]
 fn large_import_preview_defers_quota_network_calls() {
@@ -376,6 +417,7 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Err(ModelDiscoveryFailure {
             code: ModelDiscoveryFailureCode::Transport,
             retryable: true,
+            retry_after_ms: None,
             http_status: None,
         }),
     ));
@@ -393,6 +435,7 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Err(ModelDiscoveryFailure {
             code: ModelDiscoveryFailureCode::Transport,
             retryable: true,
+            retry_after_ms: None,
             http_status: None,
         }),
     ));
@@ -467,6 +510,7 @@ fn model_unauthorized_removes_an_account_with_cached_models_from_routing() {
     let failure = ModelDiscoveryFailure {
         code: ModelDiscoveryFailureCode::Unauthorized,
         retryable: false,
+        retry_after_ms: None,
         http_status: Some(401),
     };
     assert!(model_discovery_was_unauthorized(&Some(
@@ -490,9 +534,11 @@ fn model_unauthorized_does_not_downgrade_reauthentication() {
     account.account.auth_state = AccountAuthState::RequiresReauth(
         zenith_relay_core::accounts::ReauthReason::AccessTokenExpired,
     );
+    account.account.last_error_code = Some("auth_access_token_expired".into());
     let failure = ModelDiscoveryFailure {
         code: ModelDiscoveryFailureCode::Unauthorized,
         retryable: false,
+        retry_after_ms: None,
         http_status: Some(401),
     };
 
@@ -506,7 +552,7 @@ fn model_unauthorized_does_not_downgrade_reauthentication() {
     assert_eq!(account.account.health, AccountHealthState::Unhealthy);
     assert_eq!(
         account.account.last_error_code.as_deref(),
-        Some("models_unauthorized")
+        Some("auth_access_token_expired")
     );
 }
 
@@ -622,13 +668,49 @@ fn current_chatgpt_profile_visibility_requires_refreshable_oauth_identity() {
         current_time_ms()
     ));
 }
+
+#[test]
+fn expired_local_access_metadata_does_not_hide_a_refreshable_chatgpt_profile() {
+    let payload = URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "exp": 1,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "provider-expired"
+            }
+        })
+        .to_string(),
+    );
+    let access_token = format!("header.{payload}.signature");
+    let parsed = parse_import(
+        &serde_json::json!({
+            "auth_mode": "chatgpt",
+            "account_id": "provider-expired",
+            "access_token": access_token,
+            "refresh_token": "refresh-expired-access-metadata"
+        })
+        .to_string(),
+        Some("auth.json"),
+        &[],
+    )
+    .unwrap();
+
+    assert!(is_usable_current_chatgpt_profile(&parsed, u64::MAX));
+}
 #[tokio::test]
 async fn batch_confirm_persists_every_selected_account_and_credential() {
     let root = std::env::temp_dir().join(format!(
         "zenith-relay-batch-import-{}",
         Uuid::new_v4().simple()
     ));
-    let state = DesktopState::open(root.clone()).unwrap();
+    let mut state = DesktopState::open(root.clone()).unwrap();
+    let (account_check_endpoint, account_check_server) =
+        spawn_import_account_check_server_for_accounts(&[
+            "synthetic-provider-1",
+            "synthetic-provider-2",
+            "synthetic-provider-3",
+        ])
+        .await;
+    state.set_account_check_url_for_test(account_check_endpoint);
     let documents = (1..=3)
         .map(|index| {
             serde_json::json!({
@@ -701,8 +783,14 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
         .iter()
         .all(|account| account.account.subscription.active_until_ms.is_some()));
     assert!(accounts.iter().all(|account| account.account.in_pool));
-    assert!(state.next_quota_refresh_due().unwrap().is_some());
+    assert!(state
+        .store()
+        .unwrap()
+        .accounts()
+        .iter()
+        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
 
+    account_check_server.abort();
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -712,7 +800,10 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
         "zenith-relay-refresh-preserve-{}",
         Uuid::new_v4().simple()
     ));
-    let state = DesktopState::open(root.clone()).unwrap();
+    let mut state = DesktopState::open(root.clone()).unwrap();
+    let (account_check_endpoint, account_check_server) =
+        spawn_import_account_check_server("provider-preserve").await;
+    state.set_account_check_url_for_test(account_check_endpoint);
     let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
     let first = sessions
             .start(
@@ -782,6 +873,7 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
             .auth_mode,
         AccountAuthMode::OAuth
     );
+    account_check_server.abort();
     credential_store.delete(&account_id).unwrap();
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
@@ -792,7 +884,10 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
         "zenith-relay-import-retry-{}",
         Uuid::new_v4().simple()
     ));
-    let state = DesktopState::open(root.clone()).unwrap();
+    let mut state = DesktopState::open(root.clone()).unwrap();
+    let (account_check_endpoint, account_check_server) =
+        spawn_import_account_check_server("provider-retry").await;
+    state.set_account_check_url_for_test(account_check_endpoint);
     let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
     let session = sessions
         .start(
@@ -822,8 +917,14 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
     let account = response.results[0].account.as_ref().unwrap();
     assert!(account.models.is_empty());
-    assert!(state.next_quota_refresh_due().unwrap().is_some());
+    assert!(state
+        .store()
+        .unwrap()
+        .accounts()
+        .iter()
+        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
     assert!(sessions.resume(&session_id, &[]).is_err());
+    account_check_server.abort();
     CredentialStore::from_backend(NativeSecretBackend)
         .delete(&account.account.id)
         .unwrap();
@@ -948,6 +1049,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         pricing_provider: None,
         official_provider_family: None,
         wire_api: WireApi::ChatCompletions,
+        protocol_config: Default::default(),
         protocol_bindings: Vec::new(),
         models: vec!["old-model".into()],
         allowed_models: vec!["gpt-*".into()],
@@ -1005,6 +1107,72 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
     assert!(!updated.enabled);
     assert!(updated.draining);
 }
+
+#[tokio::test]
+async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
+    let id = Uuid::new_v4().simple().to_string();
+    let root = std::env::temp_dir().join(format!("zenith-relay-source-import-invalid-{id}"));
+    let secret_ref = format!("source:import-invalid-{id}");
+    let state = DesktopState::open(root.clone()).unwrap();
+    secret_store::save(&secret_ref, "sk-import-test").unwrap();
+    let source = ProviderSourceRecord {
+        id: "source_existing_invalid".into(),
+        name: "Existing invalid source".into(),
+        enabled: true,
+        in_pool: false,
+        draining: false,
+        base_url: "https://api.example.test/v1".into(),
+        secret_ref: secret_ref.clone(),
+        pricing_provider: None,
+        official_provider_family: None,
+        wire_api: WireApi::Responses,
+        protocol_config: Default::default(),
+        protocol_bindings: vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["gpt-test".into()],
+        }],
+        models: vec!["gpt-test".into()],
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        priority: 0,
+        weight: 1,
+        recovery_delay_seconds: 0,
+        model_price_overrides: Default::default(),
+        detected_model_prices: Default::default(),
+        last_used_at: None,
+        last_test_at: None,
+        last_test_status: None,
+        last_error: None,
+    };
+    state
+        .store()
+        .unwrap()
+        .upsert_source(source.clone())
+        .unwrap();
+
+    let mut parsed = parse_import(
+        r#"{"api_key":"sk-import-test","base_url":"https://api.example.test/v1"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+    let item = parsed.items.remove(0);
+    let result = import_source_item(&state, item, false, false, &["gpt-test".to_string()]).await;
+    let updated = result.unwrap();
+    assert_eq!(updated.id, source.id);
+    let routes = updated.effective_protocol_bindings().unwrap();
+    assert_eq!(routes.len(), WireApi::ALL.len());
+    assert!(routes.iter().all(|route| route.model_ids == ["gpt-test"]));
+    assert_eq!(state.store().unwrap().source(&source.id), Some(&source));
+
+    secret_store::delete(&secret_ref).unwrap();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
     let parsed = parse_import(r#"{"refresh_token":"refresh-rotated"}"#, None, &[]).unwrap();
@@ -1030,6 +1198,7 @@ fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
         expires_at_ms: Some(60_000),
         email: None,
         provider_account_id: Some("provider-private".into()),
+        account_id_hints: vec!["provider-private".into()],
         provider_user_id: None,
         organization_id: None,
         plan_type: None,
@@ -1253,7 +1422,12 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
         .unwrap()
         .upsert_account(account_record(&account_id))
         .unwrap();
-    state.mark_quota_refresh(&account_id, 123_456).unwrap();
+    let before_refresh = state
+        .store()
+        .unwrap()
+        .account_refresh_scope(&account_id)
+        .unwrap()
+        .1;
     codex::attach_account(
         &profile,
         &state.profile_backup_root(),
@@ -1263,20 +1437,23 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     )
     .unwrap();
 
-    let previous_quota = state.quota_refresh_snapshot().unwrap();
     let previous_wake = state.wake_snapshot().unwrap();
     let old_automations = state.store().unwrap().automations().clone();
     let bindings = codex::account_bindings(&state.profile_backup_root()).unwrap();
     let restored = restore_bound_account_profiles(&state, &bindings, Some(&stored)).unwrap();
     credentials.delete(&account_id).unwrap();
-    state.remove_quota_refresh(&account_id).unwrap();
+    state
+        .store()
+        .unwrap()
+        .invalidate_account_refresh(&[&account_id])
+        .unwrap();
+    state.remove_account_refresh(&account_id);
 
     rollback_deleted_account_side_effects(
         &state,
         &credentials,
         &account_id,
         Some(&stored),
-        previous_quota,
         previous_wake,
         old_automations,
         &restored,
@@ -1286,7 +1463,14 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     .unwrap();
 
     assert!(credentials.require(&account_id).is_ok());
-    assert_eq!(state.next_quota_refresh_due().unwrap(), Some(123_456));
+    assert!(state
+        .store()
+        .unwrap()
+        .ensure_account_refresh_current(&before_refresh)
+        .is_err());
+    assert!(state
+        .sync_account_quota_refresh(&account_id, current_time_ms())
+        .unwrap());
     assert_eq!(
         codex::account_bindings(&state.profile_backup_root())
             .unwrap()
@@ -1302,98 +1486,202 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
-#[test]
-fn quota_refresh_schedule_uses_reset_lead_and_failure_backoff() {
-    let now_ms = 100_000;
-    let mut account = account_record("account_local");
-    account.account.quota.primary = Some(QuotaWindow {
-        kind: QuotaWindowKind::Primary,
-        provider_cycle_id: None,
-        window_start_ms: None,
-        available_basis_points: Some(10_000),
-        explicitly_full: Some(true),
-        reset_at_ms: Some(now_ms + 300_000),
-        window_minutes: Some(300),
-        observed_at_ms: now_ms,
-        full_transition_fingerprint: None,
-        exhaustion_transition_fingerprint: None,
-    });
-    let updated = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Updated {
-            transitions: Vec::new(),
-            exhaustion_transitions: Vec::new(),
-        },
-        exhaustion_transitions: Vec::new(),
+
+#[tokio::test]
+async fn pre_authority_refresh_failure_restores_credentials_and_account_state() {
+    let root = std::env::temp_dir().join(format!(
+        "zenith-relay-refresh-rollback-{}",
+        Uuid::new_v4().simple()
+    ));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let previous = StoredCodexCredentials::new(
+        &account_id,
+        "access-before".into(),
+        Some("refresh-before".into()),
+        None,
+        Some(60_000),
+        1,
+        1,
+        None,
+        Some("provider-private".into()),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let refreshed = StoredCodexCredentials::new(
+        &account_id,
+        "access-after".into(),
+        Some("refresh-after".into()),
+        None,
+        Some(120_000),
+        2,
+        2,
+        None,
+        Some("provider-private".into()),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    credentials.save(&previous).unwrap();
+    let old_record = records::new_account_record(
+        &previous,
+        AccountAuthMode::OAuth,
+        vec!["gpt-test".into()],
+        0,
+        1,
+    )
+    .unwrap();
+    state
+        .store()
+        .unwrap()
+        .upsert_account(old_record.clone())
+        .unwrap();
+    let old_accounts = {
+        let store = state.store().unwrap();
+        store.accounts().to_vec()
     };
+    let previous_tokens = previous.to_token_set().unwrap();
+    state
+        .token_authority()
+        .register(
+            &account_id,
+            previous_tokens.clone(),
+            old_record.account.auth_state,
+        )
+        .await
+        .unwrap();
+
+    // Simulate a failure after the reversible credential and account writes,
+    // before TokenAuthority is updated.
+    credentials.save(&refreshed).unwrap();
+    let mut changed_record = old_record.clone();
+    changed_record.account.token_generation = refreshed.generation();
+    changed_record.account.token_updated_at_ms = Some(2);
+    state
+        .store()
+        .unwrap()
+        .upsert_account(changed_record)
+        .unwrap();
+
+    let error = rollback_force_refreshed_before_authority(
+        &state,
+        &credentials,
+        &account_id,
+        &previous,
+        &previous_tokens,
+        &refreshed.to_token_set().unwrap(),
+        &old_accounts,
+        "provider-private",
+        false,
+        LocalPoolError::new(ErrorCode::Io, "injected refresh failure"),
+    )
+    .await;
+
+    assert_eq!(error.code, ErrorCode::Io);
     assert_eq!(
-        next_quota_refresh_at(&updated, now_ms),
-        Some(now_ms + 300_000 + quota_reset_refresh_delay(&account.account.id))
+        credentials.require(&account_id).unwrap().access_token(),
+        previous.access_token()
     );
-    account.account.quota.primary.as_mut().unwrap().reset_at_ms = Some(now_ms + 10_000);
-    let short_reset = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Updated {
-            transitions: Vec::new(),
-            exhaustion_transitions: Vec::new(),
-        },
-        exhaustion_transitions: Vec::new(),
-    };
     assert_eq!(
-        next_quota_refresh_at(&short_reset, now_ms),
-        Some(now_ms + 10_000 + quota_reset_refresh_delay(&account.account.id))
+        state
+            .token_authority()
+            .tokens(&account_id)
+            .await
+            .unwrap()
+            .access_token(),
+        previous.access_token()
     );
-    account.account.quota.primary.as_mut().unwrap().reset_at_ms = Some(now_ms + 5 * 60 * 60_000);
-    let long_window = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Updated {
-            transitions: Vec::new(),
-            exhaustion_transitions: Vec::new(),
-        },
-        exhaustion_transitions: Vec::new(),
-    };
     assert_eq!(
-        next_quota_refresh_at(&long_window, now_ms),
-        Some(now_ms + QUOTA_IDLE_REFRESH_MS)
+        state.store().unwrap().account(&account_id),
+        Some(&old_record)
     );
 
-    let retryable = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Failed {
-            code: "quota_transport".into(),
-            retryable: true,
-        },
-        exhaustion_transitions: Vec::new(),
-    };
+    let mut newer_record = old_record.clone();
+    newer_record.account.token_generation = refreshed.generation().saturating_add(1);
+    newer_record.account.token_updated_at_ms = Some(3);
+    state
+        .store()
+        .unwrap()
+        .upsert_account(newer_record.clone())
+        .unwrap();
+    assert!(!restore_force_refreshed_account_record(
+        &state,
+        &account_id,
+        &refreshed.to_token_set().unwrap(),
+        &old_accounts,
+    )
+    .unwrap());
     assert_eq!(
-        next_quota_refresh_at(&retryable, now_ms),
-        Some(now_ms + QUOTA_REFRESH_RETRY_MS)
+        state.store().unwrap().account(&account_id),
+        Some(&newer_record)
     );
-    let parser_failure = AccountQuotaRefreshResponse {
-        account: account.clone(),
-        quota: AccountQuotaOutcome::Failed {
-            code: "quota_invalid_response".into(),
-            retryable: false,
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(
-        next_quota_refresh_at(&parser_failure, now_ms),
-        Some(now_ms + QUOTA_IDLE_REFRESH_MS)
-    );
-    account.account.auth_state =
-        AccountAuthState::RequiresReauth(zenith_relay_core::accounts::ReauthReason::InvalidGrant);
-    let terminal = AccountQuotaRefreshResponse {
-        account,
-        quota: AccountQuotaOutcome::Failed {
-            code: "invalid_grant".into(),
-            retryable: false,
-        },
-        exhaustion_transitions: Vec::new(),
-    };
-    assert_eq!(next_quota_refresh_at(&terminal, now_ms), None);
-    assert_eq!(QUOTA_REFRESH_BATCH_SIZE, 5);
+
+    credentials.delete(&account_id).unwrap();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
+    let root = std::env::temp_dir().join(format!(
+        "zenith-relay-refresh-watchdog-{}",
+        Uuid::new_v4().simple()
+    ));
+    let state = DesktopState::open(root.clone()).unwrap();
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let mut record = account_record(&account_id);
+    record.client_auth_status = Some("login_required".into());
+    record.last_client_login_redirect_at_ms = Some(123);
+    state.store().unwrap().upsert_account(record).unwrap();
+    let attempted = TokenSet::new(
+        "access-before",
+        Some("refresh-before".into()),
+        None,
+        Some(60_000),
+        1,
+        1,
+    )
+    .unwrap();
+    let authoritative = TokenSet::new(
+        "access-after",
+        Some("refresh-after".into()),
+        None,
+        Some(120_000),
+        2,
+        2,
+    )
+    .unwrap();
+
+    reconcile_force_refreshed_account_record(
+        &state,
+        &account_id,
+        &attempted,
+        &authoritative,
+        AccountAuthState::Active,
+    )
+    .unwrap();
+    let persisted = state
+        .store()
+        .unwrap()
+        .account(&account_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        persisted.client_auth_status.as_deref(),
+        Some("login_required")
+    );
+    assert_eq!(persisted.last_client_login_redirect_at_ms, Some(123));
+
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn prepared_credentials_debug_output_is_redacted() {
     let prepared = PreparedAccountCredentials {
@@ -1546,6 +1834,174 @@ async fn account_check_recovers_an_id_from_an_access_only_session() {
     assert_eq!(account_id, "workspace-private");
     server.abort();
 }
+
+#[tokio::test]
+async fn import_rejects_conflicting_document_and_jwt_account_ids() {
+    let payload = URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "jwt-account"
+            }
+        })
+        .to_string(),
+    );
+    let access_token = format!("header.{payload}.signature");
+    let mut parsed = parse_import(
+        &serde_json::json!({
+            "account_id": "document-account",
+            "access_token": access_token
+        })
+        .to_string(),
+        None,
+        &[],
+    )
+    .unwrap();
+
+    let result = build_import_credential_material(
+        parsed.items.remove(0),
+        1,
+        None,
+        None,
+        None,
+        2,
+        &Url::parse("http://127.0.0.1:1/accounts/check").unwrap(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "conflicting account identity claims were accepted"
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => return,
+    };
+
+    assert_eq!(error.code, "account_identity_claim_conflict");
+}
+
+#[tokio::test]
+async fn import_rejects_an_authenticated_account_identity_mismatch() {
+    let (endpoint, server) = spawn_import_account_check_payload(serde_json::json!({
+        "accounts": [{"account": {"id": "authenticated-account"}}]
+    }))
+    .await;
+    let mut parsed = parse_import(
+        r#"{"account_id":"claimed-account","access_token":"synthetic-access-token"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+
+    let result =
+        build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 2, &endpoint)
+            .await;
+    assert!(
+        result.is_err(),
+        "an authenticated account identity mismatch was accepted"
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => return,
+    };
+
+    assert_eq!(error.code, "account_identity_mismatch");
+    server.abort();
+}
+
+#[tokio::test]
+async fn import_uses_the_authenticated_account_id_when_the_document_has_none() {
+    let (endpoint, server) = spawn_import_account_check_payload(serde_json::json!({
+        "account_ordering": ["canonical-account"],
+        "accounts": {
+            "canonical-account": {
+                "account": {"workspace_id": "canonical-account"}
+            }
+        }
+    }))
+    .await;
+    let mut parsed = parse_import(
+        r#"{"access_token":"synthetic-access-only-token"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+
+    let material =
+        build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 2, &endpoint)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        material.provider_account_id.as_deref(),
+        Some("canonical-account")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn import_rejects_an_authenticated_response_without_an_account_id() {
+    let (endpoint, server) =
+        spawn_import_account_check_payload(serde_json::json!({"accounts": []})).await;
+    let mut parsed = parse_import(
+        r#"{"access_token":"synthetic-access-only-token"}"#,
+        None,
+        &[],
+    )
+    .unwrap();
+
+    let result =
+        build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 2, &endpoint)
+            .await;
+    assert!(
+        result.is_err(),
+        "an account-check response without an id was accepted"
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => return,
+    };
+
+    assert_eq!(error.code, "provider_account_id_missing");
+    server.abort();
+}
+
+async fn spawn_import_account_check_server(account_id: &str) -> (Url, tokio::task::JoinHandle<()>) {
+    spawn_import_account_check_server_for_accounts(&[account_id]).await
+}
+
+async fn spawn_import_account_check_server_for_accounts(
+    account_ids: &[&str],
+) -> (Url, tokio::task::JoinHandle<()>) {
+    spawn_import_account_check_payload(serde_json::json!({
+        "accounts": account_ids
+            .iter()
+            .map(|account_id| serde_json::json!({"account": {"id": account_id}}))
+            .collect::<Vec<_>>()
+    }))
+    .await
+}
+
+async fn spawn_import_account_check_payload(
+    payload: serde_json::Value,
+) -> (Url, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/accounts/check",
+        get(move || {
+            let payload = payload.clone();
+            async move { Json(payload) }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (
+        Url::parse(&format!("http://{address}/accounts/check")).unwrap(),
+        server,
+    )
+}
+
 #[tokio::test]
 async fn imported_explicit_email_wins_over_shared_token_email() {
     let payload = URL_SAFE_NO_PAD.encode(
@@ -1569,11 +2025,21 @@ async fn imported_explicit_email_wins_over_shared_token_email() {
         &[],
     )
     .unwrap();
-    let material =
-        build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 20)
-            .await
-            .unwrap();
+    let (account_check_endpoint, account_check_server) =
+        spawn_import_account_check_server("shared-team").await;
+    let material = build_import_credential_material(
+        parsed.items.remove(0),
+        1,
+        None,
+        None,
+        None,
+        20,
+        &account_check_endpoint,
+    )
+    .await
+    .unwrap();
     assert_eq!(material.email.as_deref(), Some("member@example.test"));
+    account_check_server.abort();
 }
 #[test]
 fn quota_response_types_are_safe_and_serializable() {

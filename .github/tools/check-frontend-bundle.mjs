@@ -8,6 +8,7 @@ const limits = {
   initialJavaScript: 150 * 1024,
   initialCss: 40 * 1024,
   totalAssets: 360 * 1024,
+  helpDocuments: 64 * 1024,
 };
 
 function gzipSize(path) {
@@ -45,11 +46,16 @@ const initialAssets = tags.flatMap((tag) => {
 const initialJavaScript = initialAssets.filter((path) => path.endsWith(".js"));
 const initialCss = initialAssets.filter((path) => path.endsWith(".css"));
 const allAssets = collectAssets(distDirectory);
+const helpDocuments = readdirSync(join(distDirectory, "assets"))
+  .filter((file) => /^README-.*\.md$/.test(file))
+  .map((file) => join(distDirectory, "assets", file));
+if (helpDocuments.length !== 2) throw new Error("Both local Help languages must be bundled");
 if (!initialJavaScript.length) throw new Error("Production entry script is missing from index.html");
 const measurements = {
   initialJavaScript: initialJavaScript.reduce((total, path) => total + gzipSize(path), 0),
   initialCss: initialCss.reduce((total, path) => total + gzipSize(path), 0),
   totalAssets: allAssets.reduce((total, path) => total + gzipSize(path), 0),
+  helpDocuments: helpDocuments.reduce((total, path) => total + gzipSize(path), 0),
 };
 
 for (const [name, value] of Object.entries(measurements)) {

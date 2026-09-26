@@ -25,63 +25,16 @@ pub(in crate::local_pool::accounts) fn timestamp_from_ms(value: u64) -> Option<S
         .map(|value| value.to_rfc3339())
 }
 
+#[cfg(test)]
 pub(in crate::local_pool::accounts) fn account_id_from_check_response(
     payload: &serde_json::Value,
 ) -> Option<String> {
-    if payload.get("accounts").is_none() {
-        if let Some(account_id) = account_id_from_profile_record(payload) {
-            return Some(account_id);
-        }
-    }
-    let accounts = payload.get("accounts").unwrap_or(payload);
-    if let Some(records) = accounts.as_object() {
-        if let Some(ordering) = payload
-            .get("account_ordering")
-            .and_then(|value| value.as_array())
-        {
-            for key in ordering.iter().filter_map(|value| value.as_str()) {
-                if let Some(record) = records.get(key) {
-                    if let Some(account_id) = account_id_from_profile_record(record) {
-                        return Some(account_id);
-                    }
-                    if let Some(account_id) = normalized_profile_account_id(key) {
-                        return Some(account_id);
-                    }
-                }
-            }
-        }
-        for (key, record) in records {
-            if let Some(account_id) = account_id_from_profile_record(record) {
-                return Some(account_id);
-            }
-            if let Some(account_id) = normalized_profile_account_id(key) {
-                return Some(account_id);
-            }
-        }
-    }
-    accounts
-        .as_array()?
-        .iter()
-        .find_map(account_id_from_profile_record)
-}
-
-pub(in crate::local_pool::accounts) fn account_id_from_profile_record(
-    record: &serde_json::Value,
-) -> Option<String> {
-    let record = record
-        .get("account")
-        .filter(|value| value.is_object())
-        .unwrap_or(record);
-    ["id", "account_id", "chatgpt_account_id", "workspace_id"]
+    zenith_relay_core::providers::chatgpt::account_ids_from_check_response(payload)
         .into_iter()
-        .find_map(|key| {
-            record
-                .get(key)
-                .and_then(|value| value.as_str())
-                .and_then(normalized_profile_account_id)
-        })
+        .next()
 }
 
+#[cfg(test)]
 pub(in crate::local_pool::accounts) fn normalized_profile_account_id(
     value: &str,
 ) -> Option<String> {

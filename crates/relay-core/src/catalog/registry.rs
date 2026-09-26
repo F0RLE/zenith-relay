@@ -1,7 +1,7 @@
 use super::normalize_model_ids;
 use crate::scheduler::{CandidateScope, PoolScheduler};
 use crate::WireApi;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default)]
 pub struct ModelRegistry {
@@ -61,6 +61,7 @@ impl ModelRegistry {
     ) -> Vec<String> {
         let mut visible = Vec::new();
         let mut seen = HashSet::new();
+        let mut catalog_order = HashMap::new();
         // Native ChatGPT account candidates own bare model ids.  Sources are
         // still registered after them, but an upstream-looking provider id
         // must not shadow the native entry (or make the picker lose its
@@ -83,14 +84,18 @@ impl ModelRegistry {
                 continue;
             };
             for model in &registered.models {
-                if candidate.is_catalog_visible(model, allowed_protocols, scope) {
-                    let normalized = model.to_ascii_lowercase();
-                    if seen.insert(normalized) {
-                        visible.push(model.clone());
-                    }
+                // Route grouping must not change the source catalog order.
+                let normalized = model.to_ascii_lowercase();
+                let rank = catalog_order.len();
+                catalog_order.entry(normalized.clone()).or_insert(rank);
+                if candidate.is_catalog_visible(model, allowed_protocols, scope)
+                    && seen.insert(normalized)
+                {
+                    visible.push(model.clone());
                 }
             }
         }
+        visible.sort_by_key(|model| catalog_order.get(&model.to_ascii_lowercase()).copied());
         visible
     }
 }
@@ -117,11 +122,13 @@ mod tests {
             model_rules: ModelRules::default(),
             health: CandidateHealth::Healthy,
             quota: CandidateQuota::Unknown,
+            provider_credits_micro_units: None,
+            provider_credits_unlimited: false,
             quota_updated_at_ms: None,
             quota_reset_at_ms: None,
             cooldowns: BTreeMap::new(),
             last_used_at: None,
-            consecutive_failures: 0,
+
             secret_available: true,
         }
     }

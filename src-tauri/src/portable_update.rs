@@ -1,5 +1,6 @@
 use serde::Serialize;
 use tauri::{ipc::Channel, AppHandle};
+use zenith_relay_core::error_codes;
 
 #[cfg(target_os = "windows")]
 use std::{env, process::Command};
@@ -85,29 +86,31 @@ pub async fn install_portable_update(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (app, expected_version, on_event);
-        Err("portable_update_unsupported".to_string())
+        Err(error_codes::PORTABLE_UPDATE_UNSUPPORTED.to_string())
     }
 
     #[cfg(target_os = "windows")]
     {
-        let target = get_portable_update_target().ok_or("portable_update_unsupported")?;
-        let paths = update_paths().map_err(|error| format!("portable_not_writable:{error}"))?;
+        let target =
+            get_portable_update_target().ok_or(error_codes::PORTABLE_UPDATE_UNSUPPORTED)?;
+        let paths = update_paths()
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_NOT_WRITABLE))?;
         prepare_update_directory(&paths)
-            .map_err(|error| format!("portable_not_writable:{error}"))?;
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_NOT_WRITABLE))?;
 
         use tauri_plugin_updater::UpdaterExt;
         let updater = app
             .updater_builder()
             .target(target)
             .build()
-            .map_err(|error| format!("portable_update_failed:{error}"))?;
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_UPDATE_FAILED))?;
         let update = updater
             .check()
             .await
-            .map_err(|error| format!("portable_update_failed:{error}"))?
-            .ok_or("portable_update_unavailable")?;
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_UPDATE_FAILED))?
+            .ok_or(error_codes::PORTABLE_UPDATE_UNAVAILABLE)?;
         if update.version != expected_version {
-            return Err("portable_update_unavailable".to_string());
+            return Err(error_codes::PORTABLE_UPDATE_UNAVAILABLE.to_string());
         }
 
         let mut first_chunk = true;
@@ -125,10 +128,10 @@ pub async fn install_portable_update(
                 },
             )
             .await
-            .map_err(|error| format!("portable_update_failed:{error}"))?;
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_UPDATE_FAILED))?;
 
         write_helper(&paths.helper, &bytes)
-            .map_err(|error| format!("portable_not_writable:{error}"))?;
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_NOT_WRITABLE))?;
         let pid = std::process::id();
         let mut helper = Command::new(&paths.helper);
         helper
@@ -138,7 +141,7 @@ pub async fn install_portable_update(
             .arg(&paths.ack);
         helper
             .spawn()
-            .map_err(|error| format!("portable_update_failed:{error}"))?;
+            .map_err(|error| format!("{}:{error}", error_codes::PORTABLE_UPDATE_FAILED))?;
 
         app.exit(0);
         Ok(())

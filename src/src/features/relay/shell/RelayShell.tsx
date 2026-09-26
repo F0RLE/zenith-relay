@@ -69,17 +69,16 @@ export function RelayShell() {
   }, [mode, page]);
 
   useEffect(() => {
+    if (!modeOpen) return;
     const closePopovers = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!modePickerRef.current?.contains(target)) setModeOpen(false);
-      document.querySelectorAll<HTMLDetailsElement>(".relay-action-menu[open]").forEach((menu) => {
-        if (!menu.contains(target)) menu.open = false;
-      });
     };
     const closeWithEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
       setModeOpen(false);
-      document.querySelectorAll<HTMLDetailsElement>(".relay-action-menu[open]").forEach((menu) => { menu.open = false; });
+      focusModePicker();
     };
     document.addEventListener("pointerdown", closePopovers);
     document.addEventListener("keydown", closeWithEscape);
@@ -87,7 +86,7 @@ export function RelayShell() {
       document.removeEventListener("pointerdown", closePopovers);
       document.removeEventListener("keydown", closeWithEscape);
     };
-  }, []);
+  }, [modeOpen, focusModePicker]);
 
   useEffect(() => {
     let disposed = false;
@@ -132,9 +131,10 @@ export function RelayShell() {
             <ChevronDown aria-hidden />
           </button>
           {modeOpen ? (
-            <div className="mode-menu" role="menu">
+            <div className="mode-menu relay-popover-panel" role="menu">
               {(["local", "zenith", "remote"] as RelayMode[]).map((value) => (
                 <button
+                  className="relay-popover-item"
                   role="menuitemradio"
                   aria-checked={mode === value}
                   key={value}

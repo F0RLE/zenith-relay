@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp } from "lucide-react";
+import { Activity, CalendarDays, CheckCircle2, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RemoteUsageQuery } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
-import { sortModelIdsForLauncher } from "../../modelGroups";
+import { ActionMenu, ActionMenuItem, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, Tabs, ToggleSwitch, useConfirm } from "../../components/Ui";
+import { orderModelIdsBySnapshot } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useRelayUsageContext } from "../../state/relayStateContext";
 import { formatTokenSpeed } from "../../usageSpeed";
 import { AggregateView, CompactNumber, ErrorsView, RequestDetails, RequestsView } from "./UsageReportViews";
 import { AccountUsageSummary } from "./AccountUsageSummary";
 import { UsageMetric } from "./UsageMetric";
+import { UsagePagination } from "./UsagePagination";
 import { totalsFromRows, usageRowsFromLocal, usageRowsFromRemote, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
@@ -167,6 +168,7 @@ export function UsagePage() {
   const timeFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
   const formatTime = useCallback((value: string) => timeFormatter.format(new Date(value)), [timeFormatter]);
   const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
+  const changePage = (next: number) => { setPage(next); setSelected(null); };
   const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, requestedReasoningEffort: row.requestedReasoningEffort, effectiveReasoningEffort: row.effectiveReasoningEffort, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, cacheWriteTtl: row.cacheWriteTtl, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory, errorOrigin: row.errorOrigin, ...(row.serviceTier ? { serviceTier: row.serviceTier } : {}), appliedServiceTier: row.appliedServiceTier }))), "feedback.exported");
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
@@ -193,11 +195,15 @@ export function UsagePage() {
       ? accountDisplayName(null, group.label) ?? group.label ?? t("usage.removedAccount")
       : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown"),
   })), [accountDisplayName, accountLabels, mode, sourceLabels, t, usagePage?.poolMembers]);
-  const modelOptionIds = useMemo(() => sortModelIdsForLauncher([...new Map(
-    [...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])]
-      .filter(Boolean)
-      .map((value) => [value.toLowerCase(), value] as const),
-  ).values()]), [modelGroups, modelQuery, rows, runtime?.gateway.visibleModelIds]);
+  const modelOptionIds = useMemo(() => orderModelIdsBySnapshot(
+    [
+      ...(runtime?.gateway.visibleModelIds ?? []),
+      ...(modelGroups?.map((group) => group.key) ?? []),
+      ...rows.flatMap((row) => row.model ? [row.model] : []),
+      ...(modelQuery ? [modelQuery] : []),
+    ],
+    runtime?.gateway.models ?? [],
+  ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.visibleModelIds]);
   const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))], [modelOptionIds, t]);
   const poolMemberOptionSource = useMemo(() => [
     ...(poolMemberGroups ?? []),
@@ -221,8 +227,8 @@ export function UsagePage() {
     return <section className="relay-page"><PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} /><EmptyState title={t("common.unsupported")} description={t("remote.capabilityUnavailable")} /></section>;
   }
 
-  return <section className="relay-page">
-    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem icon={<SlidersHorizontal aria-hidden />} onClick={() => setSummarySettingsOpen(true)}>{t("usage.configureSummary")}</ActionMenuItem><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
+  return <section className="relay-page usage-page">
+    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><IconButton label={t("common.refresh")} icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()} /><ActionMenu className="usage-overflow"><ActionMenuItem icon={<SlidersHorizontal aria-hidden />} onClick={() => setSummarySettingsOpen(true)}>{t("usage.configureSummary")}</ActionMenuItem><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu></>} />
     <div className="usage-view-toolbar">
       <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
       <div className="usage-scope-controls">
@@ -232,25 +238,25 @@ export function UsagePage() {
     </div>
     {selectedAccount ? <AccountUsageSummary account={selectedAccount} totals={totals} /> : null}
     {USAGE_SUMMARY_METRICS.some((metric) => summaryMetrics[metric]) ? <section className="usage-overview" aria-label={t("usage.summary")}>
-      {summaryMetrics.requests || summaryMetrics.success || summaryMetrics.tokens || summaryMetrics.equivalent || summaryMetrics.generationSpeed || summaryMetrics.e2eSpeed ? <div className="usage-metrics">
+      <div className="usage-metrics">
         {summaryMetrics.requests ? <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} /> : null}
         {summaryMetrics.success ? <UsageMetric icon={<CheckCircle2 aria-hidden />} label={t("common.success")} value={successRate == null ? "-" : `${successRate}%`} detail={`${formatFullNumber(totals.successfulRequests, i18n.language)} / ${formatFullNumber(totals.requests, i18n.language)}`} /> : null}
         {summaryMetrics.tokens ? <UsageMetric icon={<Database aria-hidden />} label={t("usage.totalTokens")} value={<CompactNumber value={totals.totalTokens} locale={i18n.language} />} detail={`${t("usage.inputShort")} ${formatCompactNumber(totals.inputTokens, i18n.language)} · ${t("usage.outputShort")} ${formatCompactNumber(totals.outputTokens, i18n.language)} · ${t("usage.cachedShort")} ${totals.cachedInputSamples ? formatCompactNumber(totals.cachedInputTokens, i18n.language) : "—"}${totals.cacheWriteInputSamples ? ` · ${t("usage.cacheWriteShort")} ${formatCompactNumber(totals.cacheWriteInputTokens ?? 0, i18n.language)}` : ""}`} title={t("usage.tokenCompositionHint")} /> : null}
         {summaryMetrics.equivalent ? <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalent")} value={formatUsageApiEquivalent(totals.apiEquivalent, i18n.language)} detail={t("usage.apiEquivalentCoverage", { priced: formatCompactNumber(totals.apiEquivalent.pricedTokens, i18n.language), unpriced: formatCompactNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} /> : null}
         {summaryMetrics.generationSpeed ? <UsageMetric icon={<TrendingUp aria-hidden />} label={t("usage.generationSpeed")} value={formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} title={t("usage.generationSpeedHint")} /> : null}
         {summaryMetrics.e2eSpeed ? <UsageMetric icon={<Gauge aria-hidden />} label={t("usage.summaryMetrics.e2eSpeed")} value={formatTokenSpeed(averageE2eSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} /> : null}
-      </div> : null}
+      </div>
     </section> : null}
     {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} modelOptions={modelOptions} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} poolMemberOptions={poolMemberOptions} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
     {view === "models" ? <AggregateView rows={filtered} {...(modelGroups ? { groups: modelGroups } : {})} field="model" empty={t("usage.empty")} /> : null}
     {view === "connections" ? <AggregateView rows={filtered} {...(poolMemberGroups ? { groups: poolMemberGroups } : {})} field="connection" empty={t("usage.empty")} /> : null}
     {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelected} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
-    {(view === "requests" || view === "errors") && usagePage && usagePage.totalPages > 1 ? <nav className="usage-pagination" aria-label={t("usage.pagination")}><Button variant="secondary" icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || usageLoading} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t("common.back")}</Button><span>{t("usage.page", { page: usagePage.page, total: usagePage.totalPages })}</span><Button variant="secondary" icon={<ChevronRight aria-hidden />} disabled={page >= usagePage.totalPages || usageLoading} onClick={() => setPage((value) => value + 1)}>{t("common.continue")}</Button></nav> : null}
+    {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? <UsagePagination key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, errorQuery, requestQuery, selectedAccountId])} page={page} totalPages={usagePage.totalPages} loading={usageLoading} onPageChange={changePage} /> : null}
     {selected ? <RequestDetails row={selected} onClose={() => setSelected(null)} /> : null}
-    {summarySettingsOpen ? <Dialog title={t("usage.configureSummary")} onClose={() => setSummarySettingsOpen(false)} closeOnBackdrop>
+    {summarySettingsOpen ? <Dialog title={t("usage.configureSummary")} onClose={() => setSummarySettingsOpen(false)}>
       <div className="usage-summary-settings">
-        {USAGE_SUMMARY_METRICS.map((metric) => <label key={metric}><input type="checkbox" checked={summaryMetrics[metric]} onChange={(event) => setSummaryMetrics((current) => ({ ...current, [metric]: event.target.checked }))} /><span>{t(`usage.summaryMetrics.${metric}`)}</span></label>)}
+        {USAGE_SUMMARY_METRICS.map((metric) => <label key={metric}><span>{t(`usage.summaryMetrics.${metric}`)}</span><ToggleSwitch label={t(`usage.summaryMetrics.${metric}`)} checked={summaryMetrics[metric]} onChange={(checked) => setSummaryMetrics((current) => ({ ...current, [metric]: checked }))} /></label>)}
       </div>
     </Dialog> : null}
   </section>;

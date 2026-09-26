@@ -21,6 +21,7 @@ pub enum RemoteClientError {
     Transport,
     RedirectRejected,
     HttpStatus(u16),
+    PoolRoutingConflict,
     ResponseTooLarge,
     InvalidResponse,
     Protocol(String),
@@ -34,6 +35,9 @@ impl fmt::Display for RemoteClientError {
             Self::Transport => formatter.write_str("remote server request failed"),
             Self::RedirectRejected => formatter.write_str("remote server redirect was rejected"),
             Self::HttpStatus(status) => write!(formatter, "remote server returned HTTP {status}"),
+            Self::PoolRoutingConflict => {
+                formatter.write_str("pool routing changed; reload the current policy before saving")
+            }
             Self::ResponseTooLarge => formatter.write_str("remote server response is too large"),
             Self::InvalidResponse => formatter.write_str("remote server response is invalid"),
             Self::Protocol(error) => write!(formatter, "remote protocol is incompatible: {error}"),
@@ -228,10 +232,15 @@ impl RemoteClient {
     pub async fn source_stats(
         &self,
         source_id: &str,
+        force: bool,
     ) -> Result<SourceProviderStats, RemoteClientError> {
         self.request(
             Method::GET,
-            &format!("{}/stats", remote_object_path("sources", source_id)?),
+            &format!(
+                "{}/stats{}",
+                remote_object_path("sources", source_id)?,
+                if force { "?force=true" } else { "" }
+            ),
             Option::<&()>::None,
             true,
         )
@@ -308,6 +317,9 @@ impl RemoteClient {
             return Err(RemoteClientError::RedirectRejected);
         }
         if !response.status().is_success() {
+            if path == "/routing/settings" && matches!(response.status().as_u16(), 400 | 409) {
+                return Err(pool_routing_error(response).await);
+            }
             return Err(RemoteClientError::HttpStatus(response.status().as_u16()));
         }
         if response.status() == reqwest::StatusCode::NO_CONTENT {
@@ -357,6 +369,37 @@ impl RemoteClient {
             return Err(RemoteClientError::ResponseTooLarge);
         }
         serde_json::from_slice(&bytes).map_err(|_| RemoteClientError::InvalidResponse)
+    }
+}
+
+async fn pool_routing_error(mut response: reqwest::Response) -> RemoteClientError {
+    let fallback = RemoteClientError::HttpStatus(response.status().as_u16());
+    let mut bytes = Vec::new();
+    // Older servers return 400 for this conflict. Inspect only a bounded code
+    // envelope; never propagate the server's message or raw body to diagnostics.
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return fallback,
+        };
+        if bytes.len() + chunk.len() > 4096 {
+            return fallback;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(_) => return fallback,
+    };
+    if body
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_str)
+        == Some(zenith_relay_core::error_codes::POOL_ROUTING_CONFLICT)
+    {
+        RemoteClientError::PoolRoutingConflict
+    } else {
+        fallback
     }
 }
 
@@ -534,6 +577,40 @@ mod tests {
         Arc, Mutex,
     };
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn routing_conflicts_are_typed_without_exposing_remote_messages() {
+        for (status, code, typed) in [
+            (400, "pool_routing_conflict", true),
+            (409, "pool_routing_conflict", true),
+            (400, "invalid_request", false),
+            (503, "pool_routing_conflict", false),
+        ] {
+            let server = spawn(Router::new().route(
+                "/routing/settings",
+                post(move || async move {
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        Json(serde_json::json!({
+                            "error": { "code": code, "message": "synthetic private server detail" }
+                        })),
+                    )
+                }),
+            ))
+            .await;
+            let client =
+                RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
+            let error = client
+                .mutate(Method::POST, "/routing/settings", None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                matches!(error, RemoteClientError::PoolRoutingConflict),
+                typed
+            );
+            assert!(!error.to_string().contains("synthetic private"));
+        }
+    }
 
     #[tokio::test]
     async fn redirect_is_not_followed_and_token_never_reaches_other_origin() {

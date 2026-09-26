@@ -1,12 +1,13 @@
 use super::errors::{upstream_failure_status, AttemptFailure, RateLimitBodyHint};
 use super::now_ms;
-use super::streaming::{parse_sse_event, TerminalOutcome};
+use super::streaming::{parse_sse_event, StreamBootstrapFailure, TerminalOutcome};
+use crate::error_codes;
 use crate::protocol::sse_event_end;
-use crate::runtime::ExecutorRoute;
-use crate::usage::ReasoningEffortDiagnostics;
+use crate::runtime::{AccountTransport, ExecutorRoute};
+use crate::usage::{normalize_reported_cache_ttls, ReasoningEffortDiagnostics};
 use crate::{
-    normalize_observed_service_tier, CacheWriteTtl, Error, ErrorOrigin, GatewayRuntime,
-    ObservedServiceTier, ToolUseDiagnostics, UsageEvent,
+    normalize_observed_service_tier, Error, ErrorOrigin, GatewayRuntime, ObservedServiceTier,
+    ToolUseDiagnostics, UsageEvent,
 };
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
@@ -28,9 +29,9 @@ pub(super) fn upstream_body_error_response(
     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
     let category = if too_large {
-        "upstream_body_too_large"
+        error_codes::UPSTREAM_BODY_TOO_LARGE
     } else {
-        "upstream_body"
+        error_codes::UPSTREAM_BODY
     };
     event.error_category = Some(category.to_string());
     event.latency_ms = started.elapsed().as_millis() as u64;
@@ -44,7 +45,7 @@ pub(super) fn upstream_body_error_response(
         } else {
             "upstream response failed"
         },
-        "upstream_error",
+        error_codes::UPSTREAM_ERROR,
         category,
         origin,
         Some(&request_id),
@@ -80,6 +81,7 @@ pub(super) fn attach_error_diagnostics(
     category: &str,
     request_id: Option<&str>,
 ) {
+    let origin = origin.for_category(category);
     response.headers_mut().insert(
         "x-zenith-relay-error-origin",
         HeaderValue::from_static(origin.as_str()),
@@ -207,7 +209,12 @@ pub(super) fn usage_event(
 ) -> UsageEvent {
     let mut routing = route.routing.clone();
     if let Some(diagnostics) = routing.as_mut() {
-        diagnostics.endpoint_kind = Some(route.adapter.route_suffix(route.wire_api).to_string());
+        diagnostics.endpoint_kind = Some(match route.account_transport {
+            AccountTransport::NativeResponses => {
+                route.adapter.route_suffix(route.wire_api).to_string()
+            }
+            AccountTransport::ExcelBasisPoints => "excel_basis_points".to_string(),
+        });
     }
     let mut event = UsageEvent {
         request_id: request_id.to_string(),
@@ -216,6 +223,7 @@ pub(super) fn usage_event(
         source_id: route.source_id.clone(),
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
+        account_token_generation: route.account_token_generation,
         client_context_id: route.client_context_id.clone(),
         routing,
         requested_model: Some(requested_model.to_string()),
@@ -244,6 +252,7 @@ pub(super) fn usage_event(
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
+        upstream_error: None,
         quota_snapshot: None,
     };
     if let Some(reasoning_effort) = reasoning_effort {
@@ -301,30 +310,65 @@ pub(super) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
 }
 
-pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
-    if serde_json::from_slice::<Value>(bytes).is_ok() {
+pub(super) fn completed_upstream_response(
+    bytes: &[u8],
+    account_stream: bool,
+) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
+    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+        let response = value.get("response").unwrap_or(&value);
+        if response.get("error").is_some_and(|error| !error.is_null())
+            || value.get("type").and_then(Value::as_str) == Some("error")
+            || response.get("status").and_then(Value::as_str) == Some("failed")
+        {
+            let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(bytes));
+            return Err(Box::new(StreamBootstrapFailure {
+                execution: failure.execution,
+                upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(None, &value)),
+                preserved: super::errors::preserved_upstream_error_value(&failure, &value),
+                ..failure.into()
+            }));
+        }
+        return Ok(bytes.to_vec());
+    }
+    if !account_stream {
         return Ok(bytes.to_vec());
     }
     let mut offset = 0;
     let mut output = Vec::new();
+    let mut saw_output = false;
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
         if terminal.has_data && !terminal.valid {
-            return Err(AttemptFailure::stream("stream_invalid"));
+            return Err(Box::new(StreamBootstrapFailure {
+                upstream_error: terminal.upstream_error,
+                ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
+            }));
         }
         if let Some(item) = terminal.output_item {
             output.push(item);
         }
         match terminal.outcome {
             Some(TerminalOutcome::Failure) => {
-                let category = terminal.error_category.unwrap_or("upstream_terminal");
-                return Err(AttemptFailure::classified_with_hint(
+                let category = terminal
+                    .error_category
+                    .unwrap_or(error_codes::UPSTREAM_TERMINAL);
+                let failure = AttemptFailure::classified_with_hint(
                     terminal
                         .error_status
                         .unwrap_or_else(|| upstream_failure_status(category)),
                     category,
                     terminal.cooldown_hint,
-                ));
+                );
+                return Err(Box::new(StreamBootstrapFailure {
+                    execution: if saw_output {
+                        crate::scheduler::rotation::ExecutionObservation::accepted()
+                    } else {
+                        failure.execution
+                    },
+                    upstream_error: terminal.upstream_error,
+                    preserved: terminal.preserved_error,
+                    ..failure.into()
+                }));
             }
             Some(TerminalOutcome::Success | TerminalOutcome::Incomplete) => {
                 if let Some(mut response) = terminal.response {
@@ -335,15 +379,19 @@ pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, Attemp
                     {
                         response["output"] = Value::Array(output);
                     }
-                    return serde_json::to_vec(&response)
-                        .map_err(|_| AttemptFailure::stream("stream_invalid"));
+                    return serde_json::to_vec(&response).map_err(|_| {
+                        Box::new(AttemptFailure::stream(error_codes::STREAM_INVALID).into())
+                    });
                 }
             }
             None => {}
         }
+        saw_output |= terminal.semantic_output;
         offset += end;
     }
-    Err(AttemptFailure::stream("stream_incomplete"))
+    Err(Box::new(
+        AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into(),
+    ))
 }
 
 pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
@@ -359,22 +407,33 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .and_then(Value::as_u64);
     let input_tokens =
         if anthropic_cache_read_tokens.is_some() || anthropic_cache_write_tokens.is_some() {
-            Some(
-                reported_input_tokens
-                    .unwrap_or_default()
+            reported_input_tokens.map(|input| {
+                input
                     .saturating_add(anthropic_cache_read_tokens.unwrap_or_default())
-                    .saturating_add(anthropic_cache_write_tokens.unwrap_or_default()),
-            )
+                    .saturating_add(anthropic_cache_write_tokens.unwrap_or_default())
+            })
         } else {
             reported_input_tokens
         };
-    let output_tokens = usage
+    let mut output_tokens = usage
         .get("output_tokens")
         .or_else(|| usage.get("completion_tokens"))
         .or_else(|| gemini.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
-    event.input_tokens = input_tokens;
-    event.cached_input_tokens = usage
+    if gemini.get("candidatesTokenCount").is_some() {
+        output_tokens = output_tokens.map(|output| {
+            output.saturating_add(
+                gemini
+                    .get("thoughtsTokenCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        });
+    }
+    if let Some(input_tokens) = input_tokens {
+        event.input_tokens = Some(input_tokens);
+    }
+    let cached_input_tokens = usage
         .get("input_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
         .or_else(|| {
@@ -386,8 +445,11 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("cache_read_input_tokens"))
         .or_else(|| gemini.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)
-        .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
-    event.cache_write_input_tokens = usage
+        .map(|cached| cached.min(input_tokens.unwrap_or(event.input_tokens.unwrap_or(cached))));
+    if let Some(cached_input_tokens) = cached_input_tokens {
+        event.cached_input_tokens = Some(cached_input_tokens);
+    }
+    let cache_write_input_tokens = usage
         .get("input_tokens_details")
         .and_then(|details| details.get("cache_write_tokens"))
         .or_else(|| {
@@ -405,11 +467,12 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                     .saturating_sub(event.cached_input_tokens.unwrap_or_default()),
             )
         });
-    event.cache_write_ttl = event
-        .cache_write_input_tokens
-        .filter(|written| *written > 0)
-        .and_then(|_| cache_write_ttl_from_usage(usage).or(event.cache_write_ttl));
-    event.reasoning_tokens = usage
+    if let Some(cache_write_input_tokens) = cache_write_input_tokens {
+        event.cache_write_input_tokens = Some(cache_write_input_tokens);
+    }
+    event.cache_write_ttl =
+        cache_write_ttl_from_usage(usage).or_else(|| event.cache_write_ttl.clone());
+    let reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
             usage
@@ -423,49 +486,113 @@ pub(super) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| gemini.get("thoughtsTokenCount"))
         .and_then(Value::as_u64)
-        .map(|reasoning| reasoning.min(output_tokens.unwrap_or(reasoning)));
-    event.output_tokens = output_tokens;
+        .map(|reasoning| {
+            reasoning.min(output_tokens.unwrap_or(event.output_tokens.unwrap_or(reasoning)))
+        });
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        event.reasoning_tokens = Some(reasoning_tokens);
+    }
+    if let Some(output_tokens) = output_tokens {
+        event.output_tokens = Some(output_tokens);
+    }
     let reported_total = usage
         .get("total_tokens")
         .or_else(|| gemini.get("totalTokenCount"))
         .and_then(Value::as_u64);
-    event.total_tokens = match (input_tokens, output_tokens) {
-        (Some(input), Some(output)) => {
-            let measured = input.saturating_add(output);
-            Some(reported_total.unwrap_or(measured).max(measured))
-        }
-        _ => reported_total,
-    };
+    if let Some(total_tokens) = reported_total.or_else(|| {
+        input_tokens
+            .zip(output_tokens)
+            .map(|(input, output)| input.saturating_add(output))
+    }) {
+        event.total_tokens = Some(
+            total_tokens.max(
+                event
+                    .input_tokens
+                    .unwrap_or_default()
+                    .saturating_add(event.output_tokens.unwrap_or_default()),
+            ),
+        );
+    }
 }
 
-fn cache_write_ttl_from_usage(usage: &Value) -> Option<CacheWriteTtl> {
-    usage
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cache_write_ttl"))
-        .or_else(|| usage.get("cache_write_ttl"))
-        .and_then(Value::as_str)
-        .and_then(CacheWriteTtl::from_anthropic_ttl)
-        .or_else(|| {
-            let creation = usage.get("cache_creation")?;
-            creation
-                .get("ephemeral_1h_input_tokens")
-                .and_then(Value::as_u64)
-                .filter(|tokens| *tokens > 0)
-                .map(|_| CacheWriteTtl::OneHour)
-                .or_else(|| {
-                    creation
-                        .get("ephemeral_5m_input_tokens")
-                        .and_then(Value::as_u64)
-                        .filter(|tokens| *tokens > 0)
-                        .map(|_| CacheWriteTtl::FiveMinutes)
-                })
-        })
+fn cache_write_ttl_from_usage(usage: &Value) -> Option<String> {
+    let mut windows = Vec::new();
+    let mut usage_objects = vec![usage];
+    for field in [
+        "input_tokens_details",
+        "prompt_tokens_details",
+        "inputTokensDetails",
+        "promptTokensDetails",
+    ] {
+        if let Some(details) = usage.get(field) {
+            usage_objects.push(details);
+        }
+    }
+
+    for object in usage_objects {
+        for field in [
+            "cache_write_ttl",
+            "cacheWriteTtl",
+            "cache_creation_ttl",
+            "cacheCreationTtl",
+        ] {
+            if let Some(value) = object.get(field).and_then(Value::as_str) {
+                windows.push(value.to_string());
+            }
+        }
+
+        if let Some(object) = object.as_object() {
+            for (key, tokens) in object {
+                if tokens.as_u64().is_some_and(|tokens| tokens > 0) {
+                    if let Some(window) = cache_window_from_token_field(key) {
+                        windows.push(window);
+                    }
+                }
+            }
+        }
+
+        if let Some(creation) = object
+            .get("cache_creation")
+            .or_else(|| object.get("cacheCreation"))
+            .and_then(Value::as_object)
+        {
+            for (key, tokens) in creation {
+                let window = key
+                    .strip_prefix("ephemeral_")
+                    .and_then(|key| key.strip_suffix("_input_tokens"));
+                if tokens.as_u64().is_some_and(|tokens| tokens > 0) {
+                    if let Some(window) = window {
+                        windows.push(window.to_string());
+                    }
+                }
+            }
+        }
+    }
+    normalize_reported_cache_ttls(&windows.join(","))
+}
+
+fn cache_window_from_token_field(key: &str) -> Option<String> {
+    let normalized = key.to_ascii_lowercase();
+    [
+        "cache_creation_input_tokens_",
+        "cache_creation_tokens_",
+        "cachecreationinputtokens",
+        "cachecreationtokens",
+        "cache_write_input_tokens_",
+        "cachewriteinputtokens",
+        "cache_write_tokens_",
+        "cachewritetokens",
+    ]
+    .into_iter()
+    .find_map(|prefix| normalized.strip_prefix(prefix))
+    .map(str::to_string)
 }
 
 pub(super) fn find_usage(value: &Value) -> Option<&Value> {
     value
         .get("usage")
         .or_else(|| value.get("usageMetadata"))
+        .or_else(|| value.pointer("/message/usage"))
         .or_else(|| {
             let response = value.get("response")?;
             response.get("usage").or_else(|| {
@@ -496,6 +623,21 @@ pub(super) fn response_id_from_bytes(body: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::gateway::test_support::test_usage_event;
+
+    #[test]
+    fn buffered_json_and_account_stream_keep_original_failure_details() {
+        for (body, account_stream) in [
+            (br#"{"status":"failed","error":{"code":"future_constraint","message":"Constraint check failed"},"input":"synthetic-private"}"#.as_slice(), false),
+            (b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"future_constraint\",\"message\":\"Constraint check failed\"}}}\n\n".as_slice(), true),
+        ] {
+            let failure = completed_upstream_response(body, account_stream).unwrap_err();
+            let details = failure.upstream_error.unwrap();
+            assert_eq!(details.code.as_deref(), Some("future_constraint"));
+            assert_eq!(details.message.as_deref(), Some("Constraint check failed"));
+            assert!(!serde_json::to_string(&details).unwrap().contains("synthetic-private"));
+            assert_eq!(failure.preserved.unwrap().message, "Constraint check failed");
+        }
+    }
 
     #[test]
     fn non_stream_usage_normalizes_cached_reasoning_and_total_tokens() {
@@ -554,13 +696,70 @@ mod tests {
             &mut event,
             br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":20},"output_tokens":10}}"#,
         );
-        assert_eq!(event.cache_write_ttl, Some(CacheWriteTtl::OneHour));
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("1h"));
 
         populate_tokens(
             &mut event,
             br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":20},"output_tokens":10}}"#,
         );
-        assert_eq!(event.cache_write_ttl, Some(CacheWriteTtl::FiveMinutes));
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("5m"));
+    }
+
+    #[test]
+    fn cache_usage_keeps_all_reported_provider_windows() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":10,"ephemeral_5m_input_tokens":10,"ephemeral_15m_input_tokens":0},"output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("5m, 1h"));
+
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_write_ttl":"15m","output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("15m"));
+    }
+
+    #[test]
+    fn cache_usage_accepts_generic_provider_window_fields() {
+        let usage = serde_json::json!({
+            "cache_creation_ttl": "2h",
+            "cache_creation_tokens_5m": 2,
+            "input_tokens_details": {
+                "cache_write_tokens_30m": 5
+            },
+            "prompt_cache_ttl": "24h",
+            "cache_creation_input_tokens": 7
+        });
+
+        assert_eq!(
+            cache_write_ttl_from_usage(&usage).as_deref(),
+            Some("5m, 30m, 2h")
+        );
+    }
+
+    #[test]
+    fn cache_usage_keeps_unknown_windows_unreported() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_input_tokens, Some(20));
+        assert_eq!(event.cache_write_ttl, None);
+    }
+
+    #[test]
+    fn cache_usage_keeps_provider_reported_ttl_without_write_counter() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":100,"cache_write_ttl":"45m","output_tokens":10}}"#,
+        );
+        assert_eq!(event.cache_write_input_tokens, None);
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("45m"));
     }
 
     #[test]

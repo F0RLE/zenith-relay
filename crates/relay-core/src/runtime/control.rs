@@ -1,15 +1,18 @@
 use crate::{DefaultServiceTier, UsageCallback, UsageEvent, WireApi};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const MAX_TRACKED_REQUEST_ORIGINS: usize = 4096;
+pub(crate) const DEFAULT_ROUTE_RECOVERY_WINDOW_MS: u64 = 30_000;
 
 /// Mutable runtime controls that are changed by management commands while the
 /// routing graph itself remains immutable for the lifetime of a runtime.
 pub(crate) struct RuntimeControl {
     codex_background_tasks_enabled: AtomicBool,
     codex_websockets_enabled: AtomicBool,
+    route_recovery_enabled: AtomicBool,
+    route_recovery_window_ms: AtomicU64,
     request_origins: Mutex<BTreeMap<String, &'static str>>,
 }
 
@@ -18,6 +21,8 @@ impl Default for RuntimeControl {
         Self {
             codex_background_tasks_enabled: AtomicBool::new(true),
             codex_websockets_enabled: AtomicBool::new(true),
+            route_recovery_enabled: AtomicBool::new(false),
+            route_recovery_window_ms: AtomicU64::new(DEFAULT_ROUTE_RECOVERY_WINDOW_MS),
             request_origins: Mutex::new(BTreeMap::new()),
         }
     }
@@ -40,6 +45,24 @@ impl RuntimeControl {
     pub(crate) fn set_codex_websockets_enabled(&self, enabled: bool) {
         self.codex_websockets_enabled
             .store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn route_recovery_enabled(&self) -> bool {
+        self.route_recovery_enabled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_route_recovery_enabled(&self, enabled: bool) {
+        self.route_recovery_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn route_recovery_window_ms(&self) -> u64 {
+        self.route_recovery_window_ms.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_route_recovery_window_ms(&self, value: u64) {
+        self.route_recovery_window_ms
+            .store(value.max(1_000), Ordering::Release);
     }
 
     pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
@@ -81,6 +104,7 @@ impl RuntimeControl {
             source_id: "relay".to_string(),
             candidate_id: None,
             account_id: None,
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some(requested_model.to_string()),
@@ -107,6 +131,7 @@ impl RuntimeControl {
             reasoning_tokens: Some(0),
             output_tokens: Some(0),
             total_tokens: Some(0),
+            upstream_error: None,
             quota_snapshot: None,
         };
         usage(event);
@@ -122,6 +147,7 @@ mod tests {
         let control = RuntimeControl::default();
         assert!(control.codex_background_tasks_enabled());
         assert!(control.codex_websockets_enabled());
+        assert!(!control.route_recovery_enabled());
     }
 
     #[test]

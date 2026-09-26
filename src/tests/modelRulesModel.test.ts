@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelSummary } from "../src/features/relay/api/types";
 import {
-  formatModelDisplayName,
+  completeModelDisplayOrder,
   modelSignature,
   normalizeReasoningSelection,
   reorderById,
@@ -16,7 +16,8 @@ const model = (id: string, overrides: Partial<ModelSummary> = {}): ModelSummary 
   memberCount: 1,
   codexVisible: true,
   codexDisplayName: id,
-  catalogRank: null,
+  catalogProvider: "openai",
+  catalogFamily: "gpt",
   inputMicroUsdPerMillion: null,
   outputMicroUsdPerMillion: null,
   customPrice: false,
@@ -50,10 +51,12 @@ describe("model rules model", () => {
     expect(groups[0]?.items.map((item) => item.id)).toEqual(["a", "b"]);
   });
 
-  test("formats common provider display names without changing identifiers", () => {
-    expect(formatModelDisplayName("gpt 5 4")).toBe("GPT-5.4");
-    expect(formatModelDisplayName("claude opus 4 8")).toBe("Claude opus 4.8");
-    expect(formatModelDisplayName("o3")).toBe("O3");
+  test("keeps unavailable catalog models when saving a reordered visible group", () => {
+    const order = completeModelDisplayOrder(
+      [model("gpt-b"), model("gpt-a")],
+      [model("gpt-a"), model("gpt-b"), model("gpt-unavailable")],
+    );
+    expect(order).toEqual(["gpt-b", "gpt-a", "gpt-unavailable"]);
   });
 
   test("normalizes advertised reasoning levels and preserves provider order", () => {
@@ -66,10 +69,10 @@ describe("model rules model", () => {
     expect(normalizeReasoningSelection(supported, ["low", "stale", "HIGH"])).toEqual(["high", "low"]);
   });
 
-  test("offers manual candidates only when the runtime explicitly permits unknown-model discovery", () => {
+  test("does not invent candidates when an automatic catalog has no levels", () => {
     expect(supportedReasoningLevels(model("claude-fable-5-1", {
       reasoningManualFallback: true,
-    }))).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    }))).toEqual([]);
     expect(supportedReasoningLevels(model("known-non-reasoning", {
       reasoningSupportedLevels: [],
       reasoningLevels: [],

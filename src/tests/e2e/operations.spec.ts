@@ -69,6 +69,37 @@ test("Gateway exposes an explicit Codex WebSocket switch", async ({ page }) => {
   expect(websocketCalls).toEqual([false, true]);
 });
 
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} API route recovery switch saves and retains its state`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, remoteFeatures: ["route_recovery_v1"] });
+    await page.goto("/");
+    await openGatewayApi(page);
+    const recovery = page.getByRole("checkbox", { name: "Wait for route recovery", exact: true });
+    await expect(recovery).not.toBeChecked();
+    await recovery.click();
+    await expect(recovery).toBeChecked();
+    await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+    await expect(recovery).toHaveCount(0);
+    await page.getByRole("tab", { name: "API", exact: true }).click();
+    await expect(recovery).toBeChecked();
+    await recovery.click();
+    await expect(recovery).not.toBeChecked();
+    const values = await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean; action?: { type: string }; payload?: { enabled: boolean } } } }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_retry_until_available"
+      || call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_chatgpt_retry_until_available")
+      .map((call) => call.args.input?.enabled ?? call.args.input?.payload?.enabled));
+    expect(values).toEqual([true, false]);
+  });
+}
+
+test("old remote server does not advertise cross-protocol route recovery", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["chatgpt_retry_until_available"] });
+  await page.goto("/");
+  await openGatewayApi(page);
+  await expect(page.getByRole("checkbox", { name: "Wait for route recovery" })).toHaveCount(0);
+});
+
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, importDescription: "# Seller package\n\n- Two Business accounts" });
   await page.goto("/");
@@ -77,19 +108,15 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(page.getByRole("tab").allTextContents()).resolves.toEqual(["Accounts", "Sources", "Proxies", "Automations"]);
   await page.getByRole("tab", { name: "Sources" }).click();
   const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
-  await sourceRow.getByRole("button", { name: "Launch in ChatGPT" }).click();
+  await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
+  await page.getByRole("dialog", { name: "Where do you want to launch this source?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
   await page.getByRole("button", { name: "Edit" }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
-  await expect(sourceDialog.getByRole("tab")).toHaveText(["General", "Models and formats", "Adapters", "Pricing"]);
+  await expect(sourceDialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(sourceDialog.locator(".source-routing-disclosure")).toHaveCount(0);
   await expect(sourceDialog.locator(".source-price-section")).toHaveCount(0);
-  await sourceDialog.getByRole("tab", { name: "Models and formats" }).click();
-  const chatCompletions = sourceDialog.getByRole("checkbox", { name: "Chat Completions is available from this source", exact: true });
-  await chatCompletions.click();
-  await expect(chatCompletions).not.toBeChecked();
-  await sourceDialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true }).uncheck();
-  await expect(sourceDialog.getByRole("checkbox", { name: "Responses is available from this source", exact: true })).not.toBeChecked();
+  await expect(sourceDialog.locator(".source-protocol-availability")).toHaveCount(0);
   await expect(sourceDialog.getByRole("radiogroup", { name: "API source role" })).toHaveCount(0);
   await expect(sourceDialog.locator("[data-member-model-id]")).toHaveCount(0);
   await sourceDialog.getByRole("tab", { name: "Pricing" }).click();
@@ -163,38 +190,27 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await automation.getByLabel("Personal Plus").check();
   await chooseOption(page, automation, "Model", "gpt-5.4-mini");
   await automation.getByRole("button", { name: "Save" }).click();
-  const automationRow = page.getByRole("row").filter({ hasText: "Start quota countdown" });
+  const automationRow = page.getByRole("listitem").filter({ hasText: "Start quota countdown" });
   await expect(automationRow).toContainText("Personal Plus");
   await expect(page.getByRole("columnheader", { name: "Quota" })).toHaveCount(0);
-  await expect(automationRow).not.toContainText("Primary");
+  await expect(automationRow).toContainText("After primary quota recovery");
   await expect(automationRow).not.toContainText("Secondary");
   await expect(automationRow).toContainText("gpt-5.4-mini");
-  await automationRow.getByRole("button", { name: "Test" }).click();
+  await expect(automationRow.getByRole("button", { name: "Test" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool member policy: Example compatible API" }).click();
-  const sourcePolicy = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
-  const sourceRoles = sourcePolicy.getByRole("radiogroup", { name: "API source role" });
-  await expect(sourceRoles.getByRole("radio")).toHaveCount(3);
-  await expect(sourcePolicy.getByLabel("Fallback order")).toContainText("API first");
-  await expect(sourcePolicy.getByLabel("Fallback order")).toContainText("Accounts");
-  await sourceRoles.getByRole("radio", { name: /API first/ }).click();
-  await expect(sourcePolicy.locator('.source-route-stage[data-current="true"]')).toContainText("API first");
-  await expect(sourcePolicy.getByRole("spinbutton", { name: "Traffic share" })).toHaveCount(0);
-  await expect(sourcePolicy.getByRole("list", { name: "API order in this role" }).getByRole("listitem")).toHaveCount(1);
+  const sourcePolicy = page.getByRole("dialog", { name: "Pool member policy", exact: true });
+  await sourcePolicy.getByRole("switch", { name: "Allow gpt-5.4", exact: true }).uncheck();
+  await sourcePolicy.getByRole("tab", { name: "Settings", exact: true }).click();
   await chooseOption(page, sourcePolicy, "Recovery check", "60");
-  await expect(sourcePolicy.locator(".member-model-rules")).toHaveCount(0);
-  await expect(sourcePolicy.locator(".source-model-configuration > summary")).toContainText("Models and price");
-  await sourcePolicy.locator(".source-model-configuration > summary").click();
-  await sourcePolicy.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
-  await sourcePolicy.locator('[data-member-model-id="gpt-5.4"]').getByRole("button", { name: "Disable gpt-5.4" }).click();
   await expect(sourcePolicy.getByLabel("Drain")).toHaveCount(0);
   await sourcePolicy.getByRole("button", { name: "Save policy" }).click();
   await page.getByRole("button", { name: "Pool member policy: Personal Plus" }).click();
+  await page.getByRole("switch", { name: "Allow gpt-5.4", exact: true }).uncheck();
+  await page.getByRole("dialog").getByRole("tab", { name: "Settings", exact: true }).click();
   await page.getByLabel("Drain").check();
   await page.getByLabel("Purchase cost, USD").fill("25.50");
-  await page.locator(".member-model-rules > summary").click();
-  await page.locator('[data-member-model-id="gpt-5.4"]').getByRole("button", { name: "Disable gpt-5.4" }).click();
   await page.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
 
@@ -218,8 +234,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
       .filter((call) => ["update_local_source", "test_quota_wake_automation", "update_local_account"].includes(call.command))
       .map((call) => [call.command, call.args]));
   });
-  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", protocolBindings: [{ wireApi: "chat_completions", modelIds: [] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_001, sourcePriorities: { source_synthetic: 1_000_001 }, weight: 1, recoveryDelaySeconds: 60 } });
-  expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
+  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: ["gpt-5.4", "gpt-5.4-mini"] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 10, weight: 100, recoveryDelaySeconds: 60 } });
+  expect(policyCalls.test_quota_wake_automation).toBeUndefined();
   expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], purchaseCostMicroUsd: 25_500_000 } });
 });
 
@@ -250,6 +266,18 @@ test("reset credits are visible and require explicit account confirmation", asyn
   expect(calls.filter((call) => call.command === "consume_local_reset_credit").at(-1)?.args.accountId).toBe("account_synthetic");
 });
 
+test("pool summary shows the total provider credits across pooled accounts", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, providerCredits: 2.5 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const summary = page.locator(".pool-summary");
+  const credits = summary.locator('[data-summary="provider-credits"]');
+  await expect(summary).toHaveAttribute("data-has-provider-credits", "true");
+  await expect(credits).toContainText("Total credits");
+  await expect(credits.locator("strong")).toHaveText("5");
+});
+
 test("reset action is absent when no reset credit is available", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, resetCreditsAvailable: 0 });
   await page.goto("/");
@@ -257,76 +285,98 @@ test("reset action is absent when no reset credit is available", async ({ page }
   await expect(page.locator(".reset-credits-control")).toHaveCount(0);
 });
 
-test("API sources use an explicit fallback order instead of traffic weights", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceCount: 2 });
+test("source launch picker starts the selected source in OpenCode", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Pool member policy: Example compatible API" }).click();
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
 
-  const dialog = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
-  const order = dialog.getByRole("list", { name: "API order in this role" });
-  await expect(order.getByRole("listitem")).toHaveCount(2);
-  await expect(order.getByRole("listitem").nth(0)).toContainText("Example compatible API");
-  await dialog.getByRole("button", { name: "Move Example compatible API down" }).click();
-  await expect(order.getByRole("listitem").nth(0)).toContainText("Backup API 1");
-  await dialog.getByRole("button", { name: "Save policy" }).click();
+  const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
+  await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "Where do you want to launch this source?" });
+  await picker.getByRole("button", { name: "OpenCode", exact: true }).click();
+  await expect(page.getByText("Client launched.", { exact: true })).toBeVisible();
 
-  const input = await page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__;
-    return calls.findLast((call) => call.command === "update_local_source")?.args.input;
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.find((call) => call.command === "launch_opencode_source")?.args).toEqual({ sourceId: "source_synthetic" });
+  expect(calls.map((call) => call.command)).not.toContain("launch_codex_source");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.directSourceId"))).toBe("source_synthetic");
+});
+
+for (const nav of ["Connections", "Pool"] as const) {
+  test(`${nav} keeps reset refresh failures visible after the last credit is consumed`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode: "local", locale: "en", populated: true,
+      resetCreditsRefreshError: "Quota unavailable: token=synthetic-reset-secret",
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: nav, exact: true }).click();
+    await page.locator(".reset-credits-control").click();
+    await page.getByRole("dialog", { name: "Reset weekly quota" }).getByRole("button", { name: "Yes, reset", exact: true }).click();
+    const error = page.locator(".reset-credits-inline-error");
+    await expect(error).toContainText("Reset was applied, but quota refresh failed");
+    await expect(error).toContainText("Quota unavailable");
+    await expect(error).not.toContainText("synthetic-reset-secret");
+    await expect(page.locator(".reset-credits-control")).toHaveCount(0);
   });
-  expect(input).toMatchObject({ priority: 1, sourcePriorities: { source_synthetic: 1, source_synthetic_2: 2 }, weight: 1 });
-  const routingOrder = await page.evaluate(async () => {
-    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<Array<{ candidateId: string; kind: string }>> } }).__TAURI_INTERNALS__;
-    return (await internals.invoke("get_local_runtime_order"))
-      .filter((candidate) => candidate.kind === "api_source")
-      .map((candidate) => candidate.candidateId);
+}
+
+test("reset rejection uses redacted diagnostics and leaves the credit available", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local", locale: "en", populated: true,
+    resetCreditsError: 'Reset rejected: {"token":"synthetic-reset-secret"}',
   });
-  expect(routingOrder).toEqual(["source_synthetic_2", "source_synthetic"]);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.locator(".reset-credits-control").click();
+  await page.getByRole("dialog", { name: "Reset weekly quota" }).getByRole("button", { name: "Yes, reset", exact: true }).click();
+  const error = page.locator(".reset-credits-inline-error");
+  await expect(error).toContainText("Reset failed: Reset rejected");
+  await expect(error).not.toContainText("synthetic-reset-secret");
+  await expect(page.getByRole("button", { name: "Reset available: 1 · Reset weekly quota", exact: true })).toBeEnabled();
+});
+
+test("secret fields expose only the themed reveal control", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
+  await page.getByRole("button", { name: "Add source", exact: true }).click();
+  await page.getByRole("radio", { name: /^OpenAI/ }).click();
+  await expect(page.locator(".secret-field")).toHaveCount(1);
+  await expect(page.locator(".secret-field > button")).toHaveCount(1);
 });
 
 for (const mode of ["local", "remote"] as const) {
-test(`${mode} source policy supports pointer reordering, direct role drops, and immediate closing while saving`, async ({ page }) => {
-  await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 2, sourceUpdateDelayMs: 500 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Pool member policy: Example compatible API" }).click();
-
-  const dialog = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
-  const current = dialog.locator('[data-source-id="source_synthetic"]');
-  const backup = dialog.locator('[data-source-id="source_synthetic_2"]');
-  const currentHandle = current.locator("[data-source-drag-handle]");
-  const beginDrag = async (from: Locator, to: Locator) => {
-    const fromBox = await from.boundingBox();
-    const toBox = await to.boundingBox();
-    if (!fromBox || !toBox) throw new Error("Source drag target is not visible.");
-    await page.mouse.move(fromBox.x + fromBox.width / 2, fromBox.y + fromBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(toBox.x + toBox.width / 2, toBox.y + toBox.height * 0.75, { steps: 8 });
-  };
-  await beginDrag(currentHandle, backup);
-  await expect(backup).toHaveAttribute("data-drop-target", "true");
-  await expect(backup).toHaveAttribute("data-drop-after", "true");
-  await page.mouse.up();
-  await expect(dialog.getByRole("listitem").nth(0)).toContainText("Backup API 1");
-
-  const primary = dialog.locator('[data-source-role="primary"]');
-  await beginDrag(currentHandle, primary);
-  await expect(primary).toHaveAttribute("data-drop-target", "true");
-  await page.mouse.up();
-  await expect(dialog.locator('[data-source-role="primary"]')).toHaveAttribute("aria-checked", "true");
-
-  await dialog.getByRole("button", { name: "Save policy" }).click();
-  await expect(dialog).toBeHidden({ timeout: 100 });
-  await expect.poll(() => page.evaluate((currentMode) => {
-    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: { priority?: number; sourcePriorities?: Record<string, number> } }; priority?: number; sourcePriorities?: Record<string, number> } }> }).__TAURI_TEST_INVOKES__;
-    const payload = currentMode === "local"
-      ? calls.findLast((call) => call.command === "update_local_source")?.args.input
-      : calls.findLast((call) => call.command === "execute_remote_server_action" && call.args.input?.action?.type === "update_source")?.args.input?.payload;
-    return payload?.priority === 1_000_001 && payload.sourcePriorities?.source_synthetic === 1_000_001;
-  }, mode)).toBe(true);
-  await expect(page.locator('[data-member-label="Example compatible API"]')).toContainText("API first");
-});
+  test(`${mode} mixed rotation reorders accounts and API providers and retains weights`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 2 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
+    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    const order = dialog.getByRole("list", { name: "Member order" });
+    await expect(order.getByRole("listitem")).toHaveCount(3);
+    const api = order.locator('[data-member-id="source:source_synthetic"]');
+    const account = order.locator('[data-member-id="account:account_synthetic"]');
+    await api.getByRole("button", { name: "Reorder Example compatible API" }).dragTo(account);
+    await expect(order.getByRole("listitem").first()).toContainText("Example compatible API");
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+    await dialog.getByLabel("Request share: Example compatible API", { exact: true }).fill("3");
+    await dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true }).fill("2");
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(dialog).toBeHidden();
+    await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+    await expect(dialog.getByRole("radio", { name: "Round robin", exact: true })).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveValue("3");
+    await expect(dialog.getByLabel("Concurrent requests: Example compatible API", { exact: true })).toHaveValue("2");
+    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    await expect(order.getByRole("listitem").first()).toContainText("Example compatible API");
+    await expect(dialog.getByLabel("Request share: Example compatible API", { exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  });
 }
 
 test("dialogs keep editable focus and close a nested option list before the dialog", async ({ page }) => {
@@ -395,8 +445,7 @@ test("automation editor only saves executable local configurations", async ({ pa
   await expect(page.locator('[role="option"][data-value="o3"]')).toHaveCount(0);
   await page.locator('[role="option"][data-value="gpt-5.4-mini"]').click();
 
-  await dialog.getByRole("button", { name: "Manual" }).click();
-  await expect(dialog.getByRole("button", { name: "Manual" })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByRole("button", { name: "Manual" })).toHaveCount(0);
   await save.click();
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
@@ -404,7 +453,7 @@ test("automation editor only saves executable local configurations", async ({ pa
     accountSelector: { kind: "account_ids", values: ["account_synthetic", "account_synthetic_3"] },
     windowKinds: ["primary"],
     modelPolicy: { kind: "explicit", value: "gpt-5.4-mini" },
-    executionPolicy: "require_confirmation",
+    executionPolicy: "automatic",
   });
 });
 
@@ -416,20 +465,85 @@ test("weekly automation is automatic and targets the secondary quota window", as
   await page.getByRole("button", { name: "Edit" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Edit automation" });
-  await chooseOption(page, dialog, "Condition", "weekly");
-  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await chooseOption(page, dialog, "Automation type", "weekly");
+  await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("");
+  await expect(dialog.getByText("When weekly quota is exhausted", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Automatic", { exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("group", { name: "Run" })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: /^Model:/ })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
   expect(call?.args.input).toMatchObject({
+    name: "Reset weekly quota",
     trigger: { kind: "weekly" },
     windowKinds: ["secondary"],
     modelPolicy: { kind: "lightest_supported" },
     executionPolicy: "automatic",
   });
+  await expect(page.locator(".automation-card header strong")).toHaveText("Reset weekly quota");
 });
+
+test("automation type controls its fields and default name while custom names are optional", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Automations" }).click();
+  await page.getByRole("button", { name: "Add automation", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Add automation" });
+  const name = dialog.getByLabel("Name", { exact: true });
+  await expect(name).toHaveValue("");
+  await expect(dialog.getByRole("button", { name: "Automation type: Start quota countdown", exact: true })).toBeVisible();
+  await chooseOption(page, dialog, "Automation type", "weekly");
+  await expect(dialog.getByRole("button", { name: /^Model:/ })).toHaveCount(0);
+  await expect(name).toHaveValue("");
+  await chooseOption(page, dialog, "Automation type", "quota_full");
+  await expect(dialog.getByRole("button", { name: /^Model:/ })).toBeVisible();
+  await name.fill("Work accounts");
+  await chooseOption(page, dialog, "Automation type", "weekly");
+  await expect(name).toHaveValue("Work accounts");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator(".automation-card header strong")).toHaveText("Work accounts");
+  await expect(page.locator(".automation-card header .connection-identity small")).toHaveText("Reset weekly quota");
+  await expect(page.getByPlaceholder("Search", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
+  const enabled = page.locator(".automation-card").getByRole("checkbox", { name: "Enabled", exact: true });
+  await enabled.uncheck();
+  await expect(enabled).not.toBeChecked();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Edit automation" });
+  await chooseOption(page, editor, "Automation type", "quota_full");
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Work accounts");
+  await editor.getByLabel("Name", { exact: true }).fill("   ");
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator(".automation-card header strong")).toHaveText("Start quota countdown");
+});
+
+for (const mode of ["local", "remote"] as const) {
+  test(`automation cards and editor stay consistent without a toolbar in ${mode} mode`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode, locale: "ru", populated: true,
+      automation: { name: "Start quota countdown", trigger: { kind: "weekly" }, windowKinds: ["secondary"] },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Подключения", exact: true }).click();
+    await page.getByRole("tab", { name: "Источники API", exact: true }).click();
+    await page.getByPlaceholder("Поиск", { exact: true }).fill("no matching source");
+    await page.getByRole("tab", { name: "Автоматизация", exact: true }).click();
+    await expect(page.locator(".automation-card header strong")).toHaveText("Сбросить недельную квоту");
+    await expect(page.locator(".automation-card")).toContainText("При исчерпании недельной квоты");
+    await expect(page.getByPlaceholder("Поиск", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Обновить", exact: true })).toHaveCount(0);
+    await expect(page.locator(".automation-card")).toHaveCount(1);
+    await page.getByRole("button", { name: "Изменить", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Изменить автоматизацию" });
+    await expect(dialog.getByLabel("Название", { exact: true })).toHaveValue("");
+    await expect(dialog.getByRole("button", { name: "Тип автоматизации: Сбросить недельную квоту", exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "Сохранить", exact: true }).click();
+    const saved = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { name?: string; payload?: { name?: string } } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => ["update_quota_wake_automation", "execute_remote_server_action"].includes(item.command)));
+    expect(saved?.args.input?.payload?.name ?? saved?.args.input?.name).toBe("Сбросить недельную квоту");
+  });
+}
 
 test("remote automation editor exposes only automatic execution", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
@@ -440,7 +554,7 @@ test("remote automation editor exposes only automatic execution", async ({ page 
 
   const dialog = page.getByRole("dialog", { name: "Edit automation" });
   await expect(dialog.getByRole("group", { name: "Run" })).toHaveCount(0);
-  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Automatic", { exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: /^Model: gpt-5\.4/ })).toBeVisible();
   await dialog.getByRole("button", { name: /^Accounts:/ }).click();
   await expect(page.locator('[role="option"][data-value="tags"]')).toHaveCount(0);
@@ -463,10 +577,85 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog).toContainText("Weighted rotation");
     await expect(dialog.getByText("Quota at selection", { exact: true })).toHaveCount(0);
   });
+
+  test(`usage distinguishes the client model from the routed model in ${mode} mode`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode, locale: "en", populated: true,
+      usageRequestedModel: "public-alias", usageResolvedModel: "provider/model",
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
+    const dialog = page.getByRole("dialog", { name: "Request details" });
+    await expect(dialog.getByText("Requested model", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Sent to source", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("public-alias", { exact: true })).toBeVisible();
+    await expect(dialog.locator("dl").getByText("provider/model", { exact: true })).toBeVisible();
+  });
 }
 
-test("API pricing groups expose cache-write TTLs only for Claude", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, mixedModels: true });
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} controls model protection only in API and reports the transport in usage`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, basisPointsAvailable: true, usageEndpointKind: "excel_basis_points" });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Accounts", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".account-transport-badge")).toHaveCount(0);
+    const transport = page.getByRole("checkbox", { name: "Model substitution protection" });
+    await expect(transport).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await expect(page.locator('.pool-member-card .account-transport-badge')).toHaveCount(0);
+    await expect(page.locator(".pool-controls").getByRole("checkbox")).toHaveCount(0);
+    await page.getByRole("slider", { name: "Request speed" }).press("ArrowRight");
+    await expect(page.getByRole("slider", { name: "Request speed" })).toBeEnabled();
+    await page.getByRole("button", { name: "API", exact: true }).click();
+    await expect(transport).toBeVisible();
+    await transport.check();
+    await expect(transport).toBeChecked();
+    await expect(transport).toBeEnabled();
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await expect(page.getByRole("slider", { name: "Request speed" })).toHaveAttribute("aria-valuetext", "Fast");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Accounts", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(transport).toHaveCount(0);
+    await page.getByRole("tab", { name: "Sources", exact: true }).click();
+    await expect(transport).toHaveCount(0);
+    await page.getByRole("button", { name: "API", exact: true }).click();
+    await expect(transport).toBeChecked();
+    await transport.uncheck();
+    await expect(transport).toBeEnabled();
+    await expect(transport).not.toBeChecked();
+    const updates = await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { basisPointsEnabled?: boolean; payload?: Record<string, unknown> } } }>;
+    }).__TAURI_TEST_INVOKES__.flatMap(({ command, args }) => {
+      const input = command === "update_local_routing" ? args.input
+        : command === "execute_remote_server_action" ? args.input?.payload : undefined;
+      return typeof input?.basisPointsEnabled === "boolean" ? [input] : [];
+    }));
+    expect(updates).toEqual([
+      { basisPointsEnabled: true, maxRetryCandidates: 3, defaultServiceTier: "fast" },
+      { basisPointsEnabled: false, maxRetryCandidates: 3, defaultServiceTier: "fast" },
+    ]);
+
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
+    const details = page.getByRole("dialog", { name: "Request details" });
+    await expect(details.getByText("Excel / Basis Points", { exact: true })).toBeVisible();
+  });
+}
+
+test("API pricing shows cache-write TTL fields for Messages routes without inventing other prices", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    mixedModels: true,
+    sourceProtocolBindings: [
+      { wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: ["gpt-5.4", "gemini-3.1-pro-preview", "grok-4.5", "glm-5.2", "private-model"] },
+      { wireApi: "messages", adapter: "native", reasoningMode: "disabled", modelIds: ["claude-opus-4-8"] },
+    ],
+  });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
@@ -479,7 +668,7 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
     "GoogleModels: 1",
     "xAIModels: 1",
     "Z.aiModels: 1",
-    "PrivateModels: 1",
+    "OtherModels: 1",
   ]);
 
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
@@ -496,6 +685,43 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
     const call = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelPriceOverrides?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_local_source");
     return call?.args.input?.modelPriceOverrides?.["claude-opus-4-8"];
   })).toEqual({ inputMicroUsdPerMillion: 1_400_000, outputMicroUsdPerMillion: 7_000_000, cachedInputMicroUsdPerMillion: 1_600_000, cacheWrite5mMicroUsdPerMillion: 2_100_000, cacheWrite1hMicroUsdPerMillion: 4_200_000 });
+});
+
+test("explicit cache-write prices remain visible without a Messages route", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    serverModelOrder: ["gpt-5.4", "claude-opus-4-8", "claude-no-cache"],
+    modelMetadata: {
+      "claude-no-cache": { catalogProvider: "anthropic", catalogFamily: "claude", catalogName: "Claude no cache" },
+    },
+    sourceProtocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: ["gpt-5.4", "claude-opus-4-8", "claude-no-cache"] }],
+    sourceDetectedModelPrices: {
+      "claude-opus-4-8": {
+        inputMicroUsdPerMillion: 1_400_000,
+        outputMicroUsdPerMillion: 7_000_000,
+        cacheWrite5mMicroUsdPerMillion: 2_100_000,
+        cacheWrite1hMicroUsdPerMillion: 4_200_000,
+      },
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit source" });
+  await dialog.getByRole("tab", { name: "Pricing" }).click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "Anthropic" }).click();
+  const group = dialog.locator(".source-price-group").filter({ hasText: "Anthropic" });
+  await expect(group.getByRole("textbox", { name: "5-minute cache write price for claude-opus-4-8" })).toHaveAttribute("placeholder", "2.1");
+  await expect(group.getByRole("textbox", { name: "1-hour cache write price for claude-opus-4-8" })).toHaveAttribute("placeholder", "4.2");
+  await expect(group.getByRole("textbox", { name: "Cached input token price for claude-opus-4-8" })).toHaveAttribute("placeholder", "—");
+  await expect(group.getByRole("textbox", { name: /cache write price for claude-no-cache/i })).toHaveCount(0);
+  await expect(group.locator(".source-price-row").filter({ hasText: "claude-no-cache" }).locator(".source-price-empty")).toHaveCount(2);
+  await dialog.screenshot({ path: "output/playwright/source-cache-write-prices-light.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await dialog.locator(".relay-dialog-body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
 });
 
 test("API-reported source prices are hints, not manual overrides", async ({ page }) => {
@@ -535,26 +761,21 @@ test("API-reported source prices are hints, not manual overrides", async ({ page
   expect(sourceUpdate).toEqual({});
 });
 
-test("pool API source edits model availability and cost in one list", async ({ page }) => {
+test("pool API source preserves model and price drafts across tabs", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool member policy: Example compatible API" }).click();
 
-  const dialog = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
-  const configuration = dialog.locator(".source-model-configuration");
-  await expect(configuration).toHaveCount(1);
-  await expect(configuration.locator("> summary")).toContainText("Models and price");
-  await expect(configuration.locator("> summary")).toContainText("Enabled: 2/2");
-  await expect(dialog.locator(".member-model-rules")).toHaveCount(0);
-
-  await configuration.locator("> summary").click();
-  await configuration.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
-  const model = configuration.locator('[data-member-model-id="gpt-5.4"]');
-  await model.getByRole("button", { name: "Disable gpt-5.4" }).click();
-  await model.getByRole("textbox", { name: "Input token price for gpt-5.4", exact: true }).fill("1.75");
-  await model.getByRole("textbox", { name: "Output token price for gpt-5.4", exact: true }).fill("4.5");
-  await expect(configuration.locator("> summary")).toContainText("Enabled: 1/2");
+  const dialog = page.getByRole("dialog", { name: "Pool member policy", exact: true });
+  await expect(dialog.locator(".member-model-heading")).toContainText("2 / 2");
+  await dialog.getByRole("switch", { name: "Allow gpt-5.4", exact: true }).uncheck();
+  await dialog.getByRole("tab", { name: "Pricing", exact: true }).click();
+  await dialog.getByRole("textbox", { name: "Input token price for gpt-5.4", exact: true }).fill("1.75");
+  await dialog.getByRole("textbox", { name: "Output token price for gpt-5.4", exact: true }).fill("4.5");
+  await dialog.getByRole("tab", { name: "Models", exact: true }).click();
+  await expect(dialog.locator(".member-model-heading")).toContainText("1 / 2");
+  await expect(dialog.getByRole("switch", { name: "Allow gpt-5.4", exact: true })).not.toBeChecked();
   await dialog.getByRole("button", { name: "Save policy" }).click();
 
   const update = await page.evaluate(() => {
@@ -701,7 +922,9 @@ test("local proxy storage warns, detaches accounts, and deletes selected endpoin
   await manager.getByText("Personal Plus", { exact: true }).click();
   await manager.getByRole("button", { name: "Save" }).click();
   await expect(page.locator(".proxy-storage-account-count").first()).toHaveText("Business Workspace+1");
-  await expect(page.locator(".proxy-storage-account-count").first()).toHaveAttribute("title", "Business Workspace, Personal Plus");
+  await page.locator(".proxy-storage-account-count").first().hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Business Workspace, Personal Plus");
+  await expect(page.locator(".proxy-storage-account-count").first()).not.toHaveAttribute("title");
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
   const importDialog = page.getByRole("dialog", { name: "Import proxies" });
@@ -779,13 +1002,14 @@ test("pasted Cockpit arrays reach the Rust batch preview unchanged", async ({ pa
 });
 
 test("dropping account files shows progress before the shared import preview", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importPreviewDelayMs: 500 });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importPreviewDeferred: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__;
     return calls.filter((call) => call.command === "plugin:event|listen").length;
   })).toBeGreaterThanOrEqual(4);
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
   const paths = ["C:\\Temp\\cockpit-one.json", "C:\\Temp\\sub2api-two.json"];
   await page.evaluate((droppedPaths) => {
     const emit = (window as unknown as { __TAURI_TEST_EMIT__: (event: string, payload: unknown) => void }).__TAURI_TEST_EMIT__;
@@ -800,6 +1024,7 @@ test("dropping account files shows progress before the shared import preview", a
   const dialog = page.getByRole("dialog", { name: "Import accounts" });
   await expect(dialog.getByText("Preparing import", { exact: true })).toBeVisible();
   await expect(dialog.locator(".import-file-loading .spin")).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("relay-test-finish-import-preview")));
   await expect(dialog.getByLabel("Select Imported account for import")).toBeChecked();
   await expect(dialog.getByLabel("Select Second imported account for import")).toBeChecked();
   await expect(dialog.locator('.account-plan-badge[data-plan="k12"]')).toHaveCount(3);
@@ -903,10 +1128,9 @@ test("missing import session keeps the dialog open with recovery guidance", asyn
   expect(layers.feedback).toBeGreaterThan(layers.modal);
 });
 
-test("empty Choose API mode opens the shared source picker", async ({ page }) => {
+test("empty Choose API mode opens the compact source picker", async ({ page }) => {
   await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
   await page.goto("/");
-  const zenithTestKey = "test-source-key";
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Sources", exact: true })).toBeVisible();
   await expect(page.getByText("No API sources", { exact: true })).toBeVisible();
@@ -919,16 +1143,12 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   expect(await dialog.getByRole("radio").evaluateAll((items) => items.map((item) => item.getAttribute("aria-checked")))).toEqual(["false", "false", "false", "false"]);
   await expect(dialog.getByText("Recommended", { exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Get API key", exact: true })).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toHaveCount(1);
 
-  await dialog.getByRole("radio", { name: /OpenAI/ }).click();
-  await expect(dialog.locator(".source-route-simple-options")).toHaveCount(1);
-  await expect(dialog.locator(".source-route-simple-options button.selected")).toContainText("Responses");
-  await expect(dialog.getByLabel("API address", { exact: true })).toHaveValue("https://api.openai.com/v1");
-
-  await dialog.getByRole("button", { name: "Back", exact: true }).click();
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-  await expect(dialog.locator(".source-route-simple-options button.selected")).toContainText("Responses");
+  await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
+  await expect(dialog.locator(".source-model-mode")).toHaveCount(0);
+  await expect(dialog.getByLabel("API address", { exact: true })).toHaveValue("https://openrouter.ai/api/v1");
   await dialog.getByRole("button", { name: "Get API key", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
@@ -943,38 +1163,26 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
     return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineWidth };
   })).toEqual({ inputOutline: "none", fieldOutline: "2px" });
 
-  await dialog.getByRole("button", { name: "Back", exact: true }).click();
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
-  await dialog.getByLabel("Upstream API key").fill(zenithTestKey);
+  await dialog.getByLabel("Upstream API key").fill("test-source-key");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("dialog", { name: "Edit source" }).getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByText("Zenith API", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Mode: Choose API", exact: true })).toBeVisible();
-  await page.getByLabel("Launch in ChatGPT").click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.directSourceId"))).toBe("source_created_1");
-  await page.getByRole("button", { name: "Overview", exact: true }).click();
-  await expect(page.getByRole("button", { name: /Selected API: Zenith API/ })).toBeVisible();
-  await expect(page.locator(".direct-api-metrics")).toContainText("$42.50");
-  await expect(page.locator(".direct-api-metrics")).toContainText("987,654");
-  await expect(page.locator(".direct-api-models code")).toHaveText(["gpt-5.4", "gpt-5.4-mini", "o3"]);
+  await expect(page.getByLabel("Launch", { exact: true })).toBeEnabled();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({
     name: "Zenith API",
     baseUrl: "https://api.zenithmarket.dev/v1",
     wireApi: "responses",
-    protocolBindings: [{
-      wireApi: "responses",
-      adapter: "native",
-      reasoningMode: "disabled",
-      modelIds: [],
-    }],
-    apiKey: zenithTestKey,
+    protocolBindings: [],
+    apiKey: "test-source-key",
   });
-  expect(calls.find((call) => call.command === "get_local_source_stats")?.args).toEqual({ sourceId: "source_created_1" });
   expect(calls.map((call) => call.command)).not.toContain("save_key");
   expect(calls.map((call) => call.command)).not.toContain("set_local_pool_membership");
 });
 
-test("provider presets leave source protocol verification to the connector", async ({ page }) => {
+test("provider presets leave automatic protocol discovery to the connector", async ({ page }) => {
   await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -982,11 +1190,12 @@ test("provider presets leave source protocol verification to the connector", asy
   const dialog = page.getByRole("dialog", { name: "Add source" });
 
   await dialog.getByRole("radio", { name: /OpenAI/ }).click();
-  await expect(dialog.locator(".source-route-simple-options")).toHaveCount(1);
+  await expect(dialog.locator(".source-route-simple-options")).toHaveCount(0);
 
   await dialog.getByLabel("Upstream API key").fill("sk-synthetic-ready-key");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("OpenAI", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Edit source" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Edit source" }).getByText("OpenAI", { exact: true })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
   }).__TAURI_TEST_INVOKES__);
@@ -994,19 +1203,12 @@ test("provider presets leave source protocol verification to the connector", asy
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
     wireApi: "responses",
-    protocolBindings: [
-      {
-        wireApi: "responses",
-        adapter: "native",
-        reasoningMode: "disabled",
-        modelIds: [],
-      },
-    ],
+    protocolBindings: [],
     apiKey: "sk-synthetic-ready-key",
   });
 });
 
-test("source model catalog switches between discovery and manual entry", async ({ page }) => {
+test("source setup leaves model catalog discovery to the connector", async ({ page }) => {
   await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -1014,23 +1216,9 @@ test("source model catalog switches between discovery and manual entry", async (
   const dialog = page.getByRole("dialog", { name: "Add source" });
 
   await dialog.getByRole("radio", { name: /Custom API/ }).click();
-  const modelSource = dialog.getByRole("radiogroup", { name: "Model source" });
-  await expect(modelSource.getByRole("radio", { name: "Automatic" })).toBeChecked();
+  await expect(dialog.locator(".source-model-mode")).toHaveCount(0);
   await expect(dialog.getByLabel("Model identifier")).toHaveCount(0);
-
-  await modelSource.locator("label").filter({ hasText: "Manual" }).click();
-  const modelInput = dialog.getByLabel("Model identifier");
-  await expect(modelInput).toBeVisible();
-  await modelInput.fill("gemini-2.5-pro");
-  await modelInput.press("Enter");
-  await expect(dialog.locator(".source-model-chip code")).toHaveText(["gemini-2.5-pro"]);
-  await expect(dialog.getByLabel("Auto-assign")).toBeChecked();
-
-  await modelSource.locator("label").filter({ hasText: "Automatic" }).click();
-  await expect(dialog.getByLabel("Model identifier")).toHaveCount(0);
-  await expect(dialog.locator(".source-model-chip")).toHaveCount(0);
-  await modelSource.locator("label").filter({ hasText: "Manual" }).click();
-  await expect(dialog.locator(".source-model-chip code")).toHaveText(["gemini-2.5-pro"]);
+  await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
 });
 
 test("source creation errors stay in one topmost dialog", async ({ page }) => {
@@ -1059,154 +1247,22 @@ test("source creation errors stay in one topmost dialog", async ({ page }) => {
   await expect(sourceDialog.getByLabel("Upstream API key")).toHaveValue("sk-synthetic-invalid");
 });
 
-test("source editor keeps bridge model ownership explicit", async ({ page }) => {
+test("source editor preserves legacy routes while routing stays automatic", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
-
-  await dialog.getByRole("tab", { name: "Models and formats" }).click();
-  await expect(dialog.locator(".source-route-matrix")).toBeVisible();
-  const formatsTab = dialog.getByRole("tab", { name: "Models and formats" });
-  const adaptersTab = dialog.getByRole("tab", { name: "Adapters" });
-  const messagesAvailable = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
-  await messagesAvailable.click();
-  await expect(messagesAvailable).not.toBeChecked();
-  const messages = dialog.getByRole("checkbox", { name: "Messages is available from this source", exact: true });
-  await expect(messages).not.toBeChecked();
-  const nativeBase = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4", exact: true });
-  const geminiBase = dialog.getByRole("checkbox", { name: "Gemini via Relay for gpt-5.4", exact: true });
-  await adaptersTab.click();
-  await expect(geminiBase).toBeDisabled();
-  await formatsTab.click();
-  await nativeBase.uncheck();
-  await adaptersTab.click();
-  await expect(geminiBase).toBeEnabled();
-  await geminiBase.check();
-  await expect(geminiBase).toBeChecked();
-  await formatsTab.click();
-  await expect(nativeBase).toBeDisabled();
-
-  const nativeMini = dialog.getByRole("checkbox", { name: "Responses for gpt-5.4-mini", exact: true });
-  const messageMini = dialog.getByRole("checkbox", { name: "Messages for gpt-5.4-mini", exact: true });
-  const bridgeCheckbox = dialog.getByRole("checkbox", { name: "Messages via Relay for gpt-5.4-mini", exact: true });
-  await adaptersTab.click();
-  await expect(bridgeCheckbox).not.toBeChecked();
-  await formatsTab.click();
-  await expect(dialog.locator(".source-route-model-row").filter({ hasText: "gpt-5.4-mini" })).toHaveCount(1);
-  await expect(dialog.getByRole("group", { name: "Messages reasoning" })).toHaveCount(0);
-  await nativeMini.uncheck();
-  await messageMini.check();
-  await adaptersTab.click();
-  await expect(bridgeCheckbox).toHaveCount(1);
-  await expect(bridgeCheckbox).not.toBeChecked();
-  await expect(dialog.locator(".source-route-auto-cell")).toHaveCount(0);
-  await bridgeCheckbox.check();
-  await expect(bridgeCheckbox).toBeChecked();
-  await formatsTab.click();
-  await expect(messageMini).toBeChecked();
-  await messageMini.uncheck();
-  await expect(messageMini).not.toBeChecked();
-  await adaptersTab.click();
-  await expect(bridgeCheckbox).toBeChecked();
-  await formatsTab.click();
-  await expect(messages).not.toBeChecked();
-  await adaptersTab.click();
-  const promptCache = dialog.getByRole("button", { name: "Prompt cache: 1 hour" });
-  await expect(promptCache).toBeVisible();
-  await promptCache.click();
-  await page.getByRole("option", { name: "5 min" }).click();
-  await dialog.getByRole("button", { name: "Prompt cache: 5 min" }).click();
-  await page.getByRole("option", { name: "1 hour" }).click();
-  // Reasoning effort is a pool/model rule, not a source transport setting.
-  // Messages bridges are persisted with their technical adaptive translator.
-  await expect(dialog.getByRole("group", { name: "Messages reasoning" })).toHaveCount(0);
-  await expect(dialog.locator(".source-route-bridge-heading")).toHaveCount(2);
-  await page.screenshot({ path: "output/playwright/source-bridge-adapters-1160x760.png" });
-  await formatsTab.click();
-  expect(await dialog.locator(".source-route-matrix").evaluate((matrix) => {
-    const header = [...matrix.querySelectorAll<HTMLElement>(".source-route-format-heading, .source-route-bridge-heading")];
-    const cells = [...matrix.querySelectorAll<HTMLElement>(".source-route-model-row:first-child .source-route-cell")];
-    return header.length === cells.length && header.every((element, index) => {
-      const headerRect = element.getBoundingClientRect();
-      const cellRect = cells[index].getBoundingClientRect();
-      return Math.abs(headerRect.left - cellRect.left) < 1 && Math.abs(headerRect.right - cellRect.right) < 1;
-    });
-  })).toBe(true);
-  expect(await dialog.locator(".source-route-matrix").evaluate((matrix) => {
-    const headers = [...matrix.querySelectorAll<HTMLElement>(".source-route-format-heading")];
-    const cells = [...matrix.querySelectorAll<HTMLElement>(".source-route-model-row:first-child .source-route-cell")];
-    return headers.every((header, index) => {
-      const headerInput = header.querySelector<HTMLInputElement>("input");
-      const cellInput = cells[index]?.querySelector<HTMLInputElement>("input");
-      if (!headerInput || !cellInput) return false;
-      const headerRect = headerInput.getBoundingClientRect();
-      const cellRect = cellInput.getBoundingClientRect();
-      return Math.abs(headerRect.left + headerRect.width / 2 - (cellRect.left + cellRect.width / 2)) < 1;
-    });
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-bridge-routes-1160x760.png" });
-
-  await page.setViewportSize({ width: 840, height: 560 });
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
-  })).toBe(true);
-  expect(await dialog.locator(".source-route-matrix").evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-bridge-routes-840x560.png" });
-
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
-  })).toBe(true);
-  expect(await dialog.locator(".source-route-matrix").evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-bridge-routes-390x844.png" });
-
+  await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => {
-    const calls = (window as unknown as {
-      __TAURI_TEST_INVOKES__: Array<{
-        command: string;
-        args: {
-          input?: {
-            protocolBindings?: Array<{
-              wireApi: string;
-              adapter: string;
-              reasoningMode: string;
-              cacheWriteTtl?: string;
-              modelIds: string[];
-            }>;
-          };
-        };
-      }>;
-    }).__TAURI_TEST_INVOKES__;
-    return calls.findLast((call) => call.command === "update_local_source")
-      ?.args.input?.protocolBindings;
-  })).toEqual([
-    {
-      wireApi: "responses",
-      adapter: "responses_to_gemini",
-      reasoningMode: "disabled",
-      cacheWriteTtl: "provider",
-      modelIds: ["gpt-5.4"],
-    },
-    {
-      wireApi: "responses",
-      adapter: "responses_to_messages",
-      reasoningMode: "adaptive",
-      cacheWriteTtl: "1h",
-      modelIds: ["gpt-5.4-mini"],
-    },
-  ]);
+  const bindings = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { protocolBindings?: unknown[] } } }>;
+  }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "update_local_source")?.args.input?.protocolBindings);
+  expect(bindings).toEqual(expect.arrayContaining([
+    expect.objectContaining({ wireApi: "responses", adapter: "native" }),
+  ]));
 });
 
 test("bridge-only sources stay pool-compatible but cannot launch ChatGPT directly", async ({ page }) => {
@@ -1227,12 +1283,11 @@ test("bridge-only sources stay pool-compatible but cannot launch ChatGPT directl
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
 
   const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
-  const launch = sourceRow.getByRole("button", { name: "Launch in ChatGPT", exact: true });
-  await expect(launch).toBeDisabled();
-  await launch.hover();
-  await expect(page.getByRole("tooltip")).toContainText("native Responses API binding");
-  await page.mouse.move(0, 0);
-  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  const launch = sourceRow.getByRole("button", { name: "Launch", exact: true });
+  await launch.click();
+  const dialog = page.getByRole("dialog", { name: "Where do you want to launch this source?" });
+  await expect(dialog.getByRole("button", { name: "ChatGPT", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "OpenCode", exact: true })).toBeEnabled();
 });
 
 test("Choose API mode manages and launches saved sources without balance controls", async ({ page }) => {
@@ -1242,7 +1297,8 @@ test("Choose API mode manages and launches saved sources without balance control
   await expect(page.getByText("Example compatible API", { exact: true })).toBeVisible();
   await expect(page.getByText("Balance", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
-  await page.getByLabel("Launch in ChatGPT").click();
+  await page.getByLabel("Launch", { exact: true }).click();
+  await page.getByRole("dialog", { name: "Where do you want to launch this source?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.find((call) => call.command === "launch_codex_source")?.args).toEqual({ sourceId: "source_synthetic" });
@@ -1260,6 +1316,22 @@ test("Choose API overview shows provider statistics and models", async ({ page }
   await expect(page.getByText("Usage over time", { exact: true })).toHaveCount(0);
 });
 
+test("Choose API overview shows a retained observation and its failed-refresh reason", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "zenith", locale: "en", populated: true,
+    sourceStatsById: {
+      source_synthetic: { provider: "zenith", balanceMicroUsd: 42_500_000, spentMicroUsd: null,
+        requests: null, totalTokens: null, status: "available", asOfMs: Date.UTC(2026, 8, 23, 12),
+        stale: true, refreshError: "rate_limited" },
+    },
+  });
+  await page.goto("/");
+  await expect(page.locator(".direct-api-metrics")).toContainText("$42.50");
+  await expect(page.getByText("Not refreshed", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Last checked:/)).toHaveCount(0);
+  await expect(page.locator(".source-stats-caption[data-warning='true']")).toHaveAttribute("data-relay-tooltip", "Try again later");
+});
+
 test("remote pool refreshes provider statistics through the server", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
@@ -1272,7 +1344,34 @@ test("remote pool refreshes provider statistics through the server", async ({ pa
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_remote_source_stats")?.args;
-  })).toEqual({ sourceId: "source_synthetic" });
+  })).toEqual({ sourceId: "source_synthetic", force: true });
+});
+
+test("replacing a source key with the same URL retires visible statistics", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const source = page.locator('.pool-member-card[data-member-kind="source"]').first();
+  await expect(source.locator(".pool-source-stats")).toContainText("$42.50");
+  await page.evaluate(() => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const original = internals.invoke.bind(internals);
+    internals.invoke = async (command, args, options) => {
+      if (command === "get_local_runtime_state") {
+        const snapshot = await original(command, args, options) as { sources: Array<{ refreshRevision: number }> };
+        snapshot.sources[0]!.refreshRevision = 2;
+        return snapshot;
+      }
+      if (command === "get_local_source_stats") {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return { provider: "zenith", balanceMicroUsd: 17_000_000, spentMicroUsd: null, requests: null, totalTokens: null };
+      }
+      return original(command, args, options);
+    };
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await expect(source.locator(".pool-source-stats")).toContainText("$17.00");
+  await expect(source.locator(".pool-source-stats")).not.toContainText("$42.50");
 });
 
 test("recovery and export controls call the Rust-owned operations", async ({ page }) => {
@@ -1297,6 +1396,31 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
   expect(commands).toEqual(expect.arrayContaining(["export_usage", "open_relay_folder"]));
   expect(commands).not.toContain("reset_local_pool_data");
+});
+
+test("diagnostic debug mode is opt-in and persisted by the native settings command", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const debug = page.getByLabel("Debug mode");
+  const poolData = page.locator(".settings-group").filter({ hasText: "Pool data" });
+  const diagnostics = page.locator(".settings-group").filter({ hasText: "Diagnostics" });
+  await expect(poolData.locator(".settings-debug-section")).toHaveCount(1);
+  await expect(diagnostics).toHaveCount(0);
+  await expect(poolData.locator(".settings-control-row").last()).toHaveClass(/settings-danger-row/);
+  await expect(debug).not.toBeChecked();
+  await debug.check();
+  await expect(debug).toBeChecked();
+  await expect(poolData.getByRole("button", { name: "Open operations" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open operations", exact: true })).toHaveCount(1);
+  await expect(diagnostics.getByRole("button", { name: "Open operations" })).toBeVisible();
+  await expect(diagnostics).toHaveCount(1);
+  await expect(page.locator(".settings-group").last()).toContainText("Diagnostics");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_diagnostic_debug_mode")?.args)).toEqual({ enabled: true });
+  await debug.uncheck();
+  await expect(debug).not.toBeChecked();
+  await expect(diagnostics).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_diagnostic_debug_mode").length)).toBe(2);
 });
 
 test("profile switch reminder can cancel a switch and be disabled", async ({ page }) => {
@@ -1406,9 +1530,51 @@ test("usage pagination follows the errors table", async ({ page }) => {
   await page.getByRole("tab", { name: "Errors", exact: true }).click();
 
   const pagination = page.getByRole("navigation", { name: "Usage pages" });
-  await expect(pagination).toContainText("Page 1 of 3");
+  await expect(pagination.getByRole("textbox", { name: "Page" })).toHaveValue("1");
+  await expect(pagination).toContainText("of 3");
   await expect(page.locator(".relay-table-wrap + .usage-pagination")).toBeVisible();
 });
+
+for (const mode of ["local", "remote"] as const) {
+  test(`usage can jump directly to a page in ${mode} mode`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, usageFailure: true, usageTotalPages: 384 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+
+    const pagination = page.getByRole("navigation", { name: "Usage pages" });
+    const input = pagination.getByRole("textbox", { name: "Page" });
+    const command = mode === "local" ? "get_local_usage_page" : "get_remote_server_usage";
+    const requestedPages = () => page.evaluate((commandName) => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { page?: number } } }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === commandName).map((call) => call.args.input?.page), command);
+
+    await expect(input).toHaveValue("1");
+    const beforeTyping = await requestedPages();
+    await input.fill("25");
+    expect(await requestedPages()).toEqual(beforeTyping);
+    await input.press("Enter");
+    await expect(input).toHaveValue("25");
+    await expect.poll(async () => (await requestedPages()).at(-1)).toBe(25);
+
+    await input.fill("385");
+    await input.press("Enter");
+    await expect(pagination.getByRole("alert")).toContainText("1 to 384");
+    expect((await requestedPages()).at(-1)).toBe(25);
+    await input.fill("384");
+    await pagination.getByRole("button", { name: "Go" }).click();
+    await expect(input).toHaveValue("384");
+    await expect.poll(async () => (await requestedPages()).at(-1)).toBe(384);
+    await expect(pagination.getByRole("button", { name: "Continue" })).toBeDisabled();
+
+    await pagination.getByRole("button", { name: "Back" }).click();
+    await expect(input).toHaveValue("383");
+    await expect.poll(async () => (await requestedPages()).at(-1)).toBe(383);
+
+    await page.getByRole("tab", { name: "Errors", exact: true }).click();
+    await expect(page.getByRole("navigation", { name: "Usage pages" }).getByRole("textbox", { name: "Page" })).toHaveValue("1");
+    await expect.poll(async () => (await requestedPages()).at(-1)).toBe(1);
+  });
+}
 
 test("dense status rows use accessible icons without repeated labels", async ({ page }) => {
   await installTauriMock(page, {
@@ -1428,7 +1594,7 @@ test("dense status rows use accessible icons without repeated labels", async ({ 
   // Availability is expressed by the power toggle, not a separate status column.
   const firstModelRow = page.locator(".model-rules tbody tr[data-model-id]").first();
   await expect(firstModelRow.locator(".relay-status-icon")).toHaveCount(0);
-  await expect(firstModelRow.locator(".model-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(firstModelRow.locator(".model-toggle")).toBeChecked();
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   const requestStatus = page.locator(".usage-request-table tbody tr td").nth(1);
@@ -1492,7 +1658,9 @@ test("Zenith package descriptions render Markdown without active content", async
   await dialog.getByRole("button", { name: "Preview", exact: true }).click();
 
   await expect(dialog.getByRole("heading", { name: "Safe package" })).toBeVisible();
-  await expect(dialog.getByText("Seller page", { exact: true })).toHaveAttribute("title", "https://example.invalid");
+  await dialog.getByText("Seller page", { exact: true }).hover();
+  await expect(page.getByRole("tooltip")).toHaveText("https://example.invalid");
+  await expect(dialog.getByText("Seller page", { exact: true })).not.toHaveAttribute("title");
   await expect(dialog.locator(".markdown-description a, .markdown-description img")).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __markdownExecuted?: boolean }).__markdownExecuted))).toBe(false);
 });
@@ -1523,15 +1691,14 @@ test("frequent account actions use full-width zones and secondary actions stay i
   const actions = page.locator(".account-card").first().locator(".account-card-actions");
   expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual([
     "Remove from pool",
-    "Refresh quota",
-    "Proxy: Common",
+    "Refresh",
     "Launch in ChatGPT",
   ]);
   await page.locator(".account-card .account-row-menu summary").click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitem", { name: /^Proxy:/ })).toHaveCount(0);
+  await expect(menu.getByRole("menuitem", { name: "Proxy: Common", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Export" })).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveCount(3);
+  await expect(menu.getByRole("menuitem")).toHaveCount(4);
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
 });
@@ -1598,13 +1765,13 @@ test("connections and pool share the current account status", async ({ page }) =
   await expect(member.locator('.relay-status-icon[aria-label="In rotation"]')).toBeVisible();
 });
 
-test("connections follow the live router order", async ({ page }) => {
+test("connections and pool group availability and preserve live order within each group", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 6, sourceCount: 3, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const labels = page.locator(".account-card .account-identity > strong");
 
-  await expect(labels).toHaveText(["Pro account", "Business Workspace", "Personal Plus", "Backup account", "Quota pending", "Free reserve"]);
+  await expect(labels).toHaveText(["Pro account", "Business Workspace", "Backup account", "Quota pending", "Free reserve", "Personal Plus"]);
   const connectionOrder = await labels.allTextContents();
   await expect(page.getByRole("button", { name: /Sort accounts/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "List view" })).toHaveCount(0);
@@ -1705,7 +1872,9 @@ test("connections and pool show model cooldown without disabling the account", a
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const member = page.locator('[data-member-label="Personal Plus"]');
-  await expect(member.locator(".pool-member-runtime-hint")).toContainText("gpt-5.4: retry after");
+  const poolRuntime = member.locator(".account-runtime-line");
+  await expect(poolRuntime).toContainText("gpt-5.4: retry after");
+  await expect(poolRuntime).toHaveAttribute("data-warning", "true");
   await expect(member.locator(".pool-member-kind-icon")).not.toHaveAttribute("data-status", "error");
 });
 
@@ -1716,7 +1885,7 @@ test("pool source errors use one status indicator without duplicate card text", 
 
   const source = page.locator('.pool-member-card[data-member-kind="source"]');
   await expect(source.locator('.pool-member-kind-icon[data-status="error"]')).toBeVisible();
-  await expect(source.locator(".pool-member-runtime-hint")).toHaveCount(0);
+  await expect(source.locator(".account-runtime-line")).toHaveCount(0);
   await expect(source).not.toHaveAttribute("title", /upstream model discovery failed/);
   await expect(source.locator('.pool-member-kind-icon[data-status="error"]')).toHaveAttribute("aria-label", "Error: upstream model discovery failed");
   await source.locator(".pool-member-kind-icon").hover();
@@ -1740,12 +1909,13 @@ test("quota refresh is visible without a destructive bulk cleanup action", async
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
-  await expect(page.getByRole("button", { name: "Refresh all quotas" })).toBeVisible();
-  await page.getByRole("button", { name: "Refresh all quotas" }).click();
+  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Refresh", exact: true });
+  await expect(refreshAll).toBeVisible();
+  await refreshAll.click();
   await expect(page.getByText("Updated: 1 · Errors: 0", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh and delete non-working accounts" })).toHaveCount(0);
   await page.locator(".account-bulk-menu summary").click();
-  await expect(page.getByRole("menuitem", { name: "Refresh all quotas" })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Refresh", exact: true })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Refresh and delete non-working accounts" })).toHaveCount(0);
 });
 
@@ -1757,7 +1927,7 @@ test("accounts without quota show the automatic refresh state", async ({ page })
   await expect(pending.locator(".account-quota-refresh-state")).toContainText("Waiting for check");
 });
 
-test("account cards show the subscription end date or an explicit unavailable state", async ({ page }) => {
+test("account cards show subscription dates only when available", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -1771,7 +1941,14 @@ test("account cards show the subscription end date or an explicit unavailable st
   await expect(personal.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
   await expect(business.locator(".account-subscription-line")).toContainText(/\d{2}\/\d{2}\/\d{4}/);
   await expect(business.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
-  await expect(cards.filter({ hasText: "Backup account" }).locator(".account-subscription-line")).toHaveText("Subscription end date unavailable");
+  await expect(cards.filter({ hasText: "Backup account" }).locator(".account-subscription-line")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const poolPersonal = page.locator('.pool-member-card[data-member-label="Personal Plus"]');
+  const poolBackup = page.locator('.pool-member-card[data-member-label="Backup account"]');
+  await expect(poolPersonal.locator(".account-subscription-line")).toContainText(/\d{2}\/\d{2}\/\d{4}/);
+  await expect(poolPersonal.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
+  await expect(poolBackup.locator(".account-subscription-line")).toHaveCount(0);
 });
 
 test("subscription countdown uses live short units in the final minute", async ({ page }) => {
@@ -1926,10 +2103,10 @@ test("icon actions explain themselves and scrollbars follow the active theme", a
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
 
-  const refreshAll = page.getByRole("button", { name: "Обновить все квоты" });
+  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Обновить", exact: true });
   await refreshAll.hover();
   const tooltip = page.getByRole("tooltip");
-  await expect(tooltip).toHaveText("Обновить все квоты");
+  await expect(tooltip).toHaveText("Обновить");
   const box = await tooltip.boundingBox();
   expect(box).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(8);
@@ -1963,8 +2140,8 @@ test("icon actions explain themselves and scrollbars follow the active theme", a
   const light = await readScrollbarTheme();
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
   const dark = await readScrollbarTheme();
-  expect(light.thumb).toBe("#aab6bb");
-  expect(dark.thumb).toBe("#536169");
+  expect(light.thumb).toBe("#bacbbd");
+  expect(dark.thumb).toBe("#555550");
   expect(light.hover).not.toBe(dark.hover);
   expect(light.scrollbar).not.toBe(dark.scrollbar);
 });
@@ -1975,10 +2152,8 @@ test("pool summary shows routing states and current errors", async ({ page }) =>
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const summary = page.locator(".pool-summary");
   await expect(summary.locator("div")).toHaveCount(4);
-  await expect(summary.locator("div").nth(0)).toHaveText("In rotation—3");
-  await expect(summary.locator("div").nth(1)).toHaveText("Waiting for quota—1");
-  await expect(summary.locator("div").nth(2)).toHaveText("With errors—1");
-  await expect(summary.locator("div").nth(3)).toHaveText("Disabled—0");
+  await expect(summary.locator("strong")).toHaveText(["3", "1", "1", "0"]);
+  await expect(summary.locator("span")).toHaveText(["In rotation", "Waiting for quota", "With errors", "Disabled"]);
 });
 
 for (const mode of ["local", "remote"] as const) {
@@ -1997,7 +2172,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.waitForTimeout(300);
 
-    const routing = page.locator(".pool-priority-label");
+    const routing = page.locator(".pool-controls");
     const member = page.locator('[data-member-label="Personal Plus"]');
     await expect(routing.locator("[data-ready-route]")).toHaveCount(0);
     expect(await usageReads()).toBe(before);
@@ -2036,14 +2211,13 @@ test("pool account avatar opens the shared error details", async ({ page }) => {
   await expect(dialog.locator("pre")).toContainText('"code": "quota_transport"');
 });
 
-test("pool keeps the backend routing order for unavailable accounts", async ({ page }) => {
+test("pool places unavailable accounts after ready members", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, accountAuthReason: "invalid_grant" });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  // The pool mirrors the runtime order instead of re-sorting unavailable members.
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Personal Plus");
-  await expect(page.locator(".pool-member-card").last()).toHaveAttribute("data-member-label", "Pro account");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
+  await expect(page.locator(".pool-member-card").last()).toHaveAttribute("data-member-label", "Personal Plus");
 });
 
 test("pool sign-in status starts reauthentication for that account", async ({ page }) => {
@@ -2053,6 +2227,21 @@ test("pool sign-in status starts reauthentication for that account", async ({ pa
 
   const member = page.locator('[data-member-label="Personal Plus"]');
   const signIn = member.getByRole("button", { name: "Sign-in required", exact: true });
+  await expect(signIn).toBeVisible();
+  await signIn.click();
+  await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
+  const oauthStart = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth"));
+  expect(oauthStart?.args).toEqual({ openBrowser: false, accountId: "account_synthetic" });
+});
+
+test("connections show the same sign-in action instead of stale quota data", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountAuthReason: "invalid_grant" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const account = page.locator(".account-card").filter({ hasText: "Personal Plus" });
+  const signIn = account.getByRole("button", { name: "Sign-in required", exact: true });
+  await expect(account.locator(".quota-meter")).toHaveCount(0);
   await expect(signIn).toBeVisible();
   await signIn.click();
   await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
@@ -2132,7 +2321,7 @@ for (const mode of ["local", "remote"] as const) {
     }
   });
 
-  test(`${mode} pool creates an API source through the shared picker and applies all three routing roles`, async ({ page }) => {
+  test(`${mode} pool creates an API source through the shared picker and applies shared rotation modes`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: false, gatewayRunning: false });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -2145,31 +2334,28 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
     await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
     await sourceDialog.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("dialog", { name: "Edit source" }).getByRole("button", { name: "Cancel", exact: true }).click();
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
-    await expect(member).toContainText("Stabilizer");
-    await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
-    let editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByRole("radiogroup", { name: "API source role" }).getByRole("radio", { name: /API first/ }).click();
-    await editor.getByRole("button", { name: "Save policy" }).click();
-    await expect(member).toContainText("API first");
-
-    await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
-    editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByRole("radiogroup", { name: "API source role" }).getByRole("radio", { name: /Last resort/ }).click();
-    await editor.getByRole("button", { name: "Save policy" }).click();
-    await expect(member).toContainText("Last resort");
+    await expect(member).toContainText("Automatic");
+    for (const name of ["In order", "Round robin"]) {
+      await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+      const editor = page.getByRole("dialog", { name: "Pool rotation", exact: true });
+      await editor.getByRole("radio", { name, exact: true }).click();
+      await editor.getByRole("button", { name: "Close", exact: true }).last().click();
+      await expect(member).toContainText(name);
+    }
 
     const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
     if (mode === "local") {
       expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 0 });
       expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
-      expect(calls.filter((call) => call.command === "update_local_source").map((call) => (call.args.input as { priority: number }).priority)).toEqual([1_000_001, -1_000_000]);
+      expect(calls.filter((call) => call.command === "update_local_routing")).toHaveLength(2);
     } else {
       const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
       expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 0 });
       expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
-      expect(actions.filter((call) => call.action.type === "update_source").map((call) => call.payload?.priority)).toEqual([1_000_001, -1_000_000]);
+      expect(actions.filter((call) => call.action.type === "set_routing_policy")).toHaveLength(2);
     }
   });
 
@@ -2184,20 +2370,21 @@ test("pool keeps access key management internal", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Create access key" })).toHaveCount(0);
 });
 
-test("pool priority follows the backend scheduler order without display heuristics", async ({ page }) => {
+test("pool preserves scheduler priority within availability groups", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-  const priority = page.locator(".pool-priority-label");
+  const priority = page.locator(".pool-controls");
   await expect(priority).toContainText("Usage order");
   await expect(priority).toContainText("Active now: Pro account");
   await expect(priority.locator("[data-active-models]")).toHaveAttribute("data-active-models", "gpt-5.4:1");
   await expect(priority.locator("[data-active-models]")).toHaveText("Active now (1): gpt-5.4");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-current", "true");
+  const current = page.locator(".pool-member-card").first();
+  await expect(current).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
-  expect(await names()).toEqual(["Pro account", "Business Workspace", "Example compatible API", "Personal Plus", "Backup account"]);
+  expect(await names()).toEqual(["Pro account", "Business Workspace", "Example compatible API", "Backup account", "Personal Plus"]);
   await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
 });
 
@@ -2216,7 +2403,7 @@ test("pool groups concurrent requests by their active model", async ({ page }) =
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  const activeModels = page.locator(".pool-priority-label [data-active-models]");
+  const activeModels = page.locator(".pool-controls [data-active-models]");
   await expect(activeModels).toHaveAttribute("data-active-request-count", "5");
   await expect(activeModels).toHaveAttribute("data-active-models", "gpt-5.4:3,gpt-5.4-mini:2");
   await expect(activeModels).toHaveText("Active now (5): gpt-5.4 ×3 · gpt-5.4-mini ×2");
@@ -2229,7 +2416,7 @@ test("pool reflects active models from the live runtime order", async ({ page })
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('.pool-priority-label [data-ready-route="source_synthetic"]')).toHaveCount(0);
+  await expect(page.locator('.pool-controls [data-ready-route="source_synthetic"]')).toHaveCount(0);
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -2266,7 +2453,7 @@ test("pool reflects active models from the live runtime order", async ({ page })
     });
   });
 
-  const activeModels = page.locator(".pool-priority-label [data-active-models]");
+  const activeModels = page.locator(".pool-controls [data-active-models]");
   await expect(activeModels).toHaveText("Active now (3): gpt-5.4 ×2 · gpt-5.4-mini");
   const current = page.locator('[data-member-label="Personal Plus"]');
   await expect(current).toHaveAttribute("data-current", "true");
@@ -2324,11 +2511,12 @@ test("pool keeps the last completed route visible after its lease is released", 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const priority = page.locator(".pool-priority-label");
+  const priority = page.locator(".pool-controls");
   await expect(priority).toContainText("Usage order");
-  await expect(priority).toContainText("Next choice: Pro account");
+  await expect(priority).toContainText("Next candidate: Pro account");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
+  await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-next", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
 
@@ -2345,8 +2533,8 @@ test("pool does not show the next route's models before any request", async ({ p
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  const priority = page.locator(".pool-priority-label");
-  await expect(priority).toContainText("Next choice: Personal Plus");
+  const priority = page.locator(".pool-controls");
+  await expect(priority).toContainText("Next candidate: Personal Plus");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(priority).not.toContainText("gpt-5.4");
   await expect(priority).not.toContainText("claude-opus-4-8");
@@ -2376,10 +2564,10 @@ test("pool follows a lower-priority stabilizer reported by runtime activity", as
   // running. It must not clear the activity overlay before the next snapshot.
   await emitTauriEvent(page, "zenith-state-changed", null);
 
-  const priority = page.locator(".pool-priority-label");
+  const priority = page.locator(".pool-controls");
   await expect(priority).toContainText("Active now: Example compatible API");
   await expect(priority).toContainText("Active now (1): claude-opus-4-8");
-  await expect(priority).not.toContainText("Next choice");
+  await expect(priority).not.toContainText("Next candidate");
   await expect(page.locator('[data-member-label="Example compatible API"]')).toHaveAttribute("data-current", "true");
   await expect(page.locator('[data-member-label="Personal Plus"]')).toHaveAttribute("data-current", "false");
 
@@ -2390,8 +2578,9 @@ test("pool follows a lower-priority stabilizer reported by runtime activity", as
     activeRequestCount: 0,
     activeModels: [],
   });
-  await expect(priority).toContainText("Next choice: Example compatible API");
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Personal Plus");
+  await expect(priority).toContainText("Last request: Example compatible API");
+  await expect(priority).not.toContainText("Next candidate");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Example compatible API");
   await expect(page.locator('[data-member-label="Example compatible API"]')).toHaveAttribute("data-current", "false");
 });
 
@@ -2401,26 +2590,28 @@ test("pool member picker lists individual accounts instead of subscription group
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Add member", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
-  const accountRows = dialog.locator(".pool-member-picker section").first().locator(".pool-member-options > label");
+  const accountRows = dialog.getByRole("region", { name: "Accounts", exact: true }).locator(":scope > label");
   await expect(accountRows).toHaveCount(4);
   await expect(accountRows.locator("strong")).toHaveText(["Personal Plus", "Pro account", "Business Workspace", "Backup account"]);
   await expect(accountRows.locator("small")).toHaveCount(0);
   await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Plus", "Pro", "Business", "Free"]);
 
-  await expect(dialog.getByRole("group", { name: "Filter by plan" }).getByRole("button")).toHaveCount(5);
-  await dialog.getByRole("button", { name: "Business (1)" }).click();
+  await dialog.getByRole("navigation").getByRole("button", { name: "Accounts", exact: true }).click();
+  await chooseOption(page, dialog, "Filter by plan", "business");
   await expect(accountRows).toHaveCount(1);
   await expect(accountRows).toContainText("Business Workspace");
-  await dialog.getByRole("button", { name: "Select shown (1)" }).click();
+  await dialog.getByRole("checkbox", { name: "Select shown", exact: true }).check();
   await expect(dialog.getByRole("button", { name: "Add selected (1)" })).toBeEnabled();
 
-  await dialog.getByRole("button", { name: "Select all (5)" }).click();
+  await dialog.getByRole("navigation").getByRole("button", { name: "All connections", exact: true }).click();
+  await dialog.getByRole("checkbox", { name: "Select shown", exact: true }).check();
   await expect(dialog.getByRole("button", { name: "Add selected (5)" })).toBeEnabled();
   await dialog.getByRole("button", { name: "Clear selection" }).click();
   await expect(dialog.getByRole("button", { name: "Add selected (0)" })).toBeDisabled();
 
-  await dialog.getByRole("button", { name: "All (4)" }).click();
-  await dialog.getByLabel("Find an account").fill("team");
+  await dialog.getByRole("navigation").getByRole("button", { name: "Accounts", exact: true }).click();
+  await chooseOption(page, dialog, "Filter by plan", "all");
+  await dialog.getByLabel("Find a connection").fill("team");
   await expect(accountRows).toHaveCount(1);
   await expect(accountRows).toContainText("Business Workspace");
 });
@@ -2449,7 +2640,7 @@ test("local pool refreshes all account quotas without an interval setting", asyn
   const freeMember = page.locator('[data-member-label="Backup account"]');
   await expect(freeMember.locator('.relay-status-icon[aria-label^="In rotation"]')).toBeVisible();
 
-  await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
+  await page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText("Updated: 3 · Errors: 0", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
   await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
@@ -2463,48 +2654,45 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const personalPlus = page.locator('[data-member-label="Personal Plus"]');
-  await expect(personalPlus.locator(".pool-member-subscription-date")).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
-  await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
+  const subscription = personalPlus.locator(".account-subscription-line");
+  await expect(subscription.locator("span").first()).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
+  await expect(subscription.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
   await expect(personalPlus.locator(".quota-meter-heading small").first()).toHaveText(/^\d+ h \d+ min$/);
   await expect(personalPlus.locator(".quota-meter-heading small").nth(1)).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
-  const speed = page.getByRole("switch", { name: "Request speed" });
-  await expect(speed).not.toBeChecked();
-  await speed.check();
-  await expect(speed).toBeChecked();
-  await speed.uncheck();
-  await expect(speed).not.toBeChecked();
-  await speed.check();
-  await expect(speed).toBeChecked();
+  const speed = page.getByRole("slider", { name: "Request speed" });
+  await expect(speed).toHaveValue("0");
+  await speed.press("ArrowRight");
+  await expect(speed).toBeEnabled();
+  await expect(speed).toHaveValue("1");
+  await speed.press("Home");
+  await expect(speed).toBeEnabled();
+  await expect(speed).toHaveValue("0");
+  await speed.press("ArrowRight");
+  await expect(speed).toBeEnabled();
+  await expect(speed).toHaveValue("1");
 
-  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Distribution" });
+  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Pool rotation" });
   await expect(dialog).not.toContainText("Request speed");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
-  await expect(dialog).toContainText("Uses the greatest available headroom and distributes requests fairly when values are equal.");
-  await expect(dialog.getByRole("button", { name: /^Distribution strategy:/ })).toHaveAttribute("data-value", "adaptive");
-  await chooseOption(page, dialog, "Distribution strategy", "quota_highest");
-  await expect(dialog).toContainText("Uses the greatest remaining quota. Equal values go to the less busy account.");
-  await chooseOption(page, dialog, "Distribution strategy", "subscription_expiry");
-  await expect(dialog).not.toContainText("Minimum image model");
-  await expect(dialog).toContainText("Uses the nearest known expiry first, then accounts without a date. Quota and load break ties.");
-  const retryCandidates = dialog.getByLabel("Retry candidates");
-  const cooldownAfterFailures = dialog.getByLabel("Failures before cooldown");
-  await retryCandidates.fill("20");
-  await cooldownAfterFailures.fill("20");
-  await expect(retryCandidates).toHaveValue("8");
-  await expect(cooldownAfterFailures).toHaveValue("8");
-  await retryCandidates.fill("0");
-  await cooldownAfterFailures.fill("0");
-  await expect(retryCandidates).toHaveValue("1");
-  await expect(cooldownAfterFailures).toHaveValue("1");
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(personalPlus.locator(".pool-member-subscription-date")).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
-  await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
+  await expect(dialog.getByRole("radio")).toHaveCount(3);
+  await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
+  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await expect(dialog.getByLabel("Retry candidates")).toHaveCount(0);
+  await expect(dialog.getByLabel("Failures before cooldown")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await expect(subscription.locator("span").first()).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
+  await expect(subscription.locator(".account-subscription-countdown")).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 1, cooldownAfterFailures: 1, keepLastCandidateAvailable: true, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
+  const routingInput = calls.findLast((call) => call.command === "update_local_routing")?.args.input;
+  expect(routingInput).toMatchObject({ poolRouting: { mode: "in_order" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" });
+  expect(routingInput).not.toHaveProperty("cooldownAfterFailures");
+  expect(routingInput).not.toHaveProperty("keepLastCandidateAvailable");
+  expect(routingInput).not.toHaveProperty("routingStrategy");
+  expect(routingInput).not.toHaveProperty("subscriptionPlanOrder");
 });
 
 test("pool card grid preserves scheduler order at every width", async ({ page }) => {
@@ -2538,52 +2726,49 @@ test("pool card grid preserves scheduler order at every width", async ({ page })
   expect(await page.evaluate(() => localStorage.getItem("relay.poolLayout"))).toBeNull();
 });
 
-test("subscription group routing saves, reorders, and restores the default order", async ({ page }) => {
+test("closing mixed rotation retains the immediately applied order", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  let dialog = page.getByRole("dialog", { name: "Distribution" });
-  await chooseOption(page, dialog, "Distribution strategy", "subscription_plan");
-
-  const plans = dialog.locator("[data-subscription-plan]");
-  await expect(plans).toHaveCount(4);
-  expect(await plans.evaluateAll((items) => items.map((item) => item.getAttribute("data-subscription-plan")))).toEqual(["team", "pro", "plus", "free"]);
-  await dialog.locator('[data-subscription-plan="free"]').dragTo(dialog.locator('[data-subscription-plan="team"]'));
-  expect(await plans.evaluateAll((items) => items.map((item) => item.getAttribute("data-subscription-plan")))).toEqual(["free", "team", "pro", "plus"]);
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
-
-  let calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "standard", subscriptionPlanOrder: ["free", "team", "pro", "plus"] } });
-
-  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  dialog = page.getByRole("dialog", { name: "Distribution" });
-  await dialog.getByRole("button", { name: "Restore default order" }).click();
-  await expect(dialog.getByRole("button", { name: /^Distribution strategy:/ })).toHaveAttribute("data-value", "subscription_plan");
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "standard", subscriptionPlanOrder: ["team", "pro", "plus", "free"] } });
+  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
+  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  const ids = () => dialog.getByRole("listitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-member-id")));
+  const original = await ids();
+  await dialog.getByRole("listitem").first().getByRole("button", { name: / down$/ }).click();
+  expect(await ids()).not.toEqual(original);
+  const reordered = await ids();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+  await expect(dialog.getByRole("radio", { name: "In order", exact: true })).toHaveAttribute("aria-checked", "true");
+  expect(await ids()).toEqual(reordered);
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("switch", { name: "Request speed" });
-  await speed.check();
-  await expect(speed).toBeChecked();
-  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Distribution" });
+  const speed = page.getByRole("slider", { name: "Request speed" });
+  await speed.press("ArrowRight");
+  await expect(speed).toBeEnabled();
+  await expect(speed).toHaveValue("1");
+  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Pool rotation" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Request speed");
-  await chooseOption(page, dialog, "Distribution strategy", "subscription_expiry");
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
+  expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toMatchObject({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "subscription_expiry", defaultServiceTier: "fast", subscriptionPlanOrder: [] },
+    payload: { poolRouting: { mode: "in_order" }, expectedPoolRouting: { mode: "automatic" }, maxRetryCandidates: 3, defaultServiceTier: "fast" },
   });
+  const remoteRoutingPayload = calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input as { payload: Record<string, unknown> };
+  expect(remoteRoutingPayload.payload).not.toHaveProperty("cooldownAfterFailures");
+  expect(remoteRoutingPayload.payload).not.toHaveProperty("keepLastCandidateAvailable");
+  expect(remoteRoutingPayload.payload).not.toHaveProperty("routingStrategy");
+  expect(remoteRoutingPayload.payload).not.toHaveProperty("subscriptionPlanOrder");
   expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
 });
 
@@ -2633,12 +2818,25 @@ test("remote pool refreshes quotas without exposing an interval setting", async 
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
+  await page.locator('[data-toolbar-group="refresh"]').getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
 
   const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
   expect(actions).toContainEqual({ action: { type: "refresh_all_quotas" }, payload: null });
   expect(actions.some((input) => input?.action?.type === "set_quota_policy")).toBe(false);
+});
+
+test("remote connections expose the same account refresh action as the pool", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const refreshAll = page.locator(".account-command-actions").getByRole("button", { name: "Refresh", exact: true });
+  await expect(refreshAll).toBeVisible();
+  await refreshAll.click();
+
+  const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
+  expect(actions).toContainEqual({ action: { type: "refresh_all_quotas" }, payload: null });
 });
 
 test("connections route Free accounts like other pool members", async ({ page }) => {
@@ -2719,14 +2917,14 @@ test("source and automation rows keep rare actions in consistent menus", async (
 
   await page.getByRole("tab", { name: "Sources" }).click();
   let actions = page.locator(".relay-table .row-actions");
-  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch in ChatGPT"]);
+  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Launch", "Edit", "Actions"]);
   await actions.locator("summary").click();
   expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Refresh API data", "Remove from pool", "Disable", "Delete"]);
   await page.keyboard.press("Escape");
 
   await page.getByRole("tab", { name: "Automations" }).click();
-  actions = page.locator(".relay-table .row-actions");
-  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Edit", "Test", "Actions"]);
+  actions = page.locator(".automation-list .row-actions");
+  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Edit", "Actions"]);
   await actions.locator("summary").click();
   await expect(page.getByRole("menuitem")).toHaveText("Delete");
 });
@@ -3056,9 +3254,10 @@ test("OAuth member policy hides manual routing controls", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: /Pool member policy/ });
   await expect(dialog).not.toContainText("Tie-break priority");
   await expect(dialog).not.toContainText("Traffic share");
-  await expect(dialog.getByText("Drain", { exact: true })).toBeVisible();
-  await expect(dialog.locator(".member-model-rules > summary")).toContainText("Models");
+  await expect(dialog.getByRole("tab", { name: "Models", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
+  await dialog.getByRole("tab", { name: "Settings", exact: true }).click();
+  await expect(dialog.getByRole("switch", { name: "Drain", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Remove from pool" })).toHaveCount(0);
 });
 
@@ -3083,18 +3282,17 @@ for (const mode of ["local", "remote"] as const) {
     await firstGroup.locator(".model-group-toggle").click();
     await expect(firstGroup.locator(".model-group-toggle")).toHaveAttribute("aria-expanded", "true");
     await expect(groupModels).toHaveCount(groupModelCount);
-    await expect(rows.first().locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
-    await expect(rows.first().locator(".model-price-value strong")).toHaveText(["$2.5", "$15", "$0.25"]);
     await expect(rows.first().locator("[data-column='availability']")).toHaveCount(0);
-    await expect(page.locator('.model-rules tbody tr[data-model-id="o3"]')).toContainText("Price not listed");
+    await expect(page.locator('.model-rules [data-column="price"]')).toHaveCount(0);
+    await expect(page.locator(".model-rules")).not.toContainText("Price not listed");
 
     await expect(page.locator(".model-sort-select")).toHaveCount(0);
 
     const mini = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
-    await mini.getByRole("button", { name: "Disable gpt-5.4-mini" }).click();
+    await mini.getByRole("checkbox", { name: "Disable gpt-5.4-mini" }).click();
     await expect(mini).toHaveAttribute("data-enabled", "false");
-    await expect(mini.getByRole("button", { name: "Enable gpt-5.4-mini" })).toHaveAttribute("aria-pressed", "false");
-    await mini.getByRole("button", { name: "Enable gpt-5.4-mini" }).click();
+    await expect(mini.getByRole("checkbox", { name: "Enable gpt-5.4-mini" })).not.toBeChecked();
+    await mini.getByRole("checkbox", { name: "Enable gpt-5.4-mini" }).click();
     await expect(mini).toHaveAttribute("data-enabled", "true");
 
     const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -3117,6 +3315,7 @@ test("remote model rules preserve the server group and model order", async ({ pa
     mode: "remote",
     locale: "en",
     populated: true,
+    accountModels: [],
     serverModelOrder: [
       "gemini-3.6-flash-high",
       "gemini-3.6-flash-medium",
@@ -3129,8 +3328,6 @@ test("remote model rules preserve the server group and model order", async ({ pa
 
   const rows = page.locator(".model-rules tbody tr[data-model-id]");
   expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual([
-    "gpt-5.4",
-    "gpt-5.4-mini",
     "gemini-3.6-flash-high",
     "gemini-3.6-flash-medium",
     "gemini-3.6-flash-low",
@@ -3145,6 +3342,7 @@ for (const mode of ["local", "remote"] as const) {
       populated: true,
       mixedModels: true,
       modelSpeed: { "gpt-5.4": "standard" },
+      modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
     });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -3152,13 +3350,24 @@ for (const mode of ["local", "remote"] as const) {
 
     const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
     const speed = model.locator(".model-speed-toggle");
-    await expect(model.locator(".model-rule-secondary-actions")).toHaveCSS("opacity", "1");
-    await expect(speed).toHaveAttribute("aria-pressed", "false");
-    await speed.click();
-    await expect(speed).toHaveAttribute("aria-pressed", "true");
+    const speedTrigger = speed.locator(".relay-option-trigger");
+    await expect(speedTrigger).toBeVisible();
+    await expect(speed).toBeVisible();
+    await expect(model.locator(".model-rule-actions")).toHaveCSS("opacity", "1");
+    expect(await model.locator(".model-rule-actions > *").evaluateAll((controls) => controls.map((control) => {
+      if (control.matches(".model-protocol-button")) return "protocol";
+      if (control.matches(".model-toggle")) return "enabled";
+      if (control.matches(".model-speed-toggle")) return "speed";
+      return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
+    }))).toEqual(["reasoning", "speed", "enabled"]);
+    await expect(speed).toHaveAttribute("data-speed-tier", "standard");
+    await expect(speedTrigger).toHaveAttribute("data-value", "standard");
+    await speedTrigger.click();
+    await page.locator('[role="option"][data-value="fast"]').click();
+    await expect(speed).toHaveAttribute("data-speed-tier", "fast");
+    await expect(speedTrigger).toHaveAttribute("data-value", "fast");
     const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
     await expect(claude.locator(".model-speed-toggle")).toHaveCount(0);
-    await expect(claude.locator(".model-speed-unavailable")).toBeVisible();
 
     const groups = page.locator(".model-rules .model-group-row");
     await groups.first().dragTo(groups.last());
@@ -3176,62 +3385,6 @@ for (const mode of ["local", "remote"] as const) {
     }
   });
 }
-
-test("local model prices can override and restore API-equivalent valuation", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Model Rules" }).click();
-
-  const model = page.locator('.model-rules tbody tr[data-model-id="o3"]');
-  await model.getByRole("button", { name: "Edit price for o3" }).click();
-  const dialog = page.getByRole("dialog", { name: "Model price" });
-  await expect(dialog.locator(".model-price-label")).toHaveText(["Input", "Output", "Cache read"]);
-  await dialog.getByLabel("Input", { exact: true }).fill("1.25");
-  await dialog.getByLabel("Output", { exact: true }).fill("7.5");
-  await dialog.getByLabel("Cache read").fill("0.125");
-  await dialog.getByRole("button", { name: "Save" }).click();
-  await expect(model.locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
-  await expect(model.locator(".model-price-value strong")).toHaveText(["$1.25", "$7.5", "$0.125"]);
-  await expect(model).toContainText("Custom price per 1M tokens");
-
-  await model.getByRole("button", { name: "Edit price for o3" }).click();
-  await page.getByRole("dialog", { name: "Model price" }).getByRole("button", { name: "Restore catalog price" }).click();
-  await expect(model).toContainText("Price not listed");
-
-  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.filter((call) => call.command === "set_local_model_price").map((call) => call.args)).toEqual([
-    { input: { modelId: "o3", inputMicroUsdPerMillion: 1_250_000, cachedInputMicroUsdPerMillion: 125_000, cacheWrite5mMicroUsdPerMillion: null, cacheWrite1hMicroUsdPerMillion: null, outputMicroUsdPerMillion: 7_500_000 } },
-    { input: { modelId: "o3", inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, cacheWrite5mMicroUsdPerMillion: null, cacheWrite1hMicroUsdPerMillion: null, outputMicroUsdPerMillion: null } },
-  ]);
-});
-
-test("remote model prices use the server-owned override", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 2 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Model Rules" }).click();
-
-  const model = page.locator('.model-rules tbody tr[data-model-id="o3"]');
-  await model.getByRole("button", { name: "Edit price for o3" }).click();
-  const dialog = page.getByRole("dialog", { name: "Model price" });
-  await dialog.getByLabel("Input", { exact: true }).fill("1.25");
-  await dialog.getByLabel("Output", { exact: true }).fill("7.5");
-  await dialog.getByLabel("Cache read").fill("0.125");
-  await dialog.getByRole("button", { name: "Save" }).click();
-  await expect(model.locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
-  await expect(model.locator(".model-price-value strong")).toHaveText(["$1.25", "$7.5", "$0.125"]);
-
-  await model.getByRole("button", { name: "Edit price for o3" }).click();
-  await page.getByRole("dialog", { name: "Model price" }).getByRole("button", { name: "Restore catalog price" }).click();
-  await expect(model).toContainText("Price not listed");
-
-  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.filter((call) => call.command === "execute_remote_server_action" && (call.args.input as { action?: { type?: string } } | undefined)?.action?.type === "set_model_price").map((call) => call.args)).toEqual([
-    { input: { action: { type: "set_model_price" }, payload: { modelId: "o3", inputMicroUsdPerMillion: 1_250_000, cachedInputMicroUsdPerMillion: 125_000, cacheWrite5mMicroUsdPerMillion: null, cacheWrite1hMicroUsdPerMillion: null, outputMicroUsdPerMillion: 7_500_000 } } },
-    { input: { action: { type: "set_model_price" }, payload: { modelId: "o3", inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, cacheWrite5mMicroUsdPerMillion: null, cacheWrite1hMicroUsdPerMillion: null, outputMicroUsdPerMillion: null } } },
-  ]);
-});
 
 test("local model reasoning defaults are compact and use backend modes", async ({ page }) => {
   await installTauriMock(page, {
@@ -3295,6 +3448,7 @@ test("every native pool model exposes backend reasoning settings", async ({ page
     locale: "en",
     populated: true,
     serverModelOrder: [],
+    quotaAvailable: true,
     modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
   });
   await page.goto("/");
@@ -3313,13 +3467,15 @@ test("every native pool model exposes backend reasoning settings", async ({ page
   });
 });
 
-test("unknown models offer manual reasoning candidates only when the backend permits discovery", async ({ page }) => {
+test("normalized catalog levels expose the complete Fable reasoning enum", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
     populated: true,
     serverModelOrder: ["claude-fable-5-1"],
-    manualReasoningFallbackModels: ["claude-fable-5-1"],
+    modelReasoning: {
+      "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
+    },
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -3331,7 +3487,7 @@ test("unknown models offer manual reasoning candidates only when the backend per
   await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Extra high", "Max"]);
   await dialog.getByRole("checkbox", { name: "High", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
-    input: { modelId: "claude-fable-5-1", allowedLevels: ["high"] },
+    input: { modelId: "claude-fable-5-1", allowedLevels: ["low", "medium", "xhigh", "max"] },
   });
 });
 
@@ -3357,17 +3513,96 @@ test("remote reasoning toggles are applied without a Save button", async ({ page
   await expect(dialog.getByRole("button", { name: "Save" })).toHaveCount(0);
 });
 
-test("Help opens the sequential guide and keeps quick setup explicit", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Help" }).click();
-  await expect(page.getByRole("heading", { name: "Help" })).toBeVisible();
-  for (const heading of ["Overview", "Connections", "Pool", "API", "Usage", "Recovery", "Errors"]) {
-    await expect(page.getByRole("heading", { name: heading, level: 2 })).toBeVisible();
+for (const guide of [
+  { locale: "en", help: "Help", contents: "On this page", pool: "Pool", errors: "Errors", quickSetup: "Repeat quick setup", start: "Get started" },
+  { locale: "ru", help: "Помощь", contents: "Содержание", pool: "Пул", errors: "Ошибки", quickSetup: "Повторить быструю настройку", start: "Приступить" },
+] as const) {
+  for (const width of [1160, 840, 430]) {
+    test(`Help navigation and explicit quick setup: ${guide.locale}, ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 760 });
+      await installTauriMock(page, { mode: "local", locale: guide.locale, populated: true });
+      await page.goto("/");
+      await page.getByRole("button", { name: guide.help, exact: true }).click();
+      await expect(page.getByRole("heading", { name: guide.help, exact: true })).toBeVisible();
+      const document = page.locator(".help-document");
+      await expect(document).toBeVisible();
+      const navigation = page.getByRole("navigation", { name: guide.contents });
+      const toggle = navigation.getByRole("button", { name: guide.contents });
+      const openContents = async () => {
+        if (await toggle.isVisible() && await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+      };
+      await openContents();
+      const links = navigation.getByRole("link");
+      expect(await links.count()).toBeGreaterThan(0);
+      expect(await links.evaluateAll((items) => items.every((item) => {
+        const href = item.getAttribute("href");
+        const target = href?.startsWith("#") ? window.document.getElementById(decodeURIComponent(href.slice(1))) : null;
+        return target?.matches(".help-document h2, .help-document h3");
+      }))).toBe(true);
+      if (await toggle.isVisible()) {
+        await toggle.press("Escape");
+        await expect(toggle).toHaveAttribute("aria-expanded", "false");
+        await expect(toggle).toBeFocused();
+      }
+      await page.screenshot({ path: testInfo.outputPath("help-start.png") });
+      await openContents();
+      await navigation.getByRole("link", { name: guide.pool, exact: true }).click();
+      const poolHeading = document.getByRole("heading", { name: `3. ${guide.pool}`, exact: true });
+      await expect(poolHeading).toBeInViewport();
+      await expect(poolHeading).toBeFocused();
+      await expect(navigation.locator("a[aria-current]")).toHaveText(guide.pool);
+      await openContents();
+      await navigation.getByRole("link", { name: guide.errors, exact: true }).focus();
+      await page.keyboard.press("Enter");
+      const errorsHeading = document.getByRole("heading", { name: `8. ${guide.errors}`, exact: true });
+      await expect(errorsHeading).toBeInViewport();
+      await expect(errorsHeading).toBeFocused();
+      await expect(navigation.locator("a[aria-current]")).toHaveText(guide.errors);
+      if (await toggle.isVisible()) await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(await page.evaluate(() => window.document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      expect(await document.locator("table, td").evaluateAll((cells) => cells.every((cell) => cell.scrollWidth <= cell.clientWidth))).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath("help-errors.png") });
+      const search = document.getByRole("searchbox");
+      await search.fill("NO_ELIGIBLE_SOURCE");
+      const group = document.locator(".help-error-group");
+      await expect(group).toHaveCount(1);
+      await expect(group).toHaveAttribute("open", "");
+      await expect(group.locator("tbody tr")).toHaveCount(1);
+      await expect(group.locator("td").last()).toContainText(guide.locale === "ru" ? "Пуле" : "Pool");
+      await search.fill("refresh_token_reused");
+      await expect(group).toHaveCount(1);
+      await expect(group.locator("tbody tr")).toHaveCount(1);
+      await expect(group).toContainText(guide.locale === "ru" ? "гонка" : "concurrent");
+      await search.fill("synthetic_unknown_error_9284");
+      await expect(group).toHaveCount(0);
+      await expect(document.getByRole("status")).toContainText(guide.locale === "ru" ? "Совпадений нет" : "No matches");
+      await document.getByRole("button", { name: guide.locale === "ru" ? "Очистить поиск" : "Clear search" }).click();
+      await expect(search).toBeFocused();
+      await expect(search).toHaveValue("");
+      await expect(document.locator(".help-error-group[open]")).toHaveCount(0);
+      await document.locator(".help-error-group summary").first().focus();
+      await page.keyboard.press("Enter");
+      await expect(document.locator(".help-error-group[open]")).toHaveCount(1);
+      expect(await document.locator("table, td").evaluateAll((cells) => cells.every((cell) => cell.scrollWidth <= cell.clientWidth))).toBe(true);
+      await page.getByRole("button", { name: guide.quickSetup }).click();
+      await expect(page.getByRole("button", { name: guide.start, exact: true })).toBeVisible();
+    });
   }
-  await expect(page.getByRole("heading", { name: "Errors", level: 2 })).toHaveAttribute("id", "7-errors");
-  await page.getByRole("button", { name: "Repeat quick setup" }).click();
-  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+}
+
+test("Help retries a failed local guide load", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  let failed = false;
+  await page.route(/README.*\.md(?:\?.*)?$/, (route) => {
+    if (!failed) { failed = true; return route.fulfill({ status: 503, body: "Unavailable" }); }
+    return route.continue();
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Help", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Help could not be opened");
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.locator(".help-document")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "On this page" })).toBeVisible();
 });
 
 test("updates are checked without downloading and require an explicit action", async ({ page }) => {
@@ -3717,6 +3952,29 @@ test("direct account value remains controlled by the dollar toggle", async ({ pa
   await expect(poolValue.first()).toBeVisible();
 });
 
+test("provider-reported credits keep an exhausted account in the pool", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, providerCredits: 222.75 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const summary = page.locator(".connections-account-summary");
+  const totalCredits = summary.locator('[data-summary="provider-credits"]');
+  await expect(summary).toHaveAttribute("data-has-provider-credits", "true");
+  await expect(totalCredits).toContainText("Total credits");
+  await expect(totalCredits.locator("strong")).toHaveText("222.8");
+
+  const connectionCredits = page.locator(".account-card").first().locator(".account-provider-quota-strip");
+  await expect(connectionCredits.locator("dt")).toHaveText("Credits");
+  await expect(connectionCredits.locator("dd")).toHaveText("222.8");
+  await page.getByRole("button", { name: "Hide account calculation" }).click();
+  await expect(connectionCredits).toBeVisible();
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const poolCredits = page.locator('.pool-member-card[data-member-kind="account"]').first().locator(".account-provider-quota-strip");
+  await expect(poolCredits.locator("dt")).toHaveText("Credits");
+  await expect(poolCredits.locator("dd")).toHaveText("222.8");
+});
+
 test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 1, sourceCount: 1 });
   await page.goto("/");
@@ -3810,6 +4068,40 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   expect(workflow[0].args).toEqual({ boundOauthAccountId: null });
   await expect(page.getByRole("dialog", { name: "Confirm action" })).toHaveCount(0);
   await expect(feedback).toBeHidden({ timeout: 5_000 });
+});
+
+test("pool connection launches Codex before waiting for a renderer snapshot", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.evaluate(() => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const invoke = internals.invoke.bind(internals);
+    let attached = false;
+    let launched = false;
+    internals.invoke = async (command, args, options) => {
+      // A slow state refresh must not leave the successfully attached client
+      // closed. Only the launch command can release this synthetic snapshot.
+      if (command === "get_local_runtime_state" && attached && !launched) {
+        await new Promise<void>((resolve) => {
+          const check = window.setInterval(() => {
+            if (launched) { window.clearInterval(check); resolve(); }
+          }, 10);
+        });
+      }
+      const result = await invoke(command, args, options);
+      if (command === "attach_codex_to_local_gateway") attached = true;
+      if (command === "launch_managed_codex_profile") launched = true;
+      return result;
+    };
+  });
+  await connectPoolToChatGPT(page, true);
+  await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  const attachIndex = calls.lastIndexOf("attach_codex_to_local_gateway");
+  const launchIndex = calls.lastIndexOf("launch_managed_codex_profile");
+  expect(launchIndex).toBeGreaterThan(attachIndex);
+  expect(calls.slice(attachIndex + 1, launchIndex)).not.toContain("get_local_runtime_state");
 });
 
 test("profile switch errors stay visible until the one-minute timeout", async ({ page }) => {
@@ -4203,19 +4495,23 @@ test("stored account proxy controls keep saved addresses hidden", async ({ page 
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const accountCard = page.locator(".account-card").first();
-  await accountCard.getByRole("button", { name: "Proxy: Common", exact: true }).click();
+  await accountCard.locator(".account-row-menu summary").click();
+  await page.getByRole("menuitem", { name: "Proxy: Common", exact: true }).click();
   let accountDialog = page.getByRole("dialog", { name: "Account proxy" });
   await accountDialog.getByRole("radio", { name: /No proxy/ }).click();
   await accountDialog.getByRole("button", { name: "Save" }).click();
-  await expect(accountCard.getByRole("button", { name: "Proxy: No proxy", exact: true })).toBeVisible();
-  await accountCard.getByRole("button", { name: "Proxy: No proxy", exact: true }).click();
+  await accountCard.locator(".account-row-menu summary").click();
+  await expect(page.getByRole("menuitem", { name: "Proxy: No proxy", exact: true })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Proxy: No proxy", exact: true }).click();
   const accountProxy = "account-user:account-pass@us-account.example:8081";
   accountDialog = page.getByRole("dialog", { name: "Account proxy" });
   await accountDialog.getByRole("radio", { name: /Add a new proxy/ }).click();
   await accountDialog.getByLabel("HTTP(S) proxy").fill(accountProxy);
   await accountDialog.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText(accountProxy)).toHaveCount(0);
-  await expect(accountCard.getByRole("button", { name: "Proxy: Per-account", exact: true })).toBeVisible();
+  await accountCard.locator(".account-row-menu summary").click();
+  await expect(page.getByRole("menuitem", { name: "Proxy: Per-account", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await page.locator(".account-bulk-menu summary").click();
   await page.getByRole("menuitem", { name: "Assign proxies" }).click();
@@ -4235,7 +4531,8 @@ test("remote proxy controls use the capability-gated management actions", async 
   await page.goto("/");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.locator(".account-card").first().getByRole("button", { name: "Proxy: Common", exact: true }).click();
+  await page.locator(".account-card").first().locator(".account-row-menu summary").click();
+  await page.getByRole("menuitem", { name: "Proxy: Common", exact: true }).click();
   const accountDialog = page.getByRole("dialog", { name: "Account proxy" });
   await accountDialog.getByRole("radio", { name: /Add a new proxy/ }).click();
   await accountDialog.getByLabel("HTTP(S) proxy").fill("remote-account:secret@us-account.example:8081");
@@ -4319,12 +4616,75 @@ test("remote bulk import previews multiple files and confirms selected rows", as
   ]);
 });
 
+test("account import preview selects all rows and exposes partial selection", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: "Choose account files" }).click();
+
+  const selectAll = dialog.getByLabel("Select all records");
+  const imported = dialog.getByLabel("Select Imported account for import");
+  const secondImported = dialog.getByLabel("Select Second imported account for import");
+  const existing = dialog.getByLabel("Select Existing account for import");
+
+  await expect(selectAll).not.toBeChecked();
+  await selectAll.check();
+  await expect(imported).toBeChecked();
+  await expect(secondImported).toBeChecked();
+  await expect(existing).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "Import 3 account(s)" })).toBeVisible();
+
+  await secondImported.uncheck();
+  await expect(selectAll).not.toBeChecked();
+  await expect(selectAll).toHaveAttribute("aria-checked", "mixed");
+  await expect(selectAll).toHaveJSProperty("indeterminate", true);
+  await expect(dialog.getByRole("button", { name: "Import 2 account(s)" })).toBeVisible();
+
+  await selectAll.check();
+  await expect(selectAll).toBeChecked();
+  await selectAll.uncheck();
+  await expect(imported).not.toBeChecked();
+  await expect(secondImported).not.toBeChecked();
+  await expect(existing).not.toBeChecked();
+});
+
+test("account import preview keeps existing and invalid rows selectable", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importPreviewError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: "Choose account files" }).click();
+
+  const selectAll = dialog.getByLabel("Select all records");
+  const imported = dialog.getByLabel("Select Imported account for import");
+  const secondImported = dialog.getByLabel("Select Second imported account for import");
+  const existing = dialog.getByLabel("Select Existing account for import");
+  const invalid = dialog.getByLabel("Select Invalid imported account for import");
+
+  await expect(existing).toBeEnabled();
+  await expect(invalid).toBeEnabled();
+  await invalid.check();
+  await expect(invalid).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "Import 3 account(s)" })).toBeVisible();
+
+  await selectAll.check();
+  await expect(imported).toBeChecked();
+  await expect(secondImported).toBeChecked();
+  await expect(existing).toBeChecked();
+  await expect(invalid).toBeChecked();
+  await expect(dialog.getByRole("button", { name: "Import 4 account(s)" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+});
+
 test("remote server-side usage filters and clear logs use managed commands", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
 
   await openGatewayApi(page);
-  await expect(page.locator(".gateway-runtime-panel")).toContainText("API is running");
+  await expect(page.locator(".gateway-api-status")).toContainText("API is running");
   await expect(page.getByText("https://relay.example.invalid/v1")).toBeVisible();
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -4386,6 +4746,7 @@ test("remote capability omissions disable or hide unsupported operations", async
 
   await openGatewayApplication(page);
   await expect(page.getByRole("button", { name: "Connect ChatGPT", exact: true })).toBeDisabled();
+  await expect(page.locator(".gateway-settings-panel")).toHaveCount(0);
   await expect(page.locator(".proxy-settings")).toHaveCount(0);
   await page.getByRole("tab", { name: "API", exact: true }).click();
   await page.locator(".relay-page-actions .relay-action-menu summary").click();

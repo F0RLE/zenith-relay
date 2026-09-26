@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { ArrowRightLeft, CheckCircle2, CircleAlert, Copy, KeyRound, Loader2, Network, Play, Plug, RefreshCw, RotateCw, Save, Square, UserRound } from "lucide-react";
+import { ArrowRightLeft, CircleAlert, Play, RotateCw, Square, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import { isCodexOauthAccountEligible } from "../../accountStatus";
-import { ActionMenu, ActionMenuItem, Button, CopyButton, EmptyState, IconButton, OptionMenu, PageHeader, SettingToggle, Tabs, copyText, formatAccountPlan, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader, SettingToggle, Tabs, formatAccountPlan } from "../../components/Ui";
 import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTasksControl";
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { GatewayApiTab } from "./GatewayApiTab";
 
 type GatewayTab = "api" | "chatgpt" | "opencode";
 
@@ -73,11 +74,22 @@ export function GatewayPage() {
     {t("gateway.launchChatGPT")}
   </Button> : null;
 
+  const openCodeActions = mode === "local" ? <Button
+    variant="primary"
+    busy={busy === "opencode-launch"}
+    disabled={!running}
+    title={!running ? t("gateway.start") : undefined}
+    icon={<Play aria-hidden />}
+    onClick={() => perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched")}
+  >
+    {t("gateway.launchOpenCode")}
+  </Button> : null;
+
   return <section className="relay-page gateway-page">
     <PageHeader
       title={t("nav.gateway")}
       subtitle={t(`gateway.tabSubtitles.${activeTab}.${mode}`)}
-      actions={activeTab === "api" || activeTab === "chatgpt" ? (activeTab === "api" ? apiActions : chatGptActions) : null}
+      actions={activeTab === "api" ? apiActions : activeTab === "chatgpt" ? chatGptActions : openCodeActions}
     />
     <Tabs value={activeTab} onChange={(value) => setActiveTab(value as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />
     {activeTab === "api"
@@ -86,144 +98,30 @@ export function GatewayPage() {
   </section>;
 }
 
-function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: string }) {
-  const { t } = useTranslation();
-  const { mode, runtime, busy, perform } = useRelayState();
-  const confirm = useConfirm();
-  const currentPort = mode === "local" && endpoint ? new URL(endpoint).port : "";
-  const [port, setPort] = useState(currentPort);
-  useEffect(() => setPort(currentPort), [currentPort]);
-
-  if (!endpoint) return <section className="gateway-tab-panel gateway-empty-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.api")}>
-    <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />
-  </section>;
-
-  const numericPort = Number(port);
-  const portValid = Number.isInteger(numericPort) && numericPort >= 1024 && numericPort <= 65535;
-  const savePort = () => perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved");
-  const canCopyApiKey = mode === "local" || (mode === "remote" && running && Boolean(runtime?.capabilities.features.includes("profile_attach")));
-  const canRotateApiKey = mode === "local" || (mode === "remote" && running && Boolean(runtime?.capabilities.features.includes("profile_attach")) && Boolean(runtime?.capabilities.features.includes("profile_key_rotation")));
-  const copyingApiKey = busy === "gateway-api-key";
-  const rotatingApiKey = busy === "gateway-api-key-rotate";
-  const apiKeyDisabledHint = mode === "remote" && !canCopyApiKey
-    ? (running ? t("gateway.apiKeyUnavailable") : t("gateway.start"))
-    : undefined;
-  const apiKeyRotationDisabledHint = mode === "remote" && !canRotateApiKey
-    ? (running ? t("gateway.apiKeyRotationUnavailable") : t("gateway.start"))
-    : undefined;
-  const copyApiKey = () => perform("gateway-api-key", async () => {
-    await copyText(mode === "local"
-      ? await relayCommands.revealLocalGatewayApiKey()
-      : await relayCommands.revealRemoteGatewayApiKey());
-  }, "feedback.copied");
-  const rotateApiKey = async () => {
-    if (!await confirm(t("gateway.regenerateApiKeyConfirm"), {
-      title: t("gateway.regenerateApiKey"),
-      confirmLabel: t("gateway.regenerateApiKey"),
-      danger: true,
-    })) return;
-    await perform("gateway-api-key-rotate", async () => {
-      await copyText(mode === "local"
-        ? await relayCommands.rotateLocalGatewayApiKey()
-        : await relayCommands.rotateRemoteGatewayApiKey());
-    }, "feedback.copied");
-  };
-
-  return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.api")}>
-    <div className="gateway-workspace">
-      <GatewayRuntimePanel running={running} />
-      <section className="gateway-api-connection-panel">
-        <header>
-          <span className="gateway-config-icon"><Network aria-hidden /></span>
-          <div>
-            <h2>{t("gateway.endpoint")}</h2>
-          </div>
-        </header>
-        <div className="gateway-api-connection-controls">
-          <div className="gateway-endpoint-value">
-            <code title={endpoint}>{endpoint}</code>
-            <CopyButton value={endpoint} label={t("gateway.copyEndpoint")} />
-            {mode === "local" ? <form className="gateway-api-port-control" onSubmit={(event) => { event.preventDefault(); void savePort(); }}>
-              <label>
-                <span>{t("gateway.port")}</span>
-                <input type="number" min="1024" max="65535" value={port} onChange={(event) => setPort(event.target.value)} />
-              </label>
-              <IconButton className="gateway-api-port-save" type="submit" label={running ? t("gateway.applyRestart") : t("common.save")} disabled={busy === "gateway-port" || !portValid || port === currentPort} icon={busy === "gateway-port" ? <Loader2 className="spin" aria-hidden /> : <Save aria-hidden />} />
-            </form> : null}
-          </div>
-          {mode !== "zenith" ? <div className="gateway-api-key-control">
-            <span className="gateway-api-key-label"><KeyRound aria-hidden /><span>{t("gateway.apiKey")}</span></span>
-            <div className="gateway-api-key-actions">
-              <IconButton className="gateway-api-key-action" label={t("gateway.copyApiKey")} title={apiKeyDisabledHint} disabled={!canCopyApiKey || rotatingApiKey || copyingApiKey} icon={copyingApiKey ? <Loader2 className="spin" aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyApiKey()} />
-              <IconButton className="gateway-api-key-rotate" label={t("gateway.regenerateApiKey")} title={apiKeyRotationDisabledHint} disabled={!canRotateApiKey || copyingApiKey || rotatingApiKey} icon={rotatingApiKey ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} onClick={() => void rotateApiKey()} />
-            </div>
-          </div> : null}
-        </div>
-      </section>
-    </div>
-  </section>;
-}
-
-function GatewayRuntimePanel({ running }: { running: boolean }) {
-  const { t } = useTranslation();
-  const { mode, runtime } = useRelayState();
-  return <section className="gateway-runtime-panel">
-    <div className={`gateway-runtime-state${running ? " running" : ""}`}>
-      <span className="gateway-runtime-icon">{running ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />}</span>
-      <div>
-        <h2>{running ? t("gateway.runtimeOnline") : t("gateway.runtimeOffline")}</h2>
-        <p>{t(`gateway.runtimeHints.${mode}`)}</p>
-      </div>
-    </div>
-    {runtime ? <dl className="gateway-runtime-metrics">
-      <div><dt>{t("common.models")}</dt><dd>{runtime.gateway.visibleModelIds.length}</dd></div>
-      <div><dt>{t("pool.members")}</dt><dd>{runtime.gateway.candidateCount}</dd></div>
-    </dl> : null}
-  </section>;
-}
-
 function GatewayChatGPTTab() {
   const { t } = useTranslation();
-  const { mode } = useRelayState();
+  const { mode, runtime } = useRelayState();
   if (mode === "zenith") return <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />;
+  const showSettings = mode === "local" || runtime?.capabilities.features.some((feature) =>
+    feature === "codex_background_tasks" || feature === "codex_websockets",
+  );
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.chatgpt")}>
     <div className="gateway-workspace">
-      <div className="gateway-settings-panel gateway-application-panel">
-        <ChatGPTSetup />
+      <ChatGPTSetup />
+      {showSettings ? <div className="gateway-settings-panel gateway-application-panel">
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
-      </div>
+      </div> : null}
     </div>
   </section>;
 }
 
 function GatewayOpenCodeTab() {
   const { t } = useTranslation();
-  const { mode, runtime, busy, perform } = useRelayState();
-  const [status, setStatus] = useState<import("../../api/types").OpenCodeConfigStatus | null>(null);
-  const refreshStatus = () => {
-    if (mode !== "local") return;
-    void relayCommands.getOpenCodeConfigStatus().then(setStatus).catch(() => setStatus(null));
-  };
-  useEffect(refreshStatus, [mode]);
-  if (mode !== "local") return <section className="gateway-tab-panel gateway-empty-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
-    <EmptyState title={t("gateway.openCodeEmptyTitle")} description={t("gateway.openCodeEmptyDescription")} />
-  </section>;
-  const connect = () => perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved").then(refreshStatus);
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.opencode")}>
-    <div className="gateway-workspace">
-      <div className="gateway-settings-panel gateway-application-panel">
-        <section className="gateway-setting-row client-setup opencode-client-setup">
-          <div className="opencode-provider-status">
-            <span className={`relay-status ${status?.configured ? "ready" : "info"}`}>
-              {status?.configured ? <CheckCircle2 aria-hidden /> : <CircleAlert aria-hidden />}
-              {status?.configured ? t("gateway.openCodeConfigured", { count: status.modelCount }) : t("gateway.openCodeNotConfigured")}
-            </span>
-            <div className="inline-actions">
-              <Button variant="primary" icon={<Plug aria-hidden />} busy={busy === "opencode-connect"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : undefined} onClick={() => void connect()}>{t("gateway.openCodeConnect")}</Button>
-            </div>
-          </div>
-        </section>
+    <div className="gateway-opencode-panel">
+      <div className="gateway-opencode-development" role="status">
+        <strong>{t("gateway.openCodeInDevelopment")}</strong>
       </div>
     </div>
   </section>;
@@ -247,7 +145,7 @@ function ChatGPTSetup() {
   if (mode === "remote") {
     const canAttach = Boolean(runtime?.capabilities.features.includes("profile_attach"));
     const switchRemote = () => activateCodexProfile("gateway-client-switch", relayCommands.attachCodexRemoteGateway, true);
-    return <section className="gateway-setting-row client-setup codex-client-setup client-oauth-binding remote-client-setup">
+    return <section className="gateway-account-panel client-setup codex-client-setup client-oauth-binding remote-client-setup">
       <header>
         <span className="gateway-config-icon"><UserRound aria-hidden /></span>
         <div><h2>{t("gateway.clientSetup")}</h2><p>{t("gateway.remoteClientHint")}</p></div>
@@ -274,7 +172,7 @@ function ChatGPTSetup() {
     true,
   );
 
-  return <section className="gateway-setting-row client-setup codex-client-setup client-oauth-binding">
+  return <section className="gateway-account-panel client-setup codex-client-setup client-oauth-binding">
     <header>
       <span className="gateway-config-icon"><UserRound aria-hidden /></span>
       <div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div>
@@ -285,7 +183,7 @@ function ChatGPTSetup() {
       </div>
       <Button className="oauth-binding-switch" variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")} onClick={() => void switchNow()}>{t("gateway.oauthBindingSwitch")}</Button>
       {automaticUnavailable ? <small className="oauth-binding-selection-hint warning"><CircleAlert aria-hidden /><span>{t("gateway.oauthBindingUnavailable")}</span></small> : null}
-      {codexPoolOauthSelection !== "none" ? <SettingToggle className="oauth-binding-reserve-toggle" label={t("gateway.oauthBindingReserve")} description={t("gateway.oauthBindingReserveHint")} checked={reserveEnabled} disabled={busy === "chatgpt-quota-reserve"} onChange={(checked) => void perform("chatgpt-quota-reserve", () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0), "feedback.saved")} /> : null}
     </div>
+    {codexPoolOauthSelection !== "none" ? <SettingToggle className="oauth-binding-reserve-toggle" label={t("gateway.oauthBindingReserve")} description={t("gateway.oauthBindingReserveHint")} checked={reserveEnabled} disabled={busy === "chatgpt-quota-reserve"} onChange={(checked) => void perform("chatgpt-quota-reserve", () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0), "feedback.saved")} /> : null}
   </section>;
 }

@@ -33,11 +33,18 @@ mod history;
 mod policy;
 mod process;
 
-use catalog::{
-    fetch_codex_model_catalog, fetch_direct_source_model_manifest, load_direct_source_api_key,
-    validate_direct_source,
-};
-pub(in crate::local_pool) use catalog::{refresh_active_codex_catalog, CodexCatalogRefreshStatus};
+pub(in crate::local_pool) use catalog::CodexCatalogRefreshStatus;
+use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_direct_source};
+
+pub(in crate::local_pool) async fn refresh_active_client_catalogs(
+    state: &DesktopState,
+) -> LocalResult<CodexCatalogRefreshStatus> {
+    catalog::refresh_client_catalogs(
+        super::opencode::refresh_active_opencode_catalog(state),
+        catalog::refresh_active_codex_catalog(state),
+    )
+    .await
+}
 pub(crate) use history::{
     discard_codex_history_backup, history_provider_changed, synchronize_codex_history,
     CodexHistoryProvider,
@@ -125,6 +132,9 @@ pub async fn attach_codex_to_local_gateway(
             store.gateway().codex_websockets_enabled,
         )
     };
+    let prepared = super::state::build_local_runtime_state(&state).await?;
+    let supports_websockets = supports_websockets
+        && zenith_relay_core::protocol::codex_catalog_supports_websockets(&prepared.gateway.models);
     if !key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -132,47 +142,21 @@ pub async fn attach_codex_to_local_gateway(
         )
         .into());
     }
-    // Connecting an already attached profile is a no-op. The previous flow
-    // stopped ChatGPT, synced its active account, rebuilt the catalog, and
-    // started the desktop app again on every click. Apart from being slow,
-    // repeated clicks could leave several launch requests queued behind the
-    // profile lock. Keep the existing active binding and let the caller only
-    // launch ChatGPT when it is actually closed.
-    let requested_oauth_account_id = bound_oauth_account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let same_oauth_binding = |binding: &codex::ProfileBinding| {
-        if disable_oauth_binding.unwrap_or(false) {
-            binding.bound_oauth_account_id.is_none()
-        } else {
-            requested_oauth_account_id.is_none()
-                || binding.bound_oauth_account_id.as_deref() == requested_oauth_account_id
-        }
-    };
-    if let Some(binding) =
-        codex::profile_bindings(&default_codex_home(), &state.profile_backup_root())?
-            .into_iter()
-            .find(|binding| {
-                binding.active
-                    && binding.credential_kind == codex::ProfileCredentialKind::LocalGateway
-                    && binding.credential_id == key_id
-                    && same_oauth_binding(binding)
-            })
-    {
-        return Ok(ProfileActivation { binding });
-    }
     let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
     let profile_dir = default_codex_home();
     let sync_history =
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
+    // Validate the selection and obtain the catalog while the current client
+    // is still usable. A catalog failure must not stop Codex or rewrite history.
+    let binding_request = gateway_oauth_binding_request(
+        disable_oauth_binding.unwrap_or(false),
+        bound_oauth_account_id.as_deref(),
+    )?;
+    let base_url = format!("http://127.0.0.1:{port}/v1");
+    let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result: Result<ProfileActivation, CommandError> = async {
-        let binding_request = gateway_oauth_binding_request(
-            disable_oauth_binding.unwrap_or(false),
-            bound_oauth_account_id.as_deref(),
-        )?;
         let bound_oauth =
             resolve_gateway_oauth_binding(&state, binding_request, &profile_dir).await?;
         let history_backup = if sync_history {
@@ -184,8 +168,6 @@ pub async fn attach_codex_to_local_gateway(
         } else {
             None
         };
-        let base_url = format!("http://127.0.0.1:{port}/v1");
-        let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
         let attached: Result<_, CommandError> = match bound_oauth.as_ref() {
             Some((account_id, prepared)) => codex::attach_with_oauth_and_options(
                 &profile_dir,
@@ -221,6 +203,7 @@ pub async fn attach_codex_to_local_gateway(
             reserve_basis_points,
         )
         .await;
+        state.record_catalog_refresh_result(None);
         Ok(ProfileActivation { binding })
     }
     .await;
@@ -252,12 +235,19 @@ pub async fn attach_codex_to_remote_gateway(
         .profile_credential()
         .await
         .map_err(super::remote_server::remote_error)?;
-    let supports_websockets = client
+    let mut remote_state = client
         .state()
         .await
-        .map_err(super::remote_server::remote_error)?
-        .gateway
-        .codex_websockets_enabled;
+        .map_err(super::remote_server::remote_error)?;
+    zenith_relay_core::protocol::apply_model_protocol_routes(
+        &mut remote_state.gateway.models,
+        &remote_state.sources,
+        &remote_state.accounts,
+    );
+    let supports_websockets = remote_state.gateway.codex_websockets_enabled
+        && zenith_relay_core::protocol::codex_catalog_supports_websockets(
+            &remote_state.gateway.models,
+        );
     let rotate_profile_key = capabilities.supports(Feature::ProfileKeyRotation);
     let profile_dir = default_codex_home();
     let sync_history =
@@ -265,15 +255,6 @@ pub async fn attach_codex_to_remote_gateway(
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result: Result<ProfileActivation, CommandError> = async {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(
-                &state,
-                &profile_dir,
-                CodexHistoryProvider::LocalGateway,
-            )?
-        } else {
-            None
-        };
         let rotation = if rotate_profile_key {
             Some(
                 client
@@ -311,6 +292,28 @@ pub async fn attach_codex_to_remote_gateway(
                 }
                 return Err(error);
             }
+        };
+        let history_backup = if sync_history {
+            match synchronize_history_for_command(
+                &state,
+                &profile_dir,
+                CodexHistoryProvider::LocalGateway,
+            ) {
+                Ok(backup) => backup,
+                Err(mut error) => {
+                    if let Some(rotation) = rotation.as_ref() {
+                        append_remote_cleanup_error(
+                            &mut error,
+                            client
+                                .abort_profile_key_rotation(&rotation.rotation_id)
+                                .await,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
         };
         let attached = codex::attach_with_catalog_and_websockets(
             &profile_dir,
@@ -504,15 +507,15 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let history_backup = if sync_history {
-        synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
-    } else {
-        None
-    };
-    let result = {
+    let result = (|| {
+        let history_backup = if sync_history {
+            synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
+        } else {
+            None
+        };
         let result = codex::restore(&profile_dir, &state.profile_backup_root()).map_err(Into::into);
         rollback_history_on_error(&state, history_backup.as_deref(), result)
-    };
+    })();
     if result.is_ok() {
         set_runtime_pool_interface_reserve(&state, None, 0).await;
     }
@@ -521,19 +524,9 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
 
 pub(crate) async fn prepare_ready_api_profile(state: &DesktopState) -> Result<bool, CommandError> {
     let _mutation = state.setup_guard().await;
-    let profile_dir = default_codex_home();
-    let restore_local_gateway = codex::credential_kind(&profile_dir, &state.profile_backup_root())?
-        == Some(codex::ProfileCredentialKind::LocalGateway);
-    let stopped = stop_codex_and_sync_account(state).await?;
-    if !restore_local_gateway {
-        return Ok(stopped);
-    }
-    let result = codex::restore(&profile_dir, &state.profile_backup_root()).map_err(Into::into);
-    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
-    if result.is_ok() {
-        set_runtime_pool_interface_reserve(state, None, 0).await;
-    }
-    result.map(|()| stopped)
+    // Detach and attach belong to the same profile transaction, not a
+    // preparatory UI call that can discard the active connection on failure.
+    stop_codex_and_sync_account(state).await
 }
 
 #[tauri::command]
@@ -549,16 +542,18 @@ pub async fn launch_managed_codex_profile(
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
-    // Profile attach/switch commands already synchronize history before they
-    // mutate a profile. A plain launch must stay side-effect free: rescanning
-    // every rollout and SQLite file here made repeated opens progressively
-    // slower as the Codex history grew.
+    // Catalog overrides are loaded by Codex on startup. Finish deferred
+    // updates before launching; do not rescan or rewrite conversation history.
     if is_codex_running() {
         return Ok(());
     }
-    launch_codex_with_profile().map_err(|error| {
-        LocalPoolError::new(ErrorCode::Io, format!("failed to launch ChatGPT: {error}")).into()
-    })
+    process::launch_after_catalog_refresh(
+        state.catalog_refresh_warning().is_some(),
+        catalog::refresh_active_codex_catalog(&state),
+        |result| super::record_catalog_refresh_result(&state, result),
+        launch_codex_with_profile,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -600,13 +595,10 @@ pub async fn launch_codex_source(
         secret_store::save,
     )?;
     let profile_dir = default_codex_home();
-    let manifest = fetch_direct_source_model_manifest(&source.base_url, &api_key)
-        .await
-        .ok();
-    let catalog = codex::direct_source_model_catalog_with_manifest(
+    let catalog = codex::direct_source_model_catalog_with_capabilities(
         &profile_dir,
         &response_models,
-        manifest.as_ref(),
+        &state.model_metadata_catalog(),
     )?;
     if catalog.is_none() {
         return Err(LocalPoolError::new(
@@ -619,12 +611,16 @@ pub async fn launch_codex_source(
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let history_backup = if sync_history {
-        synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::LocalGateway)?
-    } else {
-        None
-    };
-    let result = {
+    let result = (|| {
+        let history_backup = if sync_history {
+            synchronize_history_for_command(
+                &state,
+                &profile_dir,
+                CodexHistoryProvider::LocalGateway,
+            )?
+        } else {
+            None
+        };
         let result = codex::attach_with_catalog(
             &profile_dir,
             &state.profile_backup_root(),
@@ -636,10 +632,11 @@ pub async fn launch_codex_source(
         .map(|binding| ProfileActivation { binding })
         .map_err(Into::into);
         rollback_history_on_error(&state, history_backup.as_deref(), result)
-    };
+    })();
     let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
     if result.is_ok() {
         set_runtime_pool_interface_reserve(&state, None, 0).await;
+        state.record_catalog_refresh_result(None);
     }
     result
 }
@@ -662,16 +659,16 @@ pub async fn restore_codex_account_profile(
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account_at(&state, &profile_dir).await?;
-    let history_backup = if sync_history {
-        synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
-    } else {
-        None
-    };
-    let result = {
+    let result = (|| {
+        let history_backup = if sync_history {
+            synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
+        } else {
+            None
+        };
         let result = codex::restore_account_profile(&profile_dir, &state.profile_backup_root())
             .map_err(Into::into);
         rollback_history_on_error(&state, history_backup.as_deref(), result)
-    };
+    })();
     restart_codex_after_restore(stopped, result, launch_codex_with_profile)
 }
 
@@ -791,7 +788,7 @@ async fn activate_account_profile(
         } else {
             None
         };
-        let attached = codex::attach_account(
+        let attached = codex::attach_account_explicit(
             &profile_dir,
             &state.profile_backup_root(),
             account_id,
@@ -820,7 +817,7 @@ async fn set_runtime_pool_interface_reserve(
     }
 }
 
-fn verify_remote_profile_binding(
+pub(super) fn verify_remote_profile_binding(
     profile_dir: &std::path::Path,
     backup_root: &std::path::Path,
     key_id: &str,
@@ -955,6 +952,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["provider-model".into()],
             allowed_models: Vec::new(),

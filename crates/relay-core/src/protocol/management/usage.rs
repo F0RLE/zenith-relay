@@ -1,6 +1,6 @@
 use crate::{
-    ApiEquivalentSummary, CacheWriteTtl, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
-    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, WireApi,
+    ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, PricingMetadata,
+    RoutingDiagnostics, ToolUseDiagnostics, WireApi,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,8 +43,9 @@ pub struct UsageTokenBreakdown {
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_input_tokens: Option<u64>,
+    /// Provider-reported cache-window durations, normalized as a comma-separated list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_ttl: Option<CacheWriteTtl>,
+    pub cache_write_ttl: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,

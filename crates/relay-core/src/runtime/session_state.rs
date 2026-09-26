@@ -1,109 +1,121 @@
 use super::*;
 use crate::{NativeResponsesReplayState, PROMPT_AFFINITY_TTL_MS, RESPONSE_AFFINITY_TTL_MS};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CODEX_TURN_STATE_TTL_MS: u64 = 60 * 60 * 1_000;
+const VOLATILE_RESPONSE_PREFIX: &str = "volatile-response:";
 
 #[derive(Default)]
 pub(super) struct CodexTurnStateStore {
-    origins: Mutex<BTreeMap<String, CodexTurnStateOrigin>>,
-    writes: AtomicU64,
+    origins: Mutex<BTreeMap<String, u64>>,
 }
 
-#[derive(Clone)]
-struct CodexTurnStateOrigin {
-    account_id: String,
-    expires_at_ms: u64,
+pub(crate) struct CodexTurnStateScope<'a> {
+    pub local_key_id: &'a str,
+    pub session_id: &'a str,
+    pub account_id: &'a str,
+    pub model: &'a str,
 }
 
 impl CodexTurnStateStore {
-    fn key(local_key_id: &str, session_id: &str) -> Option<String> {
-        let local_key_id = local_key_id.trim();
-        let session_id = session_id.trim();
-        if local_key_id.is_empty() || session_id.is_empty() {
+    fn key(scope: &CodexTurnStateScope<'_>, state: &[u8], credential: &[u8]) -> Option<String> {
+        if state.is_empty()
+            || state.len() > 8192
+            || credential.is_empty()
+            || [
+                scope.local_key_id,
+                scope.session_id,
+                scope.account_id,
+                scope.model,
+            ]
+            .iter()
+            .any(|value| value.is_empty())
+        {
             return None;
         }
-        Some(hex::encode(Sha256::digest(
-            format!("codex-turn-state\0{local_key_id}\0{session_id}").as_bytes(),
-        )))
+        let mut digest = Sha256::new();
+        for part in [
+            scope.local_key_id.as_bytes(),
+            scope.session_id.as_bytes(),
+            scope.account_id.as_bytes(),
+            scope.model.as_bytes(),
+            state,
+            credential,
+        ] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part);
+        }
+        Some(hex::encode(digest.finalize()))
     }
 
-    fn note(&self, local_key_id: &str, session_id: &str, account_id: &str, now_ms: u64) {
-        let Some(key) = Self::key(local_key_id, session_id) else {
+    fn note(&self, scope: &CodexTurnStateScope<'_>, state: &[u8], credential: &[u8], now_ms: u64) {
+        let Some(key) = Self::key(scope, state, credential) else {
             return;
         };
-        let account_id = account_id.trim();
-        if account_id.is_empty() {
-            return;
-        }
-        self.origins
+        let mut origins = self
+            .origins
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                key,
-                CodexTurnStateOrigin {
-                    account_id: account_id.to_string(),
-                    expires_at_ms: now_ms.saturating_add(CODEX_TURN_STATE_TTL_MS),
-                },
-            );
-        if self.writes.fetch_add(1, Ordering::Relaxed) % 256 == 255 {
-            self.sweep(now_ms);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        origins.retain(|_, expires| *expires > now_ms);
+        if origins.len() >= 4096 && !origins.contains_key(&key) {
+            if let Some(oldest) = origins
+                .iter()
+                .min_by_key(|(_, expires)| *expires)
+                .map(|(key, _)| key.clone())
+            {
+                origins.remove(&oldest);
+            }
         }
+        origins.insert(key, now_ms.saturating_add(CODEX_TURN_STATE_TTL_MS));
     }
 
-    fn belongs_to_account(
+    fn contains(
         &self,
-        local_key_id: &str,
-        session_id: &str,
-        account_id: &str,
+        scope: &CodexTurnStateScope<'_>,
+        state: &[u8],
+        credential: &[u8],
         now_ms: u64,
     ) -> bool {
-        let Some(key) = Self::key(local_key_id, session_id) else {
+        let Some(key) = Self::key(scope, state, credential) else {
             return false;
         };
         let mut origins = self
             .origins
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(origin) = origins.get(&key) else {
+        let Some(expires) = origins.get(&key) else {
             return false;
         };
-        if origin.expires_at_ms <= now_ms {
+        if *expires <= now_ms {
             origins.remove(&key);
             return false;
         }
-        origin.account_id == account_id.trim()
-    }
-
-    fn sweep(&self, now_ms: u64) {
-        self.origins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, origin| origin.expires_at_ms > now_ms);
+        true
     }
 }
 
 impl GatewayRuntime {
     pub(crate) fn note_codex_turn_state(
         &self,
-        local_key_id: &str,
-        session_id: &str,
-        account_id: &str,
+        scope: &CodexTurnStateScope<'_>,
+        state: &[u8],
+        credential: &[u8],
         now_ms: u64,
     ) {
         self.codex_turn_state_store
-            .note(local_key_id, session_id, account_id, now_ms);
+            .note(scope, state, credential, now_ms);
     }
 
-    pub(crate) fn codex_turn_state_owned_by_account(
+    pub(crate) fn codex_turn_state_matches(
         &self,
-        local_key_id: &str,
-        session_id: &str,
-        account_id: &str,
+        scope: &CodexTurnStateScope<'_>,
+        state: &[u8],
+        credential: &[u8],
         now_ms: u64,
     ) -> bool {
         self.codex_turn_state_store
-            .belongs_to_account(local_key_id, session_id, account_id, now_ms)
+            .contains(scope, state, credential, now_ms)
     }
 }
 
@@ -157,18 +169,50 @@ impl GatewayRuntime {
             .get(local_key_id, response_id, candidate_id, now_ms)
     }
 
-    pub(crate) fn save_native_responses_replay(
+    /// Captures a completed native Responses turn as a bounded, materialized
+    /// conversation. When the completed turn continues a previous response,
+    /// fold the predecessor's replay state into it first. That keeps the
+    /// next recovery independent of an opaque upstream response id, rather
+    /// than retaining only the most recent user message.
+    pub(crate) fn capture_native_responses_replay(
         &self,
         local_key_id: &str,
         candidate_id: &str,
-        response_id: &str,
-        state: NativeResponsesReplayState,
+        request: &Value,
+        model: &str,
+        upstream: &Value,
         now_ms: u64,
     ) {
+        let materialized_request = request
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|response_id| !response_id.is_empty())
+            .and_then(|response_id| {
+                self.load_native_responses_replay(local_key_id, response_id, candidate_id, now_ms)
+            })
+            .and_then(|previous| {
+                previous
+                    .replay_request(
+                        request,
+                        model,
+                        request
+                            .get("stream")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    )
+                    .ok()
+            })
+            .unwrap_or_else(|| request.clone());
+        let Some((response_id, state)) =
+            NativeResponsesReplayState::from_response(&materialized_request, model, upstream)
+        else {
+            return;
+        };
         self.native_responses_replay_store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(local_key_id, response_id, candidate_id, state, now_ms);
+            .insert(local_key_id, &response_id, candidate_id, state, now_ms);
     }
 
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
@@ -179,6 +223,129 @@ impl GatewayRuntime {
         Some(hex::encode(Sha256::digest(
             format!("response\0{response_id}").as_bytes(),
         )))
+    }
+
+    pub(crate) fn tool_call_affinity_key(
+        &self,
+        local_key_id: &str,
+        call_id: &str,
+    ) -> Option<String> {
+        let local_key_id = local_key_id.trim();
+        let call_id = call_id.trim();
+        if local_key_id.is_empty() || call_id.is_empty() || call_id.len() > 256 {
+            return None;
+        }
+        Some(format!(
+            "tool:{}",
+            hex::encode(Sha256::digest(
+                format!("tool\0{local_key_id}\0{call_id}").as_bytes(),
+            ))
+        ))
+    }
+
+    pub(crate) fn has_response_affinity_binding(&self, key: &str, now_ms: u64) -> bool {
+        if self.lock_scheduler().has_response_affinity(key, now_ms) {
+            return true;
+        }
+        self.response_affinity_store
+            .as_ref()
+            .and_then(|store| store.find(key, now_ms).ok().flatten())
+            .is_some()
+    }
+
+    /// Returns the in-memory owner of a response continuation. This is used
+    /// only to read the owner-scoped native replay state when that owner has
+    /// left the active pool or was removed before the next turn arrives.
+    pub(crate) fn response_affinity_candidate(&self, key: &str, now_ms: u64) -> Option<String> {
+        self.lock_scheduler()
+            .response_affinity_candidate(key, now_ms)
+    }
+
+    pub(crate) fn response_affinity_owner_supports_route(
+        &self,
+        key: &AuthenticatedKey,
+        affinity_key: &str,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        let scope = key.scope_snapshot();
+        self.lock_scheduler()
+            .response_affinity_owner_supports_route(
+                affinity_key,
+                model,
+                allowed_protocols,
+                &scope,
+                now_ms,
+            )
+    }
+
+    pub(crate) fn response_affinity_owner_is_eligible(
+        &self,
+        key: &AuthenticatedKey,
+        affinity_key: &str,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        let scope = key.scope_snapshot();
+        self.lock_scheduler().response_affinity_owner_is_eligible(
+            affinity_key,
+            model,
+            allowed_protocols,
+            &scope,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn response_affinity_owner_supports_model(
+        &self,
+        affinity_key: &str,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Option<bool> {
+        self.lock_scheduler()
+            .response_affinity_owner_supports_model(affinity_key, model, allowed_protocols, now_ms)
+    }
+
+    /// Release an optional tool binding after its owner is no longer eligible
+    /// or leaves the request's configured routes. Callers must first establish
+    /// that the input contains the full tool history and does not depend on an
+    /// opaque response id.
+    pub(crate) fn release_unroutable_response_affinity(
+        &self,
+        key: &AuthenticatedKey,
+        affinity_key: &mut Option<String>,
+        model: &str,
+        allowed_protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> bool {
+        let owner_is_eligible = affinity_key.as_deref().and_then(|affinity_key| {
+            self.response_affinity_owner_is_eligible(
+                key,
+                affinity_key,
+                model,
+                allowed_protocols,
+                now_ms,
+            )
+        });
+        let supports_route = affinity_key.as_deref().and_then(|affinity_key| {
+            self.response_affinity_owner_supports_route(
+                key,
+                affinity_key,
+                model,
+                allowed_protocols,
+                now_ms,
+            )
+        });
+        if owner_is_eligible != Some(false) && supports_route != Some(false) {
+            return false;
+        }
+        // Other branches may still need this owner or its cached replay.
+        // Only this self-contained request releases the routing constraint.
+        *affinity_key = None;
+        true
     }
 
     pub(crate) fn prompt_affinity_key(
@@ -244,12 +411,46 @@ impl GatewayRuntime {
         now_ms: u64,
     ) {
         if let Some(key) = self.response_affinity_key(response_id) {
-            if self
-                .lock_scheduler()
-                .bind_response_affinity(key.clone(), candidate_id, now_ms)
-            {
-                self.persist_response_affinity(&key, candidate_id, now_ms);
-            }
+            self.bind_affinity_key(&key, candidate_id, now_ms);
+        }
+    }
+
+    /// Keeps an incomplete Responses turn on its current live WebSocket
+    /// without writing an ownership record to durable storage. A completed
+    /// response uses `bind_response_affinity`; an incomplete one may only be
+    /// continued while that same client connection remains alive.
+    pub(crate) fn bind_volatile_response_affinity(
+        &self,
+        response_id: Option<&str>,
+        candidate_id: &str,
+        request_id: &str,
+        now_ms: u64,
+    ) -> Option<String> {
+        let response_key = self.response_affinity_key(response_id)?;
+        let key = format!("{VOLATILE_RESPONSE_PREFIX}{request_id}:{response_key}");
+        self.lock_scheduler()
+            .bind_response_affinity(key.clone(), candidate_id, now_ms)
+            .then_some(key)
+    }
+
+    pub(crate) fn bind_tool_call_affinity(
+        &self,
+        local_key_id: &str,
+        call_id: &str,
+        candidate_id: &str,
+        now_ms: u64,
+    ) {
+        if let Some(key) = self.tool_call_affinity_key(local_key_id, call_id) {
+            self.bind_affinity_key(&key, candidate_id, now_ms);
+        }
+    }
+
+    fn bind_affinity_key(&self, key: &str, candidate_id: &str, now_ms: u64) {
+        if self
+            .lock_scheduler()
+            .bind_response_affinity(key.to_string(), candidate_id, now_ms)
+        {
+            self.persist_response_affinity(key, candidate_id, now_ms);
         }
     }
 
@@ -265,7 +466,22 @@ impl GatewayRuntime {
         })
     }
 
+    pub(crate) fn invalidate_prompt_affinity(&self, key: Option<&str>) -> bool {
+        key.is_some_and(|key| {
+            let invalidated = self.lock_scheduler().invalidate_prompt_affinity(key);
+            if invalidated {
+                if let Some(store) = self.response_affinity_store.as_ref() {
+                    let _ = store.delete(key);
+                }
+            }
+            invalidated
+        })
+    }
+
     pub(crate) fn persist_response_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
+        if key.starts_with(VOLATILE_RESPONSE_PREFIX) {
+            return;
+        }
         if let Some(store) = self.response_affinity_store.as_ref() {
             let _ = store.upsert(&ResponseAffinityBinding {
                 key: key.to_string(),
@@ -293,15 +509,76 @@ mod turn_state_tests {
     #[test]
     fn turn_state_origin_blocks_cross_account_echo_until_expiry() {
         let store = CodexTurnStateStore::default();
-        store.note("key", "thread", "account-a", 10);
-        assert!(store.belongs_to_account("key", "thread", "account-a", 11));
-        assert!(!store.belongs_to_account("key", "thread", "account-b", 11));
-        assert!(!store.belongs_to_account(
-            "key",
-            "thread",
-            "account-b",
-            10 + CODEX_TURN_STATE_TTL_MS,
+        let scope = CodexTurnStateScope {
+            local_key_id: "key",
+            session_id: "thread",
+            account_id: "account-a",
+            model: "synthetic",
+        };
+        store.note(&scope, b"state-a", b"credential", 10);
+        assert!(store.contains(&scope, b"state-a", b"credential", 11));
+        assert!(!store.contains(&scope, b"state-b", b"credential", 11));
+        assert!(!store.contains(&scope, b"state-a", b"refreshed", 11));
+        assert!(!store.contains(
+            &CodexTurnStateScope {
+                account_id: "account-b",
+                ..scope
+            },
+            b"state-a",
+            b"credential",
+            11
         ));
-        assert!(!store.belongs_to_account("key", "unknown", "account-a", 11));
+        assert!(!store.contains(
+            &CodexTurnStateScope {
+                model: "another",
+                ..scope
+            },
+            b"state-a",
+            b"credential",
+            11
+        ));
+        assert!(!store.contains(
+            &CodexTurnStateScope {
+                local_key_id: "other-key",
+                ..scope
+            },
+            b"state-a",
+            b"credential",
+            11
+        ));
+        assert!(!store.contains(
+            &CodexTurnStateScope {
+                session_id: "other-thread",
+                ..scope
+            },
+            b"state-a",
+            b"credential",
+            11
+        ));
+        assert!(!store.contains(
+            &scope,
+            b"state-a",
+            b"credential",
+            10 + CODEX_TURN_STATE_TTL_MS
+        ));
+    }
+
+    #[test]
+    fn late_responses_do_not_reassign_another_turn_state() {
+        let store = CodexTurnStateStore::default();
+        let first = CodexTurnStateScope {
+            local_key_id: "key",
+            session_id: "thread",
+            account_id: "a",
+            model: "synthetic",
+        };
+        let second = CodexTurnStateScope {
+            account_id: "b",
+            ..first
+        };
+        store.note(&second, b"new-state", b"new-credential", 10);
+        store.note(&first, b"old-state", b"old-credential", 11);
+        assert!(store.contains(&second, b"new-state", b"new-credential", 12));
+        assert!(!store.contains(&first, b"new-state", b"old-credential", 12));
     }
 }

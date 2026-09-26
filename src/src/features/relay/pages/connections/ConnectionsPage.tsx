@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { LogIn, Play, Plus, RefreshCw, Upload } from "lucide-react";
+import { LogIn, Plus, RefreshCw, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, SourceSummary, WakeTask } from "../../api/types";
-import { Button, PageHeader, Tabs } from "../../components/Ui";
+import { Button, IconButton, PageHeader, Tabs } from "../../components/Ui";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
 import { useSourceRefresh } from "../../hooks/useSourceRefresh";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -12,15 +12,16 @@ import { connectionInitialView, connectionViews, reconcileRemoteConnectionView, 
 import { AccountsTable } from "./AccountsTable";
 import { SourceDialog } from "./SourceDialog";
 import { AccountExportDialog } from "./AccountExportDialog";
-import { AutomationDialog, AutomationsTable } from "./AutomationsView";
+import { AutomationDialog, AutomationsList } from "./AutomationsView";
 import { OAuthAccountSetupDialog, OAuthDialog } from "./OAuthDialogs";
 import { DeployDialog, RemoteDialog, RemoteView } from "./RemoteViews";
 import { SourcesTable } from "./SourcesTable";
+import { useProxyChecks } from "./useProxyChecks";
 type DialogKind = "source" | "automation" | "remote" | "deploy" | "accountProxy" | "bulkProxies" | "proxyImport" | "oauthSetup" | "accountExport" | null;
 const CONNECTIONS_VIEW_REQUEST = "relay.connections.requestedView";
 export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, busy, perform, refresh } = useRelayState();
+  const { mode, runtime, busy, perform } = useRelayState();
   const [view, setView] = useState<ConnectionView>(() => connectionInitialView(
     mode,
     mode === "zenith" ? "sources" : "accounts",
@@ -36,6 +37,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
   const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
   const [proxyRevision, setProxyRevision] = useState(0);
+  const proxyChecks = useProxyChecks(mode);
   const oauth = useOAuthSignIn((result) => {
     setOauthAccountId(result.account.id);
     setDialog("oauthSetup");
@@ -48,9 +50,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const canImportAccounts = mode !== "remote" || supports("account_batch_import");
   const canManageProxies = supports("account_proxies");
   const canExportAccounts = supports("account_export");
-  const showTableToolbar = view === "sources"
-    ? Boolean(runtime?.sources.length)
-    : view === "automations" && Boolean(runtime?.automations.length);
+  const showSourceToolbar = view === "sources" && Boolean(runtime?.sources.length);
 
   useEffect(() => {
     const requested = mode === "zenith" ? null : sessionStorage.getItem(CONNECTIONS_VIEW_REQUEST);
@@ -146,22 +146,19 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
         }
       />
       <Tabs value={view} items={tabs} onChange={(id) => { if (id === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, id); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(id as ConnectionView); }} label={t("connections.views")} />
-      {showTableToolbar ? <div className={`table-toolbar${view === "sources" ? " relay-compact-content" : ""}`}>
+      {showSourceToolbar ? <div className="table-toolbar connections-toolbar relay-compact-content">
         <label className="search-field">
           <span className="sr-only">{t("common.search")}</span>
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
         </label>
-        {view === "automations" && mode === "local" ? <Button variant="secondary" icon={<Play aria-hidden />} busy={busy === "wake-due"} onClick={() => perform("wake-due", relayCommands.runWakeConfirmations, "feedback.checked")}>{t("automations.runDue")}</Button> : null}
-        {view === "sources" ? <>
-          {sourceRefreshReport ? <span className="table-toolbar-result" role="status">{t("sources.refreshResult", sourceRefreshReport)}</span> : null}
-          <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={refreshSourceData}>{t("sources.refreshData")}</Button>
-        </> : <Button variant="secondary" icon={<RefreshCw aria-hidden />} onClick={() => void refresh()}>{t("common.refresh")}</Button>}
+        {sourceRefreshReport ? <span className="table-toolbar-result" role="status">{t("sources.refreshResult", sourceRefreshReport)}</span> : null}
+        <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={refreshSourceData} />
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} /> : null}
       {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} onImport={onImport} onSignIn={startOAuth} onReauthenticate={reauthenticateAccount} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
-      {view === "proxies" ? <ProxyStorageView revision={proxyRevision} onImport={() => setDialog("proxyImport")} /> : null}
-      {view === "automations" ? <AutomationsTable query={query} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
+      {view === "proxies" ? <ProxyStorageView revision={proxyRevision} diagnostics={proxyChecks} onImport={() => setDialog("proxyImport")} /> : null}
+      {view === "automations" ? <AutomationsList onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
 
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
@@ -171,7 +168,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog accountIds={bulkProxyAccountIds} onClose={() => setDialog(null)} /> : null}
-      {dialog === "proxyImport" ? <ProxyImportDialog onImported={() => setProxyRevision((value) => value + 1)} onClose={() => setDialog(null)} /> : null}
+      {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((value) => value + 1)} onClose={() => setDialog(null)} /> : null}
       {dialog === "oauthSetup" && oauthAccountId ? <OAuthAccountSetupDialog accountId={oauthAccountId} onClose={() => { setDialog(null); setOauthAccountId(null); }} /> : null}
       {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}

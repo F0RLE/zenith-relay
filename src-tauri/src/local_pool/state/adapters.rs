@@ -5,6 +5,8 @@ use crate::local_pool::{
         oauth_flow::{OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
         NativeSecretBackend,
     },
+    commands::{current_time_ms, sync_runtime_account_state},
+    host::GatewayManager,
     response_affinity::DesktopResponseAffinityStore,
     store::LocalPoolStore,
     usage_writer::{DesktopUsageWriter, DesktopUsageWriterParts},
@@ -21,6 +23,8 @@ impl DesktopState {
     pub(crate) fn account_metadata_sink(&self) -> Arc<StoreAccountMetadata> {
         Arc::new(StoreAccountMetadata {
             store: self.store.clone(),
+            gateway: self.gateway.clone(),
+            events: self.oauth_events.clone(),
         })
     }
 
@@ -36,7 +40,13 @@ impl DesktopState {
         &self,
     ) -> impl Fn(RuntimeActivitySnapshot) + Send + Sync + 'static {
         let events = self.oauth_events.clone();
-        move |activity| events.emit_runtime_activity(activity)
+        let refresh = self.refresh.clone();
+        move |activity| {
+            if activity.in_flight > 0 || activity.active_request_count > 0 {
+                refresh.set_member_active(&activity.member_key);
+            }
+            events.emit_runtime_activity(activity);
+        }
     }
 
     pub(crate) fn runtime_team_breaker_callback(
@@ -60,8 +70,8 @@ impl DesktopState {
         DesktopUsageWriter::new(DesktopUsageWriterParts {
             telemetry: self.telemetry.clone(),
             store: self.store.clone(),
-            quota_refresh: self.quota_refresh.clone(),
-            quota_refresh_notify: self.quota_refresh_notify.clone(),
+            transient_root: self.transient_root(),
+            refresh: self.refresh.clone(),
             wake: self.wake.clone(),
             failed: self.failed_usage_writes.clone(),
             wake_notify: self.wake_notify.clone(),
@@ -80,6 +90,8 @@ impl DesktopState {
 
 pub(crate) struct StoreAccountMetadata {
     store: Arc<Mutex<LocalPoolStore>>,
+    gateway: GatewayManager,
+    events: DesktopOAuthEvents,
 }
 
 #[derive(Clone, Default)]
@@ -153,13 +165,31 @@ impl AccountMetadataSink for StoreAccountMetadata {
         auth_state: zenith_relay_core::accounts::AccountAuthState,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), MetadataSinkError>> + Send + 'a>> {
         Box::pin(async move {
-            let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
-            let mut account = store
-                .account(local_account_id)
-                .cloned()
-                .ok_or(MetadataSinkError)?;
-            account.account.auth_state = auth_state;
-            store.upsert_account(account).map_err(|_| MetadataSinkError)
+            let changed = {
+                let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
+                let mut account = store
+                    .account(local_account_id)
+                    .cloned()
+                    .ok_or(MetadataSinkError)?;
+                let changed = account.account.auth_state != auth_state;
+                account.account.auth_state = auth_state;
+                store
+                    .upsert_account(account.clone())
+                    .map_err(|_| MetadataSinkError)?;
+                changed
+            };
+            if let Some(runtime) = self.gateway.runtime().await {
+                // The gateway lock can yield while a newer account edit is
+                // persisted. Read and apply the current state under one lock.
+                let store = self.store.lock().map_err(|_| MetadataSinkError)?;
+                if let Some(account) = store.account(local_account_id) {
+                    sync_runtime_account_state(&runtime, account, current_time_ms());
+                }
+            }
+            if changed {
+                self.events.emit_state_changed();
+            }
+            Ok(())
         })
     }
 }

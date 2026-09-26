@@ -550,6 +550,10 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         http_status: row.get(12)?,
         error_category: row.get(13)?,
         error_origin: error_origin.as_deref().and_then(|value| value.parse().ok()),
+        upstream_error: row
+            .get::<_, Option<String>>(32)?
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         tool_use: tool_use_json
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),
@@ -561,7 +565,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         cache_write_input_tokens: cache_write_input_tokens.map(rust_u64),
         cache_write_ttl: cache_write_ttl
             .as_deref()
-            .and_then(zenith_relay_core::CacheWriteTtl::from_anthropic_ttl),
+            .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls),
         reasoning_tokens: reasoning_tokens.map(rust_u64),
         output_tokens: output_tokens.map(rust_u64),
         total_tokens: total_tokens.map(rust_u64),

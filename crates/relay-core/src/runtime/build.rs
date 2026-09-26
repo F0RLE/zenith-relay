@@ -2,20 +2,23 @@ use super::images::select_image_main_model_with_catalog;
 use super::{
     all_native_wire_apis, client_wire_apis_to_native, model_rules, normalize_client_wire_api,
     normalize_prefix, normalized_responses_url, normalized_set, require_runtime_value,
-    source_candidate_id, ChatGptAccountExecutor, GatewayRuntimeOptions, PassiveQuotaState,
-    RuntimeHttpClients, RuntimeKey, RuntimeSource, SourceCandidateBinding, IMAGE_API_MODEL,
+    source_candidate_id, AccountModelInventory, ChatGptAccountExecutor, GatewayRuntimeOptions,
+    PassiveQuotaState, RuntimeHttpClients, RuntimeKey, RuntimeSource, SourceCandidateBinding,
+    IMAGE_API_MODEL,
 };
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::{CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth};
+use crate::providers::chatgpt::{
+    CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth, BASIS_POINTS_RESPONSES_URL,
+};
 use crate::{
-    normalize_subscription_plan_order, runtime_source_protocol_bindings, CandidateHealth,
-    CandidateKind, CandidateQuota, CandidateScope, Error, ModelRegistry, ModelRules, PoolScheduler,
-    Result, RuntimeCandidate, RuntimeMixedLocalKey, SourceConnector, WireApi,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, ModelRegistry,
+    ModelRules, PoolScheduler, Result, RuntimeCandidate, RuntimeMixedLocalKey, SourceConnector,
+    WireApi,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 #[derive(Clone, Copy)]
 pub(super) enum ReachabilityRequirement {
@@ -48,14 +51,14 @@ pub(super) struct KeyRuntimeParts {
 }
 
 pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Result<()> {
+    if let Some(policy) = &options.pool_routing {
+        policy
+            .validate_activation()
+            .map_err(|message| Error::Validation(message.into()))?;
+    }
     if !(1..=8).contains(&options.max_retry_candidates) {
         return Err(Error::Validation(
             "max retry candidates must be between 1 and 8".to_string(),
-        ));
-    }
-    if !(1..=8).contains(&options.cooldown_after_failures) {
-        return Err(Error::Validation(
-            "cooldown after failures must be between 1 and 8".to_string(),
         ));
     }
     Ok(())
@@ -63,17 +66,7 @@ pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Resul
 
 pub(super) fn configure_scheduler(options: &GatewayRuntimeOptions) -> Result<PoolScheduler> {
     let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(
-        options.cooldown_after_failures,
-        options.keep_last_candidate_available,
-    );
-    scheduler.set_routing_strategy(options.routing_strategy);
-    let subscription_plan_order =
-        normalize_subscription_plan_order(options.subscription_plan_order.clone())
-            .map_err(|message| Error::Validation(message.to_string()))?;
-    scheduler.set_subscription_plan_order(&subscription_plan_order);
     scheduler.set_quota_stale_after_ms(options.quota_stale_after_ms);
-    scheduler.set_provider_storm_breaker_enabled(options.provider_storm_breaker);
     Ok(scheduler)
 }
 
@@ -100,10 +93,11 @@ pub(super) fn build_sources(
         if executors.contains_key(&source.source.id) {
             return Err(Error::Validation("source ids must be unique".to_string()));
         }
-        let bindings = runtime_source_protocol_bindings(
-            source.protocol_bindings.clone(),
-            source.source.wire_api,
+        let bindings = source.protocol_config.resolve(
+            &source.source.base_url,
             &source.source.models,
+            &source.protocol_bindings,
+            source.source.wire_api,
         )?;
         let source_id = source.source.id.clone();
         let connector = SourceConnector::new(&source.source, &bindings)?;
@@ -113,7 +107,7 @@ pub(super) fn build_sources(
             if models.is_empty() {
                 continue;
             }
-            let candidate_id = source_candidate_id(&source_id, binding, bindings.len());
+            let candidate_id = source_candidate_id(&source_id, binding, source.source.wire_api);
             if candidate_bindings.contains_key(&candidate_id) {
                 return Err(Error::Validation(
                     "source protocol candidate ids must be unique".to_string(),
@@ -133,15 +127,18 @@ pub(super) fn build_sources(
                 model_rules: rules.clone(),
                 health: CandidateHealth::Healthy,
                 quota: CandidateQuota::Unknown,
+                provider_credits_micro_units: None,
+                provider_credits_unlimited: false,
                 quota_updated_at_ms: None,
                 quota_reset_at_ms: None,
                 cooldowns: BTreeMap::new(),
                 last_used_at: source.last_used_at_ms,
-                consecutive_failures: 0,
+
                 secret_available: true,
             };
-            registry.replace(candidate_id.clone(), binding.model_ids.iter());
+            registry.replace(candidate_id.clone(), source.source.models.iter());
             scheduler.upsert(candidate);
+            scheduler.set_native_route(&candidate_id, binding.adapter.is_passthrough());
             if source.recovery_delay_seconds > 0 {
                 recovery_delays_ms.insert(
                     candidate_id.clone(),
@@ -204,6 +201,7 @@ pub(super) fn build_accounts(
             ));
         }
         let responses_url = normalized_responses_url(&account.responses_url)?;
+        let basis_points_url = normalized_responses_url(BASIS_POINTS_RESPONSES_URL)?;
         passive_quotas.insert(
             account.id.clone(),
             PassiveQuotaState {
@@ -241,11 +239,13 @@ pub(super) fn build_accounts(
             model_rules: model_rules(&account.allowed_models, &account.excluded_models),
             health: account.health,
             quota: account.quota,
+            provider_credits_micro_units: account.quota_snapshot.available_credits_micro_units,
+            provider_credits_unlimited: account.quota_snapshot.provider_credits_unlimited,
             quota_updated_at_ms: account.quota_updated_at_ms,
             quota_reset_at_ms: account.quota_snapshot.limiting_reset_at_ms(),
             cooldowns: BTreeMap::new(),
             last_used_at: account.last_used_at_ms,
-            consecutive_failures: 0,
+
             secret_available: true,
         };
         let auth = account_auth.ok_or_else(|| {
@@ -258,21 +258,21 @@ pub(super) fn build_accounts(
             .entry(account.chatgpt_account_id.trim().to_ascii_lowercase())
             .or_default()
             .insert(candidate_id.clone());
-        scheduler
-            .set_candidate_subscription_expiry(&candidate_id, account.subscription_expires_at_ms);
-        scheduler.set_candidate_subscription_plan(
-            &candidate_id,
-            account.subscription_plan_type.as_deref(),
-        );
         executors.insert(
             account.id.clone(),
             ChatGptAccountExecutor {
                 id: account.id,
                 source_id: account.source_id,
+                chatgpt_account_id: account.chatgpt_account_id,
                 identity,
                 responses_url,
-                configured_models: models,
-                image_main_model,
+                basis_points_url,
+                basis_points_enabled: AtomicBool::new(account.basis_points_enabled),
+                model_inventory: RwLock::new(AccountModelInventory {
+                    configured_models: models,
+                    image_main_model,
+                }),
+                image_bridge_revision: Arc::new(AtomicU64::new(0)),
                 token_authority: auth.token_authority.clone(),
                 refresh_adapter: auth.refresh_adapter.clone(),
                 persistence_adapter: auth.persistence_adapter.clone(),
@@ -280,7 +280,9 @@ pub(super) fn build_accounts(
                 clients,
                 active: AtomicBool::new(true),
                 agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
+                agent_identity_revision: AtomicU64::new(0),
                 agent_task_lock: tokio::sync::Mutex::new(()),
+                routing_cookies: super::routing_cookies::RoutingCookies::default(),
             },
         );
     }
@@ -340,6 +342,7 @@ pub(super) fn build_keys(
             enabled: key.enabled,
             secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
             scope: Arc::new(RwLock::new(scope)),
+            scope_revision: Arc::new(AtomicU64::new(0)),
             model_rules,
             model_prefix: normalize_prefix(key.model_prefix),
             client_wire_apis,

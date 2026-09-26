@@ -35,7 +35,7 @@ impl GatewayRuntime {
         &self,
         candidate_id: &str,
         value: Value,
-        observed_at_ms: u64,
+        _observed_at_ms: u64,
     ) {
         let scheduler = self.lock_scheduler();
         if scheduler.candidate(candidate_id).is_none() {
@@ -45,13 +45,7 @@ impl GatewayRuntime {
             .codex_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                candidate_id.to_string(),
-                CachedModelManifest {
-                    value,
-                    observed_at_ms,
-                },
-            );
+            .insert(candidate_id.to_string(), CachedModelManifest { value });
     }
 
     pub(crate) fn stale_codex_model_manifests<'a>(

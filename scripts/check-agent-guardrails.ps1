@@ -31,7 +31,7 @@ $violations = foreach ($line in $diffParts) {
     continue
   }
   if ($line -notmatch '^\+' -or $line -match '^\+\+\+' -or
-      $currentPath -match '(^|/|\\)tests?(/|\\)|(^|/|\\)[^/\\]+_test\.rs$') {
+      $currentPath -match '(^|/|\\)tests?(/|\\)|(^|/|\\)[^/\\]+_test\.rs$|(^|/|\\)tests\.rs$') {
     continue
   }
   # Compile-time fixture loaders are test-only helpers even when they live in

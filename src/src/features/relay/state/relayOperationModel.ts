@@ -3,6 +3,8 @@ import type { FeedbackError } from "./feedback";
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
 export type PerformOptions = {
+  /** Finish a dependent step before refreshing, only while the operation is current. */
+  afterWork?: () => Promise<unknown>;
   /** Keep an operation error local to the surface that initiated it. */
   reportError?: boolean;
   onError?: (error: FeedbackError, key: string) => void;
@@ -42,6 +44,10 @@ export async function runRelayOperation({
   try {
     await work();
     if (!isCurrent()) return false;
+    if (options?.afterWork) {
+      await options.afterWork();
+      if (!isCurrent()) return false;
+    }
     await refresh();
     if (!isCurrent()) return false;
     if (successKey) setFeedback({ kind: "success", key: successKey });

@@ -184,6 +184,26 @@ const MIGRATIONS: &[Migration] = &[
         name: "035_cache_write_ttl",
         sql: include_str!("../../migrations/035_cache_write_ttl.sql"),
     },
+    Migration {
+        version: 36,
+        name: "036_upstream_error_details",
+        sql: include_str!("../../migrations/036_upstream_error_details.sql"),
+    },
+    Migration {
+        version: 37,
+        name: "037_account_refresh_revisions",
+        sql: include_str!("../../migrations/037_account_refresh_revisions.sql"),
+    },
+    Migration {
+        version: 38,
+        name: "038_source_refresh_revisions",
+        sql: include_str!("../../migrations/038_source_refresh_revisions.sql"),
+    },
+    Migration {
+        version: 39,
+        name: "039_remove_v1_routing_options",
+        sql: include_str!("../../migrations/039_remove_v1_routing_options.sql"),
+    },
 ];
 
 struct Migration {
@@ -476,6 +496,49 @@ mod tests {
     }
 
     #[test]
+    fn rotation_migration_removes_only_obsolete_metadata() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        apply_migrations_through(&mut connection, 38);
+        for (key, value) in [
+            ("routing_strategy", "quota_highest"),
+            ("subscription_plan_order", "not-json"),
+            ("cooldown_after_failures", "0"),
+            ("keep_last_candidate_available", "false"),
+            ("max_retry_candidates", "8"),
+            ("gateway_enabled", "true"),
+        ] {
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            ).unwrap();
+        }
+        apply_migrations(&mut connection, 38).unwrap();
+        validate_migration_ledger(&connection).unwrap();
+        for key in [
+            "routing_strategy",
+            "subscription_plan_order",
+            "cooldown_after_failures",
+            "keep_last_candidate_available",
+        ] {
+            let found: Option<String> = connection
+                .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .unwrap();
+            assert!(found.is_none(), "{key} must be retired");
+        }
+        for (key, expected) in [("max_retry_candidates", "8"), ("gateway_enabled", "true")] {
+            let found: String = connection
+                .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(found, expected);
+        }
+    }
+
+    #[test]
     fn pool_membership_migration_defaults_existing_records_outside_pool() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(MIGRATIONS[0].sql).unwrap();
@@ -731,7 +794,11 @@ mod tests {
                 (32, "032_error_origin".to_string()),
                 (33, "033_reasoning_effort".to_string()),
                 (34, "034_account_purchase_cost".to_string()),
-                (35, "035_cache_write_ttl".to_string())
+                (35, "035_cache_write_ttl".to_string()),
+                (36, "036_upstream_error_details".to_string()),
+                (37, "037_account_refresh_revisions".to_string()),
+                (38, "038_source_refresh_revisions".to_string()),
+                (39, "039_remove_v1_routing_options".to_string())
             ]
         );
         drop(store);

@@ -5,6 +5,11 @@ use zenith_relay_core::accounts::{
     reduce_account_usage, AccountAccessState, AccountAuthState, AccountUsageObservation,
     AccountUsageState,
 };
+use zenith_relay_core::{
+    accounts::automatic_quota_monitoring_eligible,
+    providers::chatgpt::subscription_refresh_due,
+    scheduler::refresh::{passive_quota_age_ms, quota_reset_delay, RefreshKind},
+};
 use zenith_relay_core::{UsageCallback, UsageEvent};
 
 const USAGE_QUEUE_CAPACITY: usize = 16_384;
@@ -13,6 +18,14 @@ const USAGE_BATCH_SIZE: usize = 256;
 struct QueuedUsage {
     event: UsageEvent,
     observed_at_ms: u64,
+}
+
+struct AccountUsageHints {
+    natural_use_at_ms: Option<u64>,
+    refresh_now: bool,
+    passive_observation: Option<(u64, u64)>,
+    reset_delay_ms: Option<u64>,
+    retry_delay_ms: Option<u64>,
 }
 
 enum UsageWriterMessage {
@@ -136,81 +149,145 @@ fn persist_usage_batch(
     }
     let mut natural_uses = Vec::new();
     for (account_id, events) in account_events {
-        let natural_use_at_ms = match state.store.update_account(&account_id, |account| {
-            let credential = state
-                .vault
-                .load(&account.secret_ref)
-                .ok()
-                .flatten()
-                .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
-            let access_state = credential
-                .as_ref()
-                .map_or(AccountAccessState::Failed, |value| {
-                    if value.refresh_token.is_some() {
-                        AccountAccessState::Refreshable
-                    } else {
-                        AccountAccessState::AccessOnly
+        let (hints, identity) =
+            match state
+                .store
+                .update_account_with_refresh_identity(&account_id, |account| {
+                    let credential = state
+                        .vault
+                        .load(&account.secret_ref)
+                        .ok()
+                        .flatten()
+                        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+                    let access_state =
+                        credential
+                            .as_ref()
+                            .map_or(AccountAccessState::Failed, |value| {
+                                if value.refresh_token.is_some() {
+                                    AccountAccessState::Refreshable
+                                } else {
+                                    AccountAccessState::AccessOnly
+                                }
+                            });
+                    let successful_auth_state = credential.as_ref().map(|value| {
+                        if value.refresh_token.is_some() {
+                            AccountAuthState::Active
+                        } else {
+                            AccountAuthState::DegradedAccessOnly
+                        }
+                    });
+                    let mut natural_use_at_ms = None;
+                    let mut refresh_now = false;
+                    let mut new_passive = false;
+                    let mut retry_at_ms = None;
+                    for queued in &events {
+                        let event = &queued.event;
+                        let previous_quota = account.quota.clone();
+                        if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
+                            snapshot.updated_at_ms.unwrap_or_default()
+                                >= account.quota.updated_at_ms.unwrap_or_default()
+                        }) {
+                            account.quota = snapshot.clone();
+                        }
+                        new_passive |= event.success
+                            && event.quota_snapshot.as_ref().is_some_and(|snapshot| {
+                                snapshot != &previous_quota
+                                    && snapshot.updated_at_ms.is_some()
+                                    && snapshot.updated_at_ms >= previous_quota.updated_at_ms
+                                    && snapshot == &account.quota
+                            });
+                        let update = reduce_account_usage(
+                            AccountUsageState {
+                                auth_state: account.auth_state,
+                                health: account.health,
+                                last_error_code: account.last_error_code.clone(),
+                                last_used_at_ms: account.last_used_at_ms,
+                            },
+                            AccountUsageObservation {
+                                success: event.success,
+                                http_status: event.http_status,
+                                error_category: event.error_category.as_deref(),
+                                affects_account: event.affects_account_state(),
+                            },
+                            queued.observed_at_ms,
+                            (event.http_status == 401).then_some(access_state),
+                            if event.success {
+                                successful_auth_state
+                            } else {
+                                None
+                            },
+                        );
+                        account.auth_state = update.state.auth_state;
+                        account.health = update.state.health;
+                        account.last_error_code = update.state.last_error_code;
+                        account.last_used_at_ms = update.state.last_used_at_ms;
+                        refresh_now |= update.refresh_quota;
+                        if update.refresh_quota && event.http_status == 429 {
+                            retry_at_ms = retry_at_ms.max(event.retry_at_ms);
+                        }
+                        if update.reset_runtime_failures {
+                            account.cooldowns.clear();
+                            account.consecutive_failures = 0;
+                        }
+                        if event.success {
+                            natural_use_at_ms = Some(queued.observed_at_ms);
+                        }
                     }
-                });
-            let successful_auth_state = credential.as_ref().map(|value| {
-                if value.refresh_token.is_some() {
-                    AccountAuthState::Active
-                } else {
-                    AccountAuthState::DegradedAccessOnly
-                }
-            });
-            let mut natural_use_at_ms = None;
-            for queued in &events {
-                let event = &queued.event;
-                if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
-                    snapshot.updated_at_ms.unwrap_or_default()
-                        >= account.quota.updated_at_ms.unwrap_or_default()
+                    let now = now_ms();
+                    let eligible =
+                        automatic_quota_monitoring_eligible(account.enabled, account.auth_state);
+                    Ok(AccountUsageHints {
+                        natural_use_at_ms,
+                        refresh_now: eligible && refresh_now,
+                        passive_observation: (eligible
+                            && new_passive
+                            && !subscription_refresh_due(
+                                account.subscription.active_until_ms,
+                                account.subscription.updated_at_ms,
+                                now,
+                            ))
+                        .then(|| {
+                            passive_quota_age_ms(&account.quota, now)
+                                .zip(account.quota.updated_at_ms)
+                        })
+                        .flatten(),
+                        reset_delay_ms: (eligible && new_passive)
+                            .then(|| quota_reset_delay(&account_id, &account.quota, now))
+                            .flatten(),
+                        retry_delay_ms: eligible
+                            .then_some(retry_at_ms)
+                            .flatten()
+                            .map(|at| at.saturating_sub(now))
+                            .filter(|delay| *delay > 0),
+                    })
                 }) {
-                    account.quota = snapshot.clone();
+                Ok(Some(value)) => value,
+                Ok(None) => continue,
+                Err(_) => {
+                    state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
-                let update = reduce_account_usage(
-                    AccountUsageState {
-                        auth_state: account.auth_state,
-                        health: account.health,
-                        last_error_code: account.last_error_code.clone(),
-                        last_used_at_ms: account.last_used_at_ms,
-                    },
-                    AccountUsageObservation {
-                        success: event.success,
-                        http_status: event.http_status,
-                        error_category: event.error_category.as_deref(),
-                        affects_account: event.affects_account_state(),
-                    },
-                    queued.observed_at_ms,
-                    (event.http_status == 401).then_some(access_state),
-                    if event.success {
-                        successful_auth_state
-                    } else {
-                        None
-                    },
-                );
-                account.auth_state = update.state.auth_state;
-                account.health = update.state.health;
-                account.last_error_code = update.state.last_error_code;
-                account.last_used_at_ms = update.state.last_used_at_ms;
-                if update.reset_runtime_failures {
-                    account.cooldowns.clear();
-                    account.consecutive_failures = 0;
-                }
-                if event.success {
-                    natural_use_at_ms = Some(queued.observed_at_ms);
-                }
-            }
-            Ok(natural_use_at_ms)
-        }) {
-            Ok(Some(value)) => value,
-            Ok(None) => continue,
-            Err(_) => {
-                state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-        };
-        if let Some(observed_at_ms) = natural_use_at_ms {
+            };
+        state.refresh.set_member_active(&identity.member_id);
+        if let Some((age_ms, observed_at_ms)) = hints.passive_observation {
+            state
+                .refresh
+                .observe_passive_quota(&identity, age_ms, observed_at_ms);
+        }
+        if let Some(delay_ms) = hints.reset_delay_ms {
+            state
+                .refresh
+                .schedule_after(&identity, RefreshKind::Quota, delay_ms);
+        }
+        if let Some(delay_ms) = hints.retry_delay_ms {
+            state
+                .refresh
+                .respect_retry_after(&identity, RefreshKind::Quota, delay_ms);
+        }
+        if hints.refresh_now {
+            state.refresh.mark_dirty(&identity, RefreshKind::Quota);
+        }
+        if let Some(observed_at_ms) = hints.natural_use_at_ms {
             natural_uses.push((account_id, observed_at_ms));
         }
     }
@@ -259,7 +336,10 @@ mod tests {
     use tempfile::TempDir;
     use zenith_relay_core::{
         accounts::{AccountAuthState, AccountHealthState},
-        quota::Subscription,
+        quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
+        scheduler::refresh::{
+            service::RefreshRegistration, service::RefreshResult, RefreshFreshness, RefreshOutcome,
+        },
         DefaultServiceTier, ToolUseDiagnostics, UsageEvent, WireApi,
     };
 
@@ -303,6 +383,7 @@ mod tests {
             source_id: "openai_codex".to_string(),
             candidate_id: Some(account_id.to_string()),
             account_id: Some(account_id.to_string()),
+            account_token_generation: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".to_string()),
@@ -329,6 +410,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(1),
             total_tokens: Some(2),
+            upstream_error: None,
             quota_snapshot: None,
         }
     }
@@ -394,5 +476,83 @@ mod tests {
             Some(30)
         );
         assert_eq!(state.failed_usage_writes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn persisted_passive_quota_is_fresh_for_the_registered_account_only() {
+        let root = TempDir::new().unwrap();
+        let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        let state = AppState::new(config, store.clone(), vault).unwrap();
+        let now = now_ms();
+        let mut account = test_account("account_a");
+        account.subscription.active_until_ms = Some(now + 3_600_000);
+        account.subscription.updated_at_ms = Some(now);
+        store.save_account(&account).unwrap();
+        let (_, fence) = store.account_refresh_scope(&account.id).unwrap();
+        let identity = fence.identity();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let enter = runtime.enter();
+        state
+            .refresh
+            .register(
+                RefreshRegistration {
+                    identity: identity.clone(),
+                    kind: RefreshKind::Quota,
+                    origin: "https://provider.example.test".into(),
+                    active: true,
+                    automatic: true,
+                    due_now: false,
+                },
+                |_| {
+                    Box::pin(async {
+                        RefreshResult {
+                            value: Err("synthetic read".into()),
+                            outcome: RefreshOutcome::Success,
+                        }
+                    })
+                },
+            )
+            .unwrap();
+        drop(enter);
+        let mut event = usage_event("request_passive", &account.id);
+        event.quota_snapshot = Some(QuotaSnapshot {
+            primary: Some(QuotaWindow {
+                kind: QuotaWindowKind::Primary,
+                provider_cycle_id: None,
+                window_start_ms: None,
+                available_basis_points: Some(2_000),
+                explicitly_full: None,
+                reset_at_ms: None,
+                window_minutes: None,
+                observed_at_ms: now,
+                full_transition_fingerprint: None,
+                exhaustion_transition_fingerprint: None,
+            }),
+            updated_at_ms: Some(now),
+            ..QuotaSnapshot::default()
+        });
+        let batch = [QueuedUsage {
+            event,
+            observed_at_ms: now,
+        }];
+        persist_usage_batch(&state, &batch, runtime.handle());
+        assert_eq!(
+            store.account(&account.id).unwrap().unwrap().quota,
+            batch[0].event.quota_snapshot.clone().unwrap()
+        );
+        assert!(matches!(
+            state.refresh.freshness(&identity, RefreshKind::Quota),
+            RefreshFreshness::Fresh { .. }
+        ));
+        assert_eq!(
+            state.refresh.freshness(&identity, RefreshKind::Models),
+            RefreshFreshness::Unknown
+        );
+        runtime.block_on(state.refresh.shutdown());
     }
 }

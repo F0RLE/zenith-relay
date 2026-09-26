@@ -5,11 +5,13 @@ use super::{
         ensure_local_agent_identity_task, prepare_account_request_authorization,
         recover_account_authorization, refresh_manual_account_quota, PreparedAccountAuthorization,
     },
+    refresh_observations::AccountRefreshScope,
     NativeSecretBackend,
 };
 use crate::local_pool::{
     commands::current_time_ms,
     error::{CommandError, ErrorCode, ErrorDiagnostics, LocalPoolError, Result as LocalResult},
+    refresh,
     state::DesktopState,
 };
 use reqwest::{
@@ -22,6 +24,7 @@ use serde_json::Value;
 use std::time::Duration;
 use tauri::State;
 use uuid::Uuid;
+use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
 
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const RESET_CREDITS_CONSUME_URL: &str =
@@ -80,29 +83,8 @@ pub(crate) async fn consume_local_reset_credit_for_account(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<ConsumeResetCreditResponse> {
-    let lock = state.quota_account_lock(account_id)?;
-    {
-        let _guard = lock.lock().await;
-        let mut prepared = prepare_account_request_authorization(state, account_id).await?;
-        let available =
-            fetch_reset_snapshot_with_retry(state, account_id, &mut prepared, true).await?;
-        if available.available_count.unwrap_or(0) == 0 {
-            return Err(LocalPoolError::new(
-                ErrorCode::Conflict,
-                "no reset credits are currently available for this account",
-            ));
-        }
-
-        let redeem_request_id = Uuid::new_v4().to_string();
-        let response = post_reset_credit(&prepared, &redeem_request_id).await?;
-        if response.status == StatusCode::UNAUTHORIZED {
-            prepared = retry_authorization(state, account_id, &prepared).await?;
-            let retry = post_reset_credit(&prepared, &redeem_request_id).await?;
-            ensure_reset_success(retry)?;
-        } else {
-            ensure_reset_success(response)?;
-        }
-    }
+    let scope = AccountRefreshScope::capture(state, account_id).await?;
+    consume_reset_credit_for_scope(state, &scope.fence).await?;
 
     match refresh_manual_account_quota(state, account_id).await {
         Ok(_) => Ok(ConsumeResetCreditResponse {
@@ -114,6 +96,42 @@ pub(crate) async fn consume_local_reset_credit_for_account(
             refresh_error: Some(error.message),
         }),
     }
+}
+
+/// The quota job calls this action without recursively requesting itself.
+pub(crate) async fn consume_reset_credit_for_scope(
+    state: &DesktopState,
+    fence: &crate::local_pool::store::AccountRefreshFence,
+) -> LocalResult<()> {
+    let account_id = &fence.account_id;
+    let lock = state.quota_account_lock(account_id)?;
+    {
+        let _guard = lock.lock().await;
+        state.store()?.ensure_account_refresh_current(fence)?;
+        let mut prepared = refresh::request_authorization_now(state, fence).await?;
+        let available =
+            fetch_reset_snapshot_with_retry(state, account_id, &mut prepared, true).await?;
+        if available.available_count.unwrap_or(0) == 0 {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "no reset credits are currently available for this account",
+            ));
+        }
+
+        state.store()?.ensure_account_refresh_current(fence)?;
+        let redeem_request_id = Uuid::new_v4().to_string();
+        let response = post_reset_credit(&prepared, &redeem_request_id).await?;
+        if response.status == StatusCode::UNAUTHORIZED {
+            prepared = retry_authorization(state, account_id, &prepared).await?;
+            state.store()?.ensure_account_refresh_current(fence)?;
+            let retry = post_reset_credit(&prepared, &redeem_request_id).await?;
+            ensure_reset_success(retry)?;
+        } else {
+            ensure_reset_success(response)?;
+        }
+    }
+
+    Ok(())
 }
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -140,7 +158,13 @@ async fn retry_authorization(
 ) -> LocalResult<PreparedAccountAuthorization> {
     if prepared.tokens.is_some() {
         return PreparedAccountAuthorization::from_tokens(
-            recover_account_authorization(state, account_id, current_time_ms()).await?,
+            recover_account_authorization(
+                state,
+                account_id,
+                prepared.tokens.as_ref().map(|tokens| tokens.generation()),
+                current_time_ms(),
+            )
+            .await?,
         );
     }
 
@@ -222,12 +246,15 @@ async fn send_reset_request(
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().await.map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "reset credits request failed",
-        )
-    })?;
+    let (response, permit) = management_http_gate()
+        .send(&client, request, HttpClass::Ordinary)
+        .await
+        .map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "reset credits request failed",
+            )
+        })?;
     let status = response.status();
     let body = super::collect_limited(response, MAX_RESET_CREDITS_RESPONSE_BYTES)
         .await
@@ -237,6 +264,7 @@ async fn send_reset_request(
                 "reset credits response could not be read",
             )
         })?;
+    drop(permit);
     Ok(ResetHttpResponse { status, body })
 }
 

@@ -1,6 +1,6 @@
 use super::{
-    cleanup_created_secret, connections::validate_source_record, restart_or_rollback,
-    runtime_account_policy, sync_gateway_or_rollback,
+    cleanup_created_secret, connections::validate_source_record, fence_runtime_candidates,
+    restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback,
 };
 use crate::{
     files::atomic_write,
@@ -23,30 +23,28 @@ use std::collections::BTreeSet;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
-#[cfg(test)]
-use zenith_relay_core::WireApi;
 use zenith_relay_core::{
-    merge_configuration_preset_settings, model_supports_fast_service_tier,
-    normalize_configuration_preset,
+    merge_configuration_preset_settings, normalize_configuration_preset,
     protocol::{
-        AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
-        ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetPreview,
-        ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy, SourcePresetRule,
-        CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
+        complete_model_display_order, AccountPresetRule, ConfigurationPreset,
+        ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetChange,
+        ConfigurationPresetPreview, ConfigurationPresetSettings, PresetQuotaPolicy,
+        PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
+        CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
     validate_resolved_configuration_preset_members, ApiModelPriceOverride, DefaultServiceTier,
-    RoutingStrategy,
 };
 
 mod model_policy;
 mod reasoning;
 
 pub(super) use model_policy::{canonical_pool_model, local_pool_member_ids};
+use model_policy::{configured_pool_model_ids, model_policy_error};
 use reasoning::SetModelReasoningInput;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
-const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+pub(in crate::local_pool) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
 
 struct PreparedLocalPreset {
     current: ConfigurationPreset,
@@ -71,7 +69,9 @@ pub fn export_local_configuration_preset(
     write_configuration_preset(&preset, &app)
 }
 
-fn local_configuration_preset(state: &DesktopState) -> CommandResult<ConfigurationPreset> {
+pub(super) fn local_configuration_preset(
+    state: &DesktopState,
+) -> CommandResult<ConfigurationPreset> {
     let (gateway, sources, accounts) = {
         let store = state.store()?;
         (
@@ -84,6 +84,7 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
     let sources = sources
         .into_iter()
         .map(|record| SourcePresetRule {
+            legacy_protocol_mode: None,
             id: record.id,
             name: record.name,
             base_url: record.base_url.trim_end_matches('/').to_string(),
@@ -140,18 +141,17 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
     } else {
         None
     };
-    let preset = ConfigurationPreset {
+    let mut preset = ConfigurationPreset {
         format: CONFIGURATION_PRESET_FORMAT.to_string(),
         schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
         settings: ConfigurationPresetSettings {
             sources,
             accounts,
             routing: PresetRoutingPolicy {
+                tool_policy: Some(gateway.tool_policy),
+                basis_points_enabled: gateway.basis_points_enabled,
                 max_retry_candidates: gateway.max_retry_candidates,
-                cooldown_after_failures: gateway.cooldown_after_failures,
-                keep_last_candidate_available: gateway.keep_last_candidate_available,
-                routing_strategy: gateway.routing_strategy,
-                subscription_plan_order: gateway.subscription_plan_order,
+                pool_routing: gateway.pool_routing,
                 default_service_tier: gateway.default_service_tier,
                 image_base_model: gateway.image_base_model,
             },
@@ -170,10 +170,11 @@ fn local_configuration_preset(state: &DesktopState) -> CommandResult<Configurati
             model_display_order_present: true,
         },
     };
+    preset.settings.routing.pool_routing = Some(preset.settings.resolved_pool_routing());
     Ok(preset)
 }
 
-fn local_preset_revision(preset: &ConfigurationPreset) -> CommandResult<String> {
+pub(super) fn local_preset_revision(preset: &ConfigurationPreset) -> CommandResult<String> {
     let bytes = serde_json::to_vec(preset).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -232,6 +233,7 @@ fn resolve_local_preset_references(
         let store = state.store()?;
         (store.sources().to_vec(), store.accounts().to_vec())
     };
+    let mut member_ids = std::collections::BTreeMap::new();
     for rule in &mut settings.sources {
         let source = resolve_local_source_reference(&sources, rule).ok_or_else(|| {
             LocalPoolError::new(
@@ -243,6 +245,10 @@ fn resolve_local_preset_references(
             )
         })?;
         validate_source_record(state, source)?;
+        member_ids.insert(
+            (zenith_relay_core::PoolMemberKind::Source, rule.id.clone()),
+            source.id.clone(),
+        );
         rule.id = source.id.clone();
         rule.name = source.name.clone();
         rule.base_url = source.base_url.trim_end_matches('/').to_string();
@@ -277,6 +283,10 @@ fn resolve_local_preset_references(
             )
             .into());
         }
+        member_ids.insert(
+            (zenith_relay_core::PoolMemberKind::Account, rule.id.clone()),
+            account.account.id.clone(),
+        );
         rule.id = account.account.id.clone();
         rule.identity_hint = account
             .account
@@ -289,6 +299,11 @@ fn resolve_local_preset_references(
     settings
         .accounts
         .sort_by(|left, right| left.id.cmp(&right.id));
+    if let Some(policy) = &mut settings.routing.pool_routing {
+        policy
+            .remap_member_ids(&member_ids)
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    }
     validate_resolved_configuration_preset_members(settings)
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     Ok(())
@@ -524,10 +539,11 @@ pub async fn apply_local_configuration_preset(
     }
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = settings.routing.max_retry_candidates;
-    gateway.cooldown_after_failures = settings.routing.cooldown_after_failures;
-    gateway.keep_last_candidate_available = settings.routing.keep_last_candidate_available;
-    gateway.routing_strategy = settings.routing.routing_strategy;
-    gateway.subscription_plan_order = settings.routing.subscription_plan_order.clone();
+    if let Some(policy) = &settings.routing.tool_policy {
+        gateway.tool_policy = policy.clone();
+    }
+    gateway.basis_points_enabled = settings.routing.basis_points_enabled;
+    gateway.pool_routing = settings.routing.pool_routing.clone();
     gateway.default_service_tier = settings.routing.default_service_tier;
     gateway.image_base_model = settings.routing.image_base_model.clone();
     gateway.quota_request_timeout_seconds = settings.quota.request_timeout_seconds;
@@ -537,10 +553,38 @@ pub async fn apply_local_configuration_preset(
     gateway.model_reasoning_allowed_levels = settings.model_reasoning_allowed_levels.clone();
     gateway.model_service_tier_overrides = settings.model_service_tier_overrides.clone();
     gateway.model_display_order = settings.model_display_order.clone();
+    // Presets may change several scopes (including source routes and the
+    // account-proxy requirement) in two durable writes. Fence the previous
+    // physical graph until the replacement runtime or rollback is published.
+    let account_ids = old_accounts
+        .iter()
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let source_ids = old_sources
+        .iter()
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &account_ids, &source_ids);
     state
         .store()?
         .replace_pool_records(sources, accounts, old_keys.clone())?;
-    state.store()?.replace_gateway(gateway)?;
+    if let Err(error) = state
+        .store()
+        .and_then(|mut store| store.replace_gateway(gateway))
+    {
+        if let Err(restore) = state.store().and_then(|mut store| {
+            store.replace_pool_records(old_sources.clone(), old_accounts.clone(), old_keys.clone())
+        }) {
+            return Err(super::fail_closed(
+                &state,
+                format!("preset gateway save failed: {error}; failed to restore pool: {restore}"),
+            )
+            .await
+            .into());
+        }
+        return Err(error.into());
+    }
     if let Err(error) = restart_or_rollback(&state, || {
         state
             .store()?
@@ -783,9 +827,7 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
         if source.in_pool
             && source.enabled
             && !source.draining
-            && source
-                .supports_any_wire_api()
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
+            && source.supports_any_wire_api().unwrap_or(false)
             && secret_store::load(&source.secret_ref)?.is_some()
         {
             return Ok(true);
@@ -812,13 +854,11 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRoutingInput {
+    pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
+    expected_pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
+    #[serde(default)]
+    basis_points_enabled: Option<bool>,
     max_retry_candidates: u8,
-    #[serde(default)]
-    cooldown_after_failures: Option<u8>,
-    #[serde(default)]
-    keep_last_candidate_available: Option<bool>,
-    routing_strategy: RoutingStrategy,
-    subscription_plan_order: Option<Vec<String>>,
     #[serde(default)]
     default_service_tier: DefaultServiceTier,
 }
@@ -827,10 +867,10 @@ pub struct UpdateRoutingInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PoolMembershipInput {
     #[serde(default)]
-    account_ids: Vec<String>,
+    pub(super) account_ids: Vec<String>,
     #[serde(default)]
-    source_ids: Vec<String>,
-    in_pool: bool,
+    pub(super) source_ids: Vec<String>,
+    pub(super) in_pool: bool,
 }
 
 #[derive(Deserialize)]
@@ -924,10 +964,16 @@ pub async fn set_local_model_service_tier(
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
-    if !model_supports_fast_service_tier(&canonical) {
+    let runtime = state.gateway.runtime().await;
+    if input.service_tier != DefaultServiceTier::Standard
+        && !state
+            .model_metadata_catalog()
+            .service_tiers_for(&canonical)
+            .contains(&input.service_tier)
+    {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "request speed is available only for OpenAI models",
+            "requested service tier is not available under the Relay model-family policy",
         )
         .into());
     }
@@ -942,7 +988,7 @@ pub async fn set_local_model_service_tier(
         return Ok(snapshot);
     }
     state.store()?.replace_gateway(gateway.clone())?;
-    if let Some(runtime) = state.gateway.runtime().await {
+    if let Some(runtime) = runtime {
         if let Err(error) =
             runtime.set_model_service_tier_overrides(gateway.model_service_tier_overrides)
         {
@@ -961,56 +1007,13 @@ pub async fn set_local_model_display_order(
     let _mutation = state.setup_guard().await;
     let snapshot = state.snapshot().await?;
     let inputs = state.runtime_inputs().await?;
-    let mut current = std::collections::BTreeMap::new();
-    for source in inputs.sources.iter().filter(|source| source.in_pool) {
-        for model in &source.models {
-            current
-                .entry(model.to_ascii_lowercase())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    for account in inputs
-        .accounts
-        .iter()
-        .filter(|account| account.account.in_pool)
-    {
-        for model in account.effective_models() {
-            current
-                .entry(model.to_ascii_lowercase())
-                .or_insert_with(|| model.clone());
-        }
-    }
-    if input.model_ids.len() != current.len() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "model order must contain every current pool model exactly once",
-        )
-        .into());
-    }
-    let mut requested = std::collections::BTreeSet::new();
-    let mut order = Vec::with_capacity(input.model_ids.len());
-    for model in input.model_ids {
-        let key = model.trim().to_ascii_lowercase();
-        let Some(canonical) = current.get(&key) else {
-            return Err(LocalPoolError::new(ErrorCode::NotFound, "pool model not found").into());
-        };
-        if !requested.insert(key) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "model order contains duplicates",
-            )
-            .into());
-        }
-        order.push(canonical.clone());
-    }
-    if requested.len() != current.len() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "model order must contain every current pool model exactly once",
-        )
-        .into());
-    }
     let old_gateway = state.store()?.gateway().clone();
+    let order = complete_model_display_order(
+        configured_pool_model_ids(&inputs.sources, &inputs.accounts),
+        &input.model_ids,
+        &old_gateway.model_display_order,
+    )
+    .map_err(model_policy_error)?;
     let mut gateway = old_gateway.clone();
     gateway.model_display_order = order;
     if gateway == old_gateway {
@@ -1029,6 +1032,32 @@ pub async fn set_local_pool_membership(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
+    let (snapshot, updated_in_place, model_refresh_account_ids) = {
+        let _mutation = state.setup_guard().await;
+        apply_local_pool_membership(input, &state).await?
+    };
+    if updated_in_place {
+        let catalog_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = catalog_app.state::<DesktopState>();
+            let result = super::profiles::refresh_active_client_catalogs(&state).await;
+            super::record_catalog_refresh_result(&state, &result);
+            let _ = catalog_app.emit("zenith-state-changed", ());
+        });
+    }
+    crate::local_pool::background::refresh_account_models_in_background(
+        app,
+        model_refresh_account_ids,
+    );
+    Ok(snapshot)
+}
+
+/// Caller holds setup_guard. Split from the Tauri event wrapper so the
+/// durable membership and live routing transaction can be exercised locally.
+pub(super) async fn apply_local_pool_membership(
+    input: PoolMembershipInput,
+    state: &DesktopState,
+) -> CommandResult<(LocalPoolSnapshot, bool, Vec<String>)> {
     let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
     let source_ids = input.source_ids.into_iter().collect::<BTreeSet<_>>();
     if account_ids.is_empty() && source_ids.is_empty() {
@@ -1039,7 +1068,6 @@ pub async fn set_local_pool_membership(
         .into());
     }
 
-    let _mutation = state.setup_guard().await;
     let (old_sources, old_accounts, old_keys) = {
         let store = state.store()?;
         (
@@ -1073,9 +1101,7 @@ pub async fn set_local_pool_membership(
             .iter()
             .filter(|source| source_ids.contains(&source.id))
         {
-            let supports_any_protocol = source
-                .supports_any_wire_api()
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+            let supports_any_protocol = source.supports_any_wire_api().unwrap_or(false);
             if !supports_any_protocol {
                 return Err(LocalPoolError::new(
                     ErrorCode::Conflict,
@@ -1108,7 +1134,7 @@ pub async fn set_local_pool_membership(
         }
     }
     if sources == old_sources && accounts == old_accounts {
-        return state.snapshot().await.map_err(Into::into);
+        return Ok((state.snapshot().await?, false, Vec::new()));
     }
 
     let changed_accounts = accounts
@@ -1116,6 +1142,21 @@ pub async fn set_local_pool_membership(
         .filter(|account| account_ids.contains(&account.account.id))
         .cloned()
         .collect::<Vec<_>>();
+    let fenced_accounts = old_accounts
+        .iter()
+        .filter(|account| {
+            account_ids.contains(&account.account.id) && account.account.in_pool != input.in_pool
+        })
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let fenced_sources = old_sources
+        .iter()
+        .filter(|source| source_ids.contains(&source.id) && source.in_pool != input.in_pool)
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences =
+        fence_runtime_candidates(runtime.as_deref(), &fenced_accounts, &fenced_sources);
     state
         .store()?
         .replace_pool_records(sources, accounts, old_keys.clone())?;
@@ -1126,12 +1167,12 @@ pub async fn set_local_pool_membership(
                 &account.account.id,
                 runtime_account_policy(account, policy_now_ms),
             )
-        }) && super::apply_local_gateway_key_scope(&state, &runtime).unwrap_or(false)
+        }) && super::apply_local_gateway_key_scope(state, &runtime).unwrap_or(false)
     } else {
         false
     };
     if !updated_in_place {
-        restart_or_rollback(&state, || {
+        restart_or_rollback(state, || {
             state
                 .store()?
                 .replace_pool_records(old_sources, old_accounts, old_keys)
@@ -1143,21 +1184,7 @@ pub async fn set_local_pool_membership(
         state.sync_account_quota_refresh(&account_id, now_ms)?;
     }
     let snapshot = state.snapshot().await?;
-    drop(_mutation);
-    if updated_in_place {
-        let catalog_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = catalog_app.state::<DesktopState>();
-            let result = super::profiles::refresh_active_codex_catalog(&state).await;
-            super::record_catalog_refresh_result(&state, &result);
-            let _ = catalog_app.emit("zenith-state-changed", ());
-        });
-    }
-    crate::local_pool::background::refresh_account_models_in_background(
-        app,
-        model_refresh_account_ids,
-    );
-    Ok(snapshot)
+    Ok((snapshot, updated_in_place, model_refresh_account_ids))
 }
 
 #[tauri::command]
@@ -1165,53 +1192,68 @@ pub async fn update_local_routing(
     input: UpdateRoutingInput,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
+    update_local_routing_at(input, &state, &default_codex_home()).await
+}
+
+async fn update_local_routing_at(
+    input: UpdateRoutingInput,
+    state: &DesktopState,
+    codex_home: &std::path::Path,
+) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let old_gateway = state.store()?.gateway().clone();
+    let (old_gateway, current_pool) = {
+        let store = state.store()?;
+        // The UI reads the policy reconciled with inventory, including before
+        // the first save. Compare that same policy, not the stale stored list.
+        (
+            store.gateway().clone(),
+            store
+                .gateway()
+                .pool_routing_for(store.sources(), store.accounts()),
+        )
+    };
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = input.max_retry_candidates;
-    if let Some(value) = input.cooldown_after_failures {
-        gateway.cooldown_after_failures = value;
+    gateway.pool_routing = Some(current_pool.clone());
+    if let Some(policy) = input.pool_routing {
+        policy
+            .validate_update(&current_pool, input.expected_pool_routing.as_ref())
+            .map_err(|message| LocalPoolError::new(ErrorCode::Conflict, message))?;
+        gateway.pool_routing = Some(policy);
     }
-    if let Some(value) = input.keep_last_candidate_available {
-        gateway.keep_last_candidate_available = value;
-    }
-    gateway.routing_strategy = input.routing_strategy;
-    if let Some(subscription_plan_order) = input.subscription_plan_order {
-        gateway.subscription_plan_order = subscription_plan_order;
+    if let Some(value) = input.basis_points_enabled {
+        gateway.basis_points_enabled = value;
     }
     gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {
-        codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)?;
+        codex::sync_default_service_tier(codex_home, gateway.default_service_tier)?;
         return state.snapshot().await.map_err(Into::into);
     }
-    let service_tier_only = gateway.max_retry_candidates == old_gateway.max_retry_candidates
-        && gateway.cooldown_after_failures == old_gateway.cooldown_after_failures
-        && gateway.keep_last_candidate_available == old_gateway.keep_last_candidate_available
-        && gateway.routing_strategy == old_gateway.routing_strategy
-        && gateway.subscription_plan_order == old_gateway.subscription_plan_order;
     let default_service_tier = gateway.default_service_tier;
     state.store()?.replace_gateway(gateway.clone())?;
-    if service_tier_only {
-        if let Some(runtime) = state.gateway.runtime().await {
-            runtime.set_default_service_tier(default_service_tier);
+    let runtime = state.gateway.runtime().await;
+    if let Some(runtime) = &runtime {
+        if let Err(error) = runtime.set_pool_routing_policy(
+            gateway
+                .pool_routing
+                .clone()
+                .unwrap_or_else(|| current_pool.clone()),
+            gateway.max_retry_candidates,
+        ) {
+            state.store()?.replace_gateway(old_gateway)?;
+            return Err(LocalPoolError::invalid_state(error).into());
         }
-    } else {
-        sync_gateway_or_rollback(&state, old_gateway.clone()).await?;
+        runtime.set_basis_points_enabled(gateway.basis_points_enabled);
+        runtime.set_default_service_tier(default_service_tier);
     }
-    if let Err(error) =
-        codex::sync_default_service_tier(&default_codex_home(), default_service_tier)
-    {
+    if let Err(error) = codex::sync_default_service_tier(codex_home, default_service_tier) {
         state.store()?.replace_gateway(old_gateway.clone())?;
-        if service_tier_only {
-            if let Some(runtime) = state.gateway.runtime().await {
-                runtime.set_default_service_tier(old_gateway.default_service_tier);
-            }
-        } else if let Err(restore) = sync_gateway_or_rollback(&state, gateway).await {
-            return Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!("{error}; failed to restore previous gateway settings: {restore}"),
-            )
-            .into());
+        if let Some(runtime) = runtime {
+            runtime
+                .set_pool_routing_policy(current_pool, old_gateway.max_retry_candidates)
+                .map_err(LocalPoolError::invalid_state)?;
+            runtime.set_basis_points_enabled(old_gateway.basis_points_enabled);
+            runtime.set_default_service_tier(old_gateway.default_service_tier);
         }
         return Err(error.into());
     }
@@ -1221,6 +1263,7 @@ pub async fn update_local_routing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zenith_relay_core::{SourceProtocolBinding, WireApi};
 
     fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
         ProviderSourceRecord {
@@ -1234,6 +1277,7 @@ mod tests {
             pricing_provider: None,
             official_provider_family: None,
             wire_api,
+            protocol_config: Default::default(),
             protocol_bindings: Vec::new(),
             models: vec!["test-model".into()],
             allowed_models: Vec::new(),
@@ -1250,12 +1294,122 @@ mod tests {
         }
     }
 
+    async fn check_routing_modes_with_inventory(stored_policy: bool) {
+        use zenith_relay_core::PoolRoutingMode;
+
+        let root = std::env::temp_dir().join(format!("relay-routing-edit-{}", Uuid::new_v4()));
+        let state = DesktopState::open(root.join("relay")).unwrap();
+        let codex_home = root.join("codex");
+        {
+            let mut store = state.store().unwrap();
+            let first = source("first", true, WireApi::Responses);
+            let mut second = source("second", true, WireApi::Messages);
+            second.enabled = false;
+            if stored_policy {
+                let mut gateway = store.gateway().clone();
+                let mut old = gateway.pool_routing_for(
+                    &[source("removed", true, WireApi::Responses), first.clone()],
+                    &[],
+                );
+                old.members[0].weight = 7;
+                old.members[0].max_concurrency = 2;
+                gateway.pool_routing = Some(old);
+                store.replace_gateway(gateway).unwrap();
+            }
+            for record in [first, second, source("outside", false, WireApi::Responses)] {
+                store.upsert_source(record).unwrap();
+            }
+        }
+
+        for mode in [
+            PoolRoutingMode::InOrder,
+            PoolRoutingMode::RoundRobin,
+            PoolRoutingMode::Automatic,
+        ] {
+            let displayed = super::super::state::build_local_runtime_state(&state)
+                .await
+                .unwrap()
+                .gateway
+                .pool_routing
+                .unwrap();
+            assert_eq!(
+                displayed
+                    .members
+                    .iter()
+                    .map(|member| member.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+            let mut next = displayed.clone();
+            next.mode = mode;
+            let input = || {
+                serde_json::from_value(serde_json::json!({
+                    "poolRouting": next,
+                    "expectedPoolRouting": displayed,
+                    "maxRetryCandidates": 3,
+                    "defaultServiceTier": "standard",
+                    "cooldownAfterFailures": 0,
+                    "keepLastCandidateAvailable": true,
+                    "routingStrategy": "quota_highest",
+                    "subscriptionPlanOrder": ["not a valid\nplan"]
+                }))
+                .unwrap()
+            };
+            let result = update_local_routing_at(input(), &state, &codex_home)
+                .await
+                .unwrap();
+            assert_eq!(result.gateway.pool_routing, Some(next.clone()));
+            let saved_gateway = state.store().unwrap().gateway().clone();
+            assert_eq!(saved_gateway.max_retry_candidates, 3);
+            let refreshed = super::super::state::build_local_runtime_state(&state)
+                .await
+                .unwrap();
+            assert_eq!(refreshed.gateway.pool_routing.as_ref(), Some(&next));
+            // A real edit since the read must still conflict, without overwriting it.
+            let error = update_local_routing_at(input(), &state, &codex_home)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Conflict);
+        }
+        let saved = state
+            .store()
+            .unwrap()
+            .gateway()
+            .pool_routing
+            .clone()
+            .unwrap();
+        assert_eq!(saved.members[0].weight, if stored_policy { 7 } else { 1 });
+        assert_eq!(
+            saved.members[0].max_concurrency,
+            if stored_policy { 2 } else { 0 }
+        );
+        drop(state);
+        let reopened = DesktopState::open(root.join("relay")).unwrap();
+        assert_eq!(
+            reopened.store().unwrap().gateway().pool_routing.as_ref(),
+            Some(&saved)
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn routing_modes_save_from_an_unsaved_default_policy() {
+        check_routing_modes_with_inventory(false).await;
+    }
+
+    #[tokio::test]
+    async fn routing_modes_save_after_members_join_or_leave() {
+        check_routing_modes_with_inventory(true).await;
+    }
+
     #[test]
     fn source_preset_policy_preserves_source_identity() {
         let mut record = source("source", true, WireApi::Responses);
         record.name = "Existing connection".into();
         record.base_url = "https://existing.test/v1".into();
         let rule = SourcePresetRule {
+            legacy_protocol_mode: None,
             id: "source".into(),
             name: "Imported name".into(),
             base_url: "https://imported.test/v1".into(),
@@ -1298,5 +1452,94 @@ mod tests {
             BTreeSet::from(["messages".to_string(), "responses".to_string()])
         );
         assert!(account_ids.is_empty());
+    }
+
+    #[test]
+    fn model_display_order_accepts_models_before_automatic_route_confirmation() {
+        let mut source = source("automatic", true, WireApi::Responses);
+        source.models = vec!["gpt-pending".into()];
+        source.protocol_config =
+            zenith_relay_core::SourceProtocolConfig::automatic(&source.base_url);
+
+        let order = complete_model_display_order(
+            configured_pool_model_ids(&[source], &[]),
+            &["gpt-pending".into()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(order, ["gpt-pending"]);
+    }
+
+    #[test]
+    fn pool_model_inventory_includes_ids_only_present_on_source_bindings() {
+        let mut binding_only = source("binding-only", true, WireApi::Responses);
+        binding_only.models.clear();
+        binding_only.protocol_bindings = vec![SourceProtocolBinding::legacy(
+            WireApi::Responses,
+            &["binding-model".to_string()],
+        )];
+
+        let sources = [binding_only];
+        let current = configured_pool_model_ids(&sources, &[])
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(current, ["binding-model"]);
+    }
+
+    #[test]
+    fn model_edits_keep_unavailable_members_and_prefer_discovered_account_inventory() {
+        use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
+        use zenith_relay_core::{accounts::AccountAuthMode, protocol::canonical_pool_model_id};
+
+        let credentials = StoredCodexCredentials::new(
+            "account_model_inventory",
+            "synthetic-access".into(),
+            Some("synthetic-refresh".into()),
+            None,
+            None,
+            1,
+            0,
+            None,
+            Some("synthetic-account".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let mut account = records::new_account_record(
+            &credentials,
+            AccountAuthMode::OAuth,
+            vec!["old-account-model".into()],
+            0,
+            1,
+        )
+        .unwrap();
+        account.account.in_pool = true;
+        account.account.enabled = false;
+        account.discovered_models = Some(vec!["SHARED".into(), "account-model".into()]);
+        account.excluded_models = vec!["account-model".into()];
+        let mut outside_account = account.clone();
+        outside_account.account.in_pool = false;
+        outside_account.discovered_models = Some(vec!["outside-account-model".into()]);
+        let accounts = [account, outside_account];
+
+        let mut included = source("included", true, WireApi::Messages);
+        included.enabled = false;
+        included.draining = true;
+        included.models = vec!["Shared".into()];
+        included.excluded_models = vec!["Shared".into()];
+        let sources = [included, source("outside", false, WireApi::Responses)];
+        let inventory = || configured_pool_model_ids(&sources, &accounts);
+
+        assert_eq!(canonical_pool_model_id(inventory(), "shared"), Ok("Shared"));
+        assert_eq!(
+            complete_model_display_order(inventory(), &["account-model".into()], &[]).unwrap(),
+            ["account-model", "Shared"]
+        );
+        for absent in ["old-account-model", "outside-account-model", "test-model"] {
+            assert!(canonical_pool_model_id(inventory(), absent).is_err());
+        }
     }
 }

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   codexRequestOriginFromErrorCategory,
   normalizeObservedServiceTier,
+  documentedCacheRetentionMinimum,
   totalsFromRows,
   usageRowsFromLocal,
   usageRowsFromRemote,
@@ -16,6 +17,8 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   time: "2026-08-23T00:00:00.000Z",
   success: true,
   model: "gpt-5.4",
+  requestedModel: "gpt-5.4",
+  routedModel: "gpt-5.4",
   requestedReasoningEffort: null,
   effectiveReasoningEffort: null,
   connection: "Account",
@@ -29,6 +32,7 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   cachedInputTokens: null,
   cacheWriteInputTokens: null,
   cacheWriteTtl: null,
+  documentedCacheRetentionMinimum: null,
   reasoningTokens: 5,
   outputTokens: 25,
   tokens: 45,
@@ -47,6 +51,20 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("keeps documented model minimum separate from provider-reported cache windows", () => {
+    for (const model of ["gpt-5.6", "openai/gpt-5.6-2026-09-01", "gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-7-future"]) {
+      expect(documentedCacheRetentionMinimum(model, 0, 10)).toBe("30m");
+    }
+    expect(documentedCacheRetentionMinimum("gpt-6-luna", 12, 0)).toBe("30m");
+    expect(documentedCacheRetentionMinimum("gpt-6-astra", 12, 10, "1h")).toBeNull();
+    expect(documentedCacheRetentionMinimum("gpt-6-astra", 12, 10, "5m")).toBeNull();
+    expect(documentedCacheRetentionMinimum("gpt-6-astra", 0, 0)).toBeNull();
+    expect(documentedCacheRetentionMinimum("gpt-5.5", 12, 10)).toBeNull();
+    expect(documentedCacheRetentionMinimum("gpt-6x-preview", 12, 10)).toBeNull();
+    expect(documentedCacheRetentionMinimum("gpt-6.bad-suffix", 12, 10)).toBeNull();
+    expect(documentedCacheRetentionMinimum("claude-sonnet", 12, 10)).toBeNull();
+  });
+
   test("normalizes known Codex background categories", () => {
     expect(codexRequestOriginFromErrorCategory("codex_activity_summary")).toBe("activity_summary");
     expect(codexRequestOriginFromErrorCategory("other")).toBeNull();
@@ -84,6 +102,8 @@ describe("usage data", () => {
       generationMs: 600,
       inputTokens: 100,
       cachedInputTokens: 20,
+      cacheWriteInputTokens: null,
+      cacheWriteTtl: "45m",
       reasoningTokens: 30,
       outputTokens: 40,
       totalTokens: 140,
@@ -108,6 +128,8 @@ describe("usage data", () => {
       generationMs: 500,
       inputTokens: 90,
       cachedInputTokens: 10,
+      cacheWriteInputTokens: null,
+      cacheWriteTtl: "45m",
       reasoningTokens: 20,
       outputTokens: 30,
       totalTokens: 120,
@@ -135,6 +157,8 @@ describe("usage data", () => {
       requestOrigin: "activity_summary",
       ttft: 120,
       generationMs: 600,
+      cacheWriteTtl: "45m",
+      documentedCacheRetentionMinimum: null,
     });
     expect(usageRowsFromRemote([remote], {
       ...labels,
@@ -147,10 +171,44 @@ describe("usage data", () => {
       candidateKind: "account",
       candidateKey: "remote-account",
       appliedServiceTier: "flex",
+      cacheWriteTtl: "45m",
+      documentedCacheRetentionMinimum: null,
       requestOrigin: null,
       ttft: 100,
       generationMs: 500,
     });
+    const upstreamError = { httpStatus: 422, code: "future_constraint", errorType: "validation_error", message: "Invalid field: temperature", redacted: false, truncated: false };
+    for (const success of [false, true]) {
+      const localRow = usageRowsFromLocal([{ ...local, success, upstreamError }], {
+        ...labels, accountLabels: new Map(), sourceLabels: new Map(),
+      })[0];
+      const remoteRow = usageRowsFromRemote([{ ...remote, success, upstreamError }], {
+        ...labels, accountDisplayName: (label) => label,
+      })[0];
+      expect(localRow?.upstreamError).toEqual(success ? null : upstreamError);
+      expect(remoteRow?.upstreamError).toEqual(success ? null : upstreamError);
+    }
+  });
+
+  test("keeps the client model and routed source model separate for both hosts", () => {
+    const base = {
+      id: 1, requestId: "request", attempt: 1,
+      requestedModel: "public-alias", resolvedModel: "vendor/model",
+      wireApi: "responses" as const, success: true, httpStatus: 200, errorCategory: null,
+      latencyMs: 1, inputTokens: null, cachedInputTokens: null,
+      reasoningTokens: null, outputTokens: null, totalTokens: null,
+    };
+    const local = usageRowsFromLocal([{ ...base, createdAt: "2026-08-23T00:00:00Z", sourceId: "source" }], {
+      backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
+      unknownConnection: "Unknown", accountLabels: new Map(), sourceLabels: new Map(),
+    });
+    const remote = usageRowsFromRemote([{ ...base, createdAtMs: 1, candidateKind: "source", candidateHint: "source" }], {
+      backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
+      unknownConnection: "Unknown", accountDisplayName: (label) => label,
+    });
+    for (const rows of [local, remote]) {
+      expect(rows[0]).toMatchObject({ model: "vendor/model", requestedModel: "public-alias", routedModel: "vendor/model" });
+    }
   });
 
   test("labels deleted account history without collapsing it into an unknown account", () => {

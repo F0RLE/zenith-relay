@@ -108,6 +108,8 @@ pub fn new_account_record(
         weight: 1,
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
+        client_auth_status: None,
+        last_client_login_redirect_at_ms: None,
     };
     record.normalize();
     Ok(record)
@@ -279,6 +281,9 @@ mod tests {
             supplemental: Vec::new(),
             limit_reached: false,
             reset_credits_available: None,
+            available_credits_micro_units: None,
+            provider_credits_available: false,
+            provider_credits_unlimited: false,
             direct_balance_micro_usd: None,
             updated_at_ms: Some(1),
             error: None,

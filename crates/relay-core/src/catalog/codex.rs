@@ -1,4 +1,5 @@
 use super::context::context_window;
+use crate::DefaultServiceTier;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Map, Value};
 
@@ -6,6 +7,44 @@ pub const CODEX_RELAY_ALIAS_PREFIX: &str = "zenith/";
 pub const CODEX_RELAY_CATALOG_HASH: &str = "zenith-relay";
 pub const CODEX_CATALOG_PRIORITY_BASE: u64 = 1_000;
 const CODEX_RELAY_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
+
+/// Replace source-provided tier fields with the shared Relay model policy.
+pub(crate) fn set_codex_service_tiers(model: &mut Value, supported: &[DefaultServiceTier]) {
+    let Some(object) = model.as_object_mut() else {
+        return;
+    };
+    let mut tiers = Vec::new();
+    let mut aliases = Vec::new();
+    for (tier, id, alias, name, description) in [
+        (
+            DefaultServiceTier::Fast,
+            "priority",
+            "fast",
+            "Fast",
+            "Priority processing for faster responses.",
+        ),
+        (
+            DefaultServiceTier::Ultrafast,
+            "ultrafast",
+            "ultrafast",
+            "Ultrafast",
+            "Ultrafast processing for latency-sensitive work.",
+        ),
+    ] {
+        if !supported.contains(&tier) {
+            continue;
+        }
+        // Codex displays the catalog description for Ultrafast verbatim;
+        // an empty string suppresses its built-in fallback text.
+        tiers.push(json!({"id": id, "name": name, "description": description}));
+        aliases.push(alias);
+    }
+    object.insert("service_tiers".into(), json!(tiers));
+    // Older Codex clients consume this field instead of service_tiers.
+    object.insert("additional_speed_tiers".into(), json!(aliases));
+    object.remove("default_service_tier");
+    object.remove("service_tier");
+}
 
 pub fn codex_model_alias(model: &str) -> String {
     format!(
@@ -44,6 +83,14 @@ pub fn codex_model_is_picker_eligible(model: &str) -> bool {
 
 pub fn codex_model_display_name(model: &str) -> String {
     let leaf = model.rsplit('/').next().unwrap_or(model).trim();
+    // Use compact picker labels without the GPT prefix for numbered models.
+    // Reference names take precedence at projection; routing IDs are unchanged.
+    let leaf = leaf
+        .get(..4)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("gpt-"))
+        .and_then(|_| leaf.get(4..))
+        .filter(|suffix| suffix.as_bytes().first().is_some_and(u8::is_ascii_digit))
+        .unwrap_or(leaf);
     let mut output = String::new();
     let mut previous_was_number = false;
     for raw in leaf.split(['-', '_']).filter(|part| !part.is_empty()) {
@@ -138,19 +185,20 @@ pub fn routed_codex_catalog_entry(
     entry.insert("supports_search_tool".into(), Value::Bool(false));
     entry.insert("web_search_tool_type".into(), Value::String("text".into()));
     entry.insert("supports_image_detail_original".into(), Value::Bool(false));
-    // Codex uses this field as a client-side attachment gate. Routed sources
-    // may omit or under-report vision metadata, so let the selected upstream
-    // model make the final capability decision instead of blocking the image
-    // before Relay receives it.
+    // Unknown models support text/image input; models.dev replaces this
+    // fallback for known exact model identities at the publication boundary.
     entry.insert("input_modalities".into(), json!(["text", "image"]));
     entry.insert("experimental_supported_tools".into(), json!([]));
     entry.insert(
         "apply_patch_tool_type".into(),
         Value::String("freeform".into()),
     );
+    // Codex currently requires a truncation policy in every catalog entry.
+    // Keep this as a small client-side parsing default; it does not describe
+    // provider capabilities or change Relay's route selection.
     entry.insert(
         "truncation_policy".into(),
-        json!({ "mode": "tokens", "limit": 10_000 }),
+        json!({"mode": "tokens", "limit": 10000}),
     );
     let context_window = advertised_context_window
         .or_else(|| entry.get("context_window").and_then(Value::as_u64))
@@ -162,6 +210,9 @@ pub fn routed_codex_catalog_entry(
     } else {
         entry.remove("max_context_window");
     }
+    // Do not synthesize auto-compaction metadata for routed models. The
+    // provider owns that policy, and publishing a Relay-side limit would make
+    // the catalog claim a capability that was never observed upstream.
     entry.remove("auto_compact_token_limit");
     entry.insert("effective_context_window_percent".into(), 95.into());
     entry.insert(
@@ -183,6 +234,66 @@ pub fn normalize_codex_catalog_priorities(models: &mut [Value]) {
     }
 }
 
+/// Ultra is a Codex orchestration mode, not a provider reasoning effort. Only
+/// an exact Codex-owned model card may enable it, and both the parent (Max)
+/// and the configured subagent effort must already work through this route.
+/// Never copy transport capabilities or instructions from the reference card.
+pub fn apply_codex_ultra_from_official_model(
+    entry: &mut Value,
+    official: &Value,
+    upstream_model: &str,
+) -> bool {
+    if official
+        .get("slug")
+        .and_then(Value::as_str)
+        .is_none_or(|slug| !slug.eq_ignore_ascii_case(upstream_model))
+        || !official
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .is_some_and(|levels| {
+                levels
+                    .iter()
+                    .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+            })
+    {
+        return false;
+    }
+    let Some(levels) = entry
+        .get_mut("supported_reasoning_levels")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    let supports = |effort: &str| {
+        levels.iter().any(|level| {
+            level
+                .get("effort")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
+        })
+    };
+    let subagent_effort = official
+        .get("multi_agent_reasoning_effort")
+        .and_then(Value::as_str);
+    if !supports("max") || subagent_effort.is_some_and(|effort| !supports(effort)) {
+        return false;
+    }
+    if !supports("ultra") {
+        levels.push(json!({"effort": "ultra", "description": "Ultra (agents)"}));
+    }
+    if let Some(version) = official
+        .get("multi_agent_version")
+        .and_then(Value::as_str)
+        .filter(|version| matches!(*version, "v1" | "v2"))
+    {
+        entry["multi_agent_version"] = json!(version);
+    }
+    if let Some(effort) = subagent_effort {
+        entry["multi_agent_reasoning_effort"] = json!(effort);
+    }
+    true
+}
+
 pub fn normalize_upstream_codex_catalog_entry(
     template: &Map<String, Value>,
     model: &str,
@@ -191,42 +302,26 @@ pub fn normalize_upstream_codex_catalog_entry(
 ) -> Option<Value> {
     let mut entry = catalog_entry_base(template, model, priority, advertised_context_window)?;
 
-    for key in [
-        "additional_speed_tiers",
-        "default_service_tier",
-        "default_reasoning_level",
-    ] {
-        if let Some(value) = template.get(key) {
-            let valid = match key {
-                "additional_speed_tiers" => {
-                    let mut candidate = Map::new();
-                    candidate.insert(key.into(), value.clone());
-                    default_string_array(&candidate, key)
-                }
-                _ => optional_non_empty_string(template, key),
-            };
-            if valid {
-                entry.insert(key.into(), value.clone());
-            }
+    if let Some(image_input) = super::source_model_declares_image_input(template) {
+        entry.insert(
+            "input_modalities".into(),
+            if image_input {
+                json!(["text", "image"])
+            } else {
+                json!(["text"])
+            },
+        );
+    }
+
+    if let Some(value) = template.get("default_reasoning_level") {
+        if optional_non_empty_string(template, "default_reasoning_level") {
+            entry.insert("default_reasoning_level".into(), value.clone());
         }
     }
 
-    if let Some(value) = template.get("service_tiers") {
-        let mut candidate = Map::new();
-        candidate.insert("service_tiers".into(), value.clone());
-        if default_service_tiers(&candidate) {
-            entry.insert("service_tiers".into(), value.clone());
-        }
-    }
-
-    if let Some(value) = template.get("supported_reasoning_levels") {
-        if value
-            .as_array()
-            .is_some_and(|levels| levels.iter().all(valid_reasoning_level))
-        {
-            entry.insert("supported_reasoning_levels".into(), value.clone());
-            compact_reasoning_level_descriptions(&mut entry);
-        }
+    if let Some(value) = upstream_reasoning_levels(template) {
+        entry.insert("supported_reasoning_levels".into(), value);
+        compact_reasoning_level_descriptions(&mut entry);
     }
     // API routes use Relay's neutral automatic default and never inherit an
     // upstream automatic default such as `ultra`.
@@ -289,7 +384,8 @@ pub fn normalize_upstream_codex_catalog_entry(
         }
     }
 
-    let value = Value::Object(entry);
+    let mut value = Value::Object(entry);
+    set_codex_service_tiers(&mut value, super::model_service_tiers(model, None));
     codex_catalog_entry_is_compatible(&value).then_some(value)
 }
 
@@ -356,20 +452,32 @@ fn prefer_medium_reasoning_default(entry: &mut Map<String, Value>) {
 /// Provider-routed rows intentionally use `codex_model_alias` and the
 /// conservative `routed_codex_catalog_entry` path.  A native OAuth model is
 /// different: Codex uses the bare upstream slug to select its native
-/// Responses contract, so replacing it with a Relay alias would hide the
-/// account's native reasoning and service-tier controls.
+/// Responses contract. Semantic model fields are overlaid from the shared
+/// reference catalog by the caller; transport remains account-owned.
 pub fn normalize_native_codex_catalog_entry(
     template: &Map<String, Value>,
     model: &str,
     priority: u64,
     _advertised_context_window: Option<u64>,
 ) -> Option<Value> {
-    // Native rows own their context and capability fields. An API-source
-    // context override must never be allowed to fill or replace them.
+    // Normalize the account transport template without an API context override.
+    // The final projection applies shared model semantics and client context policy.
     let mut entry = catalog_entry_base(template, model, priority, None)?;
+    // `catalog_entry_base` starts from the routed fallback schema, which has
+    // a context value for API clients. Native catalogs are different: an
+    // omitted field means Codex owns the context policy, so do not manufacture
+    // a Relay limit before overlaying the native row.
+    for key in [
+        "context_window",
+        "max_context_window",
+        "auto_compact_token_limit",
+        "effective_context_window_percent",
+    ] {
+        entry.remove(key);
+    }
     // Start from a known-compatible native-shaped row so partial manifests
     // cannot make the whole pool catalog row disappear, then overlay every
-    // upstream field to retain native capabilities verbatim.
+    // upstream field to retain native capabilities. Speed is Relay-owned.
     entry.extend(
         template
             .iter()
@@ -378,7 +486,6 @@ pub fn normalize_native_codex_catalog_entry(
     if !template.contains_key("input_modalities") {
         entry.remove("input_modalities");
     }
-    let context_window = entry.get("context_window").and_then(context_window);
     // Native account rows are identified by the upstream slug. The caller's
     // model is only a routing fallback; never replace a real upstream ID with
     // a Relay alias or a configured spelling.
@@ -393,13 +500,9 @@ pub fn normalize_native_codex_catalog_entry(
         "priority".into(),
         Value::Number(priority.min(i32::MAX as u64).into()),
     );
-    if let Some(context_window) = context_window {
-        entry.insert("context_window".into(), context_window.into());
-        entry
-            .entry("max_context_window")
-            .or_insert_with(|| context_window.into());
-    }
-    codex_catalog_entry_is_compatible(&Value::Object(entry.clone())).then_some(Value::Object(entry))
+    let mut value = Value::Object(entry);
+    set_codex_service_tiers(&mut value, super::model_service_tiers(model, None));
+    codex_catalog_entry_is_compatible(&value).then_some(value)
 }
 
 pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
@@ -644,12 +747,94 @@ fn required_i64(entry: &Map<String, Value>, key: &str) -> bool {
 }
 
 fn valid_truncation_policy(entry: &Map<String, Value>) -> bool {
-    entry
-        .get("truncation_policy")
-        .and_then(Value::as_object)
-        .is_some_and(|policy| {
+    // The absence of this field is intentional for routed/API models: Relay
+    // must not impose a synthetic request-size limit on an upstream that may
+    // support a larger context. If a provider-owned catalog supplies the
+    // policy, still validate it strictly instead of accepting malformed data.
+    entry.get("truncation_policy").is_some_and(|value| {
+        value.as_object().is_some_and(|policy| {
             enum_string(policy, "mode", &["bytes", "tokens"], true) && required_i64(policy, "limit")
         })
+    })
+}
+
+/// Reports whether a source row explicitly attempted to describe reasoning.
+/// An empty or malformed declaration is still deliberate and remains empty.
+pub fn source_row_declares_reasoning(template: &Map<String, Value>) -> bool {
+    [
+        "supported_reasoning_levels",
+        "supportedReasoningLevels",
+        "supported_reasoning_efforts",
+        "supportedReasoningEfforts",
+        "efforts",
+        "reasoning_efforts",
+        "reasoningEfforts",
+        "reasoning_effort_options",
+        "reasoningEffortOptions",
+        "reasoning_effort_modes",
+        "reasoningEffortModes",
+        "supports_reasoning_effort",
+        "supportsReasoningEffort",
+    ]
+    .into_iter()
+    .any(|key| template.contains_key(key))
+}
+
+fn upstream_reasoning_levels(template: &Map<String, Value>) -> Option<Value> {
+    if ["supports_reasoning_effort", "supportsReasoningEffort"]
+        .into_iter()
+        .find_map(|key| template.get(key).and_then(Value::as_bool))
+        == Some(false)
+    {
+        return Some(Value::Array(Vec::new()));
+    }
+    let raw = [
+        "supported_reasoning_levels",
+        "supportedReasoningLevels",
+        "supported_reasoning_efforts",
+        "supportedReasoningEfforts",
+        "efforts",
+        "reasoning_efforts",
+        "reasoningEfforts",
+        "reasoning_effort_options",
+        "reasoningEffortOptions",
+        "reasoning_effort_modes",
+        "reasoningEffortModes",
+    ]
+    .into_iter()
+    .find_map(|key| template.get(key))?;
+    let levels = raw.as_array()?;
+    let normalized = levels
+        .iter()
+        .filter_map(|level| {
+            let (effort, description) = match level {
+                Value::String(effort) => (effort.as_str(), effort.as_str()),
+                Value::Object(level) => {
+                    let effort = level
+                        .get("effort")
+                        .or_else(|| level.get("id"))
+                        .or_else(|| level.get("value"))
+                        .and_then(Value::as_str)?;
+                    let description = level
+                        .get("description")
+                        .or_else(|| level.get("label"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(effort);
+                    (effort, description)
+                }
+                _ => return None,
+            };
+            let effort = effort.trim();
+            let description = description.trim();
+            (valid_reasoning_effort_text(effort) && !description.is_empty())
+                .then(|| json!({"effort": effort, "description": description}))
+        })
+        .collect::<Vec<_>>();
+    (normalized.len() == levels.len()).then_some(Value::Array(normalized))
+}
+
+fn valid_reasoning_effort_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control)
 }
 
 fn valid_input_modalities(entry: &Map<String, Value>) -> bool {
@@ -714,6 +899,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn numbered_gpt_fallback_labels_match_the_compact_codex_picker() {
+        for (model, expected) in [
+            ("gpt-6-astra", "6 Astra"),
+            ("gpt-5.6-sol", "5.6 Sol"),
+            ("gpt-5.6-terra", "5.6 Terra"),
+            ("local/gpt-6-astra", "6 Astra"),
+            ("GPT-6-Astra", "6 Astra"),
+            ("gpt-123-future", "123 Future"),
+            ("gpt-124.7-next", "124.7 Next"),
+            ("next-family-synthetic", "Next Family Synthetic"),
+            ("gpt-future", "GPT Future"),
+            ("gpt-", "GPT"),
+            ("vendor/claude-opus-4-8", "Claude Opus 4.8"),
+        ] {
+            assert_eq!(codex_model_display_name(model), expected, "{model}");
+        }
+    }
+
+    #[test]
     fn relay_aliases_are_exact_and_media_models_stay_out_of_codex() {
         let model = "vendor/claude-opus-4-8";
         let alias = codex_model_alias(model);
@@ -725,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_picker_order_matches_relay_provider_groups() {
+    fn generated_picker_order_preserves_discovery_order_without_metadata() {
         let models = crate::canonicalize_model_ids([
             "vendor/glm-5.2",
             "vendor/grok-4.5",
@@ -743,16 +947,16 @@ mod tests {
         assert_eq!(
             models,
             [
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.6-luna",
-                "gpt-5.5",
-                "vendor/gpt-5.4",
-                "gpt-5.4-mini",
-                "vendor/claude-opus-4-8",
-                "vendor/gemini-3.6-flash",
-                "vendor/grok-4.5",
                 "vendor/glm-5.2",
+                "vendor/grok-4.5",
+                "vendor/gemini-3.6-flash",
+                "vendor/claude-opus-4-8",
+                "gpt-5.4-mini",
+                "vendor/gpt-5.4",
+                "gpt-5.5",
+                "gpt-5.6-luna",
+                "gpt-5.6-terra",
+                "gpt-5.6-sol",
                 "vendor/unknown-model",
             ]
         );
@@ -927,6 +1131,31 @@ mod tests {
         .unwrap();
 
         assert!(entry.get("input_modalities").is_none());
+        assert!(entry.get("context_window").is_none());
+        assert!(entry.get("max_context_window").is_none());
+        assert!(entry.get("auto_compact_token_limit").is_none());
+    }
+
+    #[test]
+    fn native_models_do_not_synthesize_missing_context_fields() {
+        let template = json!({
+            "slug": "gpt-native",
+            "display_name": "GPT Native",
+            "context_window": 128_000,
+        });
+
+        let entry = normalize_native_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "gpt-native",
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(entry["context_window"], 128_000);
+        assert!(entry.get("max_context_window").is_none());
+        assert!(entry.get("auto_compact_token_limit").is_none());
+        assert!(entry.get("effective_context_window_percent").is_none());
     }
 
     #[test]
@@ -975,6 +1204,17 @@ mod tests {
     }
 
     #[test]
+    fn routed_models_publish_codex_required_truncation_policy() {
+        let entry = routed_codex_catalog_entry(None, "vendor/large", 1_000, Some(1_000_000));
+
+        assert_eq!(
+            entry.get("truncation_policy"),
+            Some(&json!({"mode": "tokens", "limit": 10000}))
+        );
+        assert_eq!(entry["context_window"], 1_000_000);
+    }
+
+    #[test]
     fn strict_catalog_validation_rejects_poisoned_or_incomplete_rows() {
         let valid = routed_codex_catalog_entry(None, "vendor/model", 1_000, None);
         assert!(codex_catalog_entry_is_compatible(&valid));
@@ -989,5 +1229,56 @@ mod tests {
         let mut poisoned = valid;
         poisoned["input_modalities"] = json!(["text", "video"]);
         assert!(!codex_catalog_entry_is_compatible(&poisoned));
+    }
+
+    #[test]
+    fn official_codex_ultra_requires_exact_identity_and_routable_child_effort() {
+        let official = json!({
+            "slug": "gpt-future",
+            "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}],
+            "multi_agent_version": "v2",
+            "multi_agent_reasoning_effort": "xhigh",
+            "base_instructions": "never inherit this"
+        });
+        let mut entry = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+        entry["supported_reasoning_levels"] = json!([
+            {"effort": "xhigh", "description": "xhigh"},
+            {"effort": "max", "description": "max"}
+        ]);
+        assert!(!apply_codex_ultra_from_official_model(
+            &mut entry,
+            &official,
+            "gpt-other"
+        ));
+        assert!(!apply_codex_ultra_from_official_model(
+            &mut entry,
+            &official,
+            "gpt-future-other"
+        ));
+        assert!(apply_codex_ultra_from_official_model(
+            &mut entry,
+            &official,
+            "gpt-future"
+        ));
+        assert_eq!(entry["supported_reasoning_levels"][2]["effort"], "ultra");
+        assert_eq!(entry["multi_agent_version"], "v2");
+        assert_eq!(entry["multi_agent_reasoning_effort"], "xhigh");
+        assert_ne!(entry["base_instructions"], "never inherit this");
+        assert!(codex_catalog_entry_is_compatible(&entry));
+
+        let mut missing_child = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+        missing_child["supported_reasoning_levels"] = json!([{"effort": "max"}]);
+        assert!(!apply_codex_ultra_from_official_model(
+            &mut missing_child,
+            &official,
+            "gpt-future"
+        ));
+        assert_eq!(
+            missing_child["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

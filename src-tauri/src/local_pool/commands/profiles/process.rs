@@ -8,6 +8,26 @@ use crate::{
     },
     platform::default_codex_home,
 };
+use std::future::Future;
+
+pub(super) async fn launch_after_catalog_refresh<T>(
+    refresh_required: bool,
+    refresh: impl Future<Output = crate::local_pool::error::Result<T>>,
+    report: impl FnOnce(&crate::local_pool::error::Result<T>),
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), CommandError> {
+    // A successful attach already installed the catalog under the setup guard.
+    // Only a deferred or failed update needs another fetch before startup.
+    if refresh_required {
+        let refreshed = refresh.await;
+        report(&refreshed);
+    }
+    // Catalog refresh has its own warning; failure must not strand a verified
+    // profile after the caller explicitly stopped the previous client.
+    launch().map_err(|error| {
+        LocalPoolError::new(ErrorCode::Io, format!("failed to launch ChatGPT: {error}")).into()
+    })
+}
 
 pub(super) fn stop_codex_for_profile_change() -> Result<bool, CommandError> {
     stop_codex_and_wait().map_err(|error| {
@@ -85,6 +105,79 @@ pub(super) fn restart_codex_after_restore<T>(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::cell::RefCell;
+
+    #[tokio::test]
+    async fn launch_applies_the_catalog_before_starting_the_client() {
+        let events = RefCell::new(Vec::new());
+        launch_after_catalog_refresh(
+            true,
+            async {
+                tokio::task::yield_now().await;
+                events.borrow_mut().push("catalog");
+                Ok(())
+            },
+            |result| {
+                assert!(result.is_ok());
+                events.borrow_mut().push("report");
+            },
+            || {
+                events.borrow_mut().push("launch");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*events.borrow(), ["catalog", "report", "launch"]);
+    }
+
+    #[tokio::test]
+    async fn unavailable_catalog_reports_warning_and_still_launches_verified_profile() {
+        let reported = Cell::new(false);
+        let launched = Cell::new(false);
+        launch_after_catalog_refresh(
+            true,
+            async {
+                Err::<(), _>(LocalPoolError::new(
+                    ErrorCode::GatewayUnavailable,
+                    "synthetic failure",
+                ))
+            },
+            |result| reported.set(result.is_err()),
+            || {
+                assert!(reported.get());
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(launched.get());
+    }
+
+    #[tokio::test]
+    async fn freshly_attached_catalog_is_not_fetched_again_at_launch() {
+        let fetched = Cell::new(false);
+        let reported = Cell::new(false);
+        let launched = Cell::new(false);
+        launch_after_catalog_refresh(
+            false,
+            async {
+                fetched.set(true);
+                Ok(())
+            },
+            |_| reported.set(true),
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(launched.get());
+        assert!(!fetched.get());
+        assert!(!reported.get());
+    }
 
     #[test]
     fn failed_profile_change_restarts_a_previously_running_codex() {

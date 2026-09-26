@@ -16,6 +16,7 @@ pub(super) fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSo
             models: record.models,
         },
         protocol_bindings: record.protocol_bindings,
+        protocol_config: record.protocol_config,
         enabled: record.enabled,
         draining: record.draining,
         priority: record.priority,
@@ -31,6 +32,7 @@ pub(super) fn runtime_account(
     record: ServerAccountRecord,
     credential: &crate::state::AccountCredential,
     proxy: Option<ProxyConfig>,
+    basis_points_enabled: bool,
     quota_stale_after_ms: u64,
 ) -> RuntimeChatGptAccount {
     let operational = account_operational_state(AccountOperationalInput {
@@ -53,6 +55,9 @@ pub(super) fn runtime_account(
         source_id: record.source_id,
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
         responses_url: credential.responses_url.clone(),
+        basis_points_enabled: basis_points_enabled
+            && credential.has_oauth()
+            && !credential.is_agent_identity(),
         models,
         enabled: account_candidate_enabled(record.enabled, operational.routing_block_reason),
         draining: record.draining,

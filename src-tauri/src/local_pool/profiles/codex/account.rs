@@ -37,12 +37,7 @@ pub(super) fn attach_account_locked(
     validate_config_shape(&document)?;
     let existing_backup = parse_account_backup_snapshot(&original_backup_bytes, &backup_path)?;
 
-    if existing_backup.is_none() && document_has_provider(&document) {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "restore the local gateway profile before attaching an OAuth account",
-        ));
-    }
+    let orphaned_managed_provider = existing_backup.is_none() && document_has_provider(&document);
     if let Some(backup) = existing_backup.as_ref() {
         if backup.profile_dir != profile_dir.to_string_lossy()
             || !account_managed_config_matches(&document)
@@ -59,9 +54,14 @@ pub(super) fn attach_account_locked(
     let created_backup = existing_backup.is_none();
     let mut backup = existing_backup.unwrap_or(AccountProfileBackup {
         version: 1,
+        projection_secret_ref: None,
         profile_dir: profile_dir.to_string_lossy().into_owned(),
-        previous_model_provider: root_model_provider(&document),
-        previous_openai_base_url: root_openai_base_url(&document),
+        previous_model_provider: (!orphaned_managed_provider)
+            .then(|| root_model_provider(&document))
+            .flatten(),
+        previous_openai_base_url: (!orphaned_managed_provider)
+            .then(|| root_openai_base_url(&document))
+            .flatten(),
         previous_auth_secret_ref: None,
         managed_account_id: String::new(),
         managed_access_hash: String::new(),
@@ -78,7 +78,34 @@ pub(super) fn attach_account_locked(
     }
     backup.managed_account_id = account_id.to_string();
     backup.managed_access_hash = key_hash(tokens.access_token());
-    let backup_content = serialize_account_backup(&backup)?;
+    attach_account_config(&mut document);
+    let managed_config = document.to_string();
+    let credential = account_auth_content(tokens, provider_account_id)?;
+    let managed_auth = projection::merge_auth(original_auth, Some(&credential))?
+        .expect("an attached credential is present");
+    if created_backup {
+        backup.projection_secret_ref = Some(
+            match projection::save(
+                snapshot_text(&original_config_bytes, &config_path)?,
+                &managed_config,
+                original_auth,
+                secrets,
+            ) {
+                Ok(secret_ref) => secret_ref,
+                Err(error) => {
+                    let _ = cleanup_created_account_backup_secret(created_backup, &backup, secrets);
+                    return Err(error);
+                }
+            },
+        );
+    }
+    let backup_content = match serialize_account_backup(&backup) {
+        Ok(content) => content,
+        Err(error) => {
+            let cleanup = cleanup_created_account_backup_secret(created_backup, &backup, secrets);
+            return Err(with_rollback(error, cleanup));
+        }
+    };
     if let Err(error) = replace_if_unchanged(&backup_path, &original_backup_bytes, &backup_content)
     {
         return Err(with_rollback(
@@ -87,8 +114,6 @@ pub(super) fn attach_account_locked(
         ));
     }
 
-    attach_account_config(&mut document);
-    let managed_config = document.to_string();
     if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)
     {
         return Err(with_rollback(
@@ -103,7 +128,6 @@ pub(super) fn attach_account_locked(
             ),
         ));
     }
-    let managed_auth = account_auth_content(tokens, provider_account_id)?;
     if let Err(error) = replace_if_unchanged(&auth_path, &original_auth_bytes, &managed_auth) {
         let config_rollback = rollback_file(&config_path, &managed_config, &original_config_bytes);
         let backup_rollback = rollback_account_backup(
@@ -145,72 +169,110 @@ pub(super) fn restore_account_locked(
     let original_auth_bytes = read_optional_bytes(&auth_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
-    if !account_managed_config_matches(&document)
-        || !account_auth_matches_snapshot(
-            &original_auth_bytes,
-            &auth_path,
-            &backup.managed_access_hash,
-        )?
-    {
+    if backup.projection_secret_ref.is_none() && !account_managed_config_matches(&document) {
         return Err(profile_restore_blocked());
     }
-    let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
-        Some(secret_ref) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
+    let auth_matches_managed = account_auth_matches_snapshot(
+        &original_auth_bytes,
+        &auth_path,
+        &backup.managed_access_hash,
+    )?;
+    let previous_auth = match (
+        auth_matches_managed,
+        backup.projection_secret_ref.as_deref(),
+        backup.previous_auth_secret_ref.as_deref(),
+    ) {
+        (true, None, Some(secret_ref)) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 "ChatGPT account profile backup secret is missing",
             )
         })?),
-        None => None,
+        _ => None,
     };
     restore_account_config(&mut document, &backup);
-    let restored_config = document.to_string();
-    replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
-
-    let restored_auth_bytes = previous_auth
+    let restored = projection::restore_from_backup(
+        backup.projection_secret_ref.as_deref(),
+        &document,
+        (&config_path, &original_config_bytes),
+        (&auth_path, &original_auth_bytes),
+        auth_matches_managed,
+        previous_auth.as_deref(),
+        secrets,
+    )?;
+    if read_optional_bytes(&backup_path)? != backup_bytes {
+        return Err(profile_changed_at(&backup_path));
+    }
+    let restored_config_bytes = restored
+        .config
         .as_ref()
-        .map(|content| content.as_bytes().to_vec());
-    let auth_result = match previous_auth.as_deref() {
-        Some(previous_auth) => {
+        .map(|text| text.as_bytes().to_vec());
+    replace_with_snapshot(
+        &config_path,
+        &original_config_bytes,
+        restored.config.as_deref(),
+    )?;
+
+    let restored_auth_bytes = if auth_matches_managed {
+        restored
+            .auth
+            .as_ref()
+            .map(|content| content.as_bytes().to_vec())
+    } else {
+        original_auth_bytes.clone()
+    };
+    let auth_result = match (auth_matches_managed, restored.auth.as_deref()) {
+        (true, Some(previous_auth)) => {
             replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
         }
-        None => remove_if_unchanged(&auth_path, &original_auth_bytes),
+        (true, None) => remove_if_unchanged(&auth_path, &original_auth_bytes),
+        (false, _) => Ok(()),
     };
     if let Err(error) = auth_result {
         return Err(with_rollback(
             error,
-            rollback_file(&config_path, &restored_config, &original_config_bytes),
+            restore_snapshot_if_unchanged(
+                &config_path,
+                &restored_config_bytes,
+                &original_config_bytes,
+            ),
         ));
     }
     if let Err(error) = remove_if_unchanged(&backup_path, &backup_bytes) {
         let auth_rollback =
             restore_snapshot_if_unchanged(&auth_path, &restored_auth_bytes, &original_auth_bytes);
-        let config_rollback = rollback_file(&config_path, &restored_config, &original_config_bytes);
+        let config_rollback = restore_snapshot_if_unchanged(
+            &config_path,
+            &restored_config_bytes,
+            &original_config_bytes,
+        );
         return Err(with_rollback(
             error,
             merge_rollbacks(auth_rollback, config_rollback),
         ));
     }
-    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-        if let Err(error) = secrets.delete(secret_ref) {
-            let backup_rollback = restore_snapshot_if_unchanged(&backup_path, &None, &backup_bytes);
-            let auth_rollback = restore_snapshot_if_unchanged(
-                &auth_path,
-                &restored_auth_bytes,
-                &original_auth_bytes,
-            );
-            let config_rollback =
-                rollback_file(&config_path, &restored_config, &original_config_bytes);
-            return Err(with_rollback(
-                error,
-                merge_rollbacks(
-                    backup_rollback,
-                    merge_rollbacks(auth_rollback, config_rollback),
-                ),
-            ));
-        }
+    if let Err(error) = delete_backup_secrets(
+        backup.previous_auth_secret_ref.as_deref(),
+        backup.projection_secret_ref.as_deref(),
+        secrets,
+    ) {
+        let backup_rollback = restore_snapshot_if_unchanged(&backup_path, &None, &backup_bytes);
+        let auth_rollback =
+            restore_snapshot_if_unchanged(&auth_path, &restored_auth_bytes, &original_auth_bytes);
+        let config_rollback = restore_snapshot_if_unchanged(
+            &config_path,
+            &restored_config_bytes,
+            &original_config_bytes,
+        );
+        return Err(with_rollback(
+            error,
+            merge_rollbacks(
+                backup_rollback,
+                merge_rollbacks(auth_rollback, config_rollback),
+            ),
+        ));
     }
-    Ok(Some(binding_from_backup(&backup, true)))
+    Ok(Some(binding_from_backup(&backup, auth_matches_managed)))
 }
 
 pub(super) fn sync_account_profile_with(
@@ -226,9 +288,6 @@ pub(super) fn sync_account_profile_with(
         return Ok(false);
     };
     let next_hash = key_hash(tokens.access_token());
-    if backup.managed_access_hash == next_hash {
-        return Ok(false);
-    }
     let config_path = profile_dir.join(CONFIG_FILE);
     let auth_path = profile_dir.join(AUTH_FILE);
     let config = read_optional_bytes(&config_path)?;
@@ -236,9 +295,13 @@ pub(super) fn sync_account_profile_with(
     let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
     let auth_matches_previous =
         account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?;
-    let auth_matches_next = account_auth_matches_snapshot(&auth, &auth_path, &next_hash)?;
+    let auth_matches_next =
+        account_auth_matches_tokens(&auth, &auth_path, tokens, provider_account_id)?;
     if !account_managed_config_matches(&document) || (!auth_matches_previous && !auth_matches_next)
     {
+        return Ok(false);
+    }
+    if auth_matches_next && backup.managed_access_hash == next_hash {
         return Ok(false);
     }
     backup.managed_access_hash = next_hash;
@@ -247,12 +310,11 @@ pub(super) fn sync_account_profile_with(
     if auth_matches_next {
         return Ok(true);
     }
-    let updated_auth = account_auth_content(tokens, provider_account_id)?;
-    if let Err(error) = replace_if_unchanged(&auth_path, &auth, &updated_auth) {
-        return Err(with_rollback(
-            error,
-            rollback_file(&backup_path, &updated_backup, &backup_bytes),
-        ));
-    }
-    Ok(true)
+    let credential = account_auth_content(tokens, provider_account_id)?;
+    projection::update_auth_with_rollback(
+        &auth_path,
+        &auth,
+        &credential,
+        (&backup_path, &updated_backup, &backup_bytes),
+    )
 }

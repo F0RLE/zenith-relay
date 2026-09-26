@@ -1,35 +1,9 @@
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
-
-/// Reads an explicit image-input declaration from a generic source model
-/// manifest. Missing metadata is intentionally not treated as support.
-pub(crate) fn source_image_input_capabilities(
-    manifest: &Value,
-    configured_models: &BTreeSet<String>,
-) -> BTreeMap<String, bool> {
-    manifest
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            let object = model.as_object()?;
-            let id = object.get("id")?.as_str()?.trim();
-            if !configured_models
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(id))
-            {
-                return None;
-            }
-            Some((
-                id.to_ascii_lowercase(),
-                source_model_declares_image_input(object).unwrap_or(false),
-            ))
-        })
-        .collect()
-}
 
 pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<bool> {
+    if let Some(input) = model.get("modalities").and_then(|value| value.get("input")) {
+        return Some(array_contains_image(input));
+    }
     for key in [
         "input_modalities",
         "inputModalities",

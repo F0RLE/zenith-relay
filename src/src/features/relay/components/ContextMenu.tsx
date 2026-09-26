@@ -116,13 +116,13 @@ export function AppContextMenu() {
     };
     const dismiss = () => close();
     document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", dismiss);
     window.addEventListener("scroll", dismiss, true);
     window.addEventListener("blur", dismiss);
     return () => {
       document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("resize", dismiss);
       window.removeEventListener("scroll", dismiss, true);
       window.removeEventListener("blur", dismiss);
@@ -136,10 +136,7 @@ export function AppContextMenu() {
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
     const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
     const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      close(true);
-    } else if (event.key === "Tab") {
+    if (event.key === "Tab") {
       close();
     } else if (next >= 0) {
       event.preventDefault();
@@ -149,23 +146,23 @@ export function AppContextMenu() {
 
   return <div
     ref={menuRef}
-    className="app-context-menu"
+    className="app-context-menu relay-popover-panel"
     role="menu"
     aria-label={t("common.contextMenu")}
     data-positioned={Boolean(position)}
     style={position ?? undefined}
     onKeyDown={focusMenuItem}
   >
-    {context.field && context.writable ? <button type="button" role="menuitem" disabled={!hasSelection} onClick={async () => {
+    {context.field && context.writable ? <button className="relay-popover-item" type="button" role="menuitem" disabled={!hasSelection} onClick={async () => {
       if (!context.text || !await writeClipboard(context.text)) return;
       replaceSelection(context.field!, context.selectionStart, context.selectionEnd, "");
       close();
     }}><Scissors aria-hidden /><span>{t("common.cut")}</span></button> : null}
-    <button type="button" role="menuitem" disabled={!hasSelection} onClick={async () => {
+    <button className="relay-popover-item" type="button" role="menuitem" disabled={!hasSelection} onClick={async () => {
       if (context.text) await writeClipboard(context.text);
       close(true);
     }}><Copy aria-hidden /><span>{t("common.copy")}</span></button>
-    {context.field && context.writable ? <button type="button" role="menuitem" onClick={async () => {
+    {context.field && context.writable ? <button className="relay-popover-item" type="button" role="menuitem" onClick={async () => {
       try {
         const text = await navigator.clipboard.readText();
         replaceSelection(context.field!, context.selectionStart, context.selectionEnd, text);
@@ -174,7 +171,7 @@ export function AppContextMenu() {
       }
       close();
     }}><ClipboardPaste aria-hidden /><span>{t("common.paste")}</span></button> : null}
-    {context.field ? <button type="button" role="menuitem" className="context-menu-select-all" onClick={() => {
+    {context.field ? <button type="button" role="menuitem" className="relay-popover-item context-menu-select-all" onClick={() => {
       context.field?.focus();
       context.field?.select();
       close();

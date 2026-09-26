@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatAccountValueMicroUsd, formatProviderMicroUsd } from "../src/features/relay/poolFormatting";
+import { formatAccountValueMicroUsd, formatApiEquivalent, formatProviderMicroUsd } from "../src/features/relay/poolFormatting";
 
 describe("pool currency formatting", () => {
   test("formats account value with optional approximation marker", () => {
@@ -12,5 +12,9 @@ describe("pool currency formatting", () => {
     expect(formatProviderMicroUsd(1_234_567, "en-US")).toBe("$1.23");
     expect(formatProviderMicroUsd(12_000, "en-US")).toBe("$0.01");
     expect(formatProviderMicroUsd(2_000_000, "en-US")).toBe("$2.00");
+  });
+
+  test("keeps API-equivalent source values compact enough for pool cards", () => {
+    expect(formatApiEquivalent(3_682_678_150, "en-US")).toBe("≈$3,682.68");
   });
 });

@@ -3,7 +3,7 @@ info:
   title: Zenith Relay Compatible Server
   version: 1.0.0
   description: >
-    Public management and OpenAI-compatible runtime contract for a server
+    Public management and Responses, Chat Completions, Messages and Gemini runtime contract for a server
     operated by the user. This server is separate from the production Zenith
     Gateway and Control API and has no contract for Zenith production secrets,
     customer keys, backend tokens, account-pool inventory, or internal
@@ -12,9 +12,168 @@ info:
     authorization headers, prompts, and provider response bodies never appear
     in those management responses. The /v1 data plane may carry the user's
     request and provider response as required by the selected API contract.
+    Runtime JSON generation and account compact/search bodies accept identity,
+    gzip or zstd Content-Encoding with 64 MiB limits on both wire and decoded
+    bodies. Stacked encodings are unsupported. This does not apply to multipart
+    image edits or management requests.
 servers:
   - url: https://relay.example.com
 paths:
+  /gateway/tool-policy:
+    post:
+      operationId: setToolPolicy
+      security: [{ managementToken: [] }]
+      description: >
+        Requires tool_policy_v1. Saves the two-mode catalog policy with compare-and-set
+        against expectedPolicy and applies it to new requests without rebuilding the runtime.
+        Existing requests retain their snapshot through retries. Not an execution ACL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy, expectedPolicy]
+              properties:
+                policy: { $ref: "#/components/schemas/ToolPolicy" }
+                expectedPolicy: { $ref: "#/components/schemas/ToolPolicy" }
+      responses:
+        "200": { description: Runtime snapshot with gateway.toolPolicy. }
+        "400": { description: Invalid policy. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: configuration_revision_stale; reload before saving. }
+  /models/order:
+    post:
+      security: [{ managementToken: [] }]
+      description: >
+        Save model presentation order. An empty modelIds array clears the override
+        and restores catalog ordering for all groups, including future discoveries.
+        Reset requires the model_order_reset capability. Does not change routing
+        priority, model visibility, reasoning or pricing settings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [modelIds]
+              properties:
+                modelIds: { type: array, uniqueItems: true, items: { type: string } }
+      responses:
+        "200": { description: Updated runtime snapshot with the saved or default model order. }
+        "400": { description: Invalid model order. }
+        "404": { description: Model is not part of the pool. }
+  /sources:
+    get:
+      security: [{ managementToken: [] }]
+      responses:
+        "200":
+          description: Redacted source inventory, protocolConfig evidence and resolvedProtocolBindings.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SourceSummary" } }
+    post:
+      security: [{ managementToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceInput" }
+      responses:
+        "201":
+          description: Saved source after catalog discovery. This operation never generates content.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceSummary" }
+  /sources/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      security: [{ managementToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourcePatch" }
+      responses:
+        "200":
+          description: Updated source. Changing address or credential invalidates protocol evidence and increments its revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceSummary" }
+  /sources/{id}/test:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      security: [{ managementToken: [] }]
+      responses:
+        "200": { description: Refreshed catalog and declared metadata. No generation and no inferred confirmation. }
+  /sources/{id}/probe:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      security: [{ managementToken: [] }]
+      description: Explicit paid generation check using synthetic text, at most 64 output tokens, 20 seconds and 64 KiB. Confirms text only; never implies tool, image or streaming support.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [modelId, wireApi, expectedRevision]
+              properties:
+                modelId: { type: string }
+                wireApi: { $ref: "#/components/schemas/WireApi" }
+                expectedRevision: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Bounded result without generated text. Authentication errors, timeouts and 5xx remain unknown.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capability, revision, httpStatus, errorCode]
+                properties:
+                  capability: { $ref: "#/components/schemas/ModelEndpointCapability" }
+                  revision: { type: integer, minimum: 0 }
+                  httpStatus: { type: [integer, "null"] }
+                  errorCode: { type: [string, "null"] }
+        "409": { description: Source configuration changed during the check; stale results are not applied. }
+  /routing/settings:
+    post:
+      operationId: setRoutingPolicy
+      security: [{ managementToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [maxRetryCandidates]
+              properties:
+                poolRouting: { $ref: "#/components/schemas/PoolRoutingPolicy" }
+                expectedPoolRouting:
+                  description: The complete policy from the last state snapshot; required when poolRouting is supplied.
+                  $ref: "#/components/schemas/PoolRoutingPolicy"
+                maxRetryCandidates: { type: integer, minimum: 1, maximum: 8 }
+                cooldownAfterFailures: { deprecated: true, description: "Old-client compatibility only; ignored by pool rotation." }
+                keepLastCandidateAvailable: { deprecated: true, description: "Old-client compatibility only; ignored by pool rotation." }
+                routingStrategy: { deprecated: true, description: "Old-client compatibility only; ignored by pool rotation. Use poolRouting.mode." }
+                subscriptionPlanOrder: { deprecated: true, description: "Old-client compatibility only; ignored by pool rotation." }
+                defaultServiceTier: { type: string, enum: [standard, fast, ultrafast] }
+                imageBaseModel: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Runtime snapshot with the effective gateway.poolRouting policy. Active requests retain their leases and ownership.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { description: Invalid or stale policy; reload state before saving. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /health:
     get:
       operationId: health
@@ -47,6 +206,11 @@ paths:
             Canonical redacted runtime snapshot. It contains operational state
             and aggregates only; credentials, cookies, authorization headers,
             prompts, raw provider bodies, and vault material are excluded.
+            Source/account cards include independent refreshState evidence for
+            models and balance/quota; the account shape is AccountRefreshState.
+            gateway.modelCatalog optionally maps member model IDs to advisory
+            catalogProvider and catalogFamily values, including excluded models.
+            This display metadata does not grant runtime eligibility.
           content:
             application/json:
               schema: { type: object }
@@ -66,6 +230,19 @@ paths:
             Redacted request metrics and aggregates. Request details never
             include raw credentials, cookies, authorization headers, prompts,
             response bodies, or provider session material.
+            Failed events may include upstreamError with the original httpStatus,
+            code, errorType, and a bounded redacted message; redacted and truncated
+            flags describe omissions. Missing details in older records are not
+            reconstructed. Successful events omit upstreamError.
+            toolUse may include policyMode, policyOutcome, policyFallback,
+            deferredToolSearch, clientSchemaBytes and
+            forwardedSchemaBytes. A true deferredToolSearch means a native
+            Responses route sent provider-hosted tool search with deferred
+            function schemas. A true policyFallback means Relay retried once
+            before output without the optimization after a compatibility
+            rejection. Sizes measure compact catalog JSON, not tokens or
+            savings. Old records may also contain the legacy filteredToolCount;
+            new requests never filter tools. Old records leave sizes unknown.
           content:
             application/json:
               schema: { type: object }
@@ -79,6 +256,11 @@ paths:
           in: path
           required: true
           schema: { type: string, minLength: 1 }
+        - name: force
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Explicitly refresh from the provider instead of returning a cached observation.
       responses:
         "200":
           description: >
@@ -95,11 +277,11 @@ paths:
   /v1/models:
     get:
       operationId: models
-      security: [{ profileCredential: [] }]
+      security: [{ profileCredential: [] }, { messagesCredential: [] }, { geminiCredential: [] }]
       responses:
         "200":
           description: >
-            OpenAI-compatible visible model catalog. Model metadata is returned
+            Key-scoped visible model catalog. Native request headers select Messages or Gemini shape; bearer-only uses OpenAI shape. Model metadata is returned
             without management tokens, profile credentials, or source secrets.
           content:
             application/json:
@@ -126,17 +308,236 @@ paths:
             application/json: { schema: { type: object } }
             text/event-stream: { schema: { type: string } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/chat/completions:
+    post:
+      security: [{ profileCredential: [] }]
+      requestBody: { $ref: "#/components/requestBodies/Generation" }
+      responses:
+        "200": { $ref: "#/components/responses/Generation" }
+  /v1/messages:
+    post:
+      security: [{ profileCredential: [] }, { messagesCredential: [] }]
+      requestBody: { $ref: "#/components/requestBodies/Generation" }
+      responses:
+        "200": { $ref: "#/components/responses/Generation" }
+  /v1/models/{model}:
+    parameters:
+      - { name: model, in: path, required: true, schema: { type: string } }
+    get:
+      security: [{ profileCredential: [] }, { messagesCredential: [] }]
+      responses:
+        "200": { description: Model detail in the authorized client protocol. Model and protocol key rules apply. }
+  /v1beta/models:
+    get:
+      security: [{ profileCredential: [] }, { geminiCredential: [] }]
+      responses:
+        "200": { description: Gemini catalog with key-scoped supportedGenerationMethods from executable routes. }
+  /v1beta/models/{model}:
+    parameters:
+      - { name: model, in: path, required: true, schema: { type: string } }
+    get:
+      security: [{ profileCredential: [] }, { geminiCredential: [] }]
+      responses:
+        "200": { description: Gemini model detail subject to the same key rules as generation. }
+  /v1beta/models/{model}:generateContent:
+    parameters:
+      - { name: model, in: path, required: true, schema: { type: string } }
+    post:
+      security: [{ profileCredential: [] }, { geminiCredential: [] }]
+      requestBody: { $ref: "#/components/requestBodies/Generation" }
+      responses:
+        "200": { $ref: "#/components/responses/Generation" }
+  /v1beta/models/{model}:streamGenerateContent:
+    parameters:
+      - { name: model, in: path, required: true, schema: { type: string } }
+      - { name: alt, in: query, schema: { type: string, const: sse } }
+    post:
+      security: [{ profileCredential: [] }, { geminiCredential: [] }]
+      requestBody: { $ref: "#/components/requestBodies/Generation" }
+      responses:
+        "200": { $ref: "#/components/responses/Generation" }
 components:
+  requestBodies:
+    Generation:
+      required: true
+      content:
+        application/json: { schema: { type: object } }
   securitySchemes:
     managementToken: { type: http, scheme: bearer, description: User-managed server administration token; never valid for /v1 and never a Zenith production credential. }
     profileCredential: { type: http, scheme: bearer, description: Relay-managed data-plane credential for /v1; never valid for management and never a Zenith production credential. }
+    messagesCredential: { type: apiKey, in: header, name: x-api-key, description: Pool request key with Messages permission. }
+    geminiCredential: { type: apiKey, in: header, name: x-goog-api-key, description: Pool request key with Gemini permission. }
   responses:
+    Generation:
+      description: JSON or SSE in the requested client protocol. Unsupported nonportable parameters fail before dispatch; native extensions pass through. No fallback after visible output.
+      content:
+        application/json: { schema: { type: object } }
+        text/event-stream: { schema: { type: string } }
     Unauthorized:
       description: Missing or invalid token
       content:
         application/json:
           schema: { type: object }
   schemas:
+    WireApi:
+      type: string
+      enum: [responses, chat_completions, messages, gemini]
+    CapabilityStatus:
+      type: string
+      enum: [declared, confirmed, unsupported, unknown]
+    ProtocolFeatures:
+      type: object
+      propertyNames: { enum: [text, streaming, images, function_tools, tool_choice, structured_output, reasoning] }
+      additionalProperties: { $ref: "#/components/schemas/CapabilityStatus" }
+    ModelEndpointCapability:
+      type: object
+      required: [modelId, upstreamWireApi, status, origin, checkedAtMs, features, reasoningEfforts]
+      properties:
+        modelId: { type: string }
+        upstreamWireApi: { $ref: "#/components/schemas/WireApi" }
+        status: { $ref: "#/components/schemas/CapabilityStatus" }
+        origin: { type: string, enum: [catalog, service_profile, endpoint_url, manual, generation_probe] }
+        checkedAtMs: { type: integer, minimum: 0 }
+        features: { $ref: "#/components/schemas/ProtocolFeatures" }
+        reasoningEfforts: { type: array, items: { type: string } }
+    SourceProtocolConfig:
+      type: object
+      properties:
+        revision: { type: integer, minimum: 0 }
+        endpointHint: { oneOf: [{ $ref: "#/components/schemas/WireApi" }, { type: "null" }] }
+        capabilities: { type: array, items: { $ref: "#/components/schemas/ModelEndpointCapability" } }
+    SourceProtocolBinding:
+      type: object
+      required: [wireApi, modelIds]
+      properties:
+        wireApi: { $ref: "#/components/schemas/WireApi" }
+        adapter:
+          type: string
+          default: native
+          enum: [native, responses_to_chat_completions, responses_to_messages, responses_to_gemini, chat_completions_to_responses, chat_completions_to_messages, chat_completions_to_gemini, messages_to_responses, messages_to_chat_completions, messages_to_gemini, gemini_to_responses, gemini_to_chat_completions, gemini_to_messages]
+        modelIds: { type: array, items: { type: string } }
+        reasoningMode: { type: string, enum: [disabled, budget, adaptive] }
+        cacheWriteTtl: { type: string, enum: [provider, 5m, 1h], default: provider }
+    SourcePatch:
+      type: object
+      properties:
+        name: { type: string }
+        baseUrl: { type: string, format: uri }
+        apiKey: { type: string, writeOnly: true }
+        wireApi: { $ref: "#/components/schemas/WireApi" }
+        protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
+        models: { type: array, items: { type: string } }
+    SourceInput:
+      allOf:
+        - { $ref: "#/components/schemas/SourcePatch" }
+        - { type: object, required: [name, baseUrl, apiKey, wireApi] }
+    SourceSummary:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        refreshRevision: { type: integer, minimum: 1, readOnly: true, description: Non-secret source incarnation and configuration scope; changes on key replacement even if the URL is unchanged. }
+        refreshState: { $ref: "#/components/schemas/SourceRefreshState", readOnly: true }
+        providerStats: { $ref: "#/components/schemas/SourceProviderStats", readOnly: true, description: Optional runtime-only last observation; never initiates a provider request while reading a snapshot. }
+        models: { type: array, items: { type: string } }
+        protocolConfig: { $ref: "#/components/schemas/SourceProtocolConfig" }
+        protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
+        resolvedProtocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" }, readOnly: true }
+    RefreshStatus:
+      type: string
+      enum: [unknown, fresh, stale, unsupported]
+      description: Refresh evidence only, independent of inference routing. Unknown has no current-process observation; saved data is stale after restart, not fresh.
+    SourceRefreshState:
+      type: object
+      readOnly: true
+      properties:
+        models: { $ref: "#/components/schemas/RefreshStatus" }
+        balance: { $ref: "#/components/schemas/RefreshStatus" }
+    AccountRefreshState:
+      type: object
+      readOnly: true
+      description: Account snapshot refreshState (quota and models); absent on older servers.
+      properties:
+        models: { $ref: "#/components/schemas/RefreshStatus" }
+        quota: { $ref: "#/components/schemas/RefreshStatus" }
+    ModelProtocolRoute:
+      type: object
+      properties:
+        clientWireApi: { $ref: "#/components/schemas/WireApi" }
+        upstreamWireApi: { $ref: "#/components/schemas/WireApi" }
+        features: { $ref: "#/components/schemas/ProtocolFeatures" }
+        reasoningEfforts: { type: array, items: { type: string } }
+    ModelSummary:
+      type: object
+      properties:
+        id: { type: string }
+        protocolRoutes: { type: array, items: { $ref: "#/components/schemas/ModelProtocolRoute" }, readOnly: true }
+    ConfigurationPreset:
+      type: object
+      additionalProperties: false
+      required: [format, schemaVersion, settings]
+      description: >
+        Exports use schema version 6; imports accept versions 2 through 6.
+        Legacy protocolMode fields are ignored. An omitted or null
+        settings.routing.toolPolicy preserves the destination policy; an explicit
+        pass_through policy resets it. Secrets and probe confirmations are not exported.
+        Version-1 pool policies are converted automatically to version 2 after member-ID mapping.
+        Missing pool policy preserves the destination policy. Import never grants additional permissions.
+      properties:
+        format: { type: string, const: zenith-relay-configuration }
+        schemaVersion: { type: integer, minimum: 2, maximum: 6 }
+        settings:
+          type: object
+          properties:
+            routing:
+              type: object
+              properties:
+                poolRouting:
+                  oneOf:
+                    - { $ref: "#/components/schemas/PoolRoutingPolicy" }
+                    - { type: "null" }
+                toolPolicy:
+                  oneOf:
+                    - { $ref: "#/components/schemas/ToolPolicy" }
+                    - { type: "null" }
+    ToolPolicy:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      description: >
+        Opt-in provider-native catalog optimization. pass_through sends the
+        complete client catalog unchanged. automatic enables deferred schema
+        loading for compatible native Responses requests, regardless of catalog
+        size; it does not select or remove tools by name or infer relevance locally.
+      properties:
+        mode: { type: string, enum: [pass_through, automatic], default: pass_through }
+    PoolRoutingPolicy:
+      type: object
+      additionalProperties: false
+      required: [version, mode, members]
+      properties:
+        version: { type: integer, enum: [1, 2] }
+        mode: { type: string, enum: [smart, automatic, in_order, round_robin] }
+        members:
+          type: array
+          maxItems: 4096
+          description: Ordered tagged identities; each account or source occurs once regardless of protocol count.
+          items:
+            type: object
+            additionalProperties: false
+            required: [kind, id, weight, maxConcurrency]
+            properties:
+              kind: { type: string, enum: [account, source] }
+              id: { type: string, minLength: 1, maxLength: 256 }
+              weight: { type: integer, minimum: 1, maximum: 100 }
+              maxConcurrency: { type: integer, minimum: 0, maximum: 1024, description: "Shared across protocols and lanes. Zero means no additional limit." }
+      oneOf:
+        - properties:
+            version: { const: 1 }
+            mode: { enum: [smart, in_order, round_robin] }
+        - properties:
+            version: { const: 2 }
+            mode: { enum: [automatic, in_order, round_robin] }
     Health:
       type: object
       required: [status, version, serverId, startedAtMs]
@@ -152,15 +553,44 @@ components:
         serverId: { type: string, minLength: 1 }
         protocolMin: { type: integer, minimum: 1 }
         protocolMax: { type: integer, minimum: 1 }
-        features: { type: array, items: { type: string }, uniqueItems: true }
+        features: { type: array, items: { type: string }, uniqueItems: true, description: "source_protocols_v1 enables endpoint evidence and automatic computed routes; the legacy diagnostic generation operation remains available explicitly for compatibility. route_recovery_v1 indicates that the existing recovery setting applies to all four text API inputs, unlike the older chatgpt_retry_until_available feature alone. tool_policy_v1 enables tool catalog policy and schema-5 presets; rotation_v2 is the compatibility token for the current pool rotation policy, automatic startup conversion and schema-6 presets." }
     SourceProviderStats:
       type: object
       required: [provider, balanceMicroUsd, spentMicroUsd, requests, totalTokens]
       properties:
         provider:
           type: string
-          enum: [zenith, openrouter, unsupported]
+          enum: [zenith, openrouter, sub2api, new_api, billing, deepseek, siliconflow, unsupported]
         balanceMicroUsd: { type: [integer, "null"] }
         spentMicroUsd: { type: [integer, "null"] }
         requests: { type: [integer, "null"], minimum: 0 }
         totalTokens: { type: [integer, "null"], minimum: 0 }
+        status:
+          type: string
+          enum: [available, unsupported, unauthorized, rate_limited, unavailable, invalid_response]
+          default: available
+          description: Advisory statistics state; never changes routing eligibility. Unauthorized refers to the statistics endpoint, not necessarily the inference key.
+        balanceKind:
+          type: string
+          enum: [wallet, key_quota, subscription]
+          default: wallet
+        balanceUnlimited:
+          type: boolean
+          default: false
+          description: No cap for the stated balanceKind; an unlimited key does not prove an unlimited wallet.
+        amounts:
+          type: array
+          default: []
+          description: Amounts in millionths of the stated currency or quota unit. Legacy microUSD fields contain USD only. An empty array on older servers falls back to legacy fields.
+          items:
+            type: object
+            required: [currency, balanceMicros, spentMicros]
+            properties:
+              currency: { type: string, enum: [USD, CNY, CREDITS] }
+              balanceMicros: { type: [integer, "null"] }
+              spentMicros: { type: [integer, "null"] }
+        asOfMs: { type: [integer, "null"], minimum: 0, description: Wall-clock time of the last successful statistics read. }
+        stale: { type: boolean, default: false, description: Last successful observation was retained after a failed refresh or is past its refresh interval. }
+        refreshError:
+          type: [string, "null"]
+          enum: [unauthorized, rate_limited, unavailable, invalid_response, null]

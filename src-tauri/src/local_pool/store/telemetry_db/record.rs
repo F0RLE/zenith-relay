@@ -28,6 +28,10 @@ struct UsageAggregate {
 
 impl UsageAggregate {
     fn from_event(event: &UsageEvent) -> Self {
+        let cache_write_ttl = event
+            .cache_write_ttl
+            .as_deref()
+            .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls);
         Self::from_values(
             if event.account_id.is_some() {
                 "account"
@@ -46,9 +50,7 @@ impl UsageAggregate {
             event.input_tokens,
             event.cached_input_tokens,
             event.cache_write_input_tokens,
-            event
-                .cache_write_ttl
-                .and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
+            cache_write_ttl.as_deref(),
             event.output_tokens,
             event.total_tokens,
         )
@@ -196,6 +198,18 @@ impl TelemetryDb {
                     format!("usage tool diagnostics serialization failed: {error}"),
                 )
             })?;
+        let upstream_error_json = event
+            .upstream_error
+            .as_ref()
+            .filter(|_| !event.success)
+            .map(|details| serde_json::to_string(&details.sanitized()))
+            .transpose()
+            .map_err(|_| {
+                LocalPoolError::new(
+                    ErrorCode::Io,
+                    "upstream error diagnostics serialization failed",
+                )
+            })?;
         let requested_reasoning_effort = event
             .requested_reasoning_effort
             .as_deref()
@@ -273,8 +287,8 @@ impl TelemetryDb {
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
                     requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                    usage_aggregate_recorded, client_context_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, 1, ?30)
+                    usage_aggregate_recorded, client_context_id, upstream_error_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, 1, ?30, ?31)
                 ON CONFLICT(request_id) DO UPDATE SET
                     created_at = CURRENT_TIMESTAMP,
                     attempt = excluded.attempt,
@@ -306,6 +320,7 @@ impl TelemetryDb {
                     effective_reasoning_effort = excluded.effective_reasoning_effort,
                     cache_write_ttl = excluded.cache_write_ttl,
                     client_context_id = excluded.client_context_id,
+                    upstream_error_json = excluded.upstream_error_json,
                     usage_aggregate_recorded = 1
                 WHERE excluded.attempt >= request_logs.attempt",
                 params![
@@ -337,8 +352,11 @@ impl TelemetryDb {
                     event.error_origin().map(|origin| origin.as_str()),
                     requested_reasoning_effort,
                     effective_reasoning_effort,
-                    event.cache_write_ttl.and_then(zenith_relay_core::CacheWriteTtl::anthropic_ttl),
+                    event.cache_write_ttl.as_deref().and_then(
+                        zenith_relay_core::usage::normalize_reported_cache_ttls,
+                    ),
                     event.client_context_id,
+                    upstream_error_json,
                 ],
             )
             .map_err(db_error)?

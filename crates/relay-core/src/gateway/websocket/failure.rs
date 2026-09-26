@@ -1,12 +1,14 @@
 use super::*;
+use crate::error_codes;
 use crate::ErrorOrigin;
 
 pub(super) async fn send_gateway_error(
     downstream: &mut WebSocket,
     failure: &GatewayFailure,
     request_id: Option<&str>,
+    stream_id: Option<&str>,
 ) {
-    let event = gateway_error_event(failure, request_id);
+    let event = gateway_error_event(failure, request_id, stream_id);
     let _ = downstream
         .send(Message::Text(event.to_string().into()))
         .await;
@@ -22,9 +24,13 @@ pub(super) async fn send_gateway_error(
         .await;
 }
 
-pub(super) fn gateway_error_event(failure: &GatewayFailure, request_id: Option<&str>) -> Value {
+pub(super) fn gateway_error_event(
+    failure: &GatewayFailure,
+    request_id: Option<&str>,
+    stream_id: Option<&str>,
+) -> Value {
     let code = super::super::errors::api_error_code(failure.category);
-    json!({
+    let mut event = json!({
         "type": "error",
         "status": failure.status.as_u16(),
         "error": {
@@ -33,19 +39,24 @@ pub(super) fn gateway_error_event(failure: &GatewayFailure, request_id: Option<&
                 code,
             ),
             "code": code,
-            "message": failure.message,
+            "message": failure.upstream_error.as_ref().and_then(|details| details.message.as_deref()).unwrap_or(failure.message),
             "param": null,
             "zenith_relay": {
-                "origin": failure.origin.as_str(),
+                "origin": failure.origin.for_category(failure.category).as_str(),
                 "category": failure.category,
                 "request_id": request_id,
             },
         },
         "retry_at_ms": failure.retry_at_ms,
-    })
+    });
+    if let Some(stream_id) = stream_id {
+        event["stream_id"] = json!(stream_id);
+    }
+    event
 }
 
 pub(super) struct GatewayFailure {
+    pub(super) upstream_error: Option<Box<crate::usage::UpstreamErrorDetails>>,
     pub(super) status: StatusCode,
     pub(super) category: &'static str,
     pub(super) message: &'static str,
@@ -54,12 +65,56 @@ pub(super) struct GatewayFailure {
 }
 
 impl GatewayFailure {
+    pub(super) fn admission(reason: crate::scheduler::rotation::AdmissionStopReason) -> Self {
+        let (category, message) = super::super::errors::admission_failure(reason);
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            category,
+            message,
+            retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
+    pub(super) fn with_upstream_error(
+        mut self,
+        details: Option<crate::usage::UpstreamErrorDetails>,
+    ) -> Self {
+        self.upstream_error = details.map(Box::new);
+        self
+    }
+
     pub(super) fn invalid_request(message: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            category: "invalid_request",
+            category: error_codes::INVALID_REQUEST,
             message,
             retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
+    pub(super) fn invalid_stream_id() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            category: error_codes::INVALID_STREAM_ID,
+            message:
+                "stream_id must be 1-256 ASCII letters, digits, underscores, hyphens or periods",
+            retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
+    pub(super) fn continuation_unavailable() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            category: super::super::continuation::RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+            message: super::super::continuation::RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+            retry_at_ms: None,
+            upstream_error: None,
             origin: ErrorOrigin::Relay,
         }
     }
@@ -67,9 +122,10 @@ impl GatewayFailure {
     pub(super) fn model_not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            category: "model_not_found",
+            category: error_codes::MODEL_NOT_FOUND,
             message: "model is not available in this managed pool",
             retry_at_ms: None,
+            upstream_error: None,
             origin: ErrorOrigin::Relay,
         }
     }
@@ -77,9 +133,10 @@ impl GatewayFailure {
     pub(super) fn request_timeout() -> Self {
         Self {
             status: StatusCode::REQUEST_TIMEOUT,
-            category: "request_timeout",
+            category: error_codes::REQUEST_TIMEOUT,
             message: "response.create was not received in time",
             retry_at_ms: None,
+            upstream_error: None,
             origin: ErrorOrigin::Relay,
         }
     }
@@ -87,9 +144,10 @@ impl GatewayFailure {
     pub(super) fn client_closed() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            category: "client_cancelled",
+            category: error_codes::CLIENT_CANCELLED,
             message: "client closed the WebSocket connection",
             retry_at_ms: None,
+            upstream_error: None,
             origin: ErrorOrigin::Relay,
         }
     }
@@ -97,9 +155,10 @@ impl GatewayFailure {
     pub(super) fn websocket_http_fallback(origin: ErrorOrigin) -> Self {
         Self {
             status: StatusCode::UPGRADE_REQUIRED,
-            category: "upstream_websocket_unsupported",
+            category: error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED,
             message: "upstream WebSocket is unavailable; using HTTP streaming",
             retry_at_ms: None,
+            upstream_error: None,
             origin,
         }
     }
@@ -111,6 +170,7 @@ impl GatewayFailure {
             category: failure.category,
             message: failure.message,
             retry_at_ms: None,
+            upstream_error: None,
             origin,
         }
     }
@@ -118,9 +178,10 @@ impl GatewayFailure {
     pub(super) fn transport(origin: ErrorOrigin) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
-            category: "upstream_transport",
+            category: error_codes::UPSTREAM_TRANSPORT,
             message: "upstream WebSocket connection failed",
             retry_at_ms: None,
+            upstream_error: None,
             origin,
         }
     }
@@ -128,29 +189,10 @@ impl GatewayFailure {
     pub(super) fn closed(origin: ErrorOrigin) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
-            category: "upstream_websocket_closed",
+            category: error_codes::UPSTREAM_WEBSOCKET_CLOSED,
             message: "upstream WebSocket closed before the response completed",
             retry_at_ms: None,
-            origin,
-        }
-    }
-
-    pub(super) fn idle_timeout(origin: ErrorOrigin) -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            category: "websocket_idle_timeout",
-            message: "upstream WebSocket produced no event before the idle timeout",
-            retry_at_ms: None,
-            origin,
-        }
-    }
-
-    pub(super) fn semantic_timeout(origin: ErrorOrigin) -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            category: "stream_semantic_timeout",
-            message: "upstream produced no semantic output before the watchdog timeout",
-            retry_at_ms: None,
+            upstream_error: None,
             origin,
         }
     }
@@ -158,9 +200,10 @@ impl GatewayFailure {
     pub(super) fn message_too_large(origin: ErrorOrigin) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
-            category: "stream_event_too_large",
+            category: error_codes::STREAM_EVENT_TOO_LARGE,
             message: "upstream WebSocket message exceeded the Relay size limit",
             retry_at_ms: None,
+            upstream_error: None,
             origin,
         }
     }
@@ -171,7 +214,11 @@ impl GatewayFailure {
         origin: ErrorOrigin,
     ) -> Self {
         let classification = super::super::errors::classify_upstream_error(status, body);
-        Self::classified(status, classification.category, origin)
+        Self::classified(status, classification.category, origin).with_upstream_error(
+            body.map(|body| {
+                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), body)
+            }),
+        )
     }
 
     pub(super) fn classified(
@@ -184,6 +231,7 @@ impl GatewayFailure {
             category,
             message: super::super::errors::upstream_failure_message(category),
             retry_at_ms: None,
+            upstream_error: None,
             origin,
         }
     }
@@ -191,9 +239,10 @@ impl GatewayFailure {
     pub(super) fn unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            category: "no_eligible_source",
+            category: error_codes::NO_ELIGIBLE_SOURCE,
             message: "no eligible WebSocket source is available",
             retry_at_ms: None,
+            upstream_error: None,
             origin: ErrorOrigin::Relay,
         }
     }
@@ -201,9 +250,10 @@ impl GatewayFailure {
     pub(super) fn cooldown(retry_at_ms: u64) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
-            category: "all_candidates_cooling_down",
+            category: error_codes::ALL_CANDIDATES_COOLING_DOWN,
             message: "all eligible sources are cooling down",
             retry_at_ms: Some(retry_at_ms),
+            upstream_error: None,
             origin: ErrorOrigin::Relay,
         }
     }

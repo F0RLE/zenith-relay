@@ -1,4 +1,7 @@
-use super::super::restart_or_rollback;
+use super::super::{
+    apply_local_gateway_key_scope, fence_runtime_candidates, restart_or_rollback,
+    runtime_account_policy,
+};
 use super::{active_client, now_ms, object_path, remote_error};
 use crate::local_pool::{
     accounts::{
@@ -23,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, State};
 use zenith_relay_core::accounts::{AccountAuthState, AccountExportFormat, AccountExportRequest};
+use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{Feature, RemoteAccountLocation, RuntimeStateSnapshot};
 
 mod transfer;
@@ -31,7 +35,7 @@ use transfer::{delete_remote_accounts, transfer_local_account_batch};
 
 const REMOTE_TRANSFER_VALIDATION_BATCH_SIZE: usize = 5;
 const ACCOUNT_TRANSFER_PROGRESS_EVENT: &str = "relay-account-transfer-progress";
-const REMOTE_MISSING_ERROR: &str = "remote_missing";
+const REMOTE_MISSING_ERROR: &str = error_codes::REMOTE_MISSING;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveLocalAccountsToRemoteInput {
@@ -291,6 +295,10 @@ async fn execute_move_operation(
     app: Option<&AppHandle>,
 ) -> Result<Vec<String>, LocalPoolError> {
     let account_ids = operation.local_account_ids.clone();
+    // The remote can accept an import before the local ownership commit. Keep
+    // pending local dispatch closed until success or verified remote cleanup.
+    let runtime = state.gateway.runtime().await;
+    let _transfer_fences = fence_runtime_candidates(runtime.as_deref(), &account_ids, &[]);
     let mut remote_account_ids = Vec::with_capacity(account_ids.len());
     let mut created_remote_account_ids = operation.created_remote_account_ids.clone();
     let mut completed = 0;
@@ -309,9 +317,7 @@ async fn execute_move_operation(
                 operation.remote_account_ids = remote_account_ids.clone();
                 operation.created_remote_account_ids = created_remote_account_ids.clone();
                 operation.updated_at_ms = now_ms();
-                state
-                    .store()?
-                    .replace_ownership_operation(Some(operation.clone()))?;
+                persist_remote_move_operation(state, operation.clone()).await?;
                 for _ in batch {
                     completed += 1;
                     if let Some(app) = app {
@@ -330,19 +336,21 @@ async fn execute_move_operation(
                 operation.remote_account_ids = remote_account_ids;
                 operation.created_remote_account_ids = created_remote_account_ids.clone();
                 operation.updated_at_ms = now_ms();
-                state
-                    .store()?
-                    .replace_ownership_operation(Some(operation))?;
-                let rollback_complete =
-                    delete_remote_accounts(client, &created_remote_account_ids).await;
+                let mut known_remote_ids = operation.remote_account_ids.clone();
+                extend_unique(&mut known_remote_ids, created_remote_account_ids.clone());
+                persist_remote_move_operation(state, operation).await?;
+                let rollback_complete = delete_remote_accounts(client, &created_remote_account_ids)
+                    .await
+                    && remote_accounts_absent(client, &known_remote_ids).await;
                 if rollback_complete && error.code != ErrorCode::RecoveryRequired {
                     state.store()?.replace_ownership_operation(None)?;
                     return Err(LocalPoolError::new(error.code, error.message));
                 }
-                return Err(LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
+                return Err(super::super::fail_closed(
+                    state,
                     format!("{}; remote ownership recovery is required", error.message),
-                ));
+                )
+                .await);
             }
         }
     }
@@ -351,26 +359,53 @@ async fn execute_move_operation(
     operation.remote_account_ids = remote_account_ids.clone();
     operation.created_remote_account_ids = created_remote_account_ids.clone();
     operation.updated_at_ms = now_ms();
-    state
-        .store()?
-        .replace_ownership_operation(Some(operation.clone()))?;
-    let remote_locations = move_remote_locations(target, &operation)?;
+    persist_remote_move_operation(state, operation.clone()).await?;
+    let remote_locations = match move_remote_locations(target, &operation) {
+        Ok(locations) => locations,
+        Err(error) => {
+            return Err(super::super::fail_closed(state, error.to_string()).await);
+        }
+    };
     if let Some(app) = app {
         emit_account_transfer_progress(app, completed, &account_ids, "committing");
     }
     if let Err(error) =
         deactivate_transferred_local_accounts(state, &remote_locations, &operation).await
     {
-        let rollback_complete = delete_remote_accounts(client, &created_remote_account_ids).await;
-        if rollback_complete {
-            state.store()?.replace_ownership_operation(None)?;
-        }
-        let message = if rollback_complete {
-            format!("remote import was rolled back after local deactivation failed: {error}")
-        } else {
-            format!("local deactivation failed and remote recovery is incomplete: {error}")
+        let locally_committed = match local_move_is_committed(state, &operation) {
+            Ok(committed) => committed,
+            Err(inspect) => {
+                return Err(super::super::fail_closed(
+                    state,
+                    format!("local move inspection failed: {inspect}"),
+                )
+                .await);
+            }
         };
-        return Err(LocalPoolError::new(ErrorCode::RecoveryRequired, message));
+        if locally_committed {
+            // The safe local disable was saved. Keep the remote copy and the
+            // recovery marker; never roll ownership back merely because the
+            // replacement listener failed to start.
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("local runtime replacement needs recovery: {error}"),
+            ));
+        }
+        let rollback_complete = delete_remote_accounts(client, &created_remote_account_ids).await
+            && remote_accounts_absent(client, &remote_account_ids).await;
+        if rollback_complete && error.code != ErrorCode::RecoveryRequired {
+            state.store()?.replace_ownership_operation(None)?;
+        } else {
+            return Err(super::super::fail_closed(
+                state,
+                format!("local deactivation failed and remote recovery is incomplete: {error}"),
+            )
+            .await);
+        }
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("remote import was rolled back after local deactivation failed: {error}"),
+        ));
     }
     state.store()?.replace_ownership_operation(None)?;
     if let Some(app) = app {
@@ -561,6 +596,32 @@ async fn remote_account_exists(
         .map_err(|error| LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string()))
 }
 
+async fn remote_accounts_absent(client: &RemoteClient, account_ids: &[String]) -> bool {
+    client.state().await.ok().is_some_and(|snapshot| {
+        !snapshot
+            .accounts
+            .iter()
+            .any(|account| account_ids.contains(&account.id))
+    })
+}
+
+async fn persist_remote_move_operation(
+    state: &DesktopState,
+    operation: OwnershipOperationRecord,
+) -> Result<(), LocalPoolError> {
+    if let Err(error) = state
+        .store()
+        .and_then(|mut store| store.replace_ownership_operation(Some(operation)))
+    {
+        return Err(super::super::fail_closed(
+            state,
+            format!("failed to save remote ownership recovery: {error}"),
+        )
+        .await);
+    }
+    Ok(())
+}
+
 async fn activate_returned_local_account(
     state: &DesktopState,
     local_account_id: &str,
@@ -572,13 +633,15 @@ async fn activate_returned_local_account(
     activate_local_account_with_operation(state, local_account_id, committed).await
 }
 
-/// Commits a local ownership transition and restores both storage and the
-/// previous gateway runtime if the replacement runtime cannot start.
+/// Commits a local ownership transition. Return/force activation restores the
+/// previous inactive record on failure; a committed move keeps the local route
+/// closed because the remote may already be serving that account.
 async fn commit_local_ownership_change(
     state: &DesktopState,
     accounts: Vec<LocalAccountRecord>,
     operation: OwnershipOperationRecord,
 ) -> Result<(), LocalPoolError> {
+    let moving_to_remote = operation.kind == OwnershipOperationKind::MoveToRemote;
     let (old_accounts, old_keys, old_operation) = {
         let store = state.store()?;
         (
@@ -587,6 +650,23 @@ async fn commit_local_ownership_change(
             store.ownership_operation().cloned(),
         )
     };
+    let affected_ids = old_accounts
+        .iter()
+        .filter(|previous| {
+            accounts
+                .iter()
+                .find(|account| account.account.id == previous.account.id)
+                .is_none_or(|account| {
+                    previous.remote_location != account.remote_location
+                        || previous.account.enabled != account.account.enabled
+                        || previous.account.in_pool != account.account.in_pool
+                        || previous.account.draining != account.account.draining
+                })
+        })
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_ids, &[]);
     state
         .store()?
         .replace_accounts_keys_and_ownership_operation(
@@ -595,11 +675,28 @@ async fn commit_local_ownership_change(
             Some(operation),
         )?;
     restart_or_rollback(state, || {
-        state
-            .store()?
-            .replace_accounts_keys_and_ownership_operation(old_accounts, old_keys, old_operation)
+        if moving_to_remote {
+            // The remote import has already committed. Re-enabling the local
+            // candidate on a listener failure would create two owners.
+            Ok(())
+        } else {
+            state
+                .store()?
+                .replace_accounts_keys_and_ownership_operation(
+                    old_accounts,
+                    old_keys,
+                    old_operation,
+                )
+        }
     })
     .await
+    .map_err(|error| {
+        if moving_to_remote {
+            LocalPoolError::new(ErrorCode::RecoveryRequired, error.to_string())
+        } else {
+            error
+        }
+    })
 }
 
 async fn activate_local_account_with_operation(
@@ -701,7 +798,19 @@ pub(crate) async fn recover_pending_remote_ownership(
             if operation.phase == OwnershipOperationPhase::MoveLocalCommitted {
                 if !local_move_is_committed(state, &operation)? {
                     let locations = move_remote_locations(&target, &operation)?;
-                    deactivate_transferred_local_accounts(state, &locations, &operation).await?;
+                    let runtime = state.gateway.runtime().await;
+                    let _fences = fence_runtime_candidates(
+                        runtime.as_deref(),
+                        &operation.local_account_ids,
+                        &[],
+                    );
+                    if let Err(error) =
+                        deactivate_transferred_local_accounts(state, &locations, &operation).await
+                    {
+                        return Err(super::super::fail_closed(state, error.to_string())
+                            .await
+                            .into());
+                    }
                 }
                 state.store()?.replace_ownership_operation(None)?;
                 return Ok(());
@@ -767,11 +876,11 @@ pub(crate) async fn reconcile_saved_remote_ownership(
         return Ok(());
     };
     let snapshot = client.state().await.map_err(remote_error)?;
-    reconcile_remote_account_locations(state, &target, &snapshot)?;
+    reconcile_remote_account_locations(state, &target, &snapshot).await?;
     Ok(())
 }
 
-pub(super) fn reconcile_remote_account_locations(
+pub(super) async fn reconcile_remote_account_locations(
     state: &DesktopState,
     target: &RemoteTargetRecord,
     snapshot: &RuntimeStateSnapshot,
@@ -781,11 +890,20 @@ pub(super) fn reconcile_remote_account_locations(
         .iter()
         .map(|account| account.id.as_str())
         .collect::<HashSet<_>>();
+    reconcile_remote_account_ids(state, target, &remote_ids).await
+}
+
+async fn reconcile_remote_account_ids(
+    state: &DesktopState,
+    target: &RemoteTargetRecord,
+    remote_ids: &HashSet<&str>,
+) -> Result<(), LocalPoolError> {
     let (mut accounts, keys) = {
         let store = state.store()?;
         (store.accounts().to_vec(), store.keys().to_vec())
     };
     let mut changed = false;
+    let mut affected_ids = Vec::new();
     for account in &mut accounts {
         let Some(location) = account
             .remote_location
@@ -805,11 +923,39 @@ pub(super) fn reconcile_remote_account_locations(
         if account.account.enabled || account.account.in_pool {
             account.account.enabled = false;
             account.account.in_pool = false;
+            affected_ids.push(account.account.id.clone());
             changed = true;
         }
     }
-    if changed {
-        state.store()?.replace_accounts_and_keys(accounts, keys)?;
+    if !changed {
+        return Ok(());
+    }
+    // A remote-owned account must not keep a pending local dispatch between
+    // the durable reconciliation and the live policy/scope replacement.
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_ids, &[]);
+    state
+        .store()?
+        .replace_accounts_and_keys(accounts.clone(), keys.clone())?;
+    if !affected_ids.is_empty() {
+        if let Some(runtime) = runtime {
+            let now_ms = now_ms();
+            let applied = accounts
+                .iter()
+                .filter(|account| affected_ids.contains(&account.account.id))
+                .all(|account| {
+                    runtime.update_account_policy(
+                        &account.account.id,
+                        runtime_account_policy(account, now_ms),
+                    )
+                })
+                && apply_local_gateway_key_scope(state, &runtime).unwrap_or(false);
+            if !applied {
+                // The old persisted state already had an erroneously live
+                // remote-owned account. Never roll back to that unsafe state.
+                restart_or_rollback(state, || Ok(())).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -959,6 +1105,429 @@ async fn deactivate_transferred_local_accounts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_pool::{
+        accounts::{
+            credentials::{CredentialStore, StoredCodexCredentials},
+            records, NativeSecretBackend,
+        },
+        commands::runtime::runtime_from_store,
+        store::secret_store,
+    };
+    use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+    use zenith_relay_core::{accounts::AccountAuthMode, GatewayRuntime};
+
+    struct OwnershipPool {
+        state: DesktopState,
+        root: PathBuf,
+        account_id: String,
+        key_ref: String,
+        key: String,
+        address: SocketAddr,
+        previous_runtime: Arc<GatewayRuntime>,
+    }
+
+    impl OwnershipPool {
+        async fn new() -> Self {
+            let unique = uuid::Uuid::new_v4().simple().to_string();
+            let root = std::env::temp_dir().join(format!("relay-ownership-fence-{unique}"));
+            let account_id = format!("account-{unique}");
+            let now = now_ms();
+            let state = DesktopState::open(root.clone()).unwrap();
+            let credentials = StoredCodexCredentials::new(
+                &account_id,
+                "synthetic-access".into(),
+                Some("synthetic-refresh".into()),
+                None,
+                Some(now + 3_600_000),
+                now,
+                1,
+                None,
+                Some(account_id.clone()),
+                None,
+                None,
+                Some("plus".into()),
+                false,
+            )
+            .unwrap();
+            CredentialStore::from_backend(NativeSecretBackend)
+                .save(&credentials)
+                .unwrap();
+            let mut account = records::new_account_record(
+                &credentials,
+                AccountAuthMode::OAuth,
+                vec!["gpt-ownership".into()],
+                0,
+                now,
+            )
+            .unwrap();
+            account.account.in_pool = true;
+            state.store().unwrap().upsert_account(account).unwrap();
+            let previous_runtime = runtime_from_store(&state).await.unwrap();
+            let key_ref = state.store().unwrap().keys()[0].secret_ref.clone();
+            let key = secret_store::load(&key_ref).unwrap().unwrap();
+            let address = state
+                .gateway
+                .start(previous_runtime.clone(), 0)
+                .await
+                .unwrap();
+            let mut gateway = state.store().unwrap().gateway().clone();
+            gateway.port = address.port();
+            state.store().unwrap().replace_gateway(gateway).unwrap();
+            Self {
+                state,
+                root,
+                account_id,
+                key_ref,
+                key,
+                address,
+                previous_runtime,
+            }
+        }
+
+        async fn models(&self) -> Vec<String> {
+            let response: serde_json::Value = reqwest::Client::new()
+                .get(format!("http://{}/v1/models", self.address))
+                .bearer_auth(&self.key)
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            response["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|model| model["id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        async fn close(self) {
+            self.state.gateway.stop().await;
+            CredentialStore::from_backend(NativeSecretBackend)
+                .delete(&self.account_id)
+                .unwrap();
+            secret_store::delete(&self.key_ref).unwrap();
+            drop(self.previous_runtime);
+            drop(self.state);
+            for attempt in 0..50 {
+                match std::fs::remove_dir_all(&self.root) {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(error)
+                        if attempt < 49 && matches!(error.raw_os_error(), Some(5 | 32 | 145)) =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    Err(error) => {
+                        assert!(!self.root.exists(), "test fixture cleanup failed: {error}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn target() -> RemoteTargetRecord {
+        RemoteTargetRecord {
+            origin: "https://relay.example.invalid".into(),
+            server_id: "server-synthetic".into(),
+            identity_fingerprint: "synthetic".into(),
+            server_version: "1.1.3".into(),
+            protocol_version: 1,
+            allow_insecure_http: false,
+            secret_ref: "remote:synthetic".into(),
+            connected_at_ms: now_ms(),
+        }
+    }
+
+    #[tokio::test]
+    async fn moving_local_owner_retires_previous_runtime_and_removes_route() {
+        let pool = OwnershipPool::new().await;
+        assert_eq!(pool.models().await, ["gpt-ownership"]);
+        let mut accounts = pool.state.store().unwrap().accounts().to_vec();
+        accounts[0].remote_location = Some(RemoteAccountLocation {
+            server_id: target().server_id,
+            remote_account_id: "remote-synthetic".into(),
+        });
+        accounts[0].account.enabled = false;
+        accounts[0].account.in_pool = false;
+        let mut operation = new_move_operation(&target(), vec![pool.account_id.clone()]);
+        operation.phase = OwnershipOperationPhase::MoveLocalCommitted;
+        operation.remote_account_ids = vec!["remote-synthetic".into()];
+        commit_local_ownership_change(&pool.state, accounts, operation)
+            .await
+            .unwrap();
+        assert!(pool
+            .previous_runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
+        assert!(pool.models().await.is_empty());
+        assert!(pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .remote_location
+            .is_some());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_move_runtime_replacement_keeps_local_route_disabled() {
+        let pool = OwnershipPool::new().await;
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut gateway = pool.state.store().unwrap().gateway().clone();
+        gateway.port = occupied.local_addr().unwrap().port();
+        pool.state
+            .store()
+            .unwrap()
+            .replace_gateway(gateway)
+            .unwrap();
+        let mut accounts = pool.state.store().unwrap().accounts().to_vec();
+        accounts[0].account.enabled = false;
+        accounts[0].account.in_pool = false;
+        accounts[0].remote_location = Some(RemoteAccountLocation {
+            server_id: target().server_id,
+            remote_account_id: "remote-synthetic".into(),
+        });
+        let mut operation = new_move_operation(&target(), vec![pool.account_id.clone()]);
+        operation.phase = OwnershipOperationPhase::MoveLocalCommitted;
+        operation.remote_account_ids = vec!["remote-synthetic".into()];
+        assert!(
+            commit_local_ownership_change(&pool.state, accounts, operation)
+                .await
+                .is_err()
+        );
+        let saved = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        assert!(!saved.account.enabled && !saved.account.in_pool);
+        assert!(saved.remote_location.is_some());
+        assert_eq!(
+            pool.state
+                .store()
+                .unwrap()
+                .ownership_operation()
+                .unwrap()
+                .phase,
+            OwnershipOperationPhase::MoveLocalCommitted
+        );
+        assert_eq!(pool.state.gateway.address().await, Some(pool.address));
+        assert!(pool
+            .previous_runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
+        assert!(pool.models().await.is_empty());
+        drop(occupied);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_return_runtime_replacement_restores_remote_ownership() {
+        let pool = OwnershipPool::new().await;
+        let location = RemoteAccountLocation {
+            server_id: target().server_id,
+            remote_account_id: "remote-synthetic".into(),
+        };
+        let mut account = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        account.account.enabled = false;
+        account.account.in_pool = false;
+        account.remote_location = Some(location.clone());
+        pool.state
+            .store()
+            .unwrap()
+            .upsert_account(account.clone())
+            .unwrap();
+        assert!(pool
+            .previous_runtime
+            .update_account_policy(&pool.account_id, runtime_account_policy(&account, now_ms())));
+        assert!(apply_local_gateway_key_scope(&pool.state, &pool.previous_runtime).unwrap());
+        assert!(pool.models().await.is_empty());
+
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut gateway = pool.state.store().unwrap().gateway().clone();
+        gateway.port = occupied.local_addr().unwrap().port();
+        pool.state
+            .store()
+            .unwrap()
+            .replace_gateway(gateway)
+            .unwrap();
+        let mut operation = new_force_activation_operation(&location, pool.account_id.clone());
+        operation.phase = OwnershipOperationPhase::ForceLocalCommitted;
+        assert!(
+            activate_local_account_with_operation(&pool.state, &pool.account_id, operation)
+                .await
+                .is_err()
+        );
+        let saved = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        assert!(!saved.account.enabled && !saved.account.in_pool);
+        assert_eq!(saved.remote_location, Some(location));
+        assert!(pool.state.store().unwrap().ownership_operation().is_none());
+        assert_eq!(pool.state.gateway.address().await, Some(pool.address));
+        assert!(pool.models().await.is_empty());
+        drop(occupied);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn remote_reconciliation_revokes_an_erroneously_enabled_live_account() {
+        let pool = OwnershipPool::new().await;
+        let mut account = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        account.remote_location = Some(RemoteAccountLocation {
+            server_id: target().server_id,
+            remote_account_id: "remote-synthetic".into(),
+        });
+        pool.state.store().unwrap().upsert_account(account).unwrap();
+        assert_eq!(pool.models().await, ["gpt-ownership"]);
+
+        reconcile_remote_account_ids(&pool.state, &target(), &HashSet::new())
+            .await
+            .unwrap();
+        let reconciled = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        assert!(!reconciled.account.enabled && !reconciled.account.in_pool);
+        assert_eq!(
+            reconciled.account.last_error_code.as_deref(),
+            Some(REMOTE_MISSING_ERROR)
+        );
+        assert!(Arc::ptr_eq(
+            &pool.previous_runtime,
+            &pool.state.gateway.runtime().await.unwrap()
+        ));
+        assert!(pool.models().await.is_empty());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_rebuild_cannot_route_an_unreconciled_remote_account() {
+        let pool = OwnershipPool::new().await;
+        let mut account = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        account.remote_location = Some(RemoteAccountLocation {
+            server_id: target().server_id,
+            remote_account_id: "remote-synthetic".into(),
+        });
+        pool.state.store().unwrap().upsert_account(account).unwrap();
+        let rebuilt = runtime_from_store(&pool.state).await.unwrap();
+        pool.state.gateway.stop().await;
+        pool.state
+            .gateway
+            .start(rebuilt, pool.address.port())
+            .await
+            .unwrap();
+        assert!(pool.models().await.is_empty());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_remote_move_cannot_reopen_a_local_route_on_restart() {
+        let pool = OwnershipPool::new().await;
+        let operation = new_move_operation(&target(), vec![pool.account_id.clone()]);
+        pool.state
+            .store()
+            .unwrap()
+            .replace_ownership_operation(Some(operation))
+            .unwrap();
+        assert!(apply_local_gateway_key_scope(&pool.state, &pool.previous_runtime).unwrap());
+        assert!(pool.models().await.is_empty());
+        let rebuilt = runtime_from_store(&pool.state).await.unwrap();
+        pool.state.gateway.stop().await;
+        pool.state
+            .gateway
+            .start(rebuilt, pool.address.port())
+            .await
+            .unwrap();
+        assert!(pool.models().await.is_empty());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_reconciliation_rebuild_does_not_restore_remote_owned_route() {
+        let pool = OwnershipPool::new().await;
+        let mut account = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&pool.account_id)
+            .unwrap()
+            .clone();
+        account.account.id = format!("remote-only-{}", pool.account_id);
+        account.remote_location = Some(RemoteAccountLocation {
+            server_id: target().server_id,
+            remote_account_id: "remote-synthetic".into(),
+        });
+        let remote_only_id = account.account.id.clone();
+        pool.state.store().unwrap().upsert_account(account).unwrap();
+        // This new saved account was not part of the old runtime. Hot apply
+        // must rebuild; a blocked new port exercises the safe fallback.
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut gateway = pool.state.store().unwrap().gateway().clone();
+        gateway.port = occupied.local_addr().unwrap().port();
+        pool.state
+            .store()
+            .unwrap()
+            .replace_gateway(gateway)
+            .unwrap();
+        assert!(
+            reconcile_remote_account_ids(&pool.state, &target(), &HashSet::new())
+                .await
+                .is_err()
+        );
+        let saved = pool
+            .state
+            .store()
+            .unwrap()
+            .account(&remote_only_id)
+            .unwrap()
+            .clone();
+        assert!(!saved.account.enabled && !saved.account.in_pool);
+        assert_eq!(pool.state.gateway.address().await, Some(pool.address));
+        assert!(pool
+            .previous_runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| !candidate.available));
+        assert_eq!(pool.models().await, ["gpt-ownership"]);
+        drop(occupied);
+        pool.close().await;
+    }
 
     #[test]
     fn access_only_account_cannot_start_server_transfer() {

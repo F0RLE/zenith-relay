@@ -21,6 +21,8 @@ use zenith_relay_core::{
     ProxyConfig,
 };
 
+pub(crate) mod check;
+
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub const PROXY_POOL_SECRET_REF: &str = "proxy:pool";
 const PROXY_POOL_VERSION: u32 = 2;
@@ -323,6 +325,16 @@ impl ProxyPool {
             .find(|entry| entry.id == proxy_id)
             .map(|entry| entry.assigned_account_ids.clone())
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
+    }
+
+    pub(crate) fn config(&self, proxy_id: &str) -> Result<ProxyConfig> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == proxy_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
+        ProxyConfig::parse(&entry.url)
+            .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "stored proxy is invalid"))
     }
 
     pub(crate) fn summary(&self) -> ProxyPoolSummary {

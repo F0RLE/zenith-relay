@@ -105,6 +105,12 @@ mod tests {
                 Some("synthetic-round-trip-access"),
                 "{format:?}"
             );
+            if format == AccountExportFormat::Cockpit {
+                assert_eq!(
+                    parsed.items[0].tags,
+                    std::collections::BTreeSet::from(["team".to_string(), "work".to_string()])
+                );
+            }
         }
     }
 
@@ -133,6 +139,7 @@ mod tests {
             created_at_ms: 1_787_000_000_000,
             priority: 10,
             enabled: true,
+            tags: std::collections::BTreeSet::from(["work".into(), "team".into()]),
         }
     }
 }
