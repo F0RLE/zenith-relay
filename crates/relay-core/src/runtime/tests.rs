@@ -12,6 +12,42 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn basis_points_headers_match_excel_client_contract() {
+    let headers = basis_points_headers("account-1");
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-client-host")
+            .unwrap(),
+        "office"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-office-host")
+            .unwrap(),
+        "Excel"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-office-platform")
+            .unwrap(),
+        "PC"
+    );
+    assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
+    assert_eq!(
+        headers.get("x-stainless-package-version").unwrap(),
+        "6.31.0"
+    );
+    assert_eq!(headers.get("x-stainless-retry-count").unwrap(), "0");
+    assert_eq!(
+        headers.get("x-stainless-runtime").unwrap(),
+        "browser:chrome"
+    );
+    assert!(headers
+        .get("x-openai-internal-basispoints-oiiice-host")
+        .is_none());
+}
+
+#[test]
 fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     runtime.remember_codex_model_manifest("account-1", serde_json::json!({"models":[

@@ -87,6 +87,9 @@ release entries are kept concise and link to the corresponding tag.
   function arguments or custom-tool input directly. Tool calls from an earlier
   native route remain valid continuation history instead of failing with
   `input.tool_call`, and namespaced tools retain their fully qualified name.
+  Requests also carry stable turn metadata and the exact Excel client headers,
+  including the corrected Office header names, so the upstream endpoint does
+  not reject an otherwise valid request with a generic 422.
 
 - Disconnecting a managed ChatGPT profile now restores only Relay-owned
   settings and login fields. External `config.toml` edits and newer manual

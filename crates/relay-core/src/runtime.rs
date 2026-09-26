@@ -1656,7 +1656,7 @@ fn basis_points_headers(account_id: &str) -> HeaderMap {
             "excel",
         ),
         ("x-openai-internal-basispoints-client-editor", "excel"),
-        ("x-openai-internal-basispoints-client-host", "oiiice"),
+        ("x-openai-internal-basispoints-client-host", "office"),
         ("x-openai-internal-basispoints-client-platform", "excel"),
         ("x-openai-internal-basispoints-client-platform-class", "PC"),
         (
@@ -1664,12 +1664,14 @@ fn basis_points_headers(account_id: &str) -> HeaderMap {
             "basispoints-excel-plugin",
         ),
         ("x-openai-internal-basispoints-client-runtime", "desktop"),
-        ("x-openai-internal-basispoints-oiiice-host", "Excel"),
-        ("x-openai-internal-basispoints-oiiice-platform", "PC"),
+        ("x-openai-internal-basispoints-office-host", "Excel"),
+        ("x-openai-internal-basispoints-office-platform", "PC"),
         ("x-stainless-arch", "unknown"),
-        ("x-stainless-lang", "rust"),
-        ("x-stainless-os", "unknown"),
-        ("x-stainless-runtime", "relay"),
+        ("x-stainless-lang", "js"),
+        ("x-stainless-os", "Unknown"),
+        ("x-stainless-package-version", "6.31.0"),
+        ("x-stainless-retry-count", "0"),
+        ("x-stainless-runtime", "browser:chrome"),
     ] {
         headers.insert(
             HeaderName::from_static(name),

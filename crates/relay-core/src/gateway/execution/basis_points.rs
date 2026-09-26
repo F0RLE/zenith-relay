@@ -8,6 +8,7 @@
 
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 const TRANSPORT_TOOL: &str = "run_officejs";
 const TRANSPORT_TOOL_ALIAS: &str = "functions.run_officejs";
@@ -253,6 +254,9 @@ fn sanitized_metadata(value: Option<&Value>) -> Option<Value> {
     let object = value?.as_object()?;
     let mut metadata = Map::new();
     for (key, value) in object {
+        if matches!(key.as_str(), "task_id" | "turn_id" | "agent_iteration") {
+            continue;
+        }
         let safe_key = key.chars().take(64).collect::<String>();
         if safe_key.is_empty() {
             continue;
@@ -266,6 +270,126 @@ fn sanitized_metadata(value: Option<&Value>) -> Option<Value> {
         metadata.insert(safe_key, Value::String(safe_value));
     }
     (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+fn explicit_conversation_key(object: &Map<String, Value>) -> Option<String> {
+    for key in [
+        "prompt_cache_key",
+        "promptCacheKey",
+        "session_id",
+        "sessionId",
+    ] {
+        if let Some(value) = object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    object
+        .get("client_metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| {
+            ["session_id", "sessionId"].iter().find_map(|key| {
+                metadata
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn short_hash(value: &Value) -> String {
+    let mut digest = Sha256::new();
+    digest.update(serde_json::to_vec(value).unwrap_or_default());
+    hex::encode(digest.finalize())
+}
+
+fn stable_uuid(namespace: &str, value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(namespace.as_bytes());
+    digest.update([0]);
+    digest.update(value.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.finalize()[..16]);
+    // UUID version 5/variant bits keep the identifier accepted by the
+    // Codex backend while the SHA-256 seed keeps it deterministic.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn request_iteration(input: &[Value]) -> String {
+    let last_user = input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
+        })
+        .next_back()
+        .unwrap_or(0);
+    let iteration = input
+        .iter()
+        .skip(last_user.saturating_add(1))
+        .filter(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call_output" | "custom_tool_call_output")
+            )
+        })
+        .count()
+        .saturating_add(1);
+    iteration.to_string()
+}
+
+fn basis_points_metadata(object: &Map<String, Value>, translated_input: &[Value]) -> Value {
+    let conversation = explicit_conversation_key(object).unwrap_or_else(|| {
+        translated_input
+            .first()
+            .map(short_hash)
+            .unwrap_or_else(|| "anonymous".to_string())
+    });
+    let last_user = translated_input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            (item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
+        })
+        .next_back();
+    let turn_prefix = last_user
+        .map(|index| translated_input[..=index].to_vec())
+        .unwrap_or_else(|| translated_input.to_vec());
+    let turn_fingerprint = short_hash(&Value::Array(turn_prefix));
+    json!({
+        "task_id": stable_uuid("cpa-oai-basispoints", &conversation),
+        "turn_id": stable_uuid(
+            "cpa-oai-basispoints/turn",
+            &format!("{conversation}/{turn_fingerprint}")
+        ),
+        "agent_iteration": request_iteration(translated_input),
+    })
 }
 
 fn transport_call(item: &Map<String, Value>, tool: &ClientTool) -> Result<Value, AdapterError> {
@@ -488,6 +612,7 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
     }
 
     let mut input = translate_input_items(as_input_items(object.get("input")), &all_tools)?;
+    let metadata = basis_points_metadata(object, &input);
     let mut prologue = Vec::new();
     if let Some(instructions) = object.get("instructions").and_then(Value::as_str) {
         if !instructions.trim().is_empty() {
@@ -517,9 +642,13 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
             Value::String(prompt_cache_key.to_string()),
         );
     }
-    if let Some(metadata) = sanitized_metadata(object.get("metadata")) {
-        output.insert("metadata".to_string(), metadata);
+    let mut metadata_object = metadata.as_object().cloned().unwrap_or_default();
+    if let Some(Value::Object(custom)) = sanitized_metadata(object.get("metadata")) {
+        for (key, value) in custom {
+            metadata_object.insert(key, value);
+        }
     }
+    output.insert("metadata".to_string(), Value::Object(metadata_object));
 
     if callable.is_empty() || object.get("tool_choice").and_then(Value::as_str) == Some("none") {
         output.remove("tools");
@@ -988,6 +1117,29 @@ mod tests {
         assert!(prepared.get("temperature").is_none());
         assert_eq!(prepared["metadata"]["request_kind"], "codex");
         assert!(prepared["metadata"].get("nested").is_none());
+    }
+
+    #[test]
+    fn preparation_adds_stable_basis_points_turn_metadata() {
+        let request = json!({
+            "model": "gpt-6-astra",
+            "prompt_cache_key": "conversation-1",
+            "input": [
+                {"role":"user","content":[{"type":"input_text","text":"hello"}]},
+                {"role":"assistant","content":[{"type":"output_text","text":"hi"}]},
+                {"role":"user","content":[{"type":"input_text","text":"continue"}]},
+                {"type":"function_call_output","call_id":"call_1","output":"done"}
+            ],
+            "metadata": {"request_kind":"codex","nested":{"drop":true}}
+        });
+        let first = prepare_request(&request).unwrap();
+        let second = prepare_request(&request).unwrap();
+        assert_eq!(first["metadata"], second["metadata"]);
+        assert!(first["metadata"]["task_id"].as_str().unwrap().contains('-'));
+        assert!(first["metadata"]["turn_id"].as_str().unwrap().contains('-'));
+        assert_eq!(first["metadata"]["agent_iteration"], "2");
+        assert_eq!(first["metadata"]["request_kind"], "codex");
+        assert!(first["metadata"].get("nested").is_none());
     }
 
     #[test]
