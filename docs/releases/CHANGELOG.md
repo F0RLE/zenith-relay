@@ -82,6 +82,12 @@ release entries are kept concise and link to the corresponding tag.
   output remains terminal for that request and does not cool down the account
   or trigger an automatic second generation.
 
+- Account routes using Excel / Basis Points now use the v0.1.14 tool envelope:
+  the client tool name is carried in `references`, while `code` contains the
+  function arguments or custom-tool input directly. Tool calls from an earlier
+  native route remain valid continuation history instead of failing with
+  `input.tool_call`, and namespaced tools retain their fully qualified name.
+
 - Disconnecting a managed ChatGPT profile now restores only Relay-owned
   settings and login fields. External `config.toml` edits and newer manual
   OAuth sign-ins are kept instead of blocking the disconnect; reconnecting

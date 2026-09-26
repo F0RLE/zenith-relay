@@ -160,6 +160,24 @@ fn tool_spec<'a>(tools: &'a [ClientTool], name: &str) -> Option<&'a ClientTool> 
     matches.next().is_none().then_some(tool)
 }
 
+fn client_tool_call_name(object: &Map<String, Value>) -> String {
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let namespace = object
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if namespace.is_empty() || name.is_empty() || name.starts_with(&format!("{namespace}.")) {
+        name.to_string()
+    } else {
+        format!("{namespace}.{name}")
+    }
+}
+
 fn as_input_items(input: Option<&Value>) -> Vec<Value> {
     match input {
         Some(Value::String(text)) => vec![json!({
@@ -202,17 +220,52 @@ fn parse_function_arguments(item: &Map<String, Value>) -> Result<Value, AdapterE
     Ok(parsed)
 }
 
-fn inner_tool_call(item: &Map<String, Value>, tool: &ClientTool) -> Result<Value, AdapterError> {
-    let name = tool.call_name();
-    let args = if tool.kind == "custom" {
-        item.get("input")
-            .and_then(Value::as_str)
-            .map(|input| Value::String(input.to_string()))
-            .ok_or_else(|| AdapterError::invalid_request().with_parameter("input"))?
-    } else {
-        parse_function_arguments(item)?
-    };
-    Ok(json!({"tool": name, "args": args}))
+/// Basis Points accepts the provider's effort vocabulary (`low`, `medium`,
+/// `high`, `xhigh`, `ultra`). Relay's catalog also exposes the client-facing
+/// `max` label, which is the same level as `xhigh` for this transport. Keep
+/// that normalization local to the adapter so native account routes retain
+/// their original request value and diagnostics.
+fn basis_points_reasoning_effort(request: &Map<String, Value>) -> String {
+    let effort = request
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .and_then(|reasoning| reasoning.get("effort"))
+        .or_else(|| request.get("reasoning_effort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    match effort.as_deref() {
+        Some("low") => "low",
+        Some("medium") => "medium",
+        Some("high") => "high",
+        Some("xhigh" | "x-high" | "extra-high" | "extra_high" | "max") => "xhigh",
+        Some("ultra") => "ultra",
+        // The Basis Points plugin uses medium as its safe default for an
+        // absent or unknown level. This keeps a stale client label from
+        // producing the upstream 422 `Invalid request body` response.
+        _ => "medium",
+    }
+    .to_string()
+}
+
+fn sanitized_metadata(value: Option<&Value>) -> Option<Value> {
+    let object = value?.as_object()?;
+    let mut metadata = Map::new();
+    for (key, value) in object {
+        let safe_key = key.chars().take(64).collect::<String>();
+        if safe_key.is_empty() {
+            continue;
+        }
+        let safe_value = match value {
+            Value::String(text) => text.chars().take(512).collect::<String>(),
+            Value::Bool(value) => value.to_string(),
+            Value::Number(value) => value.to_string(),
+            _ => continue,
+        };
+        metadata.insert(safe_key, Value::String(safe_value));
+    }
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
 fn transport_call(item: &Map<String, Value>, tool: &ClientTool) -> Result<Value, AdapterError> {
@@ -221,13 +274,23 @@ fn transport_call(item: &Map<String, Value>, tool: &ClientTool) -> Result<Value,
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| AdapterError::invalid_request().with_parameter("input.call_id"))?;
-    let inner = inner_tool_call(item, tool)?;
-    let code = json_text(&inner)?;
+    // Basis Points v0.1.14 routes the client tool through the outer
+    // `references` field. `code` is the payload itself: JSON text for a
+    // function tool and unchanged text for a custom tool. Keeping the
+    // payload unwrapped is required for quotes, backslashes and patches.
+    let code = if tool.kind == "custom" {
+        item.get("input")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| AdapterError::invalid_request().with_parameter("input"))?
+    } else {
+        json_text(&parse_function_arguments(item)?)?
+    };
     let arguments = json!({
         "summary": format!("Run client tool {}", tool.call_name()),
         "extended_summary": "Relay client tool through the Excel / Basis Points transport",
         "destructive": false,
-        "references": [],
+        "references": [tool.call_name()],
         "code": code,
     });
     let id = if call_id.starts_with("fc_") {
@@ -250,6 +313,7 @@ fn translate_input_items(
     tools: &[ClientTool],
 ) -> Result<Vec<Value>, AdapterError> {
     let mut result = Vec::with_capacity(items.len());
+    let mut transport_call_ids = std::collections::HashSet::new();
     for value in items {
         let Some(object) = value.as_object() else {
             result.push(value);
@@ -261,16 +325,25 @@ fn translate_input_items(
             .unwrap_or_default();
         match kind {
             "function_call" | "custom_tool_call" => {
-                let name = object
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let name = client_tool_call_name(object);
                 if name == TRANSPORT_TOOL || name == TRANSPORT_TOOL_ALIAS {
+                    if let Some(call_id) = object.get("call_id").and_then(Value::as_str) {
+                        transport_call_ids.insert(call_id.to_string());
+                    }
                     result.push(value);
-                } else if let Some(tool) = tool_spec(tools, name) {
-                    result.push(transport_call(object, tool)?);
+                } else if let Some(tool) = tool_spec(tools, &name) {
+                    let call = transport_call(object, tool)?;
+                    if let Some(call_id) = object.get("call_id").and_then(Value::as_str) {
+                        transport_call_ids.insert(call_id.to_string());
+                    }
+                    result.push(call);
                 } else {
-                    return Err(AdapterError::parameter_unsupported_for("input.tool_call"));
+                    // A continuation may carry a tool call produced by a
+                    // different native route, or by an earlier turn whose
+                    // catalog is no longer present. Preserve that history
+                    // verbatim instead of converting it to a new call or
+                    // rejecting the whole account candidate.
+                    result.push(value);
                 }
             }
             "function_call_output" | "custom_tool_call_output" => {
@@ -281,22 +354,28 @@ fn translate_input_items(
                     .ok_or_else(|| {
                         AdapterError::invalid_request().with_parameter("input.call_id")
                     })?;
-                let mut output = object.clone();
-                output.insert(
-                    "type".to_string(),
-                    Value::String("function_call_output".to_string()),
-                );
-                output.insert(
-                    "id".to_string(),
-                    Value::String(if call_id.starts_with("fc_") {
-                        call_id.to_string()
-                    } else {
-                        format!("fc_{call_id}")
-                    }),
-                );
-                output.remove("name");
-                output.remove("namespace");
-                result.push(Value::Object(output));
+                if transport_call_ids.contains(call_id) {
+                    let mut output = object.clone();
+                    output.insert(
+                        "type".to_string(),
+                        Value::String("function_call_output".to_string()),
+                    );
+                    output.insert(
+                        "id".to_string(),
+                        Value::String(if call_id.starts_with("fc_") {
+                            call_id.to_string()
+                        } else {
+                            format!("fc_{call_id}")
+                        }),
+                    );
+                    output.remove("name");
+                    output.remove("namespace");
+                    result.push(Value::Object(output));
+                } else {
+                    // Keep outputs for calls that were not created by this
+                    // transport. They may belong to a native account route.
+                    result.push(value);
+                }
             }
             "reasoning" => {
                 if object
@@ -347,8 +426,14 @@ fn tool_instructions(tools: &[ClientTool], request: &Value) -> String {
         .and_then(|value| serde_json::to_string(value).ok())
         .map(|value| format!(" Client tool_choice: {value}."))
         .unwrap_or_default();
+    let parallel = request
+        .get("parallel_tool_calls")
+        .and_then(Value::as_bool)
+        .filter(|parallel| !parallel)
+        .map(|_| " Invoke at most one client tool in this response.")
+        .unwrap_or_default();
     format!(
-        "This request is relayed through Excel / Basis Points. Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. Put a JSON object as JSON text in its code field with tool and args fields; do not put JavaScript or another {TRANSPORT_TOOL} envelope there. The available client tools are authoritative:{choice}\n{}",
+        "This request is relayed through Excel / Basis Points. The native {TRANSPORT_TOOL} function is only a transport endpoint; it does not execute Office, shell, or workspace code. Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. Set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. Put only that tool payload in code. For function tools, code is one JSON object of arguments serialized once. For custom tools, code is the unchanged raw input text, without JSON encoding. Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code. Example function envelope: {{\"summary\":\"Run client tool exec_command\",\"extended_summary\":\"Relay a shell command through the external client\",\"destructive\":false,\"references\":[\"exec_command\"],\"code\":\"{{\\\"cmd\\\":\\\"pwd\\\"}}\"}}. Example custom envelope: {{\"summary\":\"Run client tool apply_patch\",\"extended_summary\":\"Relay an unchanged patch through the external client\",\"destructive\":false,\"references\":[\"apply_patch\"],\"code\":\"*** Begin Patch\\n*** End Patch\"}}. The available client tools are authoritative:{choice}{parallel}\n{}",
         lines.join("\n")
     )
 }
@@ -374,11 +459,21 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
     if tool_choice_requires_call && callable.is_empty() {
         return Err(AdapterError::invalid_request().with_parameter("tool_choice"));
     }
-    let mut output = object.clone();
-    output.remove("previous_response_id");
-    output.remove("service_tier");
-    output.remove("store");
-    if output
+    // Basis Points has a deliberately small Responses request contract. Do
+    // not forward client-only fields such as `max_output_tokens`, sampling
+    // controls, `parallel_tool_calls` or response formatting options: the
+    // provider validates the body strictly and answers with a generic 422.
+    let mut output = Map::new();
+    if let Some(model) = object.get("model") {
+        output.insert("model".to_string(), model.clone());
+    }
+    output.insert(
+        "model_selection".to_string(),
+        Value::String("explicit".to_string()),
+    );
+    output.insert("store".to_string(), Value::Bool(false));
+    output.insert("stream".to_string(), Value::Bool(false));
+    if object
         .get("context_management")
         .is_some_and(|value| match value {
             Value::Null => true,
@@ -387,10 +482,10 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
             _ => false,
         })
     {
-        output.remove("context_management");
+        // Empty context policies are rejected by the provider; omit them.
+    } else if let Some(context_management) = object.get("context_management") {
+        output.insert("context_management".to_string(), context_management.clone());
     }
-    output.insert("store".to_string(), Value::Bool(false));
-    output.insert("stream".to_string(), Value::Bool(false));
 
     let mut input = translate_input_items(as_input_items(object.get("input")), &all_tools)?;
     let mut prologue = Vec::new();
@@ -410,7 +505,21 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
     ));
     input.splice(0..0, prologue);
     output.insert("input".to_string(), Value::Array(input));
-    output.remove("instructions");
+
+    if let Some(prompt_cache_key) = object
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        output.insert(
+            "prompt_cache_key".to_string(),
+            Value::String(prompt_cache_key.to_string()),
+        );
+    }
+    if let Some(metadata) = sanitized_metadata(object.get("metadata")) {
+        output.insert("metadata".to_string(), metadata);
+    }
 
     if callable.is_empty() || object.get("tool_choice").and_then(Value::as_str) == Some("none") {
         output.remove("tools");
@@ -445,15 +554,10 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
             },
         );
     }
-    if let Some(reasoning) = object.get("reasoning").and_then(Value::as_object) {
-        if let Some(effort) = reasoning.get("effort").and_then(Value::as_str) {
-            output.insert(
-                "reasoning_effort".to_string(),
-                Value::String(effort.to_string()),
-            );
-        }
-        output.remove("reasoning");
-    }
+    output.insert(
+        "reasoning_effort".to_string(),
+        Value::String(basis_points_reasoning_effort(object)),
+    );
     Ok(Value::Object(output))
 }
 
@@ -475,6 +579,31 @@ fn parse_transport_envelope(item: &Map<String, Value>) -> Result<Map<String, Val
     let code = outer
         .get("code")
         .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+
+    // v0.1.14 and newer identify the client tool in the outer envelope. The
+    // code field is the exact function JSON text or custom raw input; it must
+    // not be parsed as another wrapper.
+    if let Some(references) = outer.get("references") {
+        let references = references
+            .as_array()
+            .filter(|items| items.len() == 1)
+            .ok_or_else(|| invalid_tool_output("output.run_officejs.references"))?;
+        let tool = references[0]
+            .as_str()
+            .filter(|name| !name.trim().is_empty())
+            .filter(|name| *name != TRANSPORT_TOOL && *name != TRANSPORT_TOOL_ALIAS)
+            .ok_or_else(|| invalid_tool_output("output.run_officejs.references"))?;
+        let code = code
+            .as_str()
+            .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+        return Ok(Map::from_iter([
+            ("tool".to_string(), Value::String(tool.to_string())),
+            ("args".to_string(), Value::String(code.to_string())),
+        ]));
+    }
+
+    // Accept the legacy nested envelope for already materialized history, but
+    // never generate it for new calls.
     let mut inner = parse_json_object(Some(code))
         .and_then(|value| value.as_object().cloned())
         .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
@@ -567,9 +696,16 @@ pub(super) fn translate_response(body: &[u8], request: &Value) -> Result<Vec<u8>
             translated.insert("input".to_string(), Value::String(input.to_string()));
         } else {
             let args = args
+                .and_then(|value| {
+                    if value.is_object() {
+                        Some(value.clone())
+                    } else {
+                        parse_json_object(Some(value))
+                    }
+                })
                 .filter(|value| value.is_object())
                 .ok_or_else(|| invalid_tool_output("output.run_officejs.args"))?;
-            translated.insert("arguments".to_string(), Value::String(json_text(args)?));
+            translated.insert("arguments".to_string(), Value::String(json_text(&args)?));
             translated.insert("status".to_string(), Value::String("completed".to_string()));
         }
         *item = Value::Object(translated);
@@ -826,12 +962,32 @@ mod tests {
         request["context_management"] = json!([]);
         let prepared = prepare_request(&request).unwrap();
         assert_eq!(prepared["stream"], false);
+        assert_eq!(prepared["reasoning_effort"], "medium");
         assert!(prepared.get("context_management").is_none());
         assert_eq!(prepared["tools"][0]["name"], TRANSPORT_TOOL);
         assert!(prepared["input"][0]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("exec_command"));
+    }
+
+    #[test]
+    fn preparation_normalizes_max_effort_and_drops_strictly_unsupported_fields() {
+        let mut request = request_with_tool();
+        request["reasoning"] = json!({"effort": "max"});
+        request["max_output_tokens"] = json!(4096);
+        request["parallel_tool_calls"] = json!(true);
+        request["temperature"] = json!(0.2);
+        request["metadata"] = json!({"request_kind": "codex", "nested": {"drop": true}});
+
+        let prepared = prepare_request(&request).unwrap();
+        assert_eq!(prepared["model_selection"], "explicit");
+        assert_eq!(prepared["reasoning_effort"], "xhigh");
+        assert!(prepared.get("max_output_tokens").is_none());
+        assert!(prepared.get("parallel_tool_calls").is_none());
+        assert!(prepared.get("temperature").is_none());
+        assert_eq!(prepared["metadata"]["request_kind"], "codex");
+        assert!(prepared["metadata"].get("nested").is_none());
     }
 
     #[test]
@@ -856,6 +1012,60 @@ mod tests {
         assert_eq!(translated["output"][0]["name"], "exec_command");
         assert_eq!(translated["output"][0]["call_id"], "call_1");
         assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+    }
+
+    #[test]
+    fn response_translates_v014_direct_reference_envelope() {
+        let request = request_with_tool();
+        let body = json!({
+            "id":"resp_direct",
+            "status":"completed",
+            "output":[{"type":"function_call","id":"fc_outer","call_id":"call_1","name":TRANSPORT_TOOL,"arguments":serde_json::to_string(&json!({
+                "summary":"Run client tool exec_command",
+                "extended_summary":"Relay a shell command through the external client",
+                "destructive":false,
+                "references":["exec_command"],
+                "code":"{\"cmd\":\"pwd\"}"
+            })).unwrap()}]
+        });
+        let translated =
+            translate_response(serde_json::to_string(&body).unwrap().as_bytes(), &request).unwrap();
+        let translated: Value = serde_json::from_slice(&translated).unwrap();
+        assert_eq!(translated["output"][0]["name"], "exec_command");
+        assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+    }
+
+    #[test]
+    fn unknown_historical_tool_calls_are_preserved_for_account_routes() {
+        let request = json!({
+            "model": "gpt-6-astra",
+            "input": [
+                {"type":"function_call","id":"fc_native","call_id":"native_1","name":"native_account_tool","arguments":"{\"value\":1}"},
+                {"type":"function_call_output","call_id":"native_1","output":"native result"},
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+            ],
+            "tools": [{"type":"function","name":"exec_command","parameters":{"type":"object"}}]
+        });
+        let prepared = prepare_request(&request).unwrap();
+        let input = prepared["input"].as_array().unwrap();
+        assert_eq!(input[1], request["input"][0]);
+        assert_eq!(input[2], request["input"][1]);
+        assert_eq!(input[3], request["input"][2]);
+    }
+
+    #[test]
+    fn namespaced_client_tool_calls_use_a_fully_qualified_reference() {
+        let request = json!({
+            "model": "gpt-6-astra",
+            "input": [{"type":"function_call","call_id":"call_1","name":"exec","namespace":"functions","arguments":"{\"cmd\":\"pwd\"}"}],
+            "tools": [{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}]
+        });
+        let prepared = prepare_request(&request).unwrap();
+        let call = &prepared["input"][1];
+        assert_eq!(call["name"], TRANSPORT_TOOL);
+        let arguments: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["references"], json!(["functions.exec"]));
+        assert_eq!(arguments["code"], "{\"cmd\":\"pwd\"}");
     }
 
     fn tool_response(code: &str) -> Vec<u8> {
