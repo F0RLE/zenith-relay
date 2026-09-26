@@ -90,6 +90,9 @@ release entries are kept concise and link to the corresponding tag.
   Requests also carry stable turn metadata and the exact Excel client headers,
   including the corrected Office header names, so the upstream endpoint does
   not reject an otherwise valid request with a generic 422.
+  The strict Basis Points body now matches the upstream adapter: client tool
+  definitions stay in developer instructions, `tools`/`tool_choice` are not
+  forwarded, and the original stream flag is preserved.
 
 - Disconnecting a managed ChatGPT profile now restores only Relay-owned
   settings and login fields. External `config.toml` edits and newer manual

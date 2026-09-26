@@ -596,7 +596,19 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
         Value::String("explicit".to_string()),
     );
     output.insert("store".to_string(), Value::Bool(false));
-    output.insert("stream".to_string(), Value::Bool(false));
+    // Keep the upstream transport mode aligned with the client request. The
+    // runtime still buffers a Basis Points response before translating it, but
+    // the provider contract itself accepts the same stream flag as the
+    // official adapter.
+    output.insert(
+        "stream".to_string(),
+        Value::Bool(
+            object
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ),
+    );
     if object
         .get("context_management")
         .is_some_and(|value| match value {
@@ -650,39 +662,11 @@ pub(super) fn prepare_request(request: &Value) -> Result<Value, AdapterError> {
     }
     output.insert("metadata".to_string(), Value::Object(metadata_object));
 
-    if callable.is_empty() || object.get("tool_choice").and_then(Value::as_str) == Some("none") {
-        output.remove("tools");
-        output.remove("tool_choice");
-    } else {
-        output.insert(
-            "tools".to_string(),
-            json!([{
-                "type": "function",
-                "name": TRANSPORT_TOOL,
-                "description": "Relay one client tool invocation through the external client.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "summary": {"type": "string"},
-                        "extended_summary": {"type": "string"},
-                        "destructive": {"type": "boolean"},
-                        "references": {"type": "array", "items": {"type": "string"}},
-                        "code": {"type": "string"}
-                    },
-                    "required": ["summary", "extended_summary", "destructive", "references", "code"],
-                    "additionalProperties": false
-                }
-            }]),
-        );
-        output.insert(
-            "tool_choice".to_string(),
-            if tool_choice_requires_call {
-                json!({"type": "function", "name": TRANSPORT_TOOL})
-            } else {
-                Value::String("auto".to_string())
-            },
-        );
-    }
+    // Basis Points does not accept a server-side `tools`/`tool_choice` body.
+    // The official adapter supplies the client tool catalog in developer
+    // instructions and lets the model emit the native run_officejs transport
+    // call. Keeping these fields out of the strict upstream schema avoids a
+    // generic 422 before generation.
     output.insert(
         "reasoning_effort".to_string(),
         Value::String(basis_points_reasoning_effort(object)),
@@ -1093,11 +1077,23 @@ mod tests {
         assert_eq!(prepared["stream"], false);
         assert_eq!(prepared["reasoning_effort"], "medium");
         assert!(prepared.get("context_management").is_none());
-        assert_eq!(prepared["tools"][0]["name"], TRANSPORT_TOOL);
+        assert!(prepared.get("tools").is_none());
+        assert!(prepared.get("tool_choice").is_none());
         assert!(prepared["input"][0]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("exec_command"));
+    }
+
+    #[test]
+    fn preparation_preserves_stream_flag_without_forwarding_tool_schema() {
+        let mut request = request_with_tool();
+        request["stream"] = json!(true);
+        request["tool_choice"] = json!("required");
+        let prepared = prepare_request(&request).unwrap();
+        assert_eq!(prepared["stream"], true);
+        assert!(prepared.get("tools").is_none());
+        assert!(prepared.get("tool_choice").is_none());
     }
 
     #[test]
@@ -1374,7 +1370,7 @@ mod tests {
             "tools": [{"type": "function", "name": "exec_command"}]
         });
         let prepared = prepare_request(&request).unwrap();
-        assert_eq!(prepared["tool_choice"]["name"], TRANSPORT_TOOL);
+        assert!(prepared.get("tool_choice").is_none());
         let response = json!({"id": "resp_1", "status": "completed", "output": []});
         assert!(translate_response(
             serde_json::to_string(&response).unwrap().as_bytes(),
