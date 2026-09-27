@@ -8,6 +8,24 @@ pub const CODEX_RELAY_CATALOG_HASH: &str = "zenith-relay";
 pub const CODEX_CATALOG_PRIORITY_BASE: u64 = 1_000;
 const CODEX_RELAY_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
 
+/// Publish the context window Codex needs before it will start auto-compact.
+/// Native account cards are left untouched: Codex already knows those models.
+/// A missing reference limit uses the same Relay fallback as routed rows, not
+/// a theoretical million-token catalog value.
+pub fn publish_routed_codex_context(entry: &mut Value, context_limit: Option<u64>) {
+    let Some(object) = entry.as_object_mut() else {
+        return;
+    };
+    let window = context_limit
+        .filter(|window| *window > 0)
+        .unwrap_or(CODEX_RELAY_FALLBACK_CONTEXT_WINDOW);
+    let auto_compact = (window.saturating_mul(9) / 10).max(1);
+    object.insert("context_window".into(), window.into());
+    object.insert("max_context_window".into(), window.into());
+    object.insert("auto_compact_token_limit".into(), auto_compact.into());
+    object.insert("effective_context_window_percent".into(), 95.into());
+}
+
 /// Replace source-provided tier fields with the shared Relay model policy.
 pub(crate) fn set_codex_service_tiers(model: &mut Value, supported: &[DefaultServiceTier]) {
     let Some(object) = model.as_object_mut() else {

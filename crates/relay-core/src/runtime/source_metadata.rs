@@ -19,6 +19,7 @@ impl GatewayRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for model in &inventory.configured_models {
                 if key.model_rules.allows(model)
+                    && self.model_enabled(model)
                     && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
                 {
                     models.insert(match key.model_prefix.as_deref() {

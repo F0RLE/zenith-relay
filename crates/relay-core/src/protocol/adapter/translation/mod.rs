@@ -12,6 +12,7 @@ use super::contracts::{
 use crate::{MessagesReasoningMode, WireApi};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 pub use stream::TranslationStream;
 
@@ -55,6 +56,7 @@ struct Function {
     description: Option<String>,
     parameters: Value,
     strict: Option<bool>,
+    custom: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +135,7 @@ pub struct TranslationRequest {
     response_id: String,
     reasoning_mode: MessagesReasoningMode,
     history: Vec<Message>,
+    custom_tools: BTreeSet<String>,
 }
 
 impl TranslationRequest {
@@ -172,6 +175,12 @@ impl TranslationRequest {
             context.response_scope,
             context.response_id_seed,
         );
+        let custom_tools = request
+            .tools
+            .iter()
+            .filter(|tool| tool.custom)
+            .map(|tool| tool.name.clone())
+            .collect();
         Ok(Self {
             upstream_body,
             client: context.client_wire_api,
@@ -180,6 +189,7 @@ impl TranslationRequest {
             response_id,
             reasoning_mode: context.reasoning_mode,
             history: request.messages,
+            custom_tools,
         })
     }
 
@@ -194,7 +204,8 @@ impl TranslationRequest {
 
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
         response.id = self.response_id.clone();
-        let response_body = response::encode(self.client, &response, &self.model)?;
+        let response_body =
+            response::encode(self.client, &response, &self.model, &self.custom_tools)?;
         let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
         let mut history = self.history;
         history.push(Message {

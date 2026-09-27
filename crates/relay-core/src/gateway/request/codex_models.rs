@@ -362,6 +362,9 @@ fn build_codex_models_response_from_manifests(
             );
         }
         capabilities.apply_to_codex(&mut model);
+        if native_catalog_model.is_none() {
+            crate::publish_routed_codex_context(&mut model, capabilities.context_limit);
+        }
         let mut supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
         if native_catalog_model.as_ref().is_some_and(|(_, official)| {
             apply_codex_ultra_from_official_model(&mut model, official, &upstream_id)
@@ -1121,6 +1124,7 @@ mod tests {
             foreign["use_responses_lite"] = json!(true);
             foreign["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
             foreign["future_native_capability"] = json!(true);
+            foreign["context_window"] = json!(999_999);
             for manifests in [
                 Vec::new(),
                 vec![(
@@ -1137,13 +1141,11 @@ mod tests {
                 assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
                 assert_eq!(model["supports_parallel_tool_calls"], true);
                 assert_eq!(model["supported_reasoning_levels"], json!([]));
-                for field in [
-                    "use_responses_lite",
-                    "context_window",
-                    "future_native_capability",
-                ] {
+                for field in ["use_responses_lite", "future_native_capability"] {
                     assert!(model.get(field).is_none(), "unexpected capability: {field}");
                 }
+                assert_eq!(model["context_window"], 272_000);
+                assert_eq!(model["auto_compact_token_limit"], 244_800);
                 assert!(crate::codex_catalog_entry_is_compatible(model));
             }
             let alias = crate::codex_model_alias(&display_id);

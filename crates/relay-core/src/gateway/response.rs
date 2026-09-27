@@ -318,7 +318,10 @@ pub(super) fn completed_upstream_response(
         let response = value.get("response").unwrap_or(&value);
         if response.get("error").is_some_and(|error| !error.is_null())
             || value.get("type").and_then(Value::as_str) == Some("error")
-            || response.get("status").and_then(Value::as_str) == Some("failed")
+            || matches!(
+                response.get("status").and_then(Value::as_str),
+                Some("failed" | "cancelled" | "canceled")
+            )
         {
             let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(bytes));
             return Err(Box::new(StreamBootstrapFailure {
@@ -626,16 +629,34 @@ mod tests {
 
     #[test]
     fn buffered_json_and_account_stream_keep_original_failure_details() {
-        for (body, account_stream) in [
-            (br#"{"status":"failed","error":{"code":"future_constraint","message":"Constraint check failed"},"input":"synthetic-private"}"#.as_slice(), false),
-            (b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"future_constraint\",\"message\":\"Constraint check failed\"}}}\n\n".as_slice(), true),
+        for (body, account_stream, expected_code, expected_message) in [
+            (
+                br#"{"status":"failed","error":{"code":"future_constraint","message":"Constraint check failed"},"input":"synthetic-private"}"#.as_slice(),
+                false,
+                "future_constraint",
+                "Constraint check failed",
+            ),
+            (
+                br#"{"status":"cancelled","error":{"code":"client_cancelled","message":"Request was cancelled"}}"#.as_slice(),
+                false,
+                "client_cancelled",
+                "Request was cancelled",
+            ),
+            (
+                b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"future_constraint\",\"message\":\"Constraint check failed\"}}}\n\n".as_slice(),
+                true,
+                "future_constraint",
+                "Constraint check failed",
+            ),
         ] {
             let failure = completed_upstream_response(body, account_stream).unwrap_err();
             let details = failure.upstream_error.unwrap();
-            assert_eq!(details.code.as_deref(), Some("future_constraint"));
-            assert_eq!(details.message.as_deref(), Some("Constraint check failed"));
-            assert!(!serde_json::to_string(&details).unwrap().contains("synthetic-private"));
-            assert_eq!(failure.preserved.unwrap().message, "Constraint check failed");
+            assert_eq!(details.code.as_deref(), Some(expected_code));
+            assert_eq!(details.message.as_deref(), Some(expected_message));
+            if expected_code == "future_constraint" {
+                assert!(!serde_json::to_string(&details).unwrap().contains("synthetic-private"));
+                assert_eq!(failure.preserved.unwrap().message, expected_message);
+            }
         }
     }
 

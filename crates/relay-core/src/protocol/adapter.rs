@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 mod codex_controls;
+mod compaction;
 mod contracts;
 mod gemini;
 mod messages;
@@ -15,6 +16,9 @@ mod tests;
 mod tool_policy;
 mod translation;
 
+pub(crate) use compaction::{
+    prepare_bridged_compaction, wrap_compaction_response_bytes, BridgedCompaction,
+};
 pub(crate) use contracts::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids,

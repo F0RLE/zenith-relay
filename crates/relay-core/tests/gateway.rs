@@ -1638,6 +1638,96 @@ async fn responses_route_to_chat_completions_sources() {
 }
 
 #[tokio::test]
+async fn non_account_compact_summarizes_every_bridged_model() {
+    let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let recorded = seen.clone();
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(move |body: Bytes| {
+                    let recorded = recorded.clone();
+                    async move {
+                        recorded.lock().unwrap().push(body.to_vec());
+                        Json(json!({
+                            "id": "chatcmpl_compact",
+                            "choices": [{
+                                "index": 0,
+                                "finish_reason": "stop",
+                                "message": {"role": "assistant", "content": "Goal: keep src/main.rs"}
+                            }]
+                        }))
+                    }
+                }),
+            )
+            .layer(DefaultBodyLimit::max(MAX_CLIENT_REQUEST_BODY_BYTES)),
+    )
+    .await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let usage_events = events.clone();
+    let runtime = GatewayRuntime::new(
+        ProviderSource {
+            id: "chat-source".to_string(),
+            name: "Stateless chat source".to_string(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.to_string(),
+            wire_api: WireApi::ChatCompletions,
+            models: vec!["vendor-model".to_string()],
+        },
+        LocalGatewayKey {
+            id: "local-key-1".to_string(),
+            secret: LOCAL_KEY.to_string(),
+        },
+        Arc::new(move |event| usage_events.lock().unwrap().push(event)),
+    )
+    .unwrap();
+    let gateway = spawn(gateway::router(Arc::new(runtime))).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "vendor-model",
+            "input": "Keep src/main.rs",
+            "tools": [{"type": "custom", "name": "apply_patch", "format": {"type": "text"}}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let compact: Value = response.json().await.unwrap();
+    assert_eq!(compact["object"], "response.compaction");
+    assert_eq!(compact["output"][0]["type"], "compaction");
+    assert!(compact["output"][0]["encrypted_content"]
+        .as_str()
+        .unwrap()
+        .starts_with("zenith-relay-compact-v1:"));
+
+    let continued = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "vendor-model",
+            "input": [compact["output"][0].clone(), {"type": "message", "role": "user", "content": "continue"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(continued.status(), StatusCode::OK);
+    let bodies = seen.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let first = String::from_utf8(bodies[0].clone()).unwrap();
+    assert!(first.contains("Keep src/main.rs"));
+    assert!(first.contains("Reply with only the summary"));
+    assert!(!first.contains("apply_patch"));
+    let second = String::from_utf8(bodies[1].clone()).unwrap();
+    assert!(second.contains("Goal: keep src/main.rs"));
+    assert!(second.contains("continue"));
+    assert!(!second.contains("zenith-relay-compact-v1:"));
+    assert!(events.lock().unwrap().iter().all(|event| event.success));
+}
+
+#[tokio::test]
 async fn truncated_prelude_stream_returns_one_terminal_error_and_is_recorded_as_incomplete() {
     let (upstream, _) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;

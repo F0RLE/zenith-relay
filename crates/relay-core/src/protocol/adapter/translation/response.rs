@@ -1,5 +1,6 @@
 use super::*;
-use serde_json::{json, Map};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 
 pub(super) fn decode(protocol: WireApi, value: &Value, seed: &str) -> AdapterResult<Response> {
     let invalid = AdapterError::upstream_response_invalid;
@@ -511,7 +512,12 @@ pub(super) fn usage_value(protocol: WireApi, usage: &Usage) -> Value {
     value.into()
 }
 
-pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> AdapterResult<Value> {
+pub(super) fn encode(
+    protocol: WireApi,
+    response: &Response,
+    model: &str,
+    custom_tools: &BTreeSet<String>,
+) -> AdapterResult<Value> {
     let usage = usage_value(protocol, &response.usage);
     let mut content = Vec::new();
     let mut text = String::new();
@@ -520,6 +526,16 @@ pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> Ada
     for (index, block) in response.blocks.iter().enumerate() {
         match (protocol, block) {
             (WireApi::Responses, Block::Text(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]})),
+            (WireApi::Responses, Block::ToolCall { id, name, arguments }) if custom_tools.contains(name) => {
+                content.push(json!({
+                    "type": "custom_tool_call",
+                    "id": super::super::contracts::custom_tool_item_id(id),
+                    "call_id": id,
+                    "name": name,
+                    "input": custom_tool_input(arguments)?,
+                    "status": "completed"
+                }));
+            }
             (WireApi::Responses, Block::ToolCall { id, name, arguments }) => content.push(json!({"type":"function_call","id":format!("fc_{}_{index}",response.id),"call_id":id,"name":name,"arguments":arguments,"status":"completed"})),
             (WireApi::Responses, Block::Reasoning(reasoning)) => content.push(json!({"type":"reasoning","id":format!("rs_{}_{index}",response.id),"summary":[{"type":"summary_text","text":reasoning}]})),
             (WireApi::ChatCompletions, Block::Text(value)) => text.push_str(value),
@@ -557,6 +573,21 @@ pub(super) fn encode(protocol: WireApi, response: &Response, model: &str) -> Ada
             json!({"responseId":response.id,"modelVersion":model,"candidates":[{"index":0,"content":{"role":"model","parts":content},"finishReason":finish_value(protocol,response.finish)}],"usageMetadata":usage})
         }
     })
+}
+
+fn custom_tool_input(arguments: &str) -> AdapterResult<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(arguments) {
+        if let Some(input) = value.get("input").and_then(Value::as_str) {
+            return Ok(input.to_string());
+        }
+        if value.is_object() {
+            return Err(AdapterError::upstream_response_invalid());
+        }
+    }
+    if arguments.is_empty() {
+        return Err(AdapterError::upstream_response_invalid());
+    }
+    Ok(arguments.to_string())
 }
 
 pub(super) fn finish_value(protocol: WireApi, finish: Finish) -> &'static str {

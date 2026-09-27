@@ -147,10 +147,9 @@ impl ModelCapabilities {
         {
             object.insert("default_reasoning_level".into(), json!(default));
         }
-        // Context/compaction is a Codex client policy.  External model
-        // catalogs are evidence for display and routing only; advertising a
-        // model's theoretical maximum here makes Codex expand a conversation
-        // to (for example) one million tokens instead of using its own limit.
+        // Native Codex cards keep Codex's own window. Advertising a theoretical
+        // catalog maximum here makes Codex expand a conversation instead.
+        // Non-native cards publish the reference limit after this call.
     }
 }
 

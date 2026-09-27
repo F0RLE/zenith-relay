@@ -359,6 +359,34 @@ fn tools(values: Option<&Value>, protocol: WireApi) -> AdapterResult<Vec<Functio
                 false,
             )?);
         } else {
+            if protocol == WireApi::Responses
+                && tool.get("type").and_then(Value::as_str) == Some("custom")
+            {
+                let object = tool
+                    .as_object()
+                    .ok_or_else(AdapterError::unsupported_tool)?;
+                if object
+                    .get("defer_loading")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || object
+                        .get("allowed_callers")
+                        .is_some_and(|callers| !callers.is_null())
+                {
+                    return Err(AdapterError::unsupported_tool());
+                }
+                result.push(Function {
+                    name: required_text(tool, "name")?.into(),
+                    description: tool
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    parameters: super::super::messages::custom_tool_input_schema(object)?,
+                    strict: Some(false),
+                    custom: true,
+                });
+                continue;
+            }
             if tool.get("type").and_then(Value::as_str) != Some("function") {
                 return Err(AdapterError::unsupported_tool());
             }
@@ -414,6 +442,7 @@ fn function(
             .map(str::to_owned),
         parameters: schema,
         strict: optional_bool(value, "strict")?,
+        custom: false,
     })
 }
 
@@ -459,7 +488,7 @@ fn choice(value: Option<&Value>, protocol: WireApi) -> AdapterResult<Option<Tool
         "auto" => ToolChoice::Auto,
         "none" => ToolChoice::None,
         "required" | "any" => ToolChoice::Required,
-        "function" | "tool" => {
+        "function" | "tool" | "custom" => {
             let target = if protocol == WireApi::ChatCompletions {
                 value
                     .get("function")
@@ -561,7 +590,20 @@ fn responses(value: &Value) -> AdapterResult<Request> {
                         }],
                     );
                 }
-                "function_call_output" => {
+                "custom_tool_call" => {
+                    checked(item, &["type", "id", "status", "call_id", "name", "input"])?;
+                    let input = required_text(item, "input")?;
+                    append_assistant_blocks(
+                        &mut request.messages,
+                        vec![Block::ToolCall {
+                            id: required_text(item, "call_id")?.into(),
+                            name: required_text(item, "name")?.into(),
+                            arguments: serde_json::to_string(&json!({"input": input}))
+                                .map_err(|_| AdapterError::invalid_request())?,
+                        }],
+                    );
+                }
+                "function_call_output" | "custom_tool_call_output" => {
                     checked(item, &["type", "id", "status", "call_id", "output"])?;
                     request.messages.push(Message {
                         role: Role::User,

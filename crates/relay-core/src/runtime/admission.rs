@@ -195,6 +195,9 @@ impl Drop for AdmissionGuard<'_> {
 
 impl GatewayRuntime {
     fn admission_ready(&self, request: &AdmissionRequest, now_ms: u64) -> bool {
+        if !self.model_enabled(&request.model) {
+            return false;
+        }
         let scope = request.key.scope_read();
         self.lock_scheduler()
             .admission_ready_for(request.selection(&scope, now_ms), request.operation)

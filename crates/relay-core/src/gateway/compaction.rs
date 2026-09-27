@@ -127,9 +127,22 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
             .finish(Some(response), None)
             .ok_or_else(invalid_stream)?;
     }
+    compaction_document(&response)
+}
+
+/// Codex compact response. Retained tail items stay in `output`; exactly one
+/// encrypted compaction checkpoint is required.
+pub(super) fn compaction_document(response: &Value) -> Result<Vec<u8>, AttemptFailure> {
+    if response
+        .get("status")
+        .is_some_and(|value| value != "completed")
+    {
+        return Err(invalid_stream());
+    }
     let output = response
         .get("output")
         .and_then(Value::as_array)
+        .filter(|output| !output.is_empty())
         .ok_or_else(invalid_stream)?;
     let compactions = output
         .iter()
@@ -150,6 +163,44 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
         }
     }
     serde_json::to_vec(&result).map_err(|_| invalid_stream())
+}
+
+/// Makes a non-account `/v1/responses/compact` body an ordinary Responses
+/// request. String and object input use the same array shape as account
+/// compact, then Relay adds the trigger when the client omitted it.
+pub(super) fn prepare_routed_compaction_request(
+    object: &mut serde_json::Map<String, Value>,
+) -> bool {
+    match object.get("input") {
+        Some(Value::String(text)) if text.trim().is_empty() => {
+            object.insert("input".to_string(), Value::Array(Vec::new()));
+        }
+        Some(Value::String(text)) => {
+            object.insert(
+                "input".to_string(),
+                json!([{"role": "user", "content": [{"type": "input_text", "text": text}]}]),
+            );
+        }
+        Some(Value::Object(item)) => {
+            object.insert(
+                "input".to_string(),
+                Value::Array(vec![Value::Object(item.clone())]),
+            );
+        }
+        Some(Value::Array(_)) => {}
+        _ => return false,
+    }
+    let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    if !input
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
+    {
+        input.push(json!({"type": "compaction_trigger"}));
+    }
+    object.insert("stream".to_string(), Value::Bool(false));
+    true
 }
 
 // Only an explicit missing legacy endpoint permits this single compatibility
@@ -209,6 +260,39 @@ pub(super) async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routed_compact_request_adds_a_trigger_without_requiring_an_account() {
+        let mut request = serde_json::Map::new();
+        request.insert("model".into(), json!("vendor-model"));
+        request.insert("input".into(), json!("Keep src/main.rs"));
+        request.insert(
+            "tools".into(),
+            json!([{"type": "custom", "name": "apply_patch"}]),
+        );
+        assert!(prepare_routed_compaction_request(&mut request));
+        assert_eq!(request["stream"], false);
+        assert_eq!(request["tools"][0]["name"], "apply_patch");
+        let input = request["input"].as_array().unwrap();
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "compaction_trigger");
+        assert!(prepare_routed_compaction_request(&mut request));
+        assert_eq!(request["input"].as_array().unwrap().len(), 2);
+
+        let completed = json!({
+            "id": "resp_compact",
+            "status": "completed",
+            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "output": [{"type": "compaction", "encrypted_content": "zenith-relay-compact-v1:test"}]
+        });
+        let encoded = compaction_document(&completed).ok().unwrap();
+        let body: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(body["object"], "response.compaction");
+        assert_eq!(body["id"], "resp_compact");
+        assert_eq!(body["usage"]["input_tokens"], 12);
+        assert_eq!(body["output"][0]["type"], "compaction");
+        assert!(compaction_document(&json!({"status": "incomplete", "output": []})).is_err());
+    }
 
     #[test]
     fn bridge_preserves_history_and_request_fields() {

@@ -19,7 +19,7 @@ use zenith_relay_core::{
         pool_pricing_source_summary, pooled_source_runtime_available, source_runtime_available,
         AccountRefreshState, AccountSummary, GatewaySummary, ProxyMode, QuotaWindowUsage,
         RefreshStatus, RuntimeStateSnapshot, RuntimeTargetSummary, SourceRefreshState,
-        SourceSummary, UsageQuery,
+        SourceSummary,
     },
     scheduler::refresh::RefreshKind,
     ApiEquivalentSummary, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
@@ -280,6 +280,23 @@ fn account_summaries(
     inputs: AccountSnapshotInputs<'_>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<AccountSummary>, String> {
+    let quota_windows = records
+        .iter()
+        .filter_map(|(record, _)| {
+            let window =
+                zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)?;
+            Some((
+                identity_hint(&record.id),
+                window.window_start_ms.unwrap_or_default(),
+                window.observed_at_ms,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let quota_equivalents = state.store.quota_window_equivalents_with_pricing(
+        &quota_windows,
+        inputs.pricing_catalog,
+        inputs.pricing_context,
+    )?;
     records
         .iter()
         .map(|(record, fence)| {
@@ -307,12 +324,7 @@ fn account_summaries(
                     )
                 })
                 .unwrap_or((ProxyMode::Direct, false));
-            let quota_window_usage = account_quota_window_usage(
-                state,
-                record,
-                inputs.pricing_catalog,
-                inputs.pricing_context,
-            )?;
+            let quota_window_usage = quota_window_usage(record, &quota_equivalents);
             let mut summary = account_summary(
                 record,
                 AccountSummaryInputs {
@@ -349,35 +361,17 @@ fn account_summaries(
         .collect()
 }
 
-fn account_quota_window_usage(
-    state: &AppState,
+fn quota_window_usage(
     record: &ServerAccountRecord,
-    pricing_catalog: &PricingCatalog,
-    pricing_context: &PricingContext,
-) -> Result<Option<QuotaWindowUsage>, String> {
-    let Some(window) = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)
-    else {
-        return Ok(None);
-    };
-    let window_start_ms = window.window_start_ms.unwrap_or_default();
-    let window_minutes = window.window_minutes.unwrap_or_default();
-    let usage = state.store.usage_page_with_pricing(
-        &UsageQuery {
-            page: 1,
-            page_size: 1,
-            from_ms: Some(window_start_ms),
-            to_ms: Some(window.observed_at_ms),
-            source_or_account_query: Some(identity_hint(&record.id)),
-            ..UsageQuery::default()
-        },
-        pricing_catalog,
-        pricing_context,
-    )?;
-    Ok(Some(QuotaWindowUsage {
+    equivalents: &HashMap<String, ApiEquivalentSummary>,
+) -> Option<QuotaWindowUsage> {
+    let window = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)?;
+    let hint = identity_hint(&record.id);
+    Some(QuotaWindowUsage {
         kind: window.kind,
-        window_start_ms,
+        window_start_ms: window.window_start_ms.unwrap_or_default(),
         observed_at_ms: window.observed_at_ms,
-        window_minutes,
-        api_equivalent: usage.totals.api_equivalent,
-    }))
+        window_minutes: window.window_minutes.unwrap_or_default(),
+        api_equivalent: equivalents.get(&hint).copied().unwrap_or_default(),
+    })
 }

@@ -65,6 +65,8 @@ pub async fn set_model_enabled(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelEnabledInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
+    let _build = state.lock_runtime_rebuild().await;
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
     let old_hidden = state.store.hidden_models().map_err(store_error)?;
@@ -76,11 +78,14 @@ pub async fn set_model_enabled(
     if hidden == old_hidden {
         return Ok(Json(snapshot));
     }
-    state.store.set_hidden_models(hidden).map_err(store_error)?;
+    let runtime = state.runtime().map_err(runtime_error)?;
     state
-        .rebuild_runtime_or_rollback(|| state.store.set_hidden_models(old_hidden))
-        .await
-        .map_err(runtime_error)?;
+        .store
+        .set_hidden_models(hidden.clone())
+        .map_err(store_error)?;
+    if let Some(runtime) = runtime {
+        runtime.set_hidden_models(hidden);
+    }
     state.snapshot().map(Json).map_err(store_error)
 }
 

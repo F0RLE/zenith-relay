@@ -675,7 +675,8 @@ fn messages_thinking_blocks_are_translated_as_reasoning() {
     assert!(matches!(&response.blocks[0], Block::Reasoning(text) if text == "plan first"));
     assert!(matches!(&response.blocks[1], Block::Text(text) if text == "answer"));
 
-    let encoded = response::encode(WireApi::Messages, &response, "test").unwrap();
+    let encoded =
+        response::encode(WireApi::Messages, &response, "test", &Default::default()).unwrap();
     assert_eq!(encoded["content"][0]["type"], "thinking");
     assert_eq!(encoded["content"][0]["thinking"], "plan first");
 }
@@ -1181,4 +1182,67 @@ fn orphan_tool_results_are_rejected_for_every_conversion() {
             assert!(result.is_err(), "{client:?} -> {upstream:?}");
         }
     }
+}
+
+#[test]
+fn chat_bridge_keeps_apply_patch_as_a_custom_tool_call() {
+    let request = json!({
+        "model": "grok",
+        "input": [
+            {"type": "message", "role": "user", "content": "Edit the file"},
+            {"type": "custom_tool_call", "call_id": "call_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"},
+            {"type": "custom_tool_call_output", "call_id": "call_patch", "output": "applied"}
+        ],
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch",
+            "format": {"type": "text"}
+        }]
+    });
+    let prepared = prepare(
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        &request,
+        false,
+    );
+    let body = prepared.upstream_body().to_string();
+    assert!(body.contains("apply_patch"));
+    assert!(body.contains("Begin Patch"));
+    assert!(body.contains("\"input\""));
+    let upstream = json!({
+        "id": "chat_test",
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_new",
+                    "type": "function",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": "{\"input\":\"*** Begin Patch\\n+line\\n*** End Patch\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let translated = prepared
+        .translate_response_bytes(&serde_json::to_vec(&upstream).unwrap())
+        .unwrap()
+        .unwrap();
+    let item = &translated.response_body()["output"][0];
+    assert_eq!(item["type"], "custom_tool_call");
+    assert_eq!(item["name"], "apply_patch");
+    assert_eq!(item["call_id"], "call_new");
+    assert!(item["id"].as_str().unwrap().starts_with("ctc_"));
+    assert!(item["input"].as_str().unwrap().contains("Begin Patch"));
+    assert!(!translated
+        .response_body()
+        .to_string()
+        .contains("function_call"));
 }

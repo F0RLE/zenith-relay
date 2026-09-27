@@ -1648,7 +1648,7 @@ mod tests {
     }
 
     #[test]
-    fn known_model_uses_catalog_capabilities_without_overriding_codex_context() {
+    fn known_non_native_model_publishes_reference_context_for_auto_compact() {
         use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
         let catalog = ModelMetadataCatalog::from_models_dev_json(
             r#"{
@@ -1672,7 +1672,10 @@ mod tests {
         let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
         let entry = &response["models"][0];
         assert_eq!(entry["input_modalities"], json!(["text"]));
-        assert!(entry.get("context_window").is_none());
+        assert_eq!(entry["context_window"], 64_000);
+        assert_eq!(entry["max_context_window"], 64_000);
+        assert_eq!(entry["auto_compact_token_limit"], 57_600);
+        assert_eq!(entry["effective_context_window_percent"], 95);
         assert_eq!(entry["supports_parallel_tool_calls"], true);
         assert_eq!(entry["default_reasoning_level"], "high");
         assert_eq!(
@@ -1999,7 +2002,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_context_is_not_advertised_for_unknown_models() {
+    fn provider_context_does_not_replace_the_reference_window() {
         let runtime = capability_test_runtime(&["gpt-5.4"], GatewayRuntimeOptions::default());
         let key = runtime
             .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
@@ -2016,8 +2019,10 @@ mod tests {
             .expect("coding model catalog");
         let model = &response["models"][0];
 
-        assert!(model.get("context_window").is_none());
-        assert!(model.get("max_context_window").is_none());
-        assert!(model.get("auto_compact_token_limit").is_none());
+        assert_eq!(model["context_window"], 272_000);
+        assert_eq!(model["max_context_window"], 272_000);
+        assert_eq!(model["auto_compact_token_limit"], 244_800);
+        assert_ne!(model["context_window"], 128_000);
+        assert_ne!(model["auto_compact_token_limit"], 122_000);
     }
 }

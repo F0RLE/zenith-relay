@@ -251,6 +251,19 @@ impl SourceAdapter {
         context: AdapterRequestContext<'_>,
     ) -> AdapterResult<PreparedAdapterRequest> {
         self.validate(context.client_wire_api, context.reasoning_mode)?;
+        let rewritten = if !self.is_passthrough() && context.client_wire_api == WireApi::Responses {
+            match super::compaction::prepare_bridged_compaction(context.request)? {
+                super::compaction::BridgedCompaction::Rewritten { request, .. } => Some(request),
+                super::compaction::BridgedCompaction::Unchanged => None,
+            }
+        } else {
+            None
+        };
+        let context = if let Some(request) = rewritten.as_ref() {
+            AdapterRequestContext { request, ..context }
+        } else {
+            context
+        };
         if !matches!(
             self,
             Self::Native | Self::ResponsesToMessages | Self::ResponsesToGemini
@@ -348,15 +361,13 @@ pub(super) fn validate_bridge_compaction(request: &Value) -> AdapterResult<()> {
         _ => false,
     });
     if configured || history {
-        return Err(AdapterError {
-            code: error_codes::ADAPTER_COMPACTION_UNSUPPORTED,
-            message: "Responses compaction history requires a native Responses route",
-            parameter: Some(if configured {
+        return Err(
+            AdapterError::compaction_unsupported().with_parameter(if configured {
                 "context_management"
             } else {
                 "input"
             }),
-        });
+        );
     }
     Ok(())
 }
@@ -733,6 +744,14 @@ impl AdapterError {
             code: error_codes::ADAPTER_INVALID_REQUEST,
             message: "request cannot be represented by the selected source adapter",
             parameter: None,
+        }
+    }
+
+    pub(super) const fn compaction_unsupported() -> Self {
+        Self {
+            code: error_codes::ADAPTER_COMPACTION_UNSUPPORTED,
+            message: "Responses compaction history requires a native Responses route",
+            parameter: Some("input"),
         }
     }
 

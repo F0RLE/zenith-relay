@@ -11,6 +11,7 @@ use crate::scheduler::rotation::{
 
 pub(crate) struct CandidateLease {
     pub(super) scheduler: Arc<Mutex<PoolScheduler>>,
+    pub(super) hidden_models: Arc<RwLock<BTreeSet<String>>>,
     pub(super) availability: Arc<tokio::sync::Notify>,
     pub(super) candidate_id: String,
     pub(super) candidate_permission_revision: u64,
@@ -127,6 +128,13 @@ impl CandidateLease {
                 .scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let hidden = self
+                .hidden_models
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hidden.contains(&self.model.to_ascii_lowercase()) {
+                return Err(RotationDispatchStartError::CandidateChanged);
+            }
             if self
                 .image_bridge_revision
                 .as_ref()

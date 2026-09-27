@@ -11,8 +11,9 @@ pub use codex::{
     apply_codex_ultra_from_official_model, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
     normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
-    source_row_declares_reasoning, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
+    normalize_upstream_codex_catalog_entry, publish_routed_codex_context,
+    routed_codex_catalog_entry, source_row_declares_reasoning, CODEX_CATALOG_PRIORITY_BASE,
+    CODEX_RELAY_CATALOG_HASH,
 };
 pub use context::{
     deserialize_model_reasoning_allowed_levels, normalize_model_reasoning_allowed_levels,

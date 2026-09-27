@@ -220,6 +220,13 @@ impl GatewayRuntime {
         // Live principal scope stays locked through selection and reservation.
         let scope = key.scope_read();
         let mut scheduler = self.lock_scheduler();
+        let hidden = self
+            .hidden_models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if hidden.contains(&model.to_ascii_lowercase()) {
+            return (None, false);
+        }
         let selection = match (lane, operation) {
             (CandidateLeaseLane::Text, RotationOperation::Compaction) => scheduler
                 .select_compaction(SelectionRequest {
@@ -271,6 +278,7 @@ impl GatewayRuntime {
                     });
                 let lease = CandidateLease {
                     scheduler: self.scheduler.clone(),
+                    hidden_models: self.hidden_models.clone(),
                     availability: self.candidate_availability.clone(),
                     candidate_id: selection.candidate_id.clone(),
                     candidate_permission_revision: scheduler

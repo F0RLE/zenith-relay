@@ -56,9 +56,10 @@ pub use catalog::{
     deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
     merge_model_display_order, normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, reasoning_policy_key, reasoning_policy_levels,
-    routed_codex_catalog_entry, source_model_declares_image_input, source_row_declares_reasoning,
-    ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
+    normalize_upstream_codex_catalog_entry, publish_routed_codex_context, reasoning_policy_key,
+    reasoning_policy_levels, routed_codex_catalog_entry, source_model_declares_image_input,
+    source_row_declares_reasoning, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
+    CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use pricing::{

@@ -293,10 +293,7 @@ pub(super) fn build_accounts(
     })
 }
 
-pub(super) fn build_keys(
-    keys: Vec<RuntimeMixedLocalKey>,
-    hidden_models: &BTreeSet<String>,
-) -> Result<KeyRuntimeParts> {
+pub(super) fn build_keys(keys: Vec<RuntimeMixedLocalKey>) -> Result<KeyRuntimeParts> {
     let mut runtime_keys = Vec::new();
     let mut configured_rules = Vec::new();
     let mut key_ids = HashSet::new();
@@ -316,8 +313,6 @@ pub(super) fn build_keys(
             allowed: normalized_set(key.allowed_models.iter()),
             excluded: normalized_set(key.excluded_models.iter()),
         };
-        let mut model_rules = base_model_rules.clone();
-        model_rules.excluded.extend(hidden_models.iter().cloned());
         let client_wire_apis = key.wire_apis.map(|values| {
             values
                 .into_iter()
@@ -334,7 +329,7 @@ pub(super) fn build_keys(
         configured_rules.push(ConfiguredKeyRule {
             enabled: key.enabled,
             scope: scope.clone(),
-            model_rules: base_model_rules,
+            model_rules: base_model_rules.clone(),
             client_wire_apis: client_wire_apis.clone(),
         });
         runtime_keys.push(RuntimeKey {
@@ -343,7 +338,7 @@ pub(super) fn build_keys(
             secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
             scope: Arc::new(RwLock::new(scope)),
             scope_revision: Arc::new(AtomicU64::new(0)),
-            model_rules,
+            model_rules: base_model_rules,
             model_prefix: normalize_prefix(key.model_prefix),
             client_wire_apis,
         });

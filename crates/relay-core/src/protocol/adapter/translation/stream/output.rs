@@ -101,7 +101,11 @@ impl TranslationStream {
                         json!({"type":"message","id":format!("msg_{}_{index}",self.response.id),"role":"assistant","status":"in_progress","content":[]})
                     }
                     Block::ToolCall { id, name, .. } => {
-                        json!({"type":"function_call","id":format!("fc_{}_{index}",self.response.id),"call_id":id,"name":name,"arguments":"","status":"in_progress"})
+                        if self.request.custom_tools.contains(name) {
+                            json!({"type":"custom_tool_call","id":super::super::super::contracts::custom_tool_item_id(id),"call_id":id,"name":name,"input":"","status":"in_progress"})
+                        } else {
+                            json!({"type":"function_call","id":format!("fc_{}_{index}",self.response.id),"call_id":id,"name":name,"arguments":"","status":"in_progress"})
+                        }
                     }
                     Block::Reasoning(_) => {
                         json!({"type":"reasoning","id":format!("rs_{}_{index}",self.response.id),"summary":[]})
@@ -172,6 +176,13 @@ impl TranslationStream {
         if arguments.is_empty() {
             return;
         }
+        if self.request.client == WireApi::Responses {
+            if let Block::ToolCall { name, .. } = &self.response.blocks[index] {
+                if self.request.custom_tools.contains(name) {
+                    return;
+                }
+            }
+        }
         match self.request.client {
             WireApi::Responses => self.event("response.function_call_arguments.delta", json!({"type":"response.function_call_arguments.delta","output_index":index,"item_id":format!("fc_{}_{index}",self.response.id),"delta":arguments})),
             WireApi::Messages => self.event("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":arguments}})),
@@ -201,6 +212,7 @@ impl TranslationStream {
                             self.event("response.content_part.done", json!({"type":"response.content_part.done","output_index":index,"item_id":item["id"],"content_index":0,"part":part}));
                         }
                         Some("function_call") => self.event("response.function_call_arguments.done", json!({"type":"response.function_call_arguments.done","output_index":index,"item_id":item["id"],"arguments":item["arguments"]})),
+                        Some("custom_tool_call") => self.event("response.custom_tool_call_input.done", json!({"type":"response.custom_tool_call_input.done","output_index":index,"item_id":item["id"],"input":item["input"]})),
                         Some("reasoning") => {
                             self.event("response.reasoning_summary_text.done", json!({"type":"response.reasoning_summary_text.done","output_index":index,"item_id":item["id"],"summary_index":0,"text":item["summary"][0]["text"]}));
                             self.event("response.reasoning_summary_part.done", json!({"type":"response.reasoning_summary_part.done","output_index":index,"item_id":item["id"],"summary_index":0,"part":item["summary"][0]}));

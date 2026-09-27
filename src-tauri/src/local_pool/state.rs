@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn forbidden_account_is_blocked_until_an_actual_success() {
+    fn generic_forbidden_account_stays_available_until_an_actual_success() {
         let root = temp_root("usage-403");
         let account_id = "account-forbidden";
         let state = DesktopState::open(root.clone()).unwrap();
@@ -817,7 +817,7 @@ mod tests {
         {
             let store = state.store().unwrap();
             let account = store.account(account_id).unwrap();
-            assert_eq!(account.account.health, AccountHealthState::Blocked);
+            assert_eq!(account.account.health, AccountHealthState::Degraded);
             assert_eq!(
                 account.account.last_error_code.as_deref(),
                 Some("upstream_forbidden")
@@ -836,7 +836,7 @@ mod tests {
                 .unwrap()
                 .account
                 .health,
-            AccountHealthState::Blocked
+            AccountHealthState::Degraded
         );
         (reopened.usage_callback())(account_success_event(account_id));
         let store = reopened.store().unwrap();
@@ -846,6 +846,82 @@ mod tests {
         assert!(account.cooldowns.is_empty());
         assert_eq!(account.consecutive_failures, 0);
         drop(store);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_workspace_disable_stays_blocked_until_an_actual_success() {
+        let root = temp_root("usage-403-disabled");
+        let account_id = "account-disabled";
+        let state = DesktopState::open(root.clone()).unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account_record(account_id))
+            .unwrap();
+        let mut event = account_status_event(
+            account_id,
+            403,
+            Some("*"),
+            Some(now_ms().saturating_add(30 * 60_000)),
+            2,
+        );
+        event.error_category = Some("deactivated_workspace".into());
+        (state.usage_callback())(event);
+        assert_eq!(
+            state
+                .store()
+                .unwrap()
+                .account(account_id)
+                .unwrap()
+                .account
+                .health,
+            AccountHealthState::Blocked
+        );
+        drop(state);
+
+        let reopened = DesktopState::open(root.clone()).unwrap();
+        let account = reopened
+            .store()
+            .unwrap()
+            .account(account_id)
+            .unwrap()
+            .clone();
+        assert_eq!(account.account.health, AccountHealthState::Blocked);
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("deactivated_workspace")
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opening_storage_clears_a_false_upstream_forbidden_block() {
+        let root = temp_root("false-403-block");
+        {
+            let mut store = LocalPoolStore::open(root.clone()).unwrap();
+            let mut false_block = account_record("false-block");
+            false_block.account.health = AccountHealthState::Blocked;
+            false_block.account.last_error_code = Some("upstream_forbidden".into());
+            let mut real_block = account_record("real-block");
+            real_block.account.health = AccountHealthState::Blocked;
+            real_block.account.last_error_code = Some("deactivated_workspace".into());
+            store.upsert_account(false_block).unwrap();
+            store.upsert_account(real_block).unwrap();
+        }
+
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        let false_block = reopened.account("false-block").unwrap();
+        assert_eq!(false_block.account.health, AccountHealthState::Healthy);
+        assert_eq!(false_block.account.last_error_code, None);
+        let real_block = reopened.account("real-block").unwrap();
+        assert_eq!(real_block.account.health, AccountHealthState::Blocked);
+        assert_eq!(
+            real_block.account.last_error_code.as_deref(),
+            Some("deactivated_workspace")
+        );
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }

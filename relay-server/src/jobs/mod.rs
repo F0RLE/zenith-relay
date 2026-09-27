@@ -17,7 +17,8 @@ use zenith_relay_core::{
 };
 
 pub(crate) use refresh::{
-    cache_observation, refresh_account_now, refresh_all_accounts_now, RefreshReadResult,
+    cache_observation, refresh_account_now, refresh_account_quota_now, refresh_all_accounts_now,
+    RefreshReadResult,
 };
 pub(crate) use refresh::{cached_source_stats, request_source_models, request_source_stats};
 

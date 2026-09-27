@@ -22,6 +22,9 @@ impl GatewayRuntime {
             if !request.budget.can_dispatch() {
                 return None;
             }
+            if !self.model_enabled(&request.model) {
+                return None;
+            }
             let now_ms = now_ms.saturating_add(started.elapsed().as_millis() as u64);
             let reserved = {
                 // Queue -> budget/scope -> scheduler is the only admission
@@ -126,7 +129,10 @@ impl GatewayRuntime {
         let notified = self.candidate_availability.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if !budget.can_dispatch() || self.lock_scheduler().is_retired() {
+        if !budget.can_dispatch()
+            || !self.model_enabled(model)
+            || self.lock_scheduler().is_retired()
+        {
             return false;
         }
         let Ok(queue_deadline) = self.admission_deadline(budget) else {
@@ -178,6 +184,7 @@ impl GatewayRuntime {
         };
         await_event(notified, earliest(deadline, due)).await;
         !self.lock_scheduler().is_retired()
+            && self.model_enabled(model)
             && self.admission_deadline(budget).is_ok()
             && retry_deadline.is_none_or(|deadline| Instant::now() < deadline)
             && budget.can_dispatch()

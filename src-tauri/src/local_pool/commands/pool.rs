@@ -1,6 +1,6 @@
 use super::{
     cleanup_created_secret, connections::validate_source_record, fence_runtime_candidates,
-    restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback,
+    restart_or_rollback, runtime_account_policy,
 };
 use crate::{
     files::atomic_write,
@@ -911,19 +911,22 @@ pub async fn set_local_model_enabled(
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
-    let old_gateway = state.store()?.gateway().clone();
-    let mut gateway = old_gateway.clone();
+    let mut gateway = state.store()?.gateway().clone();
+    let previous = gateway.hidden_models.clone();
     gateway
         .hidden_models
         .retain(|model| !model.eq_ignore_ascii_case(&canonical));
     if !input.enabled {
         gateway.hidden_models.push(canonical);
     }
-    if gateway == old_gateway {
+    if gateway.hidden_models == previous {
         return state.snapshot().await.map_err(Into::into);
     }
+    let hidden = gateway.hidden_models.clone();
     state.store()?.replace_gateway(gateway)?;
-    sync_gateway_or_rollback(&state, old_gateway).await?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_hidden_models(hidden);
+    }
     state.snapshot().await.map_err(Into::into)
 }
 

@@ -483,7 +483,7 @@ pub async fn refresh_account(
     Path(id): Path<String>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
     let record = find_account(&state, &id)?;
-    let updated = jobs::refresh_account_now(&state, record)
+    let updated = jobs::refresh_account_quota_now(&state, record)
         .await
         .map_err(|_| {
             ManagementError::new(

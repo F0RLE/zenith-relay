@@ -263,8 +263,10 @@ impl ModelMetadataCatalog {
             .map(|metadata| metadata.capabilities.reasoning_effort_levels.clone())
     }
 
-    /// Keep companies and catalog families together. Release/update dates order
-    /// versions inside each family; presentation never determines eligibility.
+    /// Keep companies and catalog families together. Provider family precedence
+    /// is applied where the catalog has a stable product-tier order; release /
+    /// update dates then order versions inside each family. Presentation never
+    /// determines eligibility.
     pub fn order_model_ids<I, S>(&self, models: I) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
@@ -646,12 +648,54 @@ fn compare_families(
         (Some(left), Some(right)) if left != right => {
             let left_order = &families[&(provider.to_string(), left.clone())];
             let right_order = &families[&(provider.to_string(), right.clone())];
-            compare_optional_date_desc(left_order.catalog_release, right_order.catalog_release)
+            // Release dates are useful for versions within one family, but
+            // they are not a stable ranking for sibling product families.
+            // Anthropic can publish a newer Opus before a newer Fable while
+            // the picker still needs to keep the product families together in
+            // Relay's canonical order: Fable, Opus, Sonnet, Haiku. New or
+            // provider-specific families remain after the known families and
+            // continue to use the metadata date/ID tie-breakers below.
+            compare_known_family_order(provider, &left, &right)
+                .then_with(|| {
+                    compare_optional_date_desc(
+                        left_order.catalog_release,
+                        right_order.catalog_release,
+                    )
+                })
                 .then_with(|| left.cmp(&right))
         }
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         _ => Ordering::Equal,
+    }
+}
+
+fn compare_known_family_order(provider: &str, left: &str, right: &str) -> Ordering {
+    let left_rank = known_family_rank(provider, left);
+    let right_rank = known_family_rank(provider, right);
+    match (left_rank, right_rank) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Stable product-family precedence used only where the provider exposes a
+/// canonical tier order that release dates cannot represent. This deliberately
+/// ranks family labels, not individual model IDs, so future versions inherit
+/// the same placement automatically and unknown families remain discoverable.
+fn known_family_rank(provider: &str, family: &str) -> Option<u8> {
+    if provider != "anthropic" {
+        return None;
+    }
+    let family = family.strip_prefix("claude-").unwrap_or(family);
+    match family {
+        "fable" => Some(0),
+        "opus" => Some(1),
+        "sonnet" => Some(2),
+        "haiku" => Some(3),
+        _ => None,
     }
 }
 
@@ -1307,6 +1351,45 @@ mod tests {
         assert_eq!(
             catalog.merge_display_order(expected.into_iter().rev(), &[]),
             expected
+        );
+    }
+
+    #[test]
+    fn anthropic_families_use_stable_tier_order_before_release_dates() {
+        let catalog = catalog(
+            r#"{
+                "anthropic/claude-opus-5-5":{"family":"claude-opus","release_date":"2026-09-22"},
+                "anthropic/claude-opus-5":{"family":"claude-opus","release_date":"2026-07-24"},
+                "anthropic/claude-fable-5-1":{"family":"claude-fable","release_date":"2026-09-01"},
+                "anthropic/claude-fable-5":{"family":"claude-fable","release_date":"2026-06-09"},
+                "anthropic/claude-sonnet-5":{"family":"claude-sonnet","release_date":"2026-06-30"},
+                "anthropic/claude-sonnet-4-6":{"family":"claude-sonnet","release_date":"2026-02-17"},
+                "anthropic/claude-haiku-4-5":{"family":"claude-haiku","release_date":"2025-10-15"},
+                "anthropic/claude-next-1":{"family":"claude-next","release_date":"2027-01-01"}
+            }"#,
+        );
+
+        assert_eq!(
+            catalog.order_model_ids([
+                "claude-opus-5-5",
+                "claude-haiku-4-5",
+                "claude-fable-5",
+                "claude-sonnet-4-6",
+                "claude-opus-5",
+                "claude-fable-5-1",
+                "claude-sonnet-5",
+                "claude-next-1",
+            ]),
+            [
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-5-5",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5",
+                "claude-next-1",
+            ]
         );
     }
 

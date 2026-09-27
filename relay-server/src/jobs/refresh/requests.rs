@@ -20,12 +20,31 @@ pub(crate) async fn refresh_account_now(
         .ok_or_else(|| "account not found".into())
 }
 
+/// The explicit quota action does not wait for the independent model catalog.
+/// Both kinds still use the same refresh owner and preserve their own results.
+pub(crate) async fn refresh_account_quota_now(
+    state: &Arc<AppState>,
+    account: ServerAccountRecord,
+) -> Result<ServerAccountRecord, String> {
+    let quota = request(state, &account.id, RefreshKind::Quota).await;
+    let models_state = state.clone();
+    let models_id = account.id.clone();
+    tokio::spawn(async move {
+        let _ = request(&models_state, &models_id, RefreshKind::Models).await;
+    });
+    quota?;
+    state
+        .store
+        .account(&account.id)?
+        .ok_or_else(|| "account not found".into())
+}
+
 pub(crate) async fn refresh_all_accounts_now(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), String> {
     let results = stream::iter(state.store.accounts()?.into_iter().map(|account| {
         let state = state.clone();
-        async move { refresh_account_now(&state, account).await }
+        async move { refresh_account_quota_now(&state, account).await }
     }))
     // This bounds retained callers only; all HTTP admission, including other
     // concurrent batches and background work, belongs to the shared service.

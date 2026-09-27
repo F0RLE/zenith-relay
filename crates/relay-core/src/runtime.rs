@@ -413,6 +413,7 @@ pub struct GatewayRuntime {
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
     chatgpt_team_breaker_recent: Mutex<BTreeMap<String, u64>>,
     keys: Vec<RuntimeKey>,
+    hidden_models: Arc<RwLock<BTreeSet<String>>>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_availability: Arc<tokio::sync::Notify>,
     admission: Mutex<admission::AdmissionQueue>,
@@ -735,7 +736,12 @@ impl GatewayRuntime {
             &mut registry,
             &mut scheduler,
         )?;
-        let hidden_models = normalized_set(options.hidden_models.iter());
+        let hidden_models = options
+            .hidden_models
+            .iter()
+            .map(|model| model.trim().to_ascii_lowercase())
+            .filter(|model| !model.is_empty())
+            .collect();
         // All callers use pool rotation. Older settings migrate once to the
         // same explicit policy used by desktop and server.
         let policy = options
@@ -743,7 +749,7 @@ impl GatewayRuntime {
             .clone()
             .unwrap_or_else(|| scheduler.migrated_pool_routing());
         scheduler.set_pool_routing(policy)?;
-        let key_parts = build_keys(keys, &hidden_models)?;
+        let key_parts = build_keys(keys)?;
         validate_reachability(
             reachability_requirement,
             &source_parts,
@@ -792,6 +798,7 @@ impl GatewayRuntime {
             chatgpt_team_members: account_parts.team_members,
             chatgpt_team_breaker_recent: Mutex::new(BTreeMap::new()),
             keys: key_parts.runtime_keys,
+            hidden_models: Arc::new(RwLock::new(hidden_models)),
             scheduler: Arc::new(Mutex::new(scheduler)),
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::default(),
@@ -1032,7 +1039,31 @@ impl GatewayRuntime {
             Some(prefix) => strip_prefix_ignore_ascii_case(model, &format!("{prefix}/"))?,
             None => model,
         };
-        key.model_rules.allows(model).then(|| model.to_string())
+        (key.model_rules.allows(model) && self.model_enabled(model)).then(|| model.to_string())
+    }
+
+    fn model_enabled(&self, model: &str) -> bool {
+        !self
+            .hidden_models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&model.to_ascii_lowercase())
+    }
+
+    /// Apply global visibility without replacing the scheduler or interrupting
+    /// attempts that have already started upstream.
+    pub fn set_hidden_models(&self, models: Vec<String>) {
+        let hidden = models
+            .iter()
+            .map(|model| model.trim().to_ascii_lowercase())
+            .filter(|model| !model.is_empty())
+            .collect();
+        *self
+            .hidden_models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hidden;
+        self.candidate_availability.notify_waiters();
+        self.admission_changed.notify_waiters();
     }
 
     pub(crate) fn resolve_visible_model(
@@ -1123,7 +1154,7 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
-            .filter(|model| key.model_rules.allows(model))
+            .filter(|model| key.model_rules.allows(model) && self.model_enabled(model))
             .collect::<Vec<_>>();
         let order = self
             .model_display_order
@@ -1167,6 +1198,7 @@ impl GatewayRuntime {
                         .iter()
                         .filter(|model| {
                             key.model_rules.allows(model)
+                                && self.model_enabled(model)
                                 && candidate.is_catalog_visible(
                                     model,
                                     &[WireApi::Responses],

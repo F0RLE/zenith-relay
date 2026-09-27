@@ -988,7 +988,7 @@ fn translate_client_tool(
     Ok(())
 }
 
-fn custom_tool_input_schema(tool: &Map<String, Value>) -> AdapterResult<Value> {
+pub(super) fn custom_tool_input_schema(tool: &Map<String, Value>) -> AdapterResult<Value> {
     let mut input = Map::from_iter([("type".to_string(), Value::String("string".to_string()))]);
     if let Some(format) = tool.get("format") {
         let format = format

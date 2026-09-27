@@ -5,7 +5,9 @@
 mod requests;
 mod runtime;
 mod sources;
-pub(crate) use requests::{refresh_account_now, refresh_all_accounts_now};
+pub(crate) use requests::{
+    refresh_account_now, refresh_account_quota_now, refresh_all_accounts_now,
+};
 pub(crate) use sources::{
     cached_stats as cached_source_stats, request_models as request_source_models,
     request_stats as request_source_stats,
