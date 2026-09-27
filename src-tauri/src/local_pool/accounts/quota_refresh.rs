@@ -31,7 +31,7 @@ use serde::Serialize;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, State};
 use zenith_relay_core::accounts::{
     AccountAuthState, ReauthReason, TokenPersistenceAdapter, TokenRefreshFailureKind, TokenSet,
 };
@@ -260,11 +260,12 @@ pub struct AccountQuotaRefreshItemResult {
 #[tauri::command]
 pub async fn refresh_local_account_quota(
     account_id: String,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<AccountQuotaRefreshResponse> {
-    refresh_manual_account_quota(&state, &account_id)
-        .await
-        .map_err(Into::into)
+    let quota = refresh_manual_account_quota(&state, &account_id).await;
+    crate::local_pool::background::refresh_account_models_in_background(app, vec![account_id]);
+    quota.map_err(Into::into)
 }
 
 /// Explicitly exercises the stored refresh token even when the current access
@@ -855,6 +856,7 @@ fn persisted_token_generation_is_newer(
 
 #[tauri::command]
 pub async fn refresh_all_local_account_quotas(
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<Vec<AccountQuotaRefreshItemResult>> {
     let account_ids = state
@@ -864,7 +866,9 @@ pub async fn refresh_all_local_account_quotas(
         .filter(|account| account.remote_location.is_none())
         .map(|account| account.account.id.clone())
         .collect::<Vec<_>>();
-    Ok(refresh_account_quotas(&state, account_ids).await)
+    let results = refresh_account_quotas(&state, account_ids.clone()).await;
+    crate::local_pool::background::refresh_account_models_in_background(app, account_ids);
+    Ok(results)
 }
 
 pub(super) async fn refresh_account_quotas(
@@ -906,13 +910,7 @@ pub(super) async fn refresh_manual_account_quota(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    // Independent kind jobs; each joins its own automatic read. A models
-    // failure is persisted separately and must not erase a successful quota.
-    let (quota, _models) = tokio::join!(
-        refresh_account_quota_once(state, account_id),
-        refresh_account_models_once(state, account_id),
-    );
-    quota
+    refresh_account_quota_once(state, account_id).await
 }
 
 pub(crate) async fn sync_managed_account_profile(

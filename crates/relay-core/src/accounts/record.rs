@@ -49,6 +49,31 @@ pub fn provider_account_failure(code: &str) -> Option<ProviderAccountFailure> {
     }
 }
 
+pub fn explicit_account_disable(code: &str) -> bool {
+    code == error_codes::UPSTREAM_ACCOUNT_DISABLED
+        || matches!(
+            provider_account_failure(code),
+            Some(ProviderAccountFailure::Blocked)
+        )
+}
+
+/// A generic HTTP 403 was previously stored as a permanent block. That code
+/// does not prove the account was disabled, so restore routing and drop it.
+pub fn clear_false_upstream_block(
+    health: &mut AccountHealthState,
+    last_error_code: &mut Option<String>,
+) -> bool {
+    if *health == AccountHealthState::Blocked
+        && last_error_code.as_deref() == Some(error_codes::UPSTREAM_FORBIDDEN)
+    {
+        *health = AccountHealthState::Healthy;
+        *last_error_code = None;
+        true
+    } else {
+        false
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "reason")]
 pub enum AccountAuthState {
@@ -277,20 +302,20 @@ pub fn reduce_account_usage(
         },
         403 => {
             let category = failure_category.unwrap_or(error_codes::UPSTREAM_FORBIDDEN);
-            if matches!(
-                category,
-                error_codes::UPSTREAM_QUOTA_EXHAUSTED
-                    | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
-                    | error_codes::UPSTREAM_REGION_UNSUPPORTED
-                    | error_codes::UPSTREAM_EDGE_CHALLENGE
-            ) {
+            if explicit_account_disable(category) {
+                if !state.auth_state.requires_fresh_login() {
+                    state.health = AccountHealthState::Blocked;
+                }
+                state.last_error_code = Some(category.to_string());
+            } else if recoverable_forbidden(category) {
                 if !explicit_state {
                     state.health = AccountHealthState::Degraded;
                 }
-            } else {
-                state.health = AccountHealthState::Blocked;
+                state.last_error_code = Some(category.to_string());
+            } else if !preserves_stronger_account_state(&state) {
+                state.health = AccountHealthState::Degraded;
+                state.last_error_code = Some(category.to_string());
             }
-            state.last_error_code = Some(category.to_string());
         }
         429 => {
             if !explicit_state {
@@ -369,6 +394,23 @@ impl AccountIdentity {
             organization_hash,
         })
     }
+}
+
+fn recoverable_forbidden(category: &str) -> bool {
+    matches!(
+        category,
+        error_codes::UPSTREAM_QUOTA_EXHAUSTED
+            | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+            | error_codes::UPSTREAM_REGION_UNSUPPORTED
+            | error_codes::UPSTREAM_EDGE_CHALLENGE
+            | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+    )
+}
+
+fn preserves_stronger_account_state(state: &AccountUsageState) -> bool {
+    state.auth_state.requires_fresh_login()
+        || (state.health == AccountHealthState::Blocked
+            && state.last_error_code.as_deref() != Some(error_codes::UPSTREAM_FORBIDDEN))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -801,7 +843,7 @@ mod tests {
             assert_eq!(update.refresh_quota, refresh_quota);
         }
 
-        let blocked = reduce_account_usage(
+        let forbidden = reduce_account_usage(
             usage_state(),
             AccountUsageObservation {
                 success: false,
@@ -813,6 +855,89 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(blocked.state.health, AccountHealthState::Blocked);
+        assert_eq!(forbidden.state.health, AccountHealthState::Degraded);
+        assert_eq!(
+            forbidden.state.last_error_code.as_deref(),
+            Some("upstream_forbidden")
+        );
+
+        for category in ["upstream_account_disabled", "deactivated_workspace"] {
+            let blocked = reduce_account_usage(
+                usage_state(),
+                AccountUsageObservation {
+                    success: false,
+                    http_status: 403,
+                    error_category: Some(category),
+                    affects_account: true,
+                },
+                10,
+                None,
+                None,
+            );
+            assert_eq!(blocked.state.health, AccountHealthState::Blocked);
+            assert_eq!(blocked.state.last_error_code.as_deref(), Some(category));
+        }
+
+        let mut disabled = usage_state();
+        disabled.health = AccountHealthState::Blocked;
+        disabled.last_error_code = Some("deactivated_workspace".into());
+        let preserved = reduce_account_usage(
+            disabled,
+            AccountUsageObservation {
+                success: false,
+                http_status: 403,
+                error_category: Some("upstream_forbidden"),
+                affects_account: true,
+            },
+            10,
+            None,
+            None,
+        );
+        assert_eq!(preserved.state.health, AccountHealthState::Blocked);
+        assert_eq!(
+            preserved.state.last_error_code.as_deref(),
+            Some("deactivated_workspace")
+        );
+
+        let mut sign_in = usage_state();
+        sign_in.auth_state = AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant);
+        sign_in.health = AccountHealthState::Unhealthy;
+        sign_in.last_error_code = Some("invalid_grant".into());
+        let still_signed_out = reduce_account_usage(
+            sign_in,
+            AccountUsageObservation {
+                success: false,
+                http_status: 403,
+                error_category: Some("upstream_forbidden"),
+                affects_account: true,
+            },
+            10,
+            None,
+            None,
+        );
+        assert!(still_signed_out.state.auth_state.requires_fresh_login());
+        assert_eq!(still_signed_out.state.health, AccountHealthState::Unhealthy);
+        assert_eq!(
+            still_signed_out.state.last_error_code.as_deref(),
+            Some("invalid_grant")
+        );
+
+        let verification = reduce_account_usage(
+            usage_state(),
+            AccountUsageObservation {
+                success: false,
+                http_status: 403,
+                error_category: Some("upstream_account_verification_required"),
+                affects_account: true,
+            },
+            10,
+            None,
+            None,
+        );
+        assert_eq!(verification.state.health, AccountHealthState::Degraded);
+        assert_eq!(
+            verification.state.last_error_code.as_deref(),
+            Some("upstream_account_verification_required")
+        );
     }
 }
