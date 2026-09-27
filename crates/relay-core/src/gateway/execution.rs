@@ -12,9 +12,17 @@ use super::errors::{
     api_error_with_origin, api_error_with_origin_and_category, cooldown_error, AttemptFailure,
     PreservedUpstreamError,
 };
+use super::errors::{
+    responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+};
 use super::now_ms;
 use super::request::response_tool_call_ids;
 use super::response::response_id_from_bytes;
+use crate::protocol::{
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    repair_custom_tool_item_ids,
+};
 use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
 use crate::ErrorOrigin;
@@ -57,6 +65,53 @@ pub(super) fn repair_once(
     tried.remove(candidate_id);
     lease.allow_rotation_repair();
     true
+}
+
+/// One-shot flags for the three Responses item-id repairs.
+pub(super) struct ResponsesItemPrefixRepairs<'a> {
+    pub(super) function_ids: &'a mut bool,
+    pub(super) custom_tool_ids: &'a mut bool,
+    pub(super) message_ids: &'a mut bool,
+}
+
+/// Repairs `fc_`, `ctc_`, and `msg_` item ids in that order, at most one per call.
+///
+/// `enabled` is false for an adapted ordinary request. Account execution and
+/// WebSocket are already native Responses, so they pass true. Lease settlement
+/// and failure bookkeeping stay with the caller: an ordinary request settles
+/// the lease, an account does not, and WebSocket clears its last failure.
+pub(super) fn repair_responses_item_prefixes(
+    request: &mut Value,
+    body: &[u8],
+    enabled: bool,
+    repairs: &mut ResponsesItemPrefixRepairs<'_>,
+    tried: &mut HashSet<String>,
+    candidate_id: &str,
+    lease: &crate::runtime::CandidateLease,
+) -> bool {
+    enabled
+        && (repair_once(
+            repairs.function_ids,
+            responses_function_item_id_requires_fc_prefix(body),
+            tried,
+            candidate_id,
+            lease,
+            || repair_call_prefixed_function_item_ids(request),
+        ) || repair_once(
+            repairs.custom_tool_ids,
+            responses_custom_tool_item_id_requires_ctc_prefix(body),
+            tried,
+            candidate_id,
+            lease,
+            || repair_custom_tool_item_ids(request),
+        ) || repair_once(
+            repairs.message_ids,
+            responses_message_item_id_requires_msg_prefix(body),
+            tried,
+            candidate_id,
+            lease,
+            || remove_item_prefixed_message_ids(request),
+        ))
 }
 
 /// Builds the final response after all pre-output route attempts are exhausted.

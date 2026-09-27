@@ -4,6 +4,7 @@ use super::errors::{
     RateLimitBodyHint,
 };
 use super::execution::{execute_client_request, wait_for_recovery, CandidateRetryContext};
+use super::execution::{repair_responses_item_prefixes, ResponsesItemPrefixRepairs};
 use super::now_ms;
 use super::request::{
     apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
@@ -1091,37 +1092,21 @@ async fn connect_upstream(
                     UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
                     _ => None,
                 });
-                if !function_item_id_repair_attempted
-                    && terminal_body
-                        .is_some_and(super::errors::responses_function_item_id_requires_fc_prefix)
-                    && request.repair_function_item_ids()
-                {
-                    function_item_id_repair_attempted = true;
-                    tried.remove(&route.candidate_id);
-                    lease.allow_rotation_repair();
-                    last_failure = None;
-                    continue;
-                }
-                if !custom_tool_item_id_repair_attempted
-                    && terminal_body.is_some_and(
-                        super::errors::responses_custom_tool_item_id_requires_ctc_prefix,
+                if terminal_body.is_some_and(|body| {
+                    repair_responses_item_prefixes(
+                        request.value_mut(),
+                        body,
+                        true,
+                        &mut ResponsesItemPrefixRepairs {
+                            function_ids: &mut function_item_id_repair_attempted,
+                            custom_tool_ids: &mut custom_tool_item_id_repair_attempted,
+                            message_ids: &mut message_item_id_repair_attempted,
+                        },
+                        &mut tried,
+                        &route.candidate_id,
+                        &lease,
                     )
-                    && request.repair_custom_tool_item_ids()
-                {
-                    custom_tool_item_id_repair_attempted = true;
-                    tried.remove(&route.candidate_id);
-                    lease.allow_rotation_repair();
-                    last_failure = None;
-                    continue;
-                }
-                if !message_item_id_repair_attempted
-                    && terminal_body
-                        .is_some_and(super::errors::responses_message_item_id_requires_msg_prefix)
-                    && request.repair_message_item_ids()
-                {
-                    message_item_id_repair_attempted = true;
-                    tried.remove(&route.candidate_id);
-                    lease.allow_rotation_repair();
+                }) {
                     last_failure = None;
                     continue;
                 }

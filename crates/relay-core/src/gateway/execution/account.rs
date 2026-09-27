@@ -7,8 +7,6 @@ use super::super::errors::{
     api_error, apply_failure_state, current_failure_state, is_deactivated_workspace,
     preserved_upstream_error, previous_response_not_found, prompt_cache_write_rejected,
     recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_custom_tool_item_id_requires_ctc_prefix,
-    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_links_rejected, retryable_failure, settle_attempt_failure, AttemptFailure,
     PreservedUpstreamError,
 };
@@ -32,14 +30,10 @@ use super::request::{
     should_wait_for_candidate_availability, BasisPointsRelayRetryContext,
 };
 use super::{
-    bind_responses_turn, mark_model_switch_reset, repair_once, wait_for_candidate_retry,
-    wait_for_recovery, CandidateRetryContext,
+    bind_responses_turn, mark_model_switch_reset, repair_once, repair_responses_item_prefixes,
+    wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext, ResponsesItemPrefixRepairs,
 };
 use crate::error_codes;
-use crate::protocol::{
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids,
-};
 use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError};
 use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
 use crate::usage::ReasoningEffortDiagnostics;
@@ -581,33 +575,18 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     request_has_previous_response_id(&request) || has_unpaired_tool_output;
                 continue;
             }
-            if repair_once(
-                &mut function_item_id_repair_attempted,
-                responses_function_item_id_requires_fc_prefix(&bytes),
+            if repair_responses_item_prefixes(
+                &mut request,
+                &bytes,
+                true,
+                &mut ResponsesItemPrefixRepairs {
+                    function_ids: &mut function_item_id_repair_attempted,
+                    custom_tool_ids: &mut custom_tool_item_id_repair_attempted,
+                    message_ids: &mut message_item_id_repair_attempted,
+                },
                 &mut tried,
                 &route.candidate_id,
                 &lease,
-                || repair_call_prefixed_function_item_ids(&mut request),
-            ) {
-                continue;
-            }
-            if repair_once(
-                &mut custom_tool_item_id_repair_attempted,
-                responses_custom_tool_item_id_requires_ctc_prefix(&bytes),
-                &mut tried,
-                &route.candidate_id,
-                &lease,
-                || repair_custom_tool_item_ids(&mut request),
-            ) {
-                continue;
-            }
-            if repair_once(
-                &mut message_item_id_repair_attempted,
-                responses_message_item_id_requires_msg_prefix(&bytes),
-                &mut tried,
-                &route.candidate_id,
-                &lease,
-                || remove_item_prefixed_message_ids(&mut request),
             ) {
                 continue;
             }

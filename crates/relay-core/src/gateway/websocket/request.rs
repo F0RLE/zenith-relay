@@ -420,14 +420,11 @@ impl ClientRequest {
         true
     }
 
-    pub(super) fn repair_custom_tool_item_ids(&mut self) -> bool {
-        crate::protocol::repair_custom_tool_item_ids(&mut self.value)
+    pub(super) fn value_mut(&mut self) -> &mut Value {
+        &mut self.value
     }
 
-    pub(super) fn repair_function_item_ids(&mut self) -> bool {
-        crate::protocol::repair_call_prefixed_function_item_ids(&mut self.value)
-    }
-
+    #[cfg(test)]
     pub(super) fn repair_message_item_ids(&mut self) -> bool {
         crate::protocol::remove_item_prefixed_message_ids(&mut self.value)
     }

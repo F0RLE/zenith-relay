@@ -8,9 +8,7 @@ use super::super::errors::{
     failure_category_is_request_terminal, failure_category_requires_cooldown,
     preserved_upstream_error, previous_response_not_found, previous_response_requires_websocket,
     prompt_cache_write_rejected, recoverable_response_affinity_miss,
-    recoverable_response_model_switch, responses_custom_tool_item_id_requires_ctc_prefix,
-    responses_function_call_output_has_invalid_call_id,
-    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+    recoverable_response_model_switch, responses_function_call_output_has_invalid_call_id,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, retryable_failure, retryable_status,
     settle_attempt_failure, settle_status_failure, zenith_gateway_invalid_request, AttemptFailure,
@@ -38,14 +36,12 @@ use super::super::turn_state::{
 };
 use super::bind_responses_turn;
 use super::mark_model_switch_reset;
-use super::repair_once;
 use super::{attempt_error_response, finish_request_failure};
+use super::{repair_responses_item_prefixes, ResponsesItemPrefixRepairs};
 use super::{wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext};
 use crate::error_codes;
 use crate::protocol::{
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids, AdapterError, AdapterRequestContext, AdapterResponse,
-    PreparedAdapterRequest,
+    AdapterError, AdapterRequestContext, AdapterResponse, PreparedAdapterRequest,
 };
 use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError, CandidateLease};
 use crate::scheduler::rotation::ExecutionCertainty;
@@ -889,41 +885,18 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
-                && repair_once(
-                    &mut function_item_id_repair_attempted,
-                    responses_function_item_id_requires_fc_prefix(&bytes),
+                && repair_responses_item_prefixes(
+                    &mut request,
+                    &bytes,
+                    true,
+                    &mut ResponsesItemPrefixRepairs {
+                        function_ids: &mut function_item_id_repair_attempted,
+                        custom_tool_ids: &mut custom_tool_item_id_repair_attempted,
+                        message_ids: &mut message_item_id_repair_attempted,
+                    },
                     &mut tried,
                     &route.candidate_id,
                     &lease,
-                    || repair_call_prefixed_function_item_ids(&mut request),
-                )
-            {
-                lease.settle_rotation_repair(now_ms());
-                continue;
-            }
-            if wire_api == WireApi::Responses
-                && adapter_is_passthrough
-                && repair_once(
-                    &mut custom_tool_item_id_repair_attempted,
-                    responses_custom_tool_item_id_requires_ctc_prefix(&bytes),
-                    &mut tried,
-                    &route.candidate_id,
-                    &lease,
-                    || repair_custom_tool_item_ids(&mut request),
-                )
-            {
-                lease.settle_rotation_repair(now_ms());
-                continue;
-            }
-            if wire_api == WireApi::Responses
-                && adapter_is_passthrough
-                && repair_once(
-                    &mut message_item_id_repair_attempted,
-                    responses_message_item_id_requires_msg_prefix(&bytes),
-                    &mut tried,
-                    &route.candidate_id,
-                    &lease,
-                    || remove_item_prefixed_message_ids(&mut request),
                 )
             {
                 lease.settle_rotation_repair(now_ms());
