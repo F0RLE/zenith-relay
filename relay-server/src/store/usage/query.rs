@@ -2,6 +2,14 @@ use super::super::sqlite::{db_error, optional_u64};
 use super::UsagePriceResolver;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::HashMap;
+use zenith_relay_core::usage::{
+    PRICED_AGGREGATE_CACHED_INPUT_TOKENS, PRICED_AGGREGATE_CACHED_SAMPLES,
+    PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS, PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS,
+    PRICED_AGGREGATE_CACHE_WRITE_SAMPLES, PRICED_AGGREGATE_INPUT_SAMPLES,
+    PRICED_AGGREGATE_INPUT_TOKENS, PRICED_AGGREGATE_OUTPUT_SAMPLES, PRICED_AGGREGATE_OUTPUT_TOKENS,
+    PRICED_AGGREGATE_TOTAL_SAMPLES, PRICED_AGGREGATE_TOTAL_TOKENS,
+    PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS,
+};
 use zenith_relay_core::{
     pricing::PriceSource,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
@@ -187,18 +195,22 @@ fn aggregate_usage_from_row(
     row: &rusqlite::Row<'_>,
     start: usize,
 ) -> rusqlite::Result<ApiEquivalentUsage> {
-    let input_tokens = optional_u64(row.get(start)?);
-    let cached_input_tokens = optional_u64(row.get(start + 1)?);
-    let cache_write_5m_tokens = optional_u64(row.get(start + 3)?);
-    let cache_write_1h_tokens = optional_u64(row.get(start + 4)?);
-    let unknown_cache_write_tokens = optional_u64(row.get(start + 5)?);
-    let output_tokens = optional_u64(row.get(start + 6)?);
-    let total_tokens = optional_u64(row.get(start + 7)?);
-    let input_samples = nonnegative_u64(row.get(start + 8)?);
-    let cached_samples = nonnegative_u64(row.get(start + 9)?);
-    let cache_write_samples = nonnegative_u64(row.get(start + 10)?);
-    let output_samples = nonnegative_u64(row.get(start + 11)?);
-    let total_samples = nonnegative_u64(row.get(start + 12)?);
+    let input_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_INPUT_TOKENS)?);
+    let cached_input_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_CACHED_INPUT_TOKENS)?);
+    let cache_write_5m_tokens =
+        optional_u64(row.get(start + PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS)?);
+    let cache_write_1h_tokens =
+        optional_u64(row.get(start + PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS)?);
+    let unknown_cache_write_tokens =
+        optional_u64(row.get(start + PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS)?);
+    let output_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_OUTPUT_TOKENS)?);
+    let total_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_TOTAL_TOKENS)?);
+    let input_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_INPUT_SAMPLES)?);
+    let cached_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_CACHED_SAMPLES)?);
+    let cache_write_samples =
+        nonnegative_u64(row.get(start + PRICED_AGGREGATE_CACHE_WRITE_SAMPLES)?);
+    let output_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_OUTPUT_SAMPLES)?);
+    let total_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_TOTAL_SAMPLES)?);
     Ok(ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
         input_tokens,
         cached_input_tokens,

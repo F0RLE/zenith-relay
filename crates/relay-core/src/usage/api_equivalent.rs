@@ -78,6 +78,22 @@ pub const API_EQUIVALENT_AGGREGATE_SQL: &str = concat!(
      COUNT(output_tokens), COUNT(total_tokens)"
 );
 
+/// Offsets inside [`API_EQUIVALENT_AGGREGATE_SQL`].
+/// Offset 2 is the combined cache-write sum. Priced reads skip it and use the
+/// 5-minute, 1-hour, and unknown buckets that follow.
+pub const PRICED_AGGREGATE_INPUT_TOKENS: usize = 0;
+pub const PRICED_AGGREGATE_CACHED_INPUT_TOKENS: usize = 1;
+pub const PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS: usize = 3;
+pub const PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS: usize = 4;
+pub const PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS: usize = 5;
+pub const PRICED_AGGREGATE_OUTPUT_TOKENS: usize = 6;
+pub const PRICED_AGGREGATE_TOTAL_TOKENS: usize = 7;
+pub const PRICED_AGGREGATE_INPUT_SAMPLES: usize = 8;
+pub const PRICED_AGGREGATE_CACHED_SAMPLES: usize = 9;
+pub const PRICED_AGGREGATE_CACHE_WRITE_SAMPLES: usize = 10;
+pub const PRICED_AGGREGATE_OUTPUT_SAMPLES: usize = 11;
+pub const PRICED_AGGREGATE_TOTAL_SAMPLES: usize = 12;
+
 /// Converted SQL sums plus the sample counts that prove each bucket was observed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObservedUsageSums {

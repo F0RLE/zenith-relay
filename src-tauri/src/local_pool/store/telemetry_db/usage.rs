@@ -3,6 +3,14 @@ use super::{db_error, UsageLog};
 use crate::local_pool::error::Result;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::HashMap;
+use zenith_relay_core::usage::{
+    PRICED_AGGREGATE_CACHED_INPUT_TOKENS, PRICED_AGGREGATE_CACHED_SAMPLES,
+    PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS, PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS,
+    PRICED_AGGREGATE_CACHE_WRITE_SAMPLES, PRICED_AGGREGATE_INPUT_SAMPLES,
+    PRICED_AGGREGATE_INPUT_TOKENS, PRICED_AGGREGATE_OUTPUT_SAMPLES, PRICED_AGGREGATE_OUTPUT_TOKENS,
+    PRICED_AGGREGATE_TOTAL_SAMPLES, PRICED_AGGREGATE_TOTAL_TOKENS,
+    PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS,
+};
 use zenith_relay_core::{
     pricing::PriceSource,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
@@ -432,18 +440,32 @@ fn usage_pricing_usage_from_row(
     row: &rusqlite::Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<ApiEquivalentUsage> {
-    let input_tokens = row.get::<_, Option<i64>>(offset)?.map(rust_u64);
-    let cached_input_tokens = row.get::<_, Option<i64>>(offset + 1)?.map(rust_u64);
-    let cache_write_5m_tokens = row.get::<_, Option<i64>>(offset + 3)?.map(rust_u64);
-    let cache_write_1h_tokens = row.get::<_, Option<i64>>(offset + 4)?.map(rust_u64);
-    let unknown_cache_write_tokens = row.get::<_, Option<i64>>(offset + 5)?.map(rust_u64);
-    let output_tokens = row.get::<_, Option<i64>>(offset + 6)?.map(rust_u64);
-    let total_tokens = row.get::<_, Option<i64>>(offset + 7)?.map(rust_u64);
-    let input_samples = rust_u64(row.get(offset + 8)?);
-    let cached_samples = rust_u64(row.get(offset + 9)?);
-    let cache_write_samples = rust_u64(row.get(offset + 10)?);
-    let output_samples = rust_u64(row.get(offset + 11)?);
-    let total_samples = rust_u64(row.get(offset + 12)?);
+    let input_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_INPUT_TOKENS)?
+        .map(rust_u64);
+    let cached_input_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_CACHED_INPUT_TOKENS)?
+        .map(rust_u64);
+    let cache_write_5m_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS)?
+        .map(rust_u64);
+    let cache_write_1h_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS)?
+        .map(rust_u64);
+    let unknown_cache_write_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS)?
+        .map(rust_u64);
+    let output_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_OUTPUT_TOKENS)?
+        .map(rust_u64);
+    let total_tokens = row
+        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_TOTAL_TOKENS)?
+        .map(rust_u64);
+    let input_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_INPUT_SAMPLES)?);
+    let cached_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_CACHED_SAMPLES)?);
+    let cache_write_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_CACHE_WRITE_SAMPLES)?);
+    let output_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_OUTPUT_SAMPLES)?);
+    let total_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_TOTAL_SAMPLES)?);
     Ok(ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
         input_tokens,
         cached_input_tokens,
