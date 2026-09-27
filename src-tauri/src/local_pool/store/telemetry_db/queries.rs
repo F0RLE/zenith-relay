@@ -361,14 +361,15 @@ impl TelemetryDb {
                         model.as_deref(),
                         zenith_relay_core::ApiEquivalentUsage::from_observed_sums(
                             zenith_relay_core::ObservedUsageSums {
-                                input_tokens: input_tokens.map(rust_u64),
-                                cached_input_tokens: cached_input_tokens.map(rust_u64),
-                                cache_write_5m_tokens: cache_write_5m_tokens.map(rust_u64),
-                                cache_write_1h_tokens: cache_write_1h_tokens.map(rust_u64),
-                                unknown_cache_write_tokens: unknown_cache_write_tokens
-                                    .map(rust_u64),
-                                output_tokens: output_tokens.map(rust_u64),
-                                total_tokens: total_tokens.map(rust_u64),
+                                input_tokens: optional_u64(input_tokens),
+                                cached_input_tokens: optional_u64(cached_input_tokens),
+                                cache_write_5m_tokens: optional_u64(cache_write_5m_tokens),
+                                cache_write_1h_tokens: optional_u64(cache_write_1h_tokens),
+                                unknown_cache_write_tokens: optional_u64(
+                                    unknown_cache_write_tokens,
+                                ),
+                                output_tokens: optional_u64(output_tokens),
+                                total_tokens: optional_u64(total_tokens),
                                 input_samples: rust_u64(input_samples),
                                 cached_samples: rust_u64(cached_samples),
                                 cache_write_samples: rust_u64(cache_write_samples),

@@ -29,8 +29,8 @@ mod usage;
 
 use migrations::*;
 use usage::{
-    account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, rust_u64,
-    sql_u64, usage_buckets, usage_filter, usage_groups, usage_log_from_row,
+    account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, optional_u64,
+    rust_u64, sql_u64, usage_buckets, usage_filter, usage_groups, usage_log_from_row,
     usage_model_equivalents, usage_totals,
 };
 

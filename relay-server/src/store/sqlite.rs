@@ -177,3 +177,16 @@ pub(super) fn db_error(error: rusqlite::Error) -> String {
 pub(super) fn io_error(error: std::io::Error) -> String {
     format!("store I/O failed: {error}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::optional_u64;
+
+    #[test]
+    fn null_and_negative_measurements_stay_absent() {
+        assert_eq!(optional_u64(None), None);
+        assert_eq!(optional_u64(Some(-1)), None);
+        assert_eq!(optional_u64(Some(0)), Some(0));
+        assert_eq!(optional_u64(Some(12)), Some(12));
+    }
+}

@@ -416,27 +416,16 @@ fn usage_pricing_usage_from_row(
     row: &rusqlite::Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<ApiEquivalentUsage> {
-    let input_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_INPUT_TOKENS)?
-        .map(rust_u64);
-    let cached_input_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_CACHED_INPUT_TOKENS)?
-        .map(rust_u64);
-    let cache_write_5m_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS)?
-        .map(rust_u64);
-    let cache_write_1h_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS)?
-        .map(rust_u64);
-    let unknown_cache_write_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS)?
-        .map(rust_u64);
-    let output_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_OUTPUT_TOKENS)?
-        .map(rust_u64);
-    let total_tokens = row
-        .get::<_, Option<i64>>(offset + PRICED_AGGREGATE_TOTAL_TOKENS)?
-        .map(rust_u64);
+    let input_tokens = optional_u64(row.get(offset + PRICED_AGGREGATE_INPUT_TOKENS)?);
+    let cached_input_tokens = optional_u64(row.get(offset + PRICED_AGGREGATE_CACHED_INPUT_TOKENS)?);
+    let cache_write_5m_tokens =
+        optional_u64(row.get(offset + PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS)?);
+    let cache_write_1h_tokens =
+        optional_u64(row.get(offset + PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS)?);
+    let unknown_cache_write_tokens =
+        optional_u64(row.get(offset + PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS)?);
+    let output_tokens = optional_u64(row.get(offset + PRICED_AGGREGATE_OUTPUT_TOKENS)?);
+    let total_tokens = optional_u64(row.get(offset + PRICED_AGGREGATE_TOTAL_TOKENS)?);
     let input_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_INPUT_SAMPLES)?);
     let cached_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_CACHED_SAMPLES)?);
     let cache_write_samples = rust_u64(row.get(offset + PRICED_AGGREGATE_CACHE_WRITE_SAMPLES)?);
@@ -539,17 +528,17 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),
         latency_ms: rust_u64(latency_ms),
-        ttft_ms: ttft_ms.map(rust_u64),
-        generation_ms: generation_ms.map(rust_u64),
-        input_tokens: input_tokens.map(rust_u64),
-        cached_input_tokens: cached_input_tokens.map(rust_u64),
-        cache_write_input_tokens: cache_write_input_tokens.map(rust_u64),
+        ttft_ms: optional_u64(ttft_ms),
+        generation_ms: optional_u64(generation_ms),
+        input_tokens: optional_u64(input_tokens),
+        cached_input_tokens: optional_u64(cached_input_tokens),
+        cache_write_input_tokens: optional_u64(cache_write_input_tokens),
         cache_write_ttl: cache_write_ttl
             .as_deref()
             .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls),
-        reasoning_tokens: reasoning_tokens.map(rust_u64),
-        output_tokens: output_tokens.map(rust_u64),
-        total_tokens: total_tokens.map(rust_u64),
+        reasoning_tokens: optional_u64(reasoning_tokens),
+        output_tokens: optional_u64(output_tokens),
+        total_tokens: optional_u64(total_tokens),
         api_equivalent: ApiEquivalentSummary::default(),
     })
 }
@@ -566,4 +555,23 @@ pub(super) fn sql_u64(value: u64) -> i64 {
 
 pub(super) fn rust_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
+}
+
+/// `NULL` and a corrupt negative sum are both "not measured". A normal zero
+/// stays zero. Counters that cannot be absent still use `rust_u64`.
+pub(super) fn optional_u64(value: Option<i64>) -> Option<u64> {
+    value.and_then(|value| u64::try_from(value).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::optional_u64;
+
+    #[test]
+    fn null_and_negative_measurements_stay_absent() {
+        assert_eq!(optional_u64(None), None);
+        assert_eq!(optional_u64(Some(-1)), None);
+        assert_eq!(optional_u64(Some(0)), Some(0));
+        assert_eq!(optional_u64(Some(12)), Some(12));
+    }
 }
