@@ -527,6 +527,39 @@ impl Store {
         self.api_equivalents_with_resolver(&resolver)
     }
 
+    /// Price only the raw account rows inside each quota window.
+    ///
+    /// Archived rollups have no window bounds, and a full usage page also
+    /// builds events, groups, and buckets that this projection does not use.
+    pub fn quota_window_equivalents_with_pricing(
+        &self,
+        windows: &[(String, u64, u64)],
+        catalog: &PricingCatalog,
+        context: &PricingContext,
+    ) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
+        if windows.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let resolver = CatalogPriceResolver::new(catalog, context);
+        let connection = self.lock()?;
+        let mut equivalents = HashMap::with_capacity(windows.len());
+        for (hint, from_ms, to_ms) in windows {
+            let mut total = ApiEquivalentSummary::default();
+            for (model, usage) in
+                query::candidate_window_usage(&connection, hint, *from_ms, *to_ms)?
+            {
+                total.merge(resolver.estimate(
+                    "account",
+                    hint,
+                    (!model.is_empty()).then_some(model.as_str()),
+                    usage,
+                ));
+            }
+            equivalents.insert(hint.clone(), total);
+        }
+        Ok(equivalents)
+    }
+
     fn api_equivalents_with_resolver(
         &self,
         resolver: &dyn UsagePriceResolver,
@@ -1026,6 +1059,123 @@ mod tests {
         event.request_id = "request-after-delete".into();
         store.record_usage(&event, 20).unwrap();
         assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 0);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quota_window_equivalent_uses_only_that_account_and_window() {
+        let root = test_root("quota-window-equivalent");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        for account_id in ["account-a", "account-b"] {
+            store
+                .save_account(&ServerAccountRecord {
+                    id: account_id.into(),
+                    label: account_id.into(),
+                    identity_hint: account_id.into(),
+                    enabled: true,
+                    in_pool: true,
+                    draining: false,
+                    source_id: "codex".into(),
+                    secret_ref: format!("account:{account_id}"),
+                    provider_family: Some("openai".into()),
+                    auth_state: AccountAuthState::Active,
+                    health: AccountHealthState::Healthy,
+                    models: vec!["gpt-5.4".into()],
+                    discovered_models: None,
+                    allowed_models: Vec::new(),
+                    excluded_models: Vec::new(),
+                    priority: 0,
+                    weight: 1,
+                    subscription: Subscription::default(),
+                    quota: QuotaSnapshot::default(),
+                    purchase_cost_micro_usd: None,
+                    cooldowns: BTreeMap::new(),
+                    consecutive_failures: 0,
+                    created_at_ms: 1,
+                    last_used_at_ms: None,
+                    last_error_code: None,
+                    proxy_id: None,
+                    bypass_common_proxy: false,
+                })
+                .unwrap();
+        }
+        let mut event = UsageEvent {
+            request_id: "inside".into(),
+            attempt: 1,
+            local_key_id: "key".into(),
+            source_id: "source".into(),
+            candidate_id: Some("account-a".into()),
+            account_id: Some("account-a".into()),
+            account_token_generation: None,
+            client_context_id: None,
+            routing: None,
+            requested_model: Some("gpt-5.4".into()),
+            resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 10,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: Some(1_000),
+            cached_input_tokens: Some(0),
+            cache_write_input_tokens: None,
+            cache_write_ttl: None,
+            reasoning_tokens: None,
+            output_tokens: Some(100),
+            total_tokens: Some(1_100),
+            upstream_error: None,
+            quota_snapshot: None,
+        };
+        store.record_usage(&event, 5_000).unwrap();
+        event.request_id = "before-window".into();
+        event.input_tokens = Some(9_000_000);
+        event.output_tokens = Some(9_000_000);
+        event.total_tokens = Some(18_000_000);
+        store.record_usage(&event, 1_000).unwrap();
+        event.request_id = "other-account".into();
+        event.account_id = Some("account-b".into());
+        event.candidate_id = Some("account-b".into());
+        event.input_tokens = Some(8_000_000);
+        event.output_tokens = Some(8_000_000);
+        event.total_tokens = Some(16_000_000);
+        store.record_usage(&event, 5_000).unwrap();
+
+        let hint = identity_hint("account-a");
+        let priced = store
+            .quota_window_equivalents_with_pricing(
+                &[(hint.clone(), 4_000, 6_000)],
+                &test_pricing_catalog(),
+                &test_pricing_context(
+                    &store.model_price_overrides().unwrap(),
+                    &store.source_price_overrides().unwrap(),
+                ),
+            )
+            .unwrap();
+        let page = store
+            .usage_page(&UsageQuery {
+                from_ms: Some(4_000),
+                to_ms: Some(6_000),
+                source_or_account_query: Some(hint.clone()),
+                include_events: Some(false),
+                include_models: Some(false),
+                include_pool_members: Some(false),
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(priced[&hint], page.totals.api_equivalent);
+        assert!(priced[&hint].micro_usd > 0);
+        assert!(store.api_equivalents().unwrap()[&hint].micro_usd > priced[&hint].micro_usd);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

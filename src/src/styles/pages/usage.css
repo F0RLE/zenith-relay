@@ -2,34 +2,16 @@
   container: usage / inline-size;
 }
 
-.usage-page > .relay-page-header {
-  flex-direction: row;
-  align-items: center;
-  gap: 16px;
-}
-
-.usage-page .relay-page-actions {
-  flex: 0 0 auto;
-  width: auto;
-  flex-wrap: nowrap;
-}
-
 .usage-view-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px 24px;
-  margin: 4px 0 18px;
-}
-
-.usage-view-toolbar .relay-tabs {
-  flex: 1 1 360px;
-  min-width: 0;
+  justify-content: flex-start;
+  margin: 0 0 16px;
 }
 
 .usage-scope-controls {
-  flex: 1 1 320px;
+  flex: 1 1 280px;
   max-width: 420px;
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
@@ -753,6 +735,7 @@
   .usage-request-table col[data-column="request"] { width: 16%; }
 }
 
+
 @container usage (max-width: 760px) {
   .usage-view-toolbar { display: grid; gap: 12px; }
   .usage-scope-controls { max-width: none; }
@@ -862,11 +845,11 @@
   .usage-metric-copy { width: 100%; }
   .usage-account-value > header { align-items: flex-start; flex-direction: column; }
   .usage-account-value details p { right: auto; left: 0; }
-  .usage-view-toolbar .relay-tabs {
+  .usage-page .relay-workspace-header .relay-tabs {
     height: auto;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0;
+    gap: 4px;
   }
-  .usage-view-toolbar .relay-tabs button { height: 36px; padding-inline: 7px; text-align: left; }
+  .usage-page .relay-workspace-header .relay-tabs button { height: 34px; padding-inline: 7px; }
 }

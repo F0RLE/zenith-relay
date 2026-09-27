@@ -1,6 +1,8 @@
 use super::pricing_context;
 use crate::local_pool::{
-    error::CommandError, state::DesktopState, store::telemetry_db::LocalUsagePage,
+    error::CommandError,
+    state::DesktopState,
+    store::telemetry_db::{CacheSession, LocalUsagePage},
 };
 use chrono::{DateTime, Days, Local, Utc};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,6 +39,17 @@ pub fn get_local_usage_page(
 #[tauri::command]
 pub fn clear_local_usage(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     state.telemetry.clear().map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_local_cache_sessions(
+    input: Option<UsageQuery>,
+    state: State<'_, DesktopState>,
+) -> Result<Vec<CacheSession>, CommandError> {
+    state
+        .telemetry
+        .cache_sessions(&normalize_usage_query(input.unwrap_or_default()))
+        .map_err(CommandError::from)
 }
 
 fn normalize_usage_query(query: UsageQuery) -> UsageQuery {

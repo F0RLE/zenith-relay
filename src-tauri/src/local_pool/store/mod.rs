@@ -80,7 +80,7 @@ impl LocalPoolStore {
                 .validate_price_overrides()
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
-        let accounts = state.accounts;
+        let mut accounts = state.accounts;
         rotation_upgrade::upgrade_saved_gateway(&database, &mut gateway, &sources, &accounts)?;
 
         let mut automations = state.automations;
@@ -102,6 +102,18 @@ impl LocalPoolStore {
                 ErrorCode::RecoveryRequired,
                 format!("local account count exceeds the supported limit of {MAX_LOCAL_ACCOUNTS}"),
             ));
+        }
+        let mut cleared_false_blocks = false;
+        for account in &mut accounts {
+            if zenith_relay_core::accounts::clear_false_upstream_block(
+                &mut account.account.health,
+                &mut account.account.last_error_code,
+            ) {
+                cleared_false_blocks = true;
+            }
+        }
+        if cleared_false_blocks {
+            database.replace_state_json(&[(STATE_ACCOUNTS, serialize_state(&accounts)?)])?;
         }
         if let Some(operation) = &state.ownership_operation {
             operation

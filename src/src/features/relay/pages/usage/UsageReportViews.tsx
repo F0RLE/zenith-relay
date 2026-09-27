@@ -2,6 +2,7 @@ import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useSt
 import { Bot, SlidersHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
+import { relayCommands } from "../../api/commands";
 import type { ErrorOrigin, ReasoningEffort, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
@@ -25,7 +26,7 @@ import {
   type RequestColumnId,
   type RequestTableLayout,
 } from "./useColumnLayout";
-import { normalizeObservedServiceTier, totalsFromRows, usageSpeedSample, type CodexRequestOrigin, type UsageRow } from "./usageData";
+import { cacheLifetime, normalizeObservedServiceTier, totalsFromRows, usageSpeedSample, type CodexRequestOrigin, type UsageRow } from "./usageData";
 import { usageBreakdown } from "./usageBreakdown";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 
@@ -193,9 +194,11 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
   </table></div>;
 }
 
-export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () => void }) {
+export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: boolean; onClose: () => void }) {
   const { t, i18n } = useTranslation();
   const [section, setSection] = useState<"overview" | "tokens" | "tools" | "route">("overview");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [cacheTouch, setCacheTouch] = useState<CacheTouch | null>(null);
   const routing = row.routing;
   const toolUse = row.toolUse;
   const speed = usageSpeedSample(row);
@@ -212,24 +215,34 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
   const hasTokenValue = (value: number | null): value is number => value != null && value > 0;
   const hasCacheRead = hasTokenValue(breakdown.cacheRead);
   const hasCacheWrite = hasTokenValue(breakdown.cacheWrite);
-  const reportedCacheWindows = (row.cacheWriteTtl ?? "")
-    .split(",")
-    .map((window) => window.trim().toLowerCase())
-    .filter((window) => /^\d{1,5}(?:ms|s|m|h|d)$/.test(window))
-    .map((window) => window === "5m" ? t("usage.cacheWriteTtls.5m") : window === "1h" ? t("usage.cacheWriteTtls.1h") : window)
-    .join(", ");
-  const cacheWindowLabel = reportedCacheWindows
-    ? t("usage.cacheWriteWindowReported", { ttl: reportedCacheWindows })
-    : hasCacheWrite
-      ? [
-          t("usage.cacheRetentionWindowNotReported"),
-          row.documentedCacheRetentionMinimum === "30m"
-            ? t("usage.cacheRetentionWindowOpenAiMinimum")
-            : null,
-        ].filter(Boolean).join(" · ")
-    : row.documentedCacheRetentionMinimum === "30m"
-      ? t("usage.cacheRetentionWindowOpenAiMinimum")
-      : null;
+  const showCacheClock = hasCacheRead || hasCacheWrite;
+  useEffect(() => {
+    if (!showCacheClock) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, [showCacheClock]);
+  useEffect(() => {
+    if (!showCacheClock) {
+      setCacheTouch(null);
+      return;
+    }
+    const own: CacheTouch = { model: row.model, cacheWriteTtl: row.cacheWriteTtl, touchedAt: row.time };
+    if (!local || !row.clientContextId) {
+      setCacheTouch(own);
+      return;
+    }
+    let active = true;
+    setCacheTouch(null);
+    relayCommands.localCacheSessions().then((sessions) => {
+      if (!active) return;
+      const session = sessions.find((item) => item.clientContextId === row.clientContextId);
+      setCacheTouch(session
+        ? { model: session.model ?? row.model, cacheWriteTtl: session.cacheWriteTtl ?? row.cacheWriteTtl, touchedAt: session.touchedAt }
+        : own);
+    }).catch(() => { if (active) setCacheTouch(own); });
+    return () => { active = false; };
+  }, [local, row.cacheWriteTtl, row.clientContextId, row.model, row.time, showCacheClock]);
+  const cacheRemaining = cacheTouch ? cacheRemainingLabel(cacheLifetime(cacheTouch, nowMs), t) : null;
   const toolWarning = Boolean(
     toolUse
       && toolUse.forwardedToolCount > 0
@@ -300,9 +313,8 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       {breakdown.inputTotal == null || hasTokenValue(breakdown.inputTotal) ? <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><dd>{formatTokens(breakdown.inputTotal)}</dd></div>
         {hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><dd>{formatTokens(breakdown.uncachedInput)}</dd></div> : null}
-        {hasCacheRead ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}</dd></div> : null}
-        {hasCacheWrite ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)}</dd></div> : null}
-        {cacheWindowLabel ? <div className="request-details-token-child"><dt data-relay-tooltip={t("usage.cacheRetentionWindowHint")}>{t("usage.cacheRetentionWindow")}</dt><dd>{cacheWindowLabel}</dd></div> : null}
+        {hasCacheRead ? <div className="request-details-token-child"><dt>{t("usage.cachedInputTokens")}</dt><dd>{formatTokens(breakdown.cacheRead)}{cacheRemaining ? ` (${cacheRemaining})` : ""}</dd></div> : null}
+        {hasCacheWrite ? <div className="request-details-token-child"><dt>{t("usage.cacheWriteInputTokens")}</dt><dd>{formatTokens(breakdown.cacheWrite)}{!hasCacheRead && cacheRemaining ? ` (${cacheRemaining})` : ""}</dd></div> : null}
       </div> : null}
       {breakdown.outputTotal == null || hasTokenValue(breakdown.outputTotal) ? <div className="request-details-token-group">
         <div className="request-details-token-group-heading"><dt>{t("usage.outputTokens")}</dt><dd>{formatTokens(breakdown.outputTotal)}</dd></div>
@@ -464,4 +476,19 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
 
 export function CompactNumber({ value, locale }: { value: number; locale: string }) {
   return <span data-relay-tooltip={formatFullNumber(value, locale)}>{formatCompactNumber(value, locale)}</span>;
+}
+
+type CacheTouch = {
+  model: string | null;
+  cacheWriteTtl: string | null;
+  touchedAt: string;
+};
+
+function cacheRemainingLabel(life: ReturnType<typeof cacheLifetime>, translate: TFunction) {
+  if (life.expiry === "unknown") return translate("usage.cacheReport.unknown");
+  if (life.expiry === "minimum_elapsed") return translate("usage.cacheReport.minimumElapsed");
+  if (life.expiry === "elapsed") return translate("usage.cacheReport.elapsed");
+  const remaining = life.remainingMs ?? 0;
+  if (remaining < 60_000) return translate("usage.cacheReport.soon");
+  return translate("usage.cacheReport.open", { count: Math.max(1, Math.round(remaining / 60_000)) });
 }

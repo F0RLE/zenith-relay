@@ -27,7 +27,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.getByRole("button", { name: "Использование", exact: true }).click();
       await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
       await expectReportFits(page);
-      expect(await page.locator(".usage-view-toolbar .relay-tabs").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await page.locator(".usage-page .relay-workspace-header .relay-tabs").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       await page.mouse.move(0, 0);
       await page.screenshot({ path: `output/playwright/usage-${theme}-${width}.png` });
       if (width === 1160 || width === 390 || width === 360) {

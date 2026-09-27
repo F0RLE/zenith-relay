@@ -139,39 +139,9 @@ pub(super) fn usage_model_equivalents(
             let kind = row.get::<_, String>(0)?;
             let candidate_id = row.get::<_, String>(1)?;
             let model = row.get::<_, String>(2)?;
-            let input_tokens = optional_u64(row.get(3)?);
-            let cached_input_tokens = optional_u64(row.get(4)?);
-            let cache_write_5m_tokens = optional_u64(row.get(6)?);
-            let cache_write_1h_tokens = optional_u64(row.get(7)?);
-            let unknown_cache_write_tokens = optional_u64(row.get(8)?);
-            let output_tokens = optional_u64(row.get(9)?);
-            let total_tokens = optional_u64(row.get(10)?);
-            let input_samples = nonnegative_u64(row.get(11)?);
-            let cached_samples = nonnegative_u64(row.get(12)?);
-            let cache_write_samples = nonnegative_u64(row.get(13)?);
-            let output_samples = nonnegative_u64(row.get(14)?);
-            let total_samples = nonnegative_u64(row.get(15)?);
-            let cache_writes = (cache_write_samples > 0).then_some(());
+            let usage = aggregate_usage_from_row(&row, 3)?;
             let model_ref = (!model.is_empty()).then_some(model.as_str());
-            let estimate = resolver.estimate(
-                &kind,
-                &candidate_id,
-                model_ref,
-                ApiEquivalentUsage {
-                    input_tokens: (input_samples > 0).then_some(input_tokens).flatten(),
-                    cached_input_tokens: (input_samples > 0 && cached_samples == input_samples)
-                        .then_some(cached_input_tokens)
-                        .flatten(),
-                    cache_write_5m_tokens: cache_writes
-                        .map(|_| cache_write_5m_tokens.unwrap_or_default()),
-                    cache_write_1h_tokens: cache_writes
-                        .map(|_| cache_write_1h_tokens.unwrap_or_default()),
-                    unknown_cache_write_tokens: cache_writes
-                        .map(|_| unknown_cache_write_tokens.unwrap_or_default()),
-                    output_tokens: (output_samples > 0).then_some(output_tokens).flatten(),
-                    total_tokens: (total_samples > 0).then_some(total_tokens).flatten(),
-                },
-            );
+            let estimate = resolver.estimate(&kind, &candidate_id, model_ref, usage);
             let source = resolver.source(&kind, &candidate_id, model_ref);
             Ok((model.clone(), estimate, source))
         })
@@ -184,6 +154,73 @@ pub(super) fn usage_model_equivalents(
         sources.push(source);
     }
     Ok((equivalents, sources))
+}
+
+pub(super) fn candidate_window_usage(
+    connection: &Connection,
+    candidate_hint: &str,
+    from_ms: u64,
+    to_ms: u64,
+) -> Result<Vec<(String, ApiEquivalentUsage)>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT COALESCE(resolved_model, requested_model, ''),
+                SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+                SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END),
+                SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END),
+                SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END),
+                SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
+                COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
+                COUNT(output_tokens), COUNT(total_tokens)
+             FROM usage_events
+             WHERE candidate_kind = 'account' AND candidate_hint = ?1
+               AND created_at_ms >= ?2 AND created_at_ms <= ?3
+             GROUP BY 1",
+        )
+        .map_err(db_error)?;
+    let values = [
+        SqlValue::Text(candidate_hint.to_string()),
+        SqlValue::Integer(from_ms.min(i64::MAX as u64) as i64),
+        SqlValue::Integer(to_ms.min(i64::MAX as u64) as i64),
+    ];
+    let rows = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            let model = row.get::<_, String>(0)?;
+            Ok((model, aggregate_usage_from_row(&row, 1)?))
+        })
+        .map_err(db_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+}
+
+fn aggregate_usage_from_row(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+) -> rusqlite::Result<ApiEquivalentUsage> {
+    let input_tokens = optional_u64(row.get(start)?);
+    let cached_input_tokens = optional_u64(row.get(start + 1)?);
+    let cache_write_5m_tokens = optional_u64(row.get(start + 3)?);
+    let cache_write_1h_tokens = optional_u64(row.get(start + 4)?);
+    let unknown_cache_write_tokens = optional_u64(row.get(start + 5)?);
+    let output_tokens = optional_u64(row.get(start + 6)?);
+    let total_tokens = optional_u64(row.get(start + 7)?);
+    let input_samples = nonnegative_u64(row.get(start + 8)?);
+    let cached_samples = nonnegative_u64(row.get(start + 9)?);
+    let cache_write_samples = nonnegative_u64(row.get(start + 10)?);
+    let output_samples = nonnegative_u64(row.get(start + 11)?);
+    let total_samples = nonnegative_u64(row.get(start + 12)?);
+    let cache_writes = (cache_write_samples > 0).then_some(());
+    Ok(ApiEquivalentUsage {
+        input_tokens: (input_samples > 0).then_some(input_tokens).flatten(),
+        cached_input_tokens: (input_samples > 0 && cached_samples == input_samples)
+            .then_some(cached_input_tokens)
+            .flatten(),
+        cache_write_5m_tokens: cache_writes.map(|_| cache_write_5m_tokens.unwrap_or_default()),
+        cache_write_1h_tokens: cache_writes.map(|_| cache_write_1h_tokens.unwrap_or_default()),
+        unknown_cache_write_tokens: cache_writes
+            .map(|_| unknown_cache_write_tokens.unwrap_or_default()),
+        output_tokens: (output_samples > 0).then_some(output_tokens).flatten(),
+        total_tokens: (total_samples > 0).then_some(total_tokens).flatten(),
+    })
 }
 
 pub(super) fn usage_buckets(

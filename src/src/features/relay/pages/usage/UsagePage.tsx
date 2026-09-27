@@ -103,6 +103,7 @@ export function UsagePage() {
     return () => { active = false; };
   }, [mode, runtimeReady, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
+
   useEffect(() => {
     setPage(1);
     setSelected(null);
@@ -224,13 +225,12 @@ export function UsagePage() {
   };
 
   if (mode === "remote" && !remoteUsageSupported) {
-    return <section className="relay-page"><PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} /><EmptyState title={t("common.unsupported")} description={t("remote.capabilityUnavailable")} /></section>;
+    return <section className="relay-page relay-workspace-page"><PageHeader workspace title={t("nav.usage")} /><EmptyState title={t("common.unsupported")} description={t("remote.capabilityUnavailable")} /></section>;
   }
 
-  return <section className="relay-page usage-page">
-    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><IconButton label={t("common.refresh")} icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()} /><ActionMenu className="usage-overflow"><ActionMenuItem icon={<SlidersHorizontal aria-hidden />} onClick={() => setSummarySettingsOpen(true)}>{t("usage.configureSummary")}</ActionMenuItem><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu></>} />
+  return <section className="relay-page relay-workspace-page usage-page">
+    <PageHeader title={t("nav.usage")} navigation={<Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />} actions={<><IconButton label={t("common.refresh")} icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()} /><ActionMenu className="usage-overflow"><ActionMenuItem icon={<SlidersHorizontal aria-hidden />} onClick={() => setSummarySettingsOpen(true)}>{t("usage.configureSummary")}</ActionMenuItem><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu></>} />
     <div className="usage-view-toolbar">
-      <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
       <div className="usage-scope-controls">
         {mode !== "zenith" && runtime?.accounts.length ? <OptionMenu className="usage-account-menu" label={t("usage.account")} value={selectedAccountId} onChange={(value) => resetPage(() => { setSelectedAccountId(value); setConnectionQuery(""); })} options={[{ value: "", label: t("usage.allAccounts") }, ...runtime.accounts.map((account) => ({ value: account.id, label: account.label }))]} /> : null}
         <OptionMenu className="usage-range-menu" label={t("usage.range")} value={range} onChange={(value) => resetPage(() => setRange(value as Range))} icon={<CalendarDays aria-hidden />} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
@@ -253,7 +253,7 @@ export function UsagePage() {
     {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelected} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? <UsagePagination key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, errorQuery, requestQuery, selectedAccountId])} page={page} totalPages={usagePage.totalPages} loading={usageLoading} onPageChange={changePage} /> : null}
-    {selected ? <RequestDetails row={selected} onClose={() => setSelected(null)} /> : null}
+    {selected ? <RequestDetails row={selected} local={mode === "local"} onClose={() => setSelected(null)} /> : null}
     {summarySettingsOpen ? <Dialog title={t("usage.configureSummary")} onClose={() => setSummarySettingsOpen(false)}>
       <div className="usage-summary-settings">
         {USAGE_SUMMARY_METRICS.map((metric) => <label key={metric}><span>{t(`usage.summaryMetrics.${metric}`)}</span><ToggleSwitch label={t(`usage.summaryMetrics.${metric}`)} checked={summaryMetrics[metric]} onChange={(checked) => setSummaryMetrics((current) => ({ ...current, [metric]: checked }))} /></label>)}

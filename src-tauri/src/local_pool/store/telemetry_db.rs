@@ -99,6 +99,16 @@ pub struct UsageLog {
     pub api_equivalent: ApiEquivalentSummary,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheSession {
+    pub client_context_id: String,
+    pub started_at: String,
+    pub touched_at: String,
+    pub model: Option<String>,
+    pub cache_write_ttl: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalUsagePage {
@@ -2216,6 +2226,120 @@ mod tests {
         let equivalents = database.api_equivalents().unwrap();
         assert!(equivalents.accounts.is_empty());
         assert!(equivalents.sources.is_empty());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-cache-sessions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut start = aggregate_test_event("a-start", 1, 10, 0, None, 1);
+        start.client_context_id = Some("client_aaaa".into());
+        start.requested_model = Some("claude-sonnet".into());
+        start.resolved_model = Some("claude-sonnet".into());
+        start.cached_input_tokens = Some(0);
+        database.record(&start).unwrap();
+
+        let mut write = aggregate_test_event("a-write", 1, 10, 40, Some("1h".into()), 1);
+        write.client_context_id = Some("client_aaaa".into());
+        write.requested_model = Some("claude-sonnet".into());
+        write.resolved_model = Some("claude-sonnet".into());
+        database.record(&write).unwrap();
+
+        let mut miss = aggregate_test_event("a-miss", 1, 10, 0, None, 1);
+        miss.client_context_id = Some("client_aaaa".into());
+        miss.requested_model = Some("claude-sonnet".into());
+        miss.resolved_model = Some("claude-sonnet".into());
+        miss.cached_input_tokens = Some(0);
+        database.record(&miss).unwrap();
+
+        let mut read = aggregate_test_event("a-read", 1, 10, 0, None, 1);
+        read.client_context_id = Some("client_aaaa".into());
+        read.requested_model = Some("claude-sonnet".into());
+        read.resolved_model = Some("claude-sonnet".into());
+        read.cached_input_tokens = Some(12);
+        database.record(&read).unwrap();
+
+        let mut gpt = aggregate_test_event("b-write", 1, 8, 8, None, 1);
+        gpt.client_context_id = Some("client_bbbb".into());
+        gpt.account_id = Some("account_b".into());
+        gpt.requested_model = Some("gpt-6-astra".into());
+        gpt.resolved_model = Some("gpt-6-astra".into());
+        database.record(&gpt).unwrap();
+
+        let orphan = aggregate_test_event("c-none", 1, 10, 9, Some("5m".into()), 1);
+        database.record(&orphan).unwrap();
+
+        let mut only_miss = aggregate_test_event("d-miss", 1, 10, 0, None, 1);
+        only_miss.client_context_id = Some("client_dddd".into());
+        only_miss.cached_input_tokens = Some(0);
+        database.record(&only_miss).unwrap();
+
+        {
+            let connection = database.connection.lock().unwrap();
+            for (request_id, created_at) in [
+                ("a-start", "2026-09-27 10:00:00"),
+                ("a-write", "2026-09-27 10:05:00"),
+                ("a-miss", "2026-09-27 10:20:00"),
+                ("a-read", "2026-09-27 10:40:00"),
+                ("b-write", "2026-09-27 11:00:00"),
+                ("d-miss", "2026-09-27 09:00:00"),
+            ] {
+                connection
+                    .execute(
+                        "UPDATE request_logs SET created_at = ?1 WHERE request_id = ?2",
+                        [created_at, request_id],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let sessions = database.cache_sessions(&UsageQuery::default()).unwrap();
+        assert_eq!(
+            sessions,
+            vec![
+                CacheSession {
+                    client_context_id: "client_bbbb".into(),
+                    started_at: "2026-09-27T11:00:00Z".into(),
+                    touched_at: "2026-09-27T11:00:00Z".into(),
+                    model: Some("gpt-6-astra".into()),
+                    cache_write_ttl: None,
+                },
+                CacheSession {
+                    client_context_id: "client_aaaa".into(),
+                    started_at: "2026-09-27T10:00:00Z".into(),
+                    touched_at: "2026-09-27T10:40:00Z".into(),
+                    model: Some("claude-sonnet".into()),
+                    cache_write_ttl: Some("1h".into()),
+                },
+            ]
+        );
+
+        let from_ms = chrono::DateTime::parse_from_rfc3339("2026-09-27T10:30:00Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+        let ranged = database
+            .cache_sessions(&UsageQuery {
+                from_ms: Some(from_ms),
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(ranged.len(), 2);
+        assert_eq!(ranged[1].started_at, "2026-09-27T10:00:00Z");
+        assert_eq!(ranged[1].touched_at, "2026-09-27T10:40:00Z");
+
+        let account = database
+            .cache_sessions(&UsageQuery {
+                source_or_account_query: Some("account_b".into()),
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(account.len(), 1);
+        assert_eq!(account[0].client_context_id, "client_bbbb");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

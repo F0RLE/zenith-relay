@@ -3,6 +3,8 @@ import {
   codexRequestOriginFromErrorCategory,
   normalizeObservedServiceTier,
   documentedCacheRetentionMinimum,
+  cacheLifetime,
+  cacheWriteDurationWindows,
   totalsFromRows,
   usageRowsFromLocal,
   usageRowsFromRemote,
@@ -47,6 +49,7 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   candidateKey: "account",
   apiEquivalent: { microUsd: 1_500_000, pricedTokens: 45, unpricedTokens: 0 },
   requestOrigin: null,
+  clientContextId: null,
   ...overrides,
 });
 
@@ -63,6 +66,33 @@ describe("usage data", () => {
     expect(documentedCacheRetentionMinimum("gpt-6x-preview", 12, 10)).toBeNull();
     expect(documentedCacheRetentionMinimum("gpt-6.bad-suffix", 12, 10)).toBeNull();
     expect(documentedCacheRetentionMinimum("claude-sonnet", 12, 10)).toBeNull();
+  });
+
+  test("keeps reported cache-write windows and uses 30 minutes only as the OpenAI fallback", () => {
+    expect(cacheWriteDurationWindows(null, "30m")).toEqual(["30m"]);
+    expect(cacheWriteDurationWindows("30m", null)).toEqual(["30m"]);
+    expect(cacheWriteDurationWindows("5m, 1h", null)).toEqual(["5m", "1h"]);
+    expect(cacheWriteDurationWindows("15m", "30m")).toEqual(["15m"]);
+    expect(cacheWriteDurationWindows(null, null)).toEqual([]);
+  });
+
+
+  test("estimates cache lifetime from the last touch and the reported window", () => {
+    const now = Date.parse("2026-09-27T12:00:00.000Z");
+    expect(cacheLifetime({ model: "claude-sonnet-4", cacheWriteTtl: "1h", touchedAt: "2026-09-27T11:20:00.000Z" }, now)).toMatchObject({
+      windows: ["1h"], expiry: "open", remainingMs: 20 * 60_000,
+    });
+    expect(cacheLifetime({ model: "claude-sonnet-4", cacheWriteTtl: "5m, 1h", touchedAt: "2026-09-27T11:10:00.000Z" }, now)).toMatchObject({
+      windows: ["5m", "1h"], expiry: "open", remainingMs: 10 * 60_000,
+    });
+    expect(cacheLifetime({ model: "claude-opus", cacheWriteTtl: "5m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("elapsed");
+    expect(cacheLifetime({ model: "claude-opus", cacheWriteTtl: null, touchedAt: "2026-09-27T11:50:00.000Z" }, now).expiry).toBe("unknown");
+    expect(cacheLifetime({ model: "gpt-6-astra", cacheWriteTtl: null, touchedAt: "2026-09-27T11:40:00.000Z" }, now)).toMatchObject({
+      windows: ["30m"], expiry: "open", remainingMs: 10 * 60_000,
+    });
+    expect(cacheLifetime({ model: "gpt-6-astra", cacheWriteTtl: null, touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("minimum_elapsed");
+    expect(cacheLifetime({ model: "gpt-6", cacheWriteTtl: "30m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("minimum_elapsed");
+    expect(cacheLifetime({ model: "gpt-6", cacheWriteTtl: "15m", touchedAt: "2026-09-27T11:40:00.000Z" }, now).expiry).toBe("elapsed");
   });
 
   test("normalizes known Codex background categories", () => {
@@ -104,6 +134,7 @@ describe("usage data", () => {
       cachedInputTokens: 20,
       cacheWriteInputTokens: null,
       cacheWriteTtl: "45m",
+      clientContextId: "client_0123456789abcdef01234567",
       reasoningTokens: 30,
       outputTokens: 40,
       totalTokens: 140,
@@ -159,6 +190,7 @@ describe("usage data", () => {
       generationMs: 600,
       cacheWriteTtl: "45m",
       documentedCacheRetentionMinimum: null,
+      clientContextId: "client_0123456789abcdef01234567",
     });
     expect(usageRowsFromRemote([remote], {
       ...labels,
@@ -173,6 +205,7 @@ describe("usage data", () => {
       appliedServiceTier: "flex",
       cacheWriteTtl: "45m",
       documentedCacheRetentionMinimum: null,
+      clientContextId: null,
       requestOrigin: null,
       ttft: 100,
       generationMs: 500,
