@@ -13,11 +13,14 @@ use super::errors::{
     PreservedUpstreamError,
 };
 use super::now_ms;
+use super::request::response_tool_call_ids;
+use super::response::response_id_from_bytes;
 use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
 use crate::ErrorOrigin;
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
+use serde_json::Value;
 use std::collections::HashSet;
 
 /// Records the one allowed model-switch reset and drops the opaque continuation binding.
@@ -209,4 +212,42 @@ pub(super) async fn wait_for_candidate_retry(
         budget.begin_recovery_pass();
     }
     ready
+}
+
+/// Records affinity for one completed Responses body.
+///
+/// The body is parsed once. Replay capture is optional: a native passthrough
+/// keeps the materialized turn, and an adapted body still records tool-call
+/// and response affinity. Account execution always captures because that route
+/// is already native Responses. Usage emission and lease settlement stay with
+/// the caller; those two paths close the lease in opposite orders.
+pub(super) fn bind_responses_turn(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    candidate_id: &str,
+    request: &Value,
+    source_model: &str,
+    body: &[u8],
+    capture_replay: bool,
+) {
+    if let Ok(response) = serde_json::from_slice::<Value>(body) {
+        if capture_replay {
+            runtime.capture_native_responses_replay(
+                local_key_id,
+                candidate_id,
+                request,
+                source_model,
+                &response,
+                now_ms(),
+            );
+        }
+        for call_id in response_tool_call_ids(&response) {
+            runtime.bind_tool_call_affinity(local_key_id, &call_id, candidate_id, now_ms());
+        }
+    }
+    runtime.bind_response_affinity(
+        response_id_from_bytes(body).as_deref(),
+        candidate_id,
+        now_ms(),
+    );
 }

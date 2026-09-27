@@ -16,13 +16,13 @@ use super::super::now_ms;
 use super::super::request::{
     account_endpoint_url, apply_codex_routing_hint, client_context_fingerprint,
     codex_client_version, forwarded_codex_headers, is_deferred_tool_search_compatibility_error,
-    repair_legacy_responses_call_ids, request_id, response_tool_call_ids,
-    responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, AccountEndpoint,
-    RequestToolPolicy, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
+    repair_legacy_responses_call_ids, request_id, responses_lite_parallel_tool_calls_valid,
+    unpaired_tool_output_ids, AccountEndpoint, RequestToolPolicy, ServiceTierPolicy,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     emit_usage, populate_tokens, proxy_error_response, proxy_response, proxy_sse_response,
-    response_id_from_bytes, route_error_origin, usage_event,
+    route_error_origin, usage_event,
 };
 use super::super::turn_state::{relay_account_response_header, request_scope};
 use super::finish_request_failure;
@@ -32,8 +32,8 @@ use super::request::{
     should_wait_for_candidate_availability, BasisPointsRelayRetryContext,
 };
 use super::{
-    mark_model_switch_reset, repair_once, wait_for_candidate_retry, wait_for_recovery,
-    CandidateRetryContext,
+    bind_responses_turn, mark_model_switch_reset, repair_once, wait_for_candidate_retry,
+    wait_for_recovery, CandidateRetryContext,
 };
 use crate::error_codes;
 use crate::protocol::{
@@ -843,23 +843,14 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             &route.candidate_id,
             now_ms(),
         );
-        if let Ok(response) = serde_json::from_slice::<Value>(&client_bytes) {
-            runtime.capture_native_responses_replay(
-                &key.id,
-                &route.candidate_id,
-                &request,
-                &route.source_model,
-                &response,
-                now_ms(),
-            );
-            for call_id in response_tool_call_ids(&response) {
-                runtime.bind_tool_call_affinity(&key.id, &call_id, &route.candidate_id, now_ms());
-            }
-        }
-        runtime.bind_response_affinity(
-            response_id_from_bytes(&client_bytes).as_deref(),
+        bind_responses_turn(
+            &runtime,
+            &key.id,
             &route.candidate_id,
-            now_ms(),
+            &request,
+            &route.source_model,
+            &client_bytes,
+            true,
         );
         emit_usage(&runtime, event);
         lease.settle_rotation_success(now_ms());

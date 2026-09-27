@@ -23,19 +23,20 @@ use super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers,
     is_deferred_tool_search_compatibility_error, normalize_account_request,
-    normalize_responses_lite_request, repair_legacy_responses_call_ids, response_tool_call_ids,
+    normalize_responses_lite_request, repair_legacy_responses_call_ids,
     responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, RequestToolPolicy,
     ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
     completed_upstream_response, emit_usage, populate_tokens, proxy_error_response,
-    proxy_json_response, proxy_response, proxy_sse_response, response_id_from_bytes,
-    route_error_origin, upstream_body_error_response, usage_event,
+    proxy_json_response, proxy_response, proxy_sse_response, route_error_origin,
+    upstream_body_error_response, usage_event,
 };
 use super::super::streaming::{bootstrap_stream, StreamExecution};
 use super::super::turn_state::{
     relay_account_response_header, request_scope, CODEX_TURN_STATE_HEADER,
 };
+use super::bind_responses_turn;
 use super::mark_model_switch_reset;
 use super::repair_once;
 use super::{attempt_error_response, finish_request_failure};
@@ -1390,34 +1391,15 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     now_ms(),
                 );
             }
-            if wire_api == WireApi::Responses && adapter_is_passthrough {
-                if let Ok(upstream) = serde_json::from_slice::<Value>(&bytes) {
-                    runtime.capture_native_responses_replay(
-                        &key.id,
-                        &route.candidate_id,
-                        &request,
-                        &source_model,
-                        &upstream,
-                        now_ms(),
-                    );
-                }
-            }
             if wire_api == WireApi::Responses {
-                if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
-                    for call_id in response_tool_call_ids(&response) {
-                        runtime.bind_tool_call_affinity(
-                            &key.id,
-                            &call_id,
-                            &route.candidate_id,
-                            now_ms(),
-                        );
-                    }
-                }
-                let completed_response_id = response_id_from_bytes(&bytes);
-                runtime.bind_response_affinity(
-                    completed_response_id.as_deref(),
+                bind_responses_turn(
+                    &runtime,
+                    &key.id,
                     &route.candidate_id,
-                    now_ms(),
+                    &request,
+                    &source_model,
+                    &bytes,
+                    adapter_is_passthrough,
                 );
             }
             if let Some(stream_body) = basis_points_stream {
