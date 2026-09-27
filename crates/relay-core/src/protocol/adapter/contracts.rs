@@ -341,12 +341,7 @@ impl SourceAdapter {
 /// Inspect only the control field and input item types, never text or nested
 /// tool payloads.
 pub(super) fn validate_bridge_compaction(request: &Value) -> AdapterResult<()> {
-    let is_compaction = |item: &Value| {
-        matches!(
-            item.get("type").and_then(Value::as_str),
-            Some("compaction" | "compaction_summary" | "compaction_trigger")
-        )
-    };
+    let is_compaction = super::compaction::is_compaction_item;
     let configured = request
         .get("context_management")
         .is_some_and(|value| match value {

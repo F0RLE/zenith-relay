@@ -36,7 +36,7 @@ fn has_compacted_history(request: &Value) -> bool {
             return false;
         };
         match object.get("type").and_then(Value::as_str) {
-            Some("compaction" | "compaction_summary") => {
+            Some(item_type) if crate::protocol::is_compaction_checkpoint_type(item_type) => {
                 if nonempty_string(item, "encrypted_content").is_none() {
                     return false;
                 }

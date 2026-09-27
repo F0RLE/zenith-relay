@@ -149,11 +149,17 @@ fn compaction_items(input: Option<&Value>) -> Option<Vec<Value>> {
     }
 }
 
-fn is_compaction_item(item: &Value) -> bool {
-    matches!(
-        item.get("type").and_then(Value::as_str),
-        Some("compaction" | "compaction_summary" | "compaction_trigger")
-    )
+/// Checkpoint items are provider state. A trigger only asks for a new summary.
+pub(crate) fn is_compaction_checkpoint_type(item_type: &str) -> bool {
+    matches!(item_type, "compaction" | "compaction_summary")
+}
+
+pub(super) fn is_compaction_item(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("compaction_trigger") => true,
+        Some(item_type) => is_compaction_checkpoint_type(item_type),
+        None => false,
+    }
 }
 
 fn summary_message(summary: &str) -> Value {

@@ -17,8 +17,8 @@ mod tool_policy;
 mod translation;
 
 pub(crate) use compaction::{
-    ensure_compaction_trigger, prepare_bridged_compaction, wrap_compaction_response_bytes,
-    BridgedCompaction,
+    ensure_compaction_trigger, is_compaction_checkpoint_type, prepare_bridged_compaction,
+    wrap_compaction_response_bytes, BridgedCompaction,
 };
 pub(crate) use contracts::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,

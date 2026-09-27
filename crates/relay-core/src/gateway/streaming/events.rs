@@ -239,7 +239,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
 /// opaque state that must be forwarded unchanged and does not commit a route
 /// before ordinary generation begins.
 pub(in crate::gateway) fn is_compaction_payload(value: &Value, event_type: Option<&str>) -> bool {
-    matches!(event_type, Some("compaction" | "compaction_summary"))
+    event_type.is_some_and(crate::protocol::is_compaction_checkpoint_type)
         || event_type.is_some_and(is_opaque_compaction_event)
         || matches!(
             event_type,
@@ -248,7 +248,7 @@ pub(in crate::gateway) fn is_compaction_payload(value: &Value, event_type: Optio
             .get("item")
             .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
-            .is_some_and(is_compaction_item_type)
+            .is_some_and(crate::protocol::is_compaction_checkpoint_type)
 }
 
 /// Classifies protocol output without guessing about future event names.
@@ -401,10 +401,6 @@ fn function_delta_has_output(function: &Value) -> bool {
 
 fn is_opaque_compaction_event(event_name: &str) -> bool {
     event_name.starts_with("response.compaction.")
-}
-
-fn is_compaction_item_type(item_type: &str) -> bool {
-    matches!(item_type, "compaction" | "compaction_summary")
 }
 
 fn gemini_candidate_has_output_delta(candidate: &Value) -> bool {

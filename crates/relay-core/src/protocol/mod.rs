@@ -13,9 +13,10 @@ pub use adapter::{
     NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub(crate) use adapter::{
-    ensure_compaction_trigger, gemini_incomplete, prepare_bridged_compaction,
-    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids, wrap_compaction_response_bytes, BridgedCompaction,
+    ensure_compaction_trigger, gemini_incomplete, is_compaction_checkpoint_type,
+    prepare_bridged_compaction, remove_item_prefixed_message_ids,
+    repair_call_prefixed_function_item_ids, repair_custom_tool_item_ids,
+    wrap_compaction_response_bytes, BridgedCompaction,
 };
 pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
