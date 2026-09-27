@@ -9,8 +9,8 @@ with permitted accounts. Test the local path before the user-managed server.
 ## Pool rotation — remaining acceptance gates
 
 The shared admission/lease engine and request budgets are connected. This is
-not full acceptance of [ROTATION_DESIGN.md](ROTATION_DESIGN.md). Complete
-these gates before calling the replacement ready. Keep the small old-format
+not full acceptance of the replacement. Complete these gates before calling it
+ready. Keep the small old-format
 reader so existing saved data can upgrade without a separate prompt:
 
 - Finish installed-client acceptance of the automatic 1.1.3 startup upgrade.

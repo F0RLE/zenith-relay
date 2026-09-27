@@ -3,9 +3,7 @@
 Current implemented product contracts and limits. Source code and focused tests
 define exact behavior; this document explains the shared contracts. Unfinished
 work and acceptance gates are in [ROADMAP.md](ROADMAP.md), check commands in
-[CONTRIBUTING.md](../../CONTRIBUTING.md), and user steps in Help. The separate
-[pool rotation design](ROTATION_DESIGN.md) includes both connected components
-and unfinished target requirements; it is not proof of full acceptance.
+[CONTRIBUTING.md](../../CONTRIBUTING.md), and user steps in Help.
 
 ## Product and ownership
 

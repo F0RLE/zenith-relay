@@ -9,8 +9,8 @@ workspace [AGENTS.md](../AGENTS.md); production Zenith rules do not define Relay
 - [PLANNING.md](docs/project/PLANNING.md) describes current contracts;
   [ROADMAP.md](docs/project/ROADMAP.md) describes open work and acceptance.
 - Localized Help describes user steps; `CONTRIBUTING.md` owns development and
-  release procedures. The pool rotation core is connected; its design includes
-  unfinished host/acceptance gates tracked in ROADMAP, not a completed contract.
+  release procedures. The pool rotation core is connected. Unfinished host and
+  acceptance gates stay in ROADMAP and are not a completed contract.
 - Memory is recall context, never authority. Explicit user requests take
   precedence over skill recommendations.
 

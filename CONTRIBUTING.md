@@ -116,7 +116,6 @@ README.md
 CONTRIBUTING.md
 docs/project/PLANNING.md
 docs/project/ROADMAP.md
-docs/project/ROTATION_DESIGN.md (target design; see ROADMAP for open gates)
 docs/releases/CHANGELOG.md
 docs/help/<locale>/README.md
 docs/screenshots/*.png
@@ -126,10 +125,7 @@ docs/screenshots/*.png
 <code>CONTRIBUTOR_LICENSE_AGREEMENT.md</code> are legal documents, and
 <code>relay-server/openapi.yaml</code> is the machine-readable server contract.
 Do not add parallel architecture, design, handoff, or historical planning
-documents. The existing <code>docs/project/ROTATION_DESIGN.md</code> is a
-user-requested target design, with a connected core but unfinished acceptance
-gates. Do not mark the entire design implemented or use it as current-runtime
-evidence. Put implemented contracts in
+documents. Put implemented contracts in
 <code>docs/project/PLANNING.md</code>, accepted unfinished work in
 <code>docs/project/ROADMAP.md</code>, and user steps in localized Help files.
 
