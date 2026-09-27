@@ -26,7 +26,11 @@ use super::super::response::{
 };
 use super::super::turn_state::{relay_account_response_header, request_scope};
 use super::finish_request_failure;
-use super::request::{adapter_error_response, should_wait_for_candidate_availability};
+use super::request::{
+    adapter_error_response, adapter_error_response_for_origin, basis_points_relay_error_response,
+    handle_basis_points_relay_retry, should_wait_for_candidate_availability,
+    BasisPointsRelayRetryContext,
+};
 use super::{wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext};
 use crate::error_codes;
 use crate::protocol::{
@@ -119,6 +123,8 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut legacy_call_id_repair_attempted = false;
     let mut model_switch_reset_attempted = false;
     let mut stale_tool_history_recovered = false;
+    let mut basis_points_relay_retry_attempted = false;
+    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -366,7 +372,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             );
         }
         if basis_points_route {
-            upstream_body = match super::basis_points::prepare_request(&upstream_body) {
+            let mut prepared = match super::basis_points::prepare_request(&upstream_body) {
                 Ok(prepared) => prepared,
                 Err(error) if error.is_route_incompatible() => {
                     last_adapter_error = Some(error);
@@ -374,6 +380,10 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
                 Err(error) => return super::request::adapter_error_response(error),
             };
+            if let Some(parameter) = basis_points_relay_retry_parameter {
+                super::basis_points::add_tool_relay_retry_hint(&mut prepared, Some(parameter));
+            }
+            upstream_body = prepared;
         }
         let reasoning_effort =
             ReasoningEffortDiagnostics::from_bodies(&request, &upstream_body, WireApi::Responses);
@@ -779,16 +789,51 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             match super::basis_points::translate_response(&bytes, &request) {
                 Ok(bytes) => bytes,
                 Err(error) => {
+                    match handle_basis_points_relay_retry(
+                        error,
+                        &bytes,
+                        event,
+                        BasisPointsRelayRetryContext {
+                            attempted: &mut basis_points_relay_retry_attempted,
+                            parameter: &mut basis_points_relay_retry_parameter,
+                            runtime: &runtime,
+                            tried: &mut tried,
+                            candidate_id: &route.candidate_id,
+                            lease: &lease,
+                            last_adapter_error: &mut last_adapter_error,
+                        },
+                    ) {
+                        Ok(()) => continue,
+                        Err(pair) => {
+                            let (error, event) = *pair;
+                            return basis_points_relay_error_response(
+                                error,
+                                event,
+                                &runtime,
+                                &lease,
+                                selected_error_origin,
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            bytes
+        };
+        let basis_points_stream = if basis_points_route && client_stream {
+            match super::basis_points::synthetic_stream(&client_bytes) {
+                Ok(stream_body) => Some(stream_body),
+                Err(error) => {
                     event.success = false;
                     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
                     event.error_category = Some(error.code().to_string());
                     emit_usage(&runtime, event);
                     lease.settle_rotation_terminal(now_ms());
-                    return super::request::adapter_error_response(error);
+                    return adapter_error_response_for_origin(error, selected_error_origin);
                 }
             }
         } else {
-            bytes
+            None
         };
         let recovered = runtime.record_success_with_metrics(
             &route.candidate_id,
@@ -823,14 +868,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         );
         emit_usage(&runtime, event);
         lease.settle_rotation_success(now_ms());
-        if basis_points_route && client_stream {
-            let stream_body = match super::basis_points::synthetic_stream(&client_bytes) {
-                Ok(stream_body) => stream_body,
-                Err(error) => {
-                    lease.settle_rotation_terminal(now_ms());
-                    return super::request::adapter_error_response(error);
-                }
-            };
+        if let Some(stream_body) = basis_points_stream {
             let mut response =
                 proxy_sse_response(status, &response_headers, Body::from(stream_body));
             relay_account_response_header(&client_headers, &response_headers, &mut response);

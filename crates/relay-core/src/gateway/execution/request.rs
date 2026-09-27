@@ -44,11 +44,11 @@ use crate::protocol::{
     repair_custom_tool_item_ids, AdapterError, AdapterRequestContext, AdapterResponse,
     PreparedAdapterRequest,
 };
-use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError};
+use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError, CandidateLease};
 use crate::scheduler::rotation::ExecutionCertainty;
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::usage::ReasoningEffortDiagnostics;
-use crate::{Error, GatewayRuntime, WireApi};
+use crate::usage::{ReasoningEffortDiagnostics, UsageEvent};
+use crate::{Error, ErrorOrigin, GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -147,6 +147,66 @@ fn translate_basis_points_completed(
         bridge_response: Some(AdapterResponse::Translated(completed)),
         stream: Some(client_stream),
     })
+}
+
+pub(super) struct BasisPointsRelayRetryContext<'a> {
+    pub(super) attempted: &'a mut bool,
+    pub(super) parameter: &'a mut Option<&'static str>,
+    pub(super) runtime: &'a GatewayRuntime,
+    pub(super) tried: &'a mut HashSet<String>,
+    pub(super) candidate_id: &'a str,
+    pub(super) lease: &'a CandidateLease,
+    pub(super) last_adapter_error: &'a mut Option<AdapterError>,
+}
+
+/// Apply the bounded Basis Points regeneration path shared by pooled and
+/// account-only execution. Returning the original error and usage event keeps
+/// the caller's terminal-error response path intact when the retry is not
+/// eligible.
+pub(super) fn handle_basis_points_relay_retry(
+    error: AdapterError,
+    body: &[u8],
+    event: UsageEvent,
+    context: BasisPointsRelayRetryContext<'_>,
+) -> Result<(), Box<(AdapterError, UsageEvent)>> {
+    let BasisPointsRelayRetryContext {
+        attempted,
+        parameter,
+        runtime,
+        tried,
+        candidate_id,
+        lease,
+        last_adapter_error,
+    } = context;
+    if !super::basis_points::take_tool_relay_retry(error, body, attempted, parameter) {
+        return Err(Box::new((error, event)));
+    }
+
+    let mut event = event;
+    event.success = false;
+    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+    event.error_category = Some(error.code().to_string());
+    emit_usage(runtime, event);
+    *last_adapter_error = Some(error);
+    tried.remove(candidate_id);
+    lease.allow_rotation_repair();
+    lease.settle_rotation_repair(now_ms());
+    Ok(())
+}
+
+pub(super) fn basis_points_relay_error_response(
+    error: AdapterError,
+    mut event: UsageEvent,
+    runtime: &GatewayRuntime,
+    lease: &CandidateLease,
+    origin: ErrorOrigin,
+) -> Response<Body> {
+    event.success = false;
+    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+    event.error_category = Some(error.code().to_string());
+    emit_usage(runtime, event);
+    lease.settle_rotation_terminal(now_ms());
+    adapter_error_response_for_origin(error, origin)
 }
 
 pub(super) async fn execute_request(context: RequestExecution) -> Response<Body> {
@@ -547,9 +607,36 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         } else {
             None
         };
+        let client_stream = stream;
+        let compaction = if wire_api == WireApi::Responses && !route.adapter.is_passthrough() {
+            match crate::protocol::prepare_bridged_compaction(&request) {
+                Ok(compaction) => compaction,
+                Err(error) if error.is_route_incompatible() => {
+                    last_adapter_error = Some(error);
+                    continue;
+                }
+                Err(error) => return adapter_error_response(error),
+            }
+        } else {
+            crate::protocol::BridgedCompaction::Unchanged
+        };
+        let summarize = compaction.summarize();
+        let stream = if summarize { false } else { stream };
+        if summarize && client_stream {
+            if let Some(resolved) = runtime.executor_route(
+                &route.candidate_id,
+                &resolved_model,
+                &key.scope_snapshot(),
+                allowed_protocols,
+                false,
+            ) {
+                route.upstream_url = resolved.upstream_url;
+                route.upstream_headers = resolved.upstream_headers;
+            }
+        }
         let mut adapter_request = match route.adapter.prepare_request(AdapterRequestContext {
             client_wire_api: wire_api,
-            request: &request,
+            request: compaction.request(&request),
             model: &source_model,
             stream,
             reasoning_mode: route.reasoning_mode,
@@ -1209,30 +1296,39 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 )
             };
             let CompletedBasisPointsResponse {
-                bytes,
+                mut bytes,
                 bridge_response,
                 stream: basis_points_stream,
             } = match translated {
                 Ok(response) => response,
                 Err(error) => {
-                    if basis_points_route
-                        && !basis_points_relay_retry_attempted
-                        && super::basis_points::should_retry_tool_relay(
+                    if basis_points_route {
+                        match handle_basis_points_relay_retry(
                             error,
                             basis_points_retry_body.as_deref().unwrap_or_default(),
-                        )
-                    {
-                        basis_points_relay_retry_attempted = true;
-                        basis_points_relay_retry_parameter = error.parameter();
-                        event.success = false;
-                        event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-                        event.error_category = Some(error.code().to_string());
-                        emit_usage(&runtime, event);
-                        last_adapter_error = Some(error);
-                        tried.remove(&route.candidate_id);
-                        lease.allow_rotation_repair();
-                        lease.settle_rotation_repair(now_ms());
-                        continue;
+                            event,
+                            BasisPointsRelayRetryContext {
+                                attempted: &mut basis_points_relay_retry_attempted,
+                                parameter: &mut basis_points_relay_retry_parameter,
+                                runtime: &runtime,
+                                tried: &mut tried,
+                                candidate_id: &route.candidate_id,
+                                lease: &lease,
+                                last_adapter_error: &mut last_adapter_error,
+                            },
+                        ) {
+                            Ok(()) => continue,
+                            Err(pair) => {
+                                let (error, event) = *pair;
+                                return basis_points_relay_error_response(
+                                    error,
+                                    event,
+                                    &runtime,
+                                    &lease,
+                                    selected_error_origin,
+                                );
+                            }
+                        }
                     }
                     event.success = false;
                     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
@@ -1242,6 +1338,16 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     return adapter_error_response_for_origin(error, selected_error_origin);
                 }
             };
+            if summarize {
+                if let Err(error) = crate::protocol::wrap_compaction_response_bytes(&mut bytes) {
+                    event.success = false;
+                    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+                    event.error_category = Some(error.code().to_string());
+                    emit_usage(&runtime, event);
+                    lease.settle_rotation_terminal(now_ms());
+                    return adapter_error_response_for_origin(error, selected_error_origin);
+                }
+            }
             let recovered = runtime.record_success_with_metrics(
                 &route.candidate_id,
                 &source_model,
@@ -1313,6 +1419,24 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                 return response;
             }
             if account_route || !adapter_is_passthrough {
+                if summarize && client_stream {
+                    let stream_body = match super::basis_points::synthetic_stream(&bytes) {
+                        Ok(stream_body) => stream_body,
+                        Err(error) => {
+                            return adapter_error_response_for_origin(error, selected_error_origin);
+                        }
+                    };
+                    let mut response =
+                        proxy_sse_response(status, &response_headers, Body::from(stream_body));
+                    if account_route && adapter_is_passthrough {
+                        relay_account_response_header(
+                            &forwarded_headers,
+                            &response_headers,
+                            &mut response,
+                        );
+                    }
+                    return response;
+                }
                 let mut response =
                     proxy_json_response(status, &response_headers, Body::from(bytes));
                 if account_route && adapter_is_passthrough {
@@ -1716,7 +1840,7 @@ pub(super) fn adapter_error_response(error: AdapterError) -> Response<Body> {
     adapter_error_response_for_origin(error, crate::ErrorOrigin::Relay)
 }
 
-fn adapter_error_response_for_origin(
+pub(super) fn adapter_error_response_for_origin(
     error: AdapterError,
     origin: crate::ErrorOrigin,
 ) -> Response<Body> {
