@@ -824,10 +824,10 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             match super::basis_points::synthetic_stream(&client_bytes) {
                 Ok(stream_body) => Some(stream_body),
                 Err(error) => {
-                    event.success = false;
-                    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-                    event.error_category = Some(error.code().to_string());
-                    emit_usage(&runtime, event);
+                    emit_usage(
+                        &runtime,
+                        super::request::mark_adapter_failure(event, &error),
+                    );
                     lease.settle_rotation_terminal(now_ms());
                     return adapter_error_response_for_origin(error, selected_error_origin);
                 }

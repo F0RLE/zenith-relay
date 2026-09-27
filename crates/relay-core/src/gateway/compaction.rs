@@ -2,7 +2,7 @@ use super::errors::AttemptFailure;
 use super::request::{codex_client_version, MAX_CLIENT_REQUEST_BODY_BYTES};
 use super::streaming::{parse_sse_event, NativeReplayCapture, TerminalOutcome};
 use crate::error_codes;
-use crate::protocol::sse_event_end;
+use crate::protocol::{ensure_compaction_trigger, sse_event_end};
 use crate::runtime::{CodexTurnStateScope, ExecutorRoute};
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
@@ -40,12 +40,7 @@ fn request_body(request: &Value) -> Result<Vec<u8>, AttemptFailure> {
         .get_mut("input")
         .and_then(Value::as_array_mut)
         .ok_or_else(AttemptFailure::invalid_request)?;
-    if !input
-        .iter()
-        .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
-    {
-        input.push(json!({"type": "compaction_trigger"}));
-    }
+    ensure_compaction_trigger(input);
     let object = request
         .as_object_mut()
         .ok_or_else(AttemptFailure::invalid_request)?;
@@ -193,12 +188,7 @@ pub(super) fn prepare_routed_compaction_request(
     let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
         return false;
     };
-    if !input
-        .iter()
-        .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
-    {
-        input.push(json!({"type": "compaction_trigger"}));
-    }
+    ensure_compaction_trigger(input);
     object.insert("stream".to_string(), Value::Bool(false));
     true
 }

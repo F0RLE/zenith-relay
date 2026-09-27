@@ -32,6 +32,16 @@ impl BridgedCompaction {
     }
 }
 
+/// Adds Codex compaction trigger once. An existing trigger keeps its position.
+pub(crate) fn ensure_compaction_trigger(input: &mut Vec<Value>) {
+    if !input
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
+    {
+        input.push(json!({"type": "compaction_trigger"}));
+    }
+}
+
 /// Turns Codex auto-compact into an ordinary text request for every non-native
 /// route. A Relay checkpoint becomes normal text. Another provider's encrypted
 /// checkpoint stays an explicit incompatibility.

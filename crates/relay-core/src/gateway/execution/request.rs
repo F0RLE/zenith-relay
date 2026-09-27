@@ -149,6 +149,13 @@ fn translate_basis_points_completed(
     })
 }
 
+pub(super) fn mark_adapter_failure(mut event: UsageEvent, error: &AdapterError) -> UsageEvent {
+    event.success = false;
+    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+    event.error_category = Some(error.code().to_string());
+    event
+}
+
 pub(super) struct BasisPointsRelayRetryContext<'a> {
     pub(super) attempted: &'a mut bool,
     pub(super) parameter: &'a mut Option<&'static str>,
@@ -182,11 +189,7 @@ pub(super) fn handle_basis_points_relay_retry(
         return Err(Box::new((error, event)));
     }
 
-    let mut event = event;
-    event.success = false;
-    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-    event.error_category = Some(error.code().to_string());
-    emit_usage(runtime, event);
+    emit_usage(runtime, mark_adapter_failure(event, &error));
     *last_adapter_error = Some(error);
     tried.remove(candidate_id);
     lease.allow_rotation_repair();
@@ -196,15 +199,12 @@ pub(super) fn handle_basis_points_relay_retry(
 
 pub(super) fn basis_points_relay_error_response(
     error: AdapterError,
-    mut event: UsageEvent,
+    event: UsageEvent,
     runtime: &GatewayRuntime,
     lease: &CandidateLease,
     origin: ErrorOrigin,
 ) -> Response<Body> {
-    event.success = false;
-    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-    event.error_category = Some(error.code().to_string());
-    emit_usage(runtime, event);
+    emit_usage(runtime, mark_adapter_failure(event, &error));
     lease.settle_rotation_terminal(now_ms());
     adapter_error_response_for_origin(error, origin)
 }
@@ -1330,20 +1330,14 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                             }
                         }
                     }
-                    event.success = false;
-                    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-                    event.error_category = Some(error.code().to_string());
-                    emit_usage(&runtime, event);
+                    emit_usage(&runtime, mark_adapter_failure(event, &error));
                     lease.settle_rotation_terminal(now_ms());
                     return adapter_error_response_for_origin(error, selected_error_origin);
                 }
             };
             if summarize {
                 if let Err(error) = crate::protocol::wrap_compaction_response_bytes(&mut bytes) {
-                    event.success = false;
-                    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-                    event.error_category = Some(error.code().to_string());
-                    emit_usage(&runtime, event);
+                    emit_usage(&runtime, mark_adapter_failure(event, &error));
                     lease.settle_rotation_terminal(now_ms());
                     return adapter_error_response_for_origin(error, selected_error_origin);
                 }
