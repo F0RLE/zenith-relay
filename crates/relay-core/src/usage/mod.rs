@@ -8,7 +8,7 @@ pub use api_equivalent::{
     estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
     estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
     resolve_candidate_price, ApiEquivalentUsage, ApiModelPriceOverride, ApiModelPriceSources,
-    SourceModelPriceOverrides,
+    SourceModelPriceOverrides, API_EQUIVALENT_AGGREGATE_SQL,
 };
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.

@@ -54,6 +54,49 @@ pub struct ApiEquivalentUsage {
     pub total_tokens: Option<u64>,
 }
 
+/// SQL aggregate shared by the desktop log and the user-managed server.
+/// Column order is part of the contract: input, cached input, total cache
+/// write, then the 5-minute, 1-hour, and unknown write buckets, then output,
+/// total, and the sample counts those buckets need.
+pub const API_EQUIVALENT_AGGREGATE_SQL: &str = "SUM(input_tokens), SUM(cached_input_tokens), \
+    SUM(cache_write_input_tokens), \
+    SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
+    SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
+    SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') \
+        THEN cache_write_input_tokens ELSE 0 END), \
+    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
+    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
+    COUNT(output_tokens), COUNT(total_tokens)";
+
+impl ApiEquivalentUsage {
+    /// Split one reported cache write into the priced windows.
+    /// `5m` and `1h` are exact. Any other value, including no value, stays unknown.
+    pub fn from_reported_tokens(
+        input_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+        cache_write_input_tokens: Option<u64>,
+        cache_write_ttl: Option<&str>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+    ) -> Self {
+        let (cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens) =
+            match cache_write_ttl {
+                Some("5m") => (cache_write_input_tokens, Some(0), Some(0)),
+                Some("1h") => (Some(0), cache_write_input_tokens, Some(0)),
+                _ => (Some(0), Some(0), cache_write_input_tokens),
+            };
+        Self {
+            input_tokens,
+            cached_input_tokens,
+            cache_write_5m_tokens,
+            cache_write_1h_tokens,
+            unknown_cache_write_tokens,
+            output_tokens,
+            total_tokens,
+        }
+    }
+}
+
 impl ApiModelPriceOverride {
     pub fn from_optional_fields(
         input: Option<u64>,

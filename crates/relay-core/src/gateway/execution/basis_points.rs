@@ -456,6 +456,20 @@ fn transport_call(item: &Map<String, Value>, tool: &ClientTool) -> Result<Value,
     }))
 }
 
+fn record_client_call(
+    object: &Map<String, Value>,
+    tool: &ClientTool,
+    result: &mut Vec<Value>,
+    transport_call_ids: &mut std::collections::HashSet<String>,
+) -> Result<(), AdapterError> {
+    let call = transport_call(object, tool)?;
+    if let Some(call_id) = object.get("call_id").and_then(Value::as_str) {
+        transport_call_ids.insert(call_id.to_string());
+    }
+    result.push(call);
+    Ok(())
+}
+
 fn translate_input_items(
     items: Vec<Value>,
     tools: &[ClientTool],
@@ -480,17 +494,9 @@ fn translate_input_items(
                     }
                     result.push(value);
                 } else if let Some(tool) = tool_spec(tools, &name) {
-                    let call = transport_call(object, tool)?;
-                    if let Some(call_id) = object.get("call_id").and_then(Value::as_str) {
-                        transport_call_ids.insert(call_id.to_string());
-                    }
-                    result.push(call);
+                    record_client_call(object, tool, &mut result, &mut transport_call_ids)?;
                 } else if let Some(tool) = history_tool(object) {
-                    let call = transport_call(object, &tool)?;
-                    if let Some(call_id) = object.get("call_id").and_then(Value::as_str) {
-                        transport_call_ids.insert(call_id.to_string());
-                    }
-                    result.push(call);
+                    record_client_call(object, &tool, &mut result, &mut transport_call_ids)?;
                 } else {
                     return Err(AdapterError::invalid_request().with_parameter("input.name"));
                 }

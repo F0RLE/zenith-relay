@@ -232,25 +232,18 @@ impl TelemetryDb {
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
-            let (cache_write_5m, cache_write_1h, unknown_cache_write) =
-                match event.cache_write_ttl.as_deref() {
-                    Some("5m") => (event.cache_write_input_tokens, Some(0), Some(0)),
-                    Some("1h") => (Some(0), event.cache_write_input_tokens, Some(0)),
-                    _ => (Some(0), Some(0), event.cache_write_input_tokens),
-                };
             event.api_equivalent = resolver.estimate(
                 candidate_kind,
                 candidate_id,
                 model,
-                zenith_relay_core::ApiEquivalentUsage {
-                    input_tokens: event.input_tokens,
-                    cached_input_tokens: event.cached_input_tokens,
-                    cache_write_5m_tokens: cache_write_5m,
-                    cache_write_1h_tokens: cache_write_1h,
-                    unknown_cache_write_tokens: unknown_cache_write,
-                    output_tokens: event.output_tokens,
-                    total_tokens: event.total_tokens,
-                },
+                zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
+                    event.input_tokens,
+                    event.cached_input_tokens,
+                    event.cache_write_input_tokens,
+                    event.cache_write_ttl.as_deref(),
+                    event.output_tokens,
+                    event.total_tokens,
+                ),
             );
         }
         let total_pages = if total == 0 {

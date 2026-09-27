@@ -35,6 +35,9 @@ pub(super) const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
         AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms \
         THEN latency_ms ELSE 0 END), 0)";
 
+const USAGE_PRICING_AGGREGATE_COLUMNS: &str =
+    zenith_relay_core::usage::API_EQUIVALENT_AGGREGATE_SQL;
+
 pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -124,13 +127,7 @@ pub(super) fn usage_model_equivalents(
 ) -> Result<(HashMap<String, ApiEquivalentSummary>, Vec<PriceSource>), String> {
     let sql = format!(
         "SELECT candidate_kind, candidate_hint, COALESCE(resolved_model, requested_model, ''),
-            SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END),
-            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END),
-            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END),
-            SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
-            COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
-            COUNT(output_tokens), COUNT(total_tokens)
+            {USAGE_PRICING_AGGREGATE_COLUMNS}
          FROM usage_events{where_sql} GROUP BY 1, 2, 3"
     );
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -139,7 +136,7 @@ pub(super) fn usage_model_equivalents(
             let kind = row.get::<_, String>(0)?;
             let candidate_id = row.get::<_, String>(1)?;
             let model = row.get::<_, String>(2)?;
-            let usage = aggregate_usage_from_row(&row, 3)?;
+            let usage = aggregate_usage_from_row(row, 3)?;
             let model_ref = (!model.is_empty()).then_some(model.as_str());
             let estimate = resolver.estimate(&kind, &candidate_id, model_ref, usage);
             let source = resolver.source(&kind, &candidate_id, model_ref);
@@ -163,20 +160,14 @@ pub(super) fn candidate_window_usage(
     to_ms: u64,
 ) -> Result<Vec<(String, ApiEquivalentUsage)>, String> {
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT COALESCE(resolved_model, requested_model, ''),
-                SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END),
-                SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END),
-                SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END),
-                SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
-                COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
-                COUNT(output_tokens), COUNT(total_tokens)
-             FROM usage_events
-             WHERE candidate_kind = 'account' AND candidate_hint = ?1
-               AND created_at_ms >= ?2 AND created_at_ms <= ?3
-             GROUP BY 1",
-        )
+                    {USAGE_PRICING_AGGREGATE_COLUMNS}
+                 FROM usage_events
+                 WHERE candidate_kind = 'account' AND candidate_hint = ?1
+                   AND created_at_ms >= ?2 AND created_at_ms <= ?3
+                 GROUP BY 1"
+        ))
         .map_err(db_error)?;
     let values = [
         SqlValue::Text(candidate_hint.to_string()),
@@ -186,7 +177,7 @@ pub(super) fn candidate_window_usage(
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
             let model = row.get::<_, String>(0)?;
-            Ok((model, aggregate_usage_from_row(&row, 1)?))
+            Ok((model, aggregate_usage_from_row(row, 1)?))
         })
         .map_err(db_error)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
@@ -258,13 +249,7 @@ pub(super) fn usage_buckets(
     let price_sql = format!(
         "SELECT {bucket_sql}, candidate_kind, candidate_hint, \
             COALESCE(resolved_model, requested_model), \
-            SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), \
-            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
-            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
-            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), \
-            SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
-            COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
-            COUNT(output_tokens), COUNT(total_tokens) \
+            {USAGE_PRICING_AGGREGATE_COLUMNS} \
          FROM usage_events{where_sql} GROUP BY 1, 2, 3, 4"
     );
     let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
@@ -273,48 +258,14 @@ pub(super) fn usage_buckets(
             let kind = row.get::<_, String>(1)?;
             let candidate_id = row.get::<_, String>(2)?;
             let model = row.get::<_, Option<String>>(3)?;
-            let input_tokens: Option<i64> = row.get(4)?;
-            let cached_input_tokens: Option<i64> = row.get(5)?;
-            let cache_write_5m_tokens: Option<i64> = row.get(7)?;
-            let cache_write_1h_tokens: Option<i64> = row.get(8)?;
-            let unknown_cache_write_tokens: Option<i64> = row.get(9)?;
-            let output_tokens: Option<i64> = row.get(10)?;
-            let total_tokens: Option<i64> = row.get(11)?;
-            let input_samples: i64 = row.get(12)?;
-            let cached_samples: i64 = row.get(13)?;
-            let cache_write_samples: i64 = row.get(14)?;
-            let output_samples: i64 = row.get(15)?;
-            let total_samples: i64 = row.get(16)?;
             let start_ms = nonnegative_u64(row.get(0)?);
-            let input_tokens = (input_samples > 0)
-                .then(|| optional_u64(input_tokens))
-                .flatten();
-            let cached_input_tokens = (input_samples > 0 && cached_samples == input_samples)
-                .then(|| optional_u64(cached_input_tokens))
-                .flatten();
-            let cache_writes = (cache_write_samples > 0).then_some(());
             Ok((
                 start_ms,
                 resolver.estimate(
                     &kind,
                     &candidate_id,
                     model.as_deref(),
-                    ApiEquivalentUsage {
-                        input_tokens,
-                        cached_input_tokens,
-                        cache_write_5m_tokens: cache_writes
-                            .map(|_| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
-                        cache_write_1h_tokens: cache_writes
-                            .map(|_| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
-                        unknown_cache_write_tokens: cache_writes
-                            .map(|_| optional_u64(unknown_cache_write_tokens).unwrap_or_default()),
-                        output_tokens: (output_samples > 0)
-                            .then(|| optional_u64(output_tokens))
-                            .flatten(),
-                        total_tokens: (total_samples > 0)
-                            .then(|| optional_u64(total_tokens))
-                            .flatten(),
-                    },
+                    aggregate_usage_from_row(row, 4)?,
                 ),
             ))
         })

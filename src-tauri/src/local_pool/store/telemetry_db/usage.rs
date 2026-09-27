@@ -166,15 +166,8 @@ const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
 /// Aggregate columns used when only API-equivalent pricing is needed. The
 /// sample counts are important: a cache value is only treated as complete
 /// when every row in the aggregate reported that measurement.
-const USAGE_PRICING_AGGREGATE_COLUMNS: &str = "SUM(input_tokens), SUM(cached_input_tokens), \
-    SUM(cache_write_input_tokens), \
-    SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
-    SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
-    SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') \
-        THEN cache_write_input_tokens ELSE 0 END), \
-    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
-    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
-    COUNT(output_tokens), COUNT(total_tokens)";
+const USAGE_PRICING_AGGREGATE_COLUMNS: &str =
+    zenith_relay_core::usage::API_EQUIVALENT_AGGREGATE_SQL;
 
 pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     let mut clauses = Vec::new();
@@ -316,7 +309,8 @@ pub(super) fn usage_model_equivalents(
         // Current rows are maintained transactionally in the rollup. Keep a
         // small compatibility branch for rows written by an older Relay
         // version (or a recovery tool) before the aggregate flag existed.
-        "SELECT candidate_kind, candidate_id, model,
+        format!(
+            "SELECT candidate_kind, candidate_id, model,
                 input_tokens, cached_input_tokens, cache_write_input_tokens,
                 cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
                 output_tokens, total_tokens, input_samples,
@@ -326,18 +320,11 @@ pub(super) fn usage_model_equivalents(
              UNION ALL
              SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
-                SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END),
-                SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END),
-                SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h')
-                    THEN cache_write_input_tokens ELSE 0 END),
-                SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
-                COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
-                COUNT(output_tokens), COUNT(total_tokens)
+                {USAGE_PRICING_AGGREGATE_COLUMNS}
              FROM request_logs
              WHERE usage_aggregate_recorded = 0
              GROUP BY 1, 2, 3"
-            .to_string()
+        )
     } else {
         format!(
             "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
@@ -409,13 +396,7 @@ pub(super) fn usage_buckets(
     let price_sql = format!(
         "SELECT {bucket_sql}, CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END, \
             COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model), \
-            SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), \
-            SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
-            SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
-            SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), \
-            SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
-            COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
-            COUNT(output_tokens), COUNT(total_tokens) \
+            {USAGE_PRICING_AGGREGATE_COLUMNS} \
          FROM request_logs{where_sql} GROUP BY 1, 2, 3, 4"
     );
     let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
