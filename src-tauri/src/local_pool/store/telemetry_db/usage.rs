@@ -7,7 +7,7 @@ use zenith_relay_core::{
     pricing::PriceSource,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
     sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier,
-    UsageEvent, WireApi,
+    ObservedUsageSums, UsageEvent, WireApi,
 };
 
 /// The scalar fields that contribute to a totals row for one request.
@@ -444,19 +444,21 @@ fn usage_pricing_usage_from_row(
     let cache_write_samples = rust_u64(row.get(offset + 10)?);
     let output_samples = rust_u64(row.get(offset + 11)?);
     let total_samples = rust_u64(row.get(offset + 12)?);
-    let cache_writes = cache_write_samples > 0;
-    Ok(ApiEquivalentUsage {
-        input_tokens: (input_samples > 0).then_some(input_tokens).flatten(),
-        cached_input_tokens: (input_samples > 0 && cached_samples == input_samples)
-            .then_some(cached_input_tokens)
-            .flatten(),
-        cache_write_5m_tokens: cache_writes.then(|| cache_write_5m_tokens.unwrap_or_default()),
-        cache_write_1h_tokens: cache_writes.then(|| cache_write_1h_tokens.unwrap_or_default()),
-        unknown_cache_write_tokens: cache_writes
-            .then(|| unknown_cache_write_tokens.unwrap_or_default()),
-        output_tokens: (output_samples > 0).then_some(output_tokens).flatten(),
-        total_tokens: (total_samples > 0).then_some(total_tokens).flatten(),
-    })
+    Ok(ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
+        input_tokens,
+        cached_input_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        unknown_cache_write_tokens,
+        output_tokens,
+        total_tokens,
+        input_samples,
+        cached_samples,
+        cache_write_samples,
+        output_samples,
+        total_samples,
+        gate_measured_buckets: true,
+    }))
 }
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {

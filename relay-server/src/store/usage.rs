@@ -8,7 +8,8 @@ use zenith_relay_core::{
     normalize_observed_service_tier,
     pricing::{PriceSource, PricingCatalog, PricingContext, PricingMetadata, PricingSourceSummary},
     protocol::{UsagePage, UsageQuery, UsageSummary, UsageTokenBreakdown},
-    ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier, UsageEvent, WireApi,
+    ApiEquivalentSummary, ApiEquivalentUsage, DefaultServiceTier, ObservedUsageSums, UsageEvent,
+    WireApi,
 };
 
 mod query;
@@ -608,22 +609,20 @@ impl Store {
                         &kind,
                         &candidate_id,
                         model.as_deref(),
-                        ApiEquivalentUsage {
+                        ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
                             input_tokens: optional_u64(input_tokens),
-                            cached_input_tokens: (input_samples > 0
-                                && cached_samples == input_samples)
-                                .then(|| optional_u64(cached_input_tokens))
-                                .flatten(),
-                            cache_write_5m_tokens: (cache_write_samples > 0)
-                                .then(|| optional_u64(cache_write_5m_tokens).unwrap_or_default()),
-                            cache_write_1h_tokens: (cache_write_samples > 0)
-                                .then(|| optional_u64(cache_write_1h_tokens).unwrap_or_default()),
-                            unknown_cache_write_tokens: (cache_write_samples > 0).then(|| {
-                                optional_u64(unknown_cache_write_tokens).unwrap_or_default()
-                            }),
+                            cached_input_tokens: optional_u64(cached_input_tokens),
+                            cache_write_5m_tokens: optional_u64(cache_write_5m_tokens),
+                            cache_write_1h_tokens: optional_u64(cache_write_1h_tokens),
+                            unknown_cache_write_tokens: optional_u64(unknown_cache_write_tokens),
                             output_tokens: optional_u64(output_tokens),
                             total_tokens: optional_u64(total_tokens),
-                        },
+                            input_samples: u64::try_from(input_samples).unwrap_or(0),
+                            cached_samples: u64::try_from(cached_samples).unwrap_or(0),
+                            cache_write_samples: u64::try_from(cache_write_samples).unwrap_or(0),
+                            gate_measured_buckets: false,
+                            ..ObservedUsageSums::default()
+                        }),
                     )
                 }))
             })

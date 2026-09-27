@@ -143,6 +143,7 @@ pub use usage::{
     estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
     normalize_observed_service_tier, normalize_reasoning_effort, resolve_candidate_price,
     sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
-    ApiModelPriceSources, ErrorOrigin, ObservedServiceTier, SourceModelPriceOverrides,
-    TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    ApiModelPriceSources, ErrorOrigin, ObservedServiceTier, ObservedUsageSums,
+    SourceModelPriceOverrides, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
+    UsageCallback, UsageEvent, UsageValue,
 };

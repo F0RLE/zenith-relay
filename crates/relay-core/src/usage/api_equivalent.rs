@@ -68,7 +68,55 @@ pub const API_EQUIVALENT_AGGREGATE_SQL: &str = "SUM(input_tokens), SUM(cached_in
     COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
     COUNT(output_tokens), COUNT(total_tokens)";
 
+/// Converted SQL sums plus the sample counts that prove each bucket was observed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ObservedUsageSums {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_5m_tokens: Option<u64>,
+    pub cache_write_1h_tokens: Option<u64>,
+    pub unknown_cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub input_samples: u64,
+    pub cached_samples: u64,
+    pub cache_write_samples: u64,
+    pub output_samples: u64,
+    pub total_samples: u64,
+    pub gate_measured_buckets: bool,
+}
+
 impl ApiEquivalentUsage {
+    /// Apply the sample gates shared by desktop and server usage reads.
+    /// Cached input counts only when every input sample reported it. A cache
+    /// write with a missing split becomes zero. Live aggregates set
+    /// `gate_measured_buckets` because they counted input, output, and total.
+    /// Historical rollups never stored output or total sample counts, so they
+    /// leave that flag false and keep those summed values.
+    pub fn from_observed_sums(sums: ObservedUsageSums) -> Self {
+        let measured = |samples: u64, tokens: Option<u64>| {
+            if sums.gate_measured_buckets {
+                (samples > 0).then_some(tokens).flatten()
+            } else {
+                tokens
+            }
+        };
+        let cache_writes = sums.cache_write_samples > 0;
+        let write = |tokens: Option<u64>| cache_writes.then(|| tokens.unwrap_or_default());
+        Self {
+            input_tokens: measured(sums.input_samples, sums.input_tokens),
+            cached_input_tokens: (sums.input_samples > 0
+                && sums.cached_samples == sums.input_samples)
+                .then_some(sums.cached_input_tokens)
+                .flatten(),
+            cache_write_5m_tokens: write(sums.cache_write_5m_tokens),
+            cache_write_1h_tokens: write(sums.cache_write_1h_tokens),
+            unknown_cache_write_tokens: write(sums.unknown_cache_write_tokens),
+            output_tokens: measured(sums.output_samples, sums.output_tokens),
+            total_tokens: measured(sums.total_samples, sums.total_tokens),
+        }
+    }
+
     /// Split one reported cache write into the priced windows.
     /// `5m` and `1h` are exact. Any other value, including no value, stays unknown.
     pub fn from_reported_tokens(
@@ -376,6 +424,61 @@ mod pricing_tests {
             None,
         )
         .0
+    }
+
+    #[test]
+    fn observed_sums_keep_rollup_buckets_and_gate_complete_aggregates() {
+        let complete = ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
+            input_tokens: Some(10),
+            cached_input_tokens: Some(4),
+            cache_write_5m_tokens: Some(2),
+            cache_write_1h_tokens: None,
+            unknown_cache_write_tokens: Some(1),
+            output_tokens: Some(3),
+            total_tokens: Some(13),
+            input_samples: 2,
+            cached_samples: 2,
+            cache_write_samples: 1,
+            output_samples: 1,
+            total_samples: 1,
+            gate_measured_buckets: true,
+        });
+        assert_eq!(complete.cached_input_tokens, Some(4));
+        assert_eq!(complete.cache_write_1h_tokens, Some(0));
+        assert_eq!(complete.output_tokens, Some(3));
+        assert_eq!(complete.total_tokens, Some(13));
+
+        let partial = ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
+            input_tokens: Some(10),
+            cached_input_tokens: Some(4),
+            cache_write_5m_tokens: Some(2),
+            unknown_cache_write_tokens: Some(1),
+            output_tokens: Some(3),
+            total_tokens: Some(13),
+            input_samples: 2,
+            cached_samples: 1,
+            gate_measured_buckets: true,
+            ..ObservedUsageSums::default()
+        });
+        assert_eq!(partial.input_tokens, Some(10));
+        assert_eq!(partial.cached_input_tokens, None);
+        assert_eq!(partial.cache_write_5m_tokens, None);
+        assert_eq!(partial.output_tokens, None);
+        assert_eq!(partial.total_tokens, None);
+
+        let rollup = ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
+            input_tokens: Some(10),
+            cached_input_tokens: Some(4),
+            cache_write_5m_tokens: Some(2),
+            unknown_cache_write_tokens: Some(1),
+            output_tokens: Some(3),
+            total_tokens: Some(13),
+            ..ObservedUsageSums::default()
+        });
+        assert_eq!(rollup.input_tokens, Some(10));
+        assert_eq!(rollup.cached_input_tokens, None);
+        assert_eq!(rollup.output_tokens, Some(3));
+        assert_eq!(rollup.total_tokens, Some(13));
     }
 
     #[test]

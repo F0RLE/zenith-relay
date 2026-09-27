@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use zenith_relay_core::{
     pricing::PriceSource,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ObservedUsageSums,
 };
 
 pub(super) const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
@@ -199,19 +199,21 @@ fn aggregate_usage_from_row(
     let cache_write_samples = nonnegative_u64(row.get(start + 10)?);
     let output_samples = nonnegative_u64(row.get(start + 11)?);
     let total_samples = nonnegative_u64(row.get(start + 12)?);
-    let cache_writes = (cache_write_samples > 0).then_some(());
-    Ok(ApiEquivalentUsage {
-        input_tokens: (input_samples > 0).then_some(input_tokens).flatten(),
-        cached_input_tokens: (input_samples > 0 && cached_samples == input_samples)
-            .then_some(cached_input_tokens)
-            .flatten(),
-        cache_write_5m_tokens: cache_writes.map(|_| cache_write_5m_tokens.unwrap_or_default()),
-        cache_write_1h_tokens: cache_writes.map(|_| cache_write_1h_tokens.unwrap_or_default()),
-        unknown_cache_write_tokens: cache_writes
-            .map(|_| unknown_cache_write_tokens.unwrap_or_default()),
-        output_tokens: (output_samples > 0).then_some(output_tokens).flatten(),
-        total_tokens: (total_samples > 0).then_some(total_tokens).flatten(),
-    })
+    Ok(ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
+        input_tokens,
+        cached_input_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
+        unknown_cache_write_tokens,
+        output_tokens,
+        total_tokens,
+        input_samples,
+        cached_samples,
+        cache_write_samples,
+        output_samples,
+        total_samples,
+        gate_measured_buckets: true,
+    }))
 }
 
 pub(super) fn usage_buckets(
