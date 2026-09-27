@@ -2235,7 +2235,18 @@ async fn codex_compatibility_aliases_reach_the_canonical_account_endpoints() {
 
 #[tokio::test]
 async fn account_only_endpoints_never_forward_to_an_api_key_source() {
-    let (upstream, state) = spawn_upstream(Vec::new()).await;
+    let (upstream, state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::OK,
+        json!({
+            "id": "resp_compact",
+            "status": "completed",
+            "output": [{
+                "type": "compaction",
+                "encrypted_content": "zenith-relay-compact-v1:test"
+            }]
+        }),
+    )])
+    .await;
     let (gateway, events, _, _) = spawn_mixed_gateway(
         vec![source("api-source", &upstream, "source-secret", 100)],
         Vec::new(),
@@ -2246,18 +2257,32 @@ async fn account_only_endpoints_never_forward_to_an_api_key_source() {
     )
     .await;
     let client = reqwest::Client::new();
-    for path in ["/v1/responses/compact", "/v1/alpha/search"] {
-        let response = client
-            .post(format!("{}{path}", gateway.base_url))
-            .bearer_auth(LOCAL_KEY)
-            .json(&json!({"model": MODEL, "input": "hello", "query": "hello"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
+    let search = client
+        .post(format!("{}/v1/alpha/search", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "query": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::NOT_FOUND);
     assert!(state.requests.lock().unwrap().is_empty());
     assert!(events.lock().unwrap().is_empty());
+
+    let compact = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compact.status(), StatusCode::OK);
+    let body: Value = compact.json().await.unwrap();
+    assert_eq!(body["object"], "response.compaction");
+    assert_eq!(body["output"][0]["type"], "compaction");
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert_eq!(requests[0].body["input"][1]["type"], "compaction_trigger");
 }
 
 #[tokio::test]
