@@ -545,16 +545,13 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         let account_route = route.account_id.is_some();
         let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
         if basis_points_route {
-            if responses_lite.is_some() {
-                last_adapter_error =
-                    Some(AdapterError::parameter_unsupported_for("responses_lite"));
-                continue;
-            }
-            if let Some(error) = super::compatibility::basis_points_route_error(
+            if let Some(error) = super::compatibility::basis_points_admission_error(
                 &request,
                 stream,
                 &service_tier_policy,
                 selected_service_tier,
+                responses_lite.is_some(),
+                false,
             ) {
                 last_adapter_error = Some(error);
                 continue;
@@ -594,12 +591,7 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             normalize_responses_lite_request(object);
         }
         let previous = if route.adapter.uses_local_continuation_state() {
-            match request
-                .get("previous_response_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+            match previous_response_id(&request) {
                 Some(response_id) => match runtime.load_messages_bridge_state(
                     &key.id,
                     response_id,
@@ -682,19 +674,17 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
         let basis_points_request =
             basis_points_route.then(|| adapter_request.upstream_body().clone());
         if basis_points_route {
-            let prepared =
-                match super::basis_points::prepare_request(adapter_request.upstream_body()) {
-                    Ok(prepared) => prepared,
-                    Err(error) if error.is_route_incompatible() => {
-                        last_adapter_error = Some(error);
-                        continue;
-                    }
-                    Err(error) => return adapter_error_response(error),
-                };
-            let mut prepared = prepared;
-            if let Some(parameter) = basis_points_relay_retry_parameter {
-                super::basis_points::add_tool_relay_retry_hint(&mut prepared, Some(parameter));
-            }
+            let prepared = match super::basis_points::prepare_upstream(
+                adapter_request.upstream_body(),
+                basis_points_relay_retry_parameter,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) if error.is_route_incompatible() => {
+                    last_adapter_error = Some(error);
+                    continue;
+                }
+                Err(error) => return adapter_error_response(error),
+            };
             *adapter_request.upstream_body_mut() = prepared;
         }
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(

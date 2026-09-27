@@ -239,3 +239,15 @@ pub(in crate::gateway::execution) fn prepare_request(
     );
     Ok(Value::Object(output))
 }
+
+/// Prepare the upstream body and attach the one-shot relay hint when a retry is already claimed.
+pub(in crate::gateway::execution) fn prepare_upstream(
+    request: &Value,
+    retry_parameter: Option<&str>,
+) -> Result<Value, AdapterError> {
+    let mut prepared = prepare_request(request)?;
+    if retry_parameter.is_some() {
+        add_tool_relay_retry_hint(&mut prepared, retry_parameter);
+    }
+    Ok(prepared)
+}

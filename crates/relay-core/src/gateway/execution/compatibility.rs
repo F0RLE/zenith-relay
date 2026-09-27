@@ -135,6 +135,28 @@ pub(super) fn basis_points_route_error(
     None
 }
 
+/// Shared pre-dispatch rejection for a Basis Points account.
+///
+/// An unsupported account endpoint wins over Responses Lite. Both win over a
+/// request the transport cannot carry. Callers still decide whether to skip
+/// the candidate or stop the request.
+pub(super) fn basis_points_admission_error(
+    request: &Value,
+    stream: bool,
+    tier_policy: &ServiceTierPolicy,
+    selected_tier: DefaultServiceTier,
+    responses_lite: bool,
+    rejected_endpoint: bool,
+) -> Option<AdapterError> {
+    if rejected_endpoint {
+        return Some(AdapterError::parameter_unsupported_for("endpoint"));
+    }
+    if responses_lite {
+        return Some(AdapterError::parameter_unsupported_for("responses_lite"));
+    }
+    basis_points_route_error(request, stream, tier_policy, selected_tier)
+}
+
 fn requested_features(request: &Value, stream: bool) -> Vec<ProtocolFeature> {
     let mut result = vec![ProtocolFeature::Text];
     if stream {

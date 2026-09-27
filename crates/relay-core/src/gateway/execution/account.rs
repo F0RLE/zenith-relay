@@ -37,7 +37,7 @@ use super::{
 use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids, AdapterError,
+    repair_custom_tool_item_ids,
 };
 use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError};
 use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
@@ -293,21 +293,13 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             service_tier_policy.effective_tier(&request, selected_service_tier, WireApi::Responses);
         let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
         if basis_points_route {
-            if endpoint != AccountEndpoint::Wake || responses_lite.is_some() {
-                last_adapter_error = Some(AdapterError::parameter_unsupported_for(
-                    if endpoint != AccountEndpoint::Wake {
-                        "endpoint"
-                    } else {
-                        "responses_lite"
-                    },
-                ));
-                continue;
-            }
-            if let Some(error) = super::compatibility::basis_points_route_error(
+            if let Some(error) = super::compatibility::basis_points_admission_error(
                 &request,
                 request.get("stream").and_then(Value::as_bool) == Some(true),
                 &service_tier_policy,
                 selected_service_tier,
+                responses_lite.is_some(),
+                endpoint != AccountEndpoint::Wake,
             ) {
                 last_adapter_error = Some(error);
                 continue;
@@ -376,7 +368,10 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             );
         }
         if basis_points_route {
-            let mut prepared = match super::basis_points::prepare_request(&upstream_body) {
+            let prepared = match super::basis_points::prepare_upstream(
+                &upstream_body,
+                basis_points_relay_retry_parameter,
+            ) {
                 Ok(prepared) => prepared,
                 Err(error) if error.is_route_incompatible() => {
                     last_adapter_error = Some(error);
@@ -384,9 +379,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
                 Err(error) => return super::request::adapter_error_response(error),
             };
-            if let Some(parameter) = basis_points_relay_retry_parameter {
-                super::basis_points::add_tool_relay_retry_hint(&mut prepared, Some(parameter));
-            }
             upstream_body = prepared;
         }
         let reasoning_effort =
