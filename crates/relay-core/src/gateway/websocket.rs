@@ -1073,20 +1073,6 @@ async fn connect_upstream(
         }
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(EventTerminalOutcome::Failure) {
-                let failure = super::errors::AttemptFailure::classified_with_hint(
-                    terminal_failure_status(terminal.status),
-                    terminal
-                        .error_category
-                        .unwrap_or(error_codes::UPSTREAM_TERMINAL),
-                    terminal.body_hint,
-                );
-                super::errors::settle_attempt_failure(
-                    runtime,
-                    &lease,
-                    &route.source_model,
-                    &failure,
-                    &terminal.headers,
-                );
                 let terminal_body = initial_messages.last().and_then(|message| match message {
                     UpstreamMessage::Text(text) => Some(text.as_bytes()),
                     UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
@@ -1107,6 +1093,10 @@ async fn connect_upstream(
                         &lease,
                     )
                 }) {
+                    // A missing item prefix is a compatible body repair, not
+                    // an upstream failure. Settling the terminal first would
+                    // mark the outcome unknown and stop this retry.
+                    lease.settle_rotation_repair(now_ms());
                     last_failure = None;
                     continue;
                 }
@@ -1127,7 +1117,7 @@ async fn connect_upstream(
                 {
                     legacy_call_id_repair_attempted = true;
                     tried.remove(&route.candidate_id);
-                    lease.allow_rotation_repair();
+                    lease.settle_rotation_repair(now_ms());
                     continue 'candidates;
                 }
                 let affinity_miss = super::errors::recoverable_response_affinity_miss(
@@ -1151,7 +1141,7 @@ async fn connect_upstream(
                         runtime, key, &route, &request, attempt, started, status,
                     );
                     tried.remove(&route.candidate_id);
-                    lease.allow_rotation_repair();
+                    lease.settle_rotation_repair(now_ms());
                     last_failure = Some(failure);
                     continue 'candidates;
                 }
@@ -1168,6 +1158,7 @@ async fn connect_upstream(
                     record_connect_rejection(
                         runtime, key, &route, &request, attempt, started, &failure,
                     );
+                    lease.settle_rotation_repair(now_ms());
                     last_failure = Some(failure);
                     continue;
                 }
@@ -1187,9 +1178,24 @@ async fn connect_upstream(
                     record_connect_rejection(
                         runtime, key, &route, &request, attempt, started, &failure,
                     );
+                    lease.settle_rotation_repair(now_ms());
                     last_failure = Some(failure);
                     continue;
                 }
+                let failure = super::errors::AttemptFailure::classified_with_hint(
+                    terminal_failure_status(terminal.status),
+                    terminal
+                        .error_category
+                        .unwrap_or(error_codes::UPSTREAM_TERMINAL),
+                    terminal.body_hint,
+                );
+                super::errors::settle_attempt_failure(
+                    runtime,
+                    &lease,
+                    &route.source_model,
+                    &failure,
+                    &terminal.headers,
+                );
                 if terminal_body.is_some_and(super::errors::prompt_cache_write_rejected) {
                     runtime.invalidate_prompt_affinity(request.prompt_affinity_key.as_deref());
                     let failure = GatewayFailure::classified(status, category, source_error_origin)
@@ -1963,7 +1969,10 @@ async fn bridge(
                 };
                 if let Some(request) = repairable_terminal_request(&runtime, &mut state, &message) {
                     if let Some(lease) = state.lease.as_ref() {
-                        lease.allow_rotation_repair();
+                        // Close the repair before `finish_terminal`. That
+                        // function settles a real failure, and a missing
+                        // category would otherwise stop the retry as unknown.
+                        lease.settle_rotation_repair(now_ms());
                     }
                     let request_id = state.request_id().map(str::to_owned);
                     let attempt_offset = state

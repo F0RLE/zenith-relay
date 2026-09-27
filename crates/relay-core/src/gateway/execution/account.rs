@@ -555,13 +555,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         }
         let attempt = u16::from(budget.dispatches());
         if !status.is_success() {
-            let rejection_state = settle_attempt_failure(
-                &runtime,
-                &lease,
-                &route.source_model,
-                &AttemptFailure::status_with_body(status, Some(&bytes)),
-                &response_headers,
-            );
             if repair_once(
                 &mut legacy_call_id_repair_attempted,
                 responses_tool_call_links_rejected(&bytes),
@@ -573,6 +566,10 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
                 requires_affinity_owner =
                     request_has_previous_response_id(&request) || has_unpaired_tool_output;
+                // The provider rejected the body before doing the work. Close
+                // that attempt as not sent so the repaired request can use the
+                // same account without a cooldown or an unknown cancellation.
+                lease.settle_rotation_repair(now_ms());
                 continue;
             }
             if repair_responses_item_prefixes(
@@ -588,6 +585,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 &route.candidate_id,
                 &lease,
             ) {
+                lease.settle_rotation_repair(now_ms());
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
@@ -625,7 +623,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 event.tool_use.policy_fallback = true;
                 emit_usage(&runtime, event);
                 tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
+                lease.settle_rotation_repair(now_ms());
                 last_failure = Some(failure);
                 last_failure_origin = selected_error_origin;
                 continue;
@@ -646,7 +644,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     &mut has_unpaired_tool_output,
                 );
                 tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
+                lease.settle_rotation_repair(now_ms());
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
                 last_failure_origin = selected_error_origin;
@@ -676,6 +674,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
                 last_failure_origin = selected_error_origin;
+                lease.settle_rotation_repair(now_ms());
                 continue;
             }
             let affinity_miss = recoverable_response_affinity_miss(
@@ -702,17 +701,31 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                         &mut requires_affinity_owner,
                     );
                     tried.remove(&route.candidate_id);
-                    lease.allow_rotation_repair();
+                    lease.settle_rotation_repair(now_ms());
                     last_failure = Some(failure);
                     last_failure_origin = selected_error_origin;
                     continue;
                 }
+                settle_attempt_failure(
+                    &runtime,
+                    &lease,
+                    &route.source_model,
+                    &failure,
+                    &response_headers,
+                );
                 return api_error(
                     StatusCode::CONFLICT,
                     RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
                     RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
                 );
             }
+            let rejection_state = settle_attempt_failure(
+                &runtime,
+                &lease,
+                &route.source_model,
+                &failure,
+                &response_headers,
+            );
             if cache_write_rejected {
                 runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
             }

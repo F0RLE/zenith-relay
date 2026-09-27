@@ -48,8 +48,9 @@ pub(super) fn mark_model_switch_reset(
 /// Accepts one pre-output request repair and lets the same candidate be selected again.
 ///
 /// The predicate and mutation stay with the caller so a failed repair does not
-/// consume the one-shot flag. Ordinary requests still settle the lease
-/// themselves; account-only execution does not.
+/// consume the one-shot flag. A successful repair only permits the same member
+/// again. The caller closes a started lease with `settle_rotation_repair`
+/// before continuing; dropping it records an unknown outcome and stops retry.
 pub(super) fn repair_once(
     attempted: &mut bool,
     eligible: bool,
@@ -77,9 +78,9 @@ pub(super) struct ResponsesItemPrefixRepairs<'a> {
 /// Repairs `fc_`, `ctc_`, and `msg_` item ids in that order, at most one per call.
 ///
 /// `enabled` is false for an adapted ordinary request. Account execution and
-/// WebSocket are already native Responses, so they pass true. Lease settlement
-/// and failure bookkeeping stay with the caller: an ordinary request settles
-/// the lease, an account does not, and WebSocket clears its last failure.
+/// WebSocket are already native Responses, so they pass true. The caller still
+/// settles the lease: a proven repair is not a route failure, so it must be
+/// closed with `settle_rotation_repair` before any rejection settlement.
 pub(super) fn repair_responses_item_prefixes(
     request: &mut Value,
     body: &[u8],
