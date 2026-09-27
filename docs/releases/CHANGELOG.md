@@ -6,6 +6,12 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-09-27
+
+Zenith Relay 1.1.3 keeps a ChatGPT account available after a generic provider
+403, restores Excel tool history, shows a reported cache lifetime in usage, and
+uses the same compact controls across the launcher.
+
 ### Changed
 
 - The API tool optimization switch now says that schemas open on demand for a
@@ -96,9 +102,7 @@ release entries are kept concise and link to the corresponding tag.
 - Pool now separates participant counts, routing controls and current activity
   in an open layout. Connections and Pool share a compact summary with inline
   counts. Account controls have a full-width search field in narrow windows.
-  Excel / Basis Points has moved to API as **Model
-  substitution protection**, with an explanation for OpenAI accounts and
-  immediate saving. Request details still identify the transport used.
+  Request details still identify the transport used.
 
 - Excel / Basis Points tool failures now identify the invalid envelope field
   without revealing tool arguments. An ambiguous unqualified namespace tool or
@@ -110,9 +114,10 @@ release entries are kept concise and link to the corresponding tag.
 
 - Account routes using Excel / Basis Points now use the v0.1.14 tool envelope:
   the client tool name is carried in `references`, while `code` contains the
-  function arguments or custom-tool input directly. Tool calls from an earlier
-  native route remain valid continuation history instead of failing with
-  `input.tool_call`, and namespaced tools retain their fully qualified name.
+  function arguments or custom-tool input directly. Historical client calls,
+  including calls whose catalog is no longer in the request, are restored to
+  that envelope. A declared tool excluded by `tool_choice` is rejected as a
+  choice error. Namespaced tools retain their fully qualified name.
   Requests also carry stable turn metadata and the exact Excel client headers,
   including the corrected Office header names, so the upstream endpoint does
   not reject an otherwise valid request with a generic 422.

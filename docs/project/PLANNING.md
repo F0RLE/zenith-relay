@@ -715,8 +715,8 @@ Images and explicit nonstandard service tiers are incompatible with this route;
 opaque `previous_response_id` continuation is rejected before dispatch rather
 than silently removed. Completed and incomplete buffered responses retain
 their respective terminal status in JSON and synthesized SSE.
-it does not publish native Codex Fast/Ultrafast metadata. Relay does not claim
-incremental streaming or provider acceptance without a live request.
+This route does not publish native Codex Fast/Ultrafast metadata. Relay does
+not claim incremental streaming or provider acceptance without a live request.
 
 The adapter registry supports four native contracts and twelve conversions:
 Responses (`/v1/responses`), Chat Completions (`/v1/chat/completions`), Messages
