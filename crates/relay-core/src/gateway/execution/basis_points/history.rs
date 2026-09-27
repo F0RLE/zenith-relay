@@ -4,6 +4,14 @@ use super::{TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
+fn function_transport_id(call_id: &str) -> String {
+    if call_id.starts_with("fc_") {
+        call_id.to_string()
+    } else {
+        format!("fc_{call_id}")
+    }
+}
+
 pub(super) fn transport_call(
     item: &Map<String, Value>,
     tool: &ClientTool,
@@ -32,11 +40,7 @@ pub(super) fn transport_call(
         "references": [tool.call_name()],
         "code": code,
     });
-    let id = if call_id.starts_with("fc_") {
-        call_id.to_string()
-    } else {
-        format!("fc_{call_id}")
-    };
+    let id = function_transport_id(call_id);
     Ok(json!({
         "type": "function_call",
         "id": id,
@@ -108,11 +112,7 @@ pub(super) fn translate_input_items(
                     );
                     output.insert(
                         "id".to_string(),
-                        Value::String(if call_id.starts_with("fc_") {
-                            call_id.to_string()
-                        } else {
-                            format!("fc_{call_id}")
-                        }),
+                        Value::String(function_transport_id(call_id)),
                     );
                     output.remove("name");
                     output.remove("namespace");

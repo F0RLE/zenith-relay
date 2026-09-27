@@ -1197,6 +1197,31 @@ fn append_replay_input(target: &mut Vec<Value>, input: &Value) -> AdapterResult<
     Ok(())
 }
 
+fn prefixed_id(id: &str, prefix: &str) -> String {
+    if id.starts_with(prefix) {
+        id.to_string()
+    } else {
+        format!("{prefix}{id}")
+    }
+}
+
+fn repair_input_item_ids(
+    request: &mut Value,
+    mut repair_item: impl FnMut(&mut Map<String, Value>) -> bool,
+) -> bool {
+    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut repaired = false;
+    for item in input {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        repaired |= repair_item(item);
+    }
+    repaired
+}
+
 /// Repairs a historic Responses function item only after a strict upstream has
 /// rejected its item-id namespace.
 ///
@@ -1207,66 +1232,46 @@ fn append_replay_input(target: &mut Vec<Value>, input: &Value) -> AdapterResult<
 /// this repair narrow lets native routes stay byte-for-byte passthrough until
 /// an upstream proves that its stricter item contract is required.
 pub(crate) fn repair_call_prefixed_function_item_ids(request: &mut Value) -> bool {
-    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let mut repaired = false;
-    for item in input {
-        let Some(item) = item.as_object_mut() else {
-            continue;
-        };
+    repair_input_item_ids(request, |item| {
         if item.get("type").and_then(Value::as_str) != Some("function_call") {
-            continue;
+            return false;
         }
         let Some(id) = item.get("id").and_then(Value::as_str) else {
-            continue;
+            return false;
         };
         if id.starts_with("fc_") || id.is_empty() {
-            continue;
+            return false;
         }
-        item.insert("id".to_string(), Value::String(format!("fc_{id}")));
-        repaired = true;
-    }
-    repaired
+        item.insert("id".to_string(), Value::String(prefixed_id(id, "fc_")));
+        true
+    })
 }
 
 /// Strict Responses endpoints use a separate `ctc_` namespace for
 /// `custom_tool_call.id`. The `call_id` remains the stable link used by the
 /// matching `custom_tool_call_output`, so only the item identifier is changed.
 pub(super) fn custom_tool_item_id(call_id: &str) -> String {
-    let call_id = call_id.trim();
-    if call_id.starts_with("ctc_") {
-        call_id.to_string()
-    } else {
-        format!("ctc_{call_id}")
-    }
+    prefixed_id(call_id.trim(), "ctc_")
 }
 
 /// Repairs a historic Responses custom-tool item only after a strict upstream
 /// has rejected its item-id namespace. This is deliberately separate from the
 /// function-call repair because the two item types have different namespaces.
 pub(crate) fn repair_custom_tool_item_ids(request: &mut Value) -> bool {
-    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let mut repaired = false;
-    for item in input {
-        let Some(item) = item.as_object_mut() else {
-            continue;
+    repair_input_item_ids(request, |item| {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            return false;
         };
         if item.get("type").and_then(Value::as_str) != Some("custom_tool_call") {
-            continue;
+            return false;
         }
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
-            continue;
-        };
         let normalized = custom_tool_item_id(id);
-        if normalized != id {
-            item.insert("id".to_string(), Value::String(normalized));
-            repaired = true;
+        if normalized == id {
+            return false;
         }
-    }
-    repaired
+        item.insert("id".to_string(), Value::String(normalized));
+        true
+    })
 }
 
 /// Drops only foreign `item_` identifiers from message inputs after a strict
@@ -1275,14 +1280,7 @@ pub(crate) fn repair_custom_tool_item_ids(request: &mut Value) -> bool {
 /// native `msg_` IDs and every non-message item (especially reasoning and
 /// tool-call links) exactly as the client supplied them.
 pub(crate) fn remove_item_prefixed_message_ids(request: &mut Value) -> bool {
-    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let mut repaired = false;
-    for item in input {
-        let Some(item) = item.as_object_mut() else {
-            continue;
-        };
+    repair_input_item_ids(request, |item| {
         let is_message = item.get("type").and_then(Value::as_str) == Some("message")
             || matches!(
                 item.get("role").and_then(Value::as_str),
@@ -1294,12 +1292,11 @@ pub(crate) fn remove_item_prefixed_message_ids(request: &mut Value) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|id| id.starts_with("item_"))
         {
-            continue;
+            return false;
         }
         item.remove("id");
-        repaired = true;
-    }
-    repaired
+        true
+    })
 }
 
 #[derive(Clone, Debug)]
