@@ -1,5 +1,5 @@
 use super::super::continuation::{
-    drop_materialized_previous_response_id,
+    drop_materialized_previous_response_id, previous_response_id,
     recover_stale_tool_history as replay_and_prune_stale_tool_history,
     RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
@@ -36,6 +36,7 @@ use super::super::streaming::{bootstrap_stream, StreamExecution};
 use super::super::turn_state::{
     relay_account_response_header, request_scope, CODEX_TURN_STATE_HEADER,
 };
+use super::mark_model_switch_reset;
 use super::{attempt_error_response, finish_request_failure};
 use super::{wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext};
 use crate::error_codes;
@@ -371,9 +372,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     now_ms(),
                 )
             {
-                model_switch_reset_attempted = true;
-                response_affinity_key = None;
-                requires_affinity_owner = false;
+                mark_model_switch_reset(
+                    &mut model_switch_reset_attempted,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                );
                 continue;
             }
             // Pool membership can change between two Codex turns.  An opaque
@@ -434,9 +437,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     now_ms(),
                 )
             {
-                model_switch_reset_attempted = true;
-                response_affinity_key = None;
-                requires_affinity_owner = false;
+                mark_model_switch_reset(
+                    &mut model_switch_reset_attempted,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                );
                 continue;
             }
             if requires_affinity_owner
@@ -1023,9 +1028,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     now_ms(),
                 )
             {
-                model_switch_reset_attempted = true;
-                response_affinity_key = None;
-                requires_affinity_owner = false;
+                mark_model_switch_reset(
+                    &mut model_switch_reset_attempted,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                );
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
                 last_failure_origin = selected_error_origin;
@@ -1690,7 +1697,7 @@ pub(super) fn should_wait_for_candidate_availability(
         })
 }
 
-fn recover_stale_tool_history(
+pub(super) fn recover_stale_tool_history(
     runtime: &GatewayRuntime,
     local_key_id: &str,
     request: &mut Value,
@@ -1720,11 +1727,7 @@ fn recover_stale_tool_history(
 }
 
 fn request_has_previous_response_id(wire_api: WireApi, request: &Value) -> bool {
-    wire_api == WireApi::Responses
-        && request
-            .get("previous_response_id")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+    wire_api == WireApi::Responses && previous_response_id(request).is_some()
 }
 
 /// Applies the one permitted repair for a strict upstream rejection, then
@@ -1768,12 +1771,7 @@ fn replay_native_tool_continuation(
     stream: bool,
     attempted: &mut bool,
 ) -> Result<bool, AdapterError> {
-    let Some(previous_response_id) = request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(previous_response_id) = previous_response_id(request) else {
         return Ok(false);
     };
     let Some(replay) = runtime.load_native_responses_replay(
@@ -1798,12 +1796,7 @@ fn replay_native_affinity_continuation(
     stream: bool,
     attempted: &mut bool,
 ) -> Result<bool, AdapterError> {
-    let Some(previous_response_id) = request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(previous_response_id) = previous_response_id(request) else {
         return Ok(false);
     };
     let Some(candidate_id) =

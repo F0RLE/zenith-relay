@@ -361,11 +361,7 @@ impl ClientRequest {
     }
 
     pub(super) fn previous_response_id(&self) -> Option<&str> {
-        self.value
-            .get("previous_response_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        continuation::previous_response_id(&self.value)
     }
 
     pub(super) const fn has_unpaired_tool_output(&self) -> bool {

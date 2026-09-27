@@ -10,6 +10,18 @@ pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_CODE: &str =
 pub(super) const RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE: &str =
     "response continuation is unavailable; resend complete history without previous_response_id or start a new conversation";
 
+/// Trimmed Responses `previous_response_id`, or `None` when the field is absent or blank.
+///
+/// Callers that decide whether a request is a continuation use this form.
+/// Recovery still reads the raw field so an untrimmed stored identifier is unchanged.
+pub(super) fn previous_response_id(request: &Value) -> Option<&str> {
+    request
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Shared ownership facts for HTTP, WebSocket, and account-only execution.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct ContinuationState {

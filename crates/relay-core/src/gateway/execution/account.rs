@@ -1,6 +1,5 @@
 use super::super::continuation::{
-    drop_materialized_previous_response_id, prepare_response_continuation,
-    recover_stale_tool_history as replay_and_prune_stale_tool_history,
+    drop_materialized_previous_response_id, prepare_response_continuation, previous_response_id,
     RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
 use super::super::errors::{
@@ -9,8 +8,8 @@ use super::super::errors::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
-    responses_tool_call_is_missing_output, responses_tool_call_links_rejected, retryable_failure,
-    settle_attempt_failure, AttemptFailure, PreservedUpstreamError,
+    responses_tool_call_links_rejected, retryable_failure, settle_attempt_failure, AttemptFailure,
+    PreservedUpstreamError,
 };
 use super::super::now_ms;
 use super::super::request::{
@@ -28,10 +27,12 @@ use super::super::turn_state::{relay_account_response_header, request_scope};
 use super::finish_request_failure;
 use super::request::{
     adapter_error_response, adapter_error_response_for_origin, basis_points_relay_error_response,
-    handle_basis_points_relay_retry, should_wait_for_candidate_availability,
-    BasisPointsRelayRetryContext,
+    handle_basis_points_relay_retry, recover_stale_tool_history,
+    should_wait_for_candidate_availability, BasisPointsRelayRetryContext,
 };
-use super::{wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext};
+use super::{
+    mark_model_switch_reset, wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext,
+};
 use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
@@ -225,9 +226,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     now_ms(),
                 )
             {
-                model_switch_reset_attempted = true;
-                response_affinity_key = None;
-                requires_affinity_owner = false;
+                mark_model_switch_reset(
+                    &mut model_switch_reset_attempted,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                );
                 continue;
             }
             if wait_for_recovery(
@@ -654,24 +657,16 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 last_failure_origin = selected_error_origin;
                 continue;
             }
-            let stream = request
-                .get("stream")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if !stale_tool_history_recovered
-                && has_previous_response_id
-                && responses_tool_call_is_missing_output(&bytes)
-                && replay_and_prune_stale_tool_history(
+            if has_previous_response_id
+                && recover_stale_tool_history(
                     &runtime,
                     &key.id,
                     &mut request,
                     &resolved_model,
-                    now_ms(),
-                    stream,
                     &bytes,
+                    &mut stale_tool_history_recovered,
                 )
             {
-                stale_tool_history_recovered = true;
                 response_affinity_key = None;
                 requires_affinity_owner = false;
                 has_unpaired_tool_output = false;
@@ -698,9 +693,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     now_ms(),
                 )
             {
-                model_switch_reset_attempted = true;
-                response_affinity_key = None;
-                requires_affinity_owner = false;
+                mark_model_switch_reset(
+                    &mut model_switch_reset_attempted,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                );
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
                 last_failure_origin = selected_error_origin;
@@ -724,9 +721,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                         now_ms(),
                     )
                 {
-                    model_switch_reset_attempted = true;
-                    response_affinity_key = None;
-                    requires_affinity_owner = false;
+                    mark_model_switch_reset(
+                        &mut model_switch_reset_attempted,
+                        &mut response_affinity_key,
+                        &mut requires_affinity_owner,
+                    );
                     tried.remove(&route.candidate_id);
                     lease.allow_rotation_repair();
                     last_failure = Some(failure);
@@ -912,8 +911,5 @@ pub(in crate::gateway) async fn execute_account_endpoint(
 }
 
 fn request_has_previous_response_id(request: &Value) -> bool {
-    request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    previous_response_id(request).is_some()
 }

@@ -20,6 +20,20 @@ use axum::body::Body;
 use axum::http::{Response, StatusCode};
 use std::collections::HashSet;
 
+/// Records the one allowed model-switch reset and drops the opaque continuation binding.
+///
+/// Usage, lease, and retry steps stay with the caller: ordinary requests and
+/// account-only execution do not share those aftermaths.
+pub(super) fn mark_model_switch_reset(
+    attempted: &mut bool,
+    response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+) {
+    *attempted = true;
+    *response_affinity_key = None;
+    *requires_affinity_owner = false;
+}
+
 /// Builds the final response after all pre-output route attempts are exhausted.
 /// Account and ordinary client execution use the same cooldown and preserved
 /// provider-error policy; keeping it here prevents the two retry loops from
