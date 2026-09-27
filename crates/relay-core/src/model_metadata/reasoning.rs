@@ -1,4 +1,5 @@
-use super::{model_leaf, normalize, ReasoningMethod, MAX_STRING_LENGTH};
+use super::order::{model_leaf, normalize};
+use super::{ReasoningMethod, MAX_STRING_LENGTH};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 

@@ -1,4 +1,5 @@
-use super::{normalize, validate_payload, MAX_RECORDS};
+use super::order::normalize;
+use super::{validate_payload, MAX_RECORDS};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
