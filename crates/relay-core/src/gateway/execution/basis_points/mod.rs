@@ -17,7 +17,7 @@ mod prepare;
 mod response;
 
 pub(in crate::gateway::execution) use prepare::{
-    add_tool_relay_retry_hint, prepare_request, should_retry_tool_relay, take_tool_relay_retry,
+    add_tool_relay_retry_hint, prepare_request, take_tool_relay_retry,
 };
 pub(in crate::gateway::execution) use response::{synthetic_stream, translate_response};
 

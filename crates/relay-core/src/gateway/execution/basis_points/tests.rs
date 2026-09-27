@@ -1,6 +1,7 @@
 use crate::protocol::AdapterError;
 use serde_json::{json, Value};
 
+use super::prepare::should_retry_tool_relay;
 use super::*;
 
 fn request_with_tool() -> Value {
