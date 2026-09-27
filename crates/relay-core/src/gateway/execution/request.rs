@@ -1,5 +1,5 @@
 use super::super::continuation::{
-    drop_materialized_previous_response_id, previous_response_id,
+    clear_materialized_continuation, drop_materialized_previous_response_id, previous_response_id,
     recover_stale_tool_history as replay_and_prune_stale_tool_history,
     RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
@@ -401,9 +401,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        response_affinity_key = None;
-                        requires_affinity_owner = false;
-                        has_unpaired_tool_output = false;
+                        clear_materialized_continuation(
+                            &mut response_affinity_key,
+                            &mut requires_affinity_owner,
+                            &mut has_unpaired_tool_output,
+                        );
                         continue;
                     }
                     Ok(false) => {}
@@ -972,9 +974,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        response_affinity_key = None;
-                        requires_affinity_owner = false;
-                        has_unpaired_tool_output = false;
+                        clear_materialized_continuation(
+                            &mut response_affinity_key,
+                            &mut requires_affinity_owner,
+                            &mut has_unpaired_tool_output,
+                        );
                         tried.remove(&route.candidate_id);
                         lease.allow_rotation_repair();
                         emit_usage(&runtime, event);
@@ -999,9 +1003,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut stale_tool_history_recovered,
                 )
             {
-                response_affinity_key = None;
-                requires_affinity_owner = false;
-                has_unpaired_tool_output = false;
+                clear_materialized_continuation(
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &mut has_unpaired_tool_output,
+                );
                 tried.remove(&route.candidate_id);
                 lease.allow_rotation_repair();
                 emit_usage(&runtime, event);
@@ -1077,9 +1083,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                     &mut native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        response_affinity_key = None;
-                        requires_affinity_owner = false;
-                        has_unpaired_tool_output = false;
+                        clear_materialized_continuation(
+                            &mut response_affinity_key,
+                            &mut requires_affinity_owner,
+                            &mut has_unpaired_tool_output,
+                        );
                         if response_missing {
                             // The owner is healthy but has lost its opaque
                             // response id. It can safely accept the
@@ -1241,9 +1249,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                                 &mut native_replay_attempted,
                             ) {
                                 Ok(true) => {
-                                    response_affinity_key = None;
-                                    requires_affinity_owner = false;
-                                    has_unpaired_tool_output = false;
+                                    clear_materialized_continuation(
+                                        &mut response_affinity_key,
+                                        &mut requires_affinity_owner,
+                                        &mut has_unpaired_tool_output,
+                                    );
                                     tried.remove(&route.candidate_id);
                                     lease.allow_rotation_repair();
                                     event.error_category =
@@ -1544,9 +1554,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                                 event.error_category =
                                     Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
                             }
-                            response_affinity_key = None;
-                            requires_affinity_owner = false;
-                            has_unpaired_tool_output = false;
+                            clear_materialized_continuation(
+                                &mut response_affinity_key,
+                                &mut requires_affinity_owner,
+                                &mut has_unpaired_tool_output,
+                            );
                             tried.remove(&route.candidate_id);
                             lease.allow_rotation_repair();
                             emit_usage(&runtime, event);
@@ -1573,9 +1585,11 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
                         )
                     })
                 {
-                    response_affinity_key = None;
-                    requires_affinity_owner = false;
-                    has_unpaired_tool_output = false;
+                    clear_materialized_continuation(
+                        &mut response_affinity_key,
+                        &mut requires_affinity_owner,
+                        &mut has_unpaired_tool_output,
+                    );
                     tried.remove(&route.candidate_id);
                     lease.allow_rotation_repair();
                     emit_usage(&runtime, event);

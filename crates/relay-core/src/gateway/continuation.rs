@@ -22,6 +22,20 @@ pub(super) fn previous_response_id(request: &Value) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+/// Drops the opaque continuation binding after its history has been materialized.
+///
+/// Retry bookkeeping stays with the caller. Account-only execution does not
+/// settle a rotation repair on the same paths as an ordinary request.
+pub(super) fn clear_materialized_continuation(
+    response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+    has_unpaired_tool_output: &mut bool,
+) {
+    *response_affinity_key = None;
+    *requires_affinity_owner = false;
+    *has_unpaired_tool_output = false;
+}
+
 /// Shared ownership facts for HTTP, WebSocket, and account-only execution.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct ContinuationState {

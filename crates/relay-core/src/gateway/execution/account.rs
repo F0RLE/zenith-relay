@@ -1,6 +1,7 @@
 use super::super::continuation::{
-    drop_materialized_previous_response_id, prepare_response_continuation, previous_response_id,
-    RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+    clear_materialized_continuation, drop_materialized_previous_response_id,
+    prepare_response_continuation, previous_response_id, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
 use super::super::errors::{
     api_error, apply_failure_state, current_failure_state, is_deactivated_workspace,
@@ -667,9 +668,11 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                     &mut stale_tool_history_recovered,
                 )
             {
-                response_affinity_key = None;
-                requires_affinity_owner = false;
-                has_unpaired_tool_output = false;
+                clear_materialized_continuation(
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &mut has_unpaired_tool_output,
+                );
                 tried.remove(&route.candidate_id);
                 lease.allow_rotation_repair();
                 emit_usage(&runtime, event);

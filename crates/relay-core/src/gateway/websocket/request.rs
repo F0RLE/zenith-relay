@@ -270,9 +270,11 @@ impl ClientRequest {
             }
         };
         self.value = replayed;
-        self.response_affinity_key = None;
-        self.requires_affinity_owner = false;
-        self.has_unpaired_tool_output = false;
+        continuation::clear_materialized_continuation(
+            &mut self.response_affinity_key,
+            &mut self.requires_affinity_owner,
+            &mut self.has_unpaired_tool_output,
+        );
         Ok(true)
     }
 
@@ -380,9 +382,11 @@ impl ClientRequest {
             &self.resolved_model,
             now_ms(),
         ) {
-            self.response_affinity_key = None;
-            self.requires_affinity_owner = false;
-            self.has_unpaired_tool_output = false;
+            continuation::clear_materialized_continuation(
+                &mut self.response_affinity_key,
+                &mut self.requires_affinity_owner,
+                &mut self.has_unpaired_tool_output,
+            );
             true
         } else {
             false
@@ -408,9 +412,11 @@ impl ClientRequest {
             return false;
         }
         self.value = materialized;
-        self.response_affinity_key = None;
-        self.requires_affinity_owner = false;
-        self.has_unpaired_tool_output = false;
+        continuation::clear_materialized_continuation(
+            &mut self.response_affinity_key,
+            &mut self.requires_affinity_owner,
+            &mut self.has_unpaired_tool_output,
+        );
         true
     }
 
