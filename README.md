@@ -39,9 +39,9 @@ again from **Help**.
 
 | Mode | Use it when | What remains running |
 | --- | --- | --- |
-| **Computer** | You want to combine personal accounts and API sources without deploying a server. | Relay and the local endpoint must stay open. |
-| **Choose API** | You want to connect an application directly to one saved API source; select this mode after setup. | The provider runs the requests. |
-| **On your server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. |
+| **Computer** | You want to combine personal accounts and API sources without deploying a server. | The Relay process and its local API. Closing the window leaves them in the tray. |
+| **Choose API** | You want to connect an application directly to one saved API source. Choose this after setup. | The provider runs the requests. Pool, API, and Usage are hidden. |
+| **On your server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. Closing the desktop app does not stop it. |
 
 ## Everyday workflow
 
@@ -76,13 +76,6 @@ The complete behavior and troubleshooting guidance are kept in the in-app
     <td align="center" width="50%"><img src="docs/screenshots/usage.png" height="360" alt="Usage"></td>
   </tr>
 </table>
-
-<details>
-<summary>ChatGPT account and connection settings</summary>
-
-![ChatGPT settings](docs/screenshots/chatgpt-settings.png)
-
-</details>
 
 ## Help
 

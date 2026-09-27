@@ -416,18 +416,18 @@ uses the same compact controls across the launcher.
   on their own tab. Account and API model order now follows metadata and saved manual order
   without moving disabled models or prioritizing price overrides.
 
-- Accounts and API providers now share three pool rotation modes: Smart,
-  In order, and Round robin. One reorderable list replaces separate API roles,
-  with member weights and shared request limits. Settings apply without
-  interrupting active requests; unavailable members do not block the rest.
-  Concurrent edits are detected before saving, and presets retain the mixed order.
-  The editor uses one scrollbar, short status labels and mode-specific controls;
-  centered fields use Request share and Concurrent requests, with Unlimited
-  shown for an unset concurrency cap. Detailed explanations are in Help.
-  Automatic modes show ready members first,
-  while In order preserves your manual queue. Modes support keyboard selection.
-  Smart ignores manual order, includes all similarly suitable members instead
-  of limiting selection to three, and stops preferring stale quota readings.
+- Accounts and API providers now share three pool rotation modes: Automatic,
+  In order, and Round robin. Existing Smart profiles become Automatic on update.
+  One reorderable list replaces separate API roles, with member weights and shared
+  request limits. Settings apply without interrupting active requests; unavailable
+  members do not block the rest. Concurrent edits are detected before saving, and
+  presets retain the mixed order. The editor uses one scrollbar, short status
+  labels and mode-specific controls; centered fields use Request share and
+  Concurrent requests, with Unlimited shown for an unset concurrency cap.
+  Detailed explanations are in Help. Automatic chooses the least occupied
+  eligible members and uses request share only to break ties. It does not rank
+  by manual order, balance, or quota percentage. In order preserves the manual
+  queue. Modes support keyboard selection.
   Recent failures lose their scheduling penalty within a minute, so recovered
   members can return automatically. Finishing an older request cannot release
   another recovery probe; occupied probes allow a bounded wait. Server pool
@@ -602,223 +602,42 @@ uses the same compact controls across the launcher.
 - A model can be returned to Standard speed while its route is temporarily
   unavailable. Fast and Ultrafast are recalculated for every retry candidate,
   so an unsupported speed is not carried to the next account or API source.
-- Model Rules now shows only models that have a usable route. Stale ownership
-  is released when a route becomes unavailable, so a compatible replacement
-  can serve the chat.
+- Model Rules keeps every model from pooled members, including members that are
+  disabled or temporarily unavailable. Request availability is checked when
+  Relay selects a member, so a missing route does not delete the model row.
 - Saving a partial Model Rules reorder now preserves unavailable and
   binding-only pool models instead of treating them as removed.
 - Pool and Connections cards use consistent account information and
   reauthentication controls. Unavailable accounts remain visible with their
   status instead of making the whole pool look unavailable.
-- Closing the main window now hides Relay in the tray and reopens the same
-  window instead of destroying it. The OAuth completion page no longer shows
-  a close button that cannot work.
+- The OAuth completion page no longer shows a close button that cannot work.
 
-## 1.1.3 release draft (not published)
-
-Before tagging the release, replace this heading with a dated `[1.1.3]`
-heading and add the tag link required by the release workflow.
 
 <!-- relay-notes:en -->
 
-Zenith Relay 1.1.3 improves account recovery, native ChatGPT integration,
-model discovery, streaming resilience, and local data safety.
+Zenith Relay 1.1.3 keeps ChatGPT accounts usable after a generic provider 403, adds Basis Points for those accounts, and uses the same compact controls across the app.
 
-### Fixed
-
-- Relay storage now uses separate durable database, vault, catalog, migration,
-  temporary WebView/import, export, and recovery folders on Windows, macOS, and
-  Linux. Startup safely migrates only Relay-owned flat files, removes the old
-  legacy-marker file after relocating it, and refuses to overwrite a conflicting
-  durable copy.
-- ChatGPT history transfer now reconciles the desktop's local chat catalog as
-  well as its state database, clears stale visibility markers, and can complete
-  a prior partial transfer without rewriting already-correct rollout files. It
-  keeps conversation chronology, handles legacy catalog rows with no host id,
-  and includes the catalog in the existing rollback backup.
-- A stale account import no longer overwrites a newer in-memory OAuth rotation.
-  Relay persists and restarts from the authoritative credential state, while
-  preserving a separate credential update that completed meanwhile.
-- Relay-owned ChatGPT account discovery and requests now start with a stable
-  Codex fallback and asynchronously follow the newest published stable Rust
-  Codex release from the official OpenAI GitHub feed. Prerelease versions are
-  ignored, and the selected version stays in process memory instead of being
-  written to a local JSON cache; identity headers from a directly connected
-  client remain preserved.
-- Automatic Responses Lite now stays off unless every configured fallback route
-  has confirmed native Lite support for the selected model. Mixed or partially
-  known pools therefore preserve one full-Responses tool and reasoning-context
-  contract across HTTP, WebSocket, and account-only retries; explicit client
-  Lite requests are unchanged.
-- Relay no longer exits during startup when the client-login watchdog starts
-  before the desktop state is available; optimized desktop builds now open
-  reliably.
-- Launching a direct ChatGPT account now removes a previously managed Relay or
-  external model catalog for that session. Codex can again load the account's
-  native model names and its own available speed controls; the prior catalog is
-  restored when switching away.
-- Responses WebSocket streams no longer switch upstream or append a synthetic
-  Relay failure after output has reached the client, including HTTP/SSE
-  fallback. Disconnecting the client cancels fallback waits and releases the
-  occupied route. Enabled API text-route recovery can keep waiting for a temporary
-  route recovery without the former 30-second deadline.
-- Compact Usage tables now keep Russian column headings readable while
-  preserving timing and request identifiers, and keyboard focus remains
-  visible on shared navigation and action controls.
-- Requests carrying complete tool history can now leave a failed account after
-  a pre-output streaming or transport error, instead of being blocked by their
-  old tool affinity. Stateful continuations retain their original owner.
-- Desktop and tray icon artwork now uses more of its transparent canvas, so
-  Zenith Relay appears visually consistent with neighboring system icons.
-- Codex profile attachment now removes the unsupported `persistent` reasoning
-  effort from the desktop setting while Relay is active; profile restore keeps
-  the user's original configuration intact.
-- Reasoning catalogs now match decimal and dashed model versions, so Claude
-  releases such as Fable 5.1 and Opus 4.8 retain the full OpenRouter effort
-  enum instead of falling back to partial LiteLLM flags. Native ChatGPT
-  `ultra` levels are preserved, while Messages bridges expose `ultra` only as
-  the supported Codex alias translated to upstream `max`.
-- Model capabilities now come from the merged public metadata catalog for both
-  API sources and accounts, including ChatGPT/Codex and OpenCode profiles.
-  Unknown models accept text and image input with text output, without invented
-  reasoning, tools, or limits. Incomplete provider metadata no longer excludes
-  image requests from pool routes. Native account Responses Lite settings
-  remain isolated between accounts.
-- Retryable 502/503 failures move to the next eligible pool route before response
-  output begins; removed providers do not remain eligible for new requests.
-- Usage history now attributes upstream overload and server failures on OAuth
-  routes to the selected account instead of misidentifying it as an API
-  provider. Provider-neutral category text remains accurate for both route
-  kinds.
-- Model Rules now shows the selected global Standard or Fast pool policy when
-  an OpenAI-family model has no per-model override. Fast sends the upstream
-  `priority` request tier; it is not a capability check or a speed guarantee.
-
-- Responses tool continuations now retain the physical route that created both
-  function and custom-tool calls. A transient owner failure no longer replays
-  an orphaned tool output to another provider and surfaces a misleading
-  tool-call mismatch.
-- Reopening an older Codex chat on another model now recovers a stale
-  custom-tool or function call that has no recorded output. Relay removes only
-  the incomplete historical call and retries the new-model request instead of
-  exposing the provider's `No tool output found` error.
-- Responses bridges reject opaque compaction history with a specific
-  compatibility error, allowing an eligible native Responses route to be
-  tried without penalizing the bridge. A bridge also rejects a non-empty
-  context-management request instead of silently dropping the client's
-  compaction settings. Native requests preserve client-owned settings;
-  experimental compaction is not enabled automatically.
-- Hover hints now use Relay's themed tooltips throughout the interface instead
-  of browser popups. Redundant hints are hidden when the full value is visible;
-  truncated values and disabled-control explanations remain available.
-- Source launch buttons now ask whether to open the selected API source in
-  ChatGPT or OpenCode. OpenCode receives that source's exact endpoint,
-  credential, and verified native Responses models instead of silently using
-  the pool connection.
-- Proxy assignment is now available from each account card's three-dot menu;
-  the lower action bar no longer shows an edit pencil for this secondary action.
-- Reset-quota refresh failures remain visible even when the consumed credit was
-  the last available one, and reset diagnostics now use the shared redaction
-  path for provider errors, URL credentials, and quoted secret fields.
-- Pool profile switching no longer terminates the process tree of ChatGPT or
-  OpenCode. Relay stops only the identified desktop process, so unrelated
-  child processes cannot close Relay or another active desktop session.
-- Model Rules and source pricing now show one group per company instead of
-  separate family subgroups. Default model order puts newer releases first
-  across families while preserving manually saved ordering.
-- Model Rules is now limited to pool management: provider-dependent prices are
-  no longer shown or edited there. Per-source pricing remains available in the
-  source editor, where each API can keep its own prices.
-- Relay now keeps setup-only streaming frames internal until a route produces
-  real output or completes. A provider failure before that point falls back to
-  another eligible route instead of appearing as a separate user-visible
-  failed request.
-- Responses custom-tool continuations now stay bound to the route that created
-  the tool call. If a conversation is switched to another model or provider,
-  Relay refuses the unsafe continuation locally instead of forwarding it to a
-  provider that cannot recognize the tool-call id.
-- Unknown pooled models whose provider does not advertise reasoning metadata can
-  now be configured manually with Low, Medium, High, Extra high, and Max.
-  Relay sends no reasoning setting until the user explicitly enables one.
-  Models whose provider explicitly reports no reasoning support remain
-  unavailable for configuration.
-- Moved the update notification to the sidebar update row so it aligns with the
-  application controls in both expanded and compact navigation.
-- Automatic weekly quota reset now recovers when the secondary window was
-  already exhausted before the refresh that detected it. Missing reset-credit
-  metadata no longer prevents the authoritative reset-credit endpoint from
-  checking availability.
-- Pool routing status now keeps the last account that actually handled a
-  request visible alongside the next eligible route, with a distinct card
-  highlight for the last-used member.
-- Runtime activity overlays are reconciled with fresh snapshots so an old
-  release event cannot hide a newly active account or mislabel the next route.
-- Changing Usage filters while a report is still loading can no longer replace
-  the current report with a stale result or leave it empty. The API page also
-  remains usable when a partially saved gateway address is malformed.
-- Direct provider switching no longer rejects every routed model as having no
-  compatible text models after Relay stops publishing a synthetic truncation
-  limit. Provider-supplied truncation policies remain validated when present.
+- A generic 403 no longer permanently blocks a ChatGPT account. An explicitly disabled workspace still stays blocked.
+- **Use Basis Points** is in the API tab. It sends pooled ChatGPT accounts through Excel instead of Responses and may help a degraded account generate. It does not guarantee a result.
+- Usage shows a cache-write lifetime only when the provider reports one. For GPT-5.6 and later, OpenAI's documented 30-minute minimum is a separate note, not a countdown. Five-minute and one-hour cache-write prices belong to Anthropic-style pricing.
+- Pool rotation is Automatic, In order, or Round robin. Saved Smart profiles become Automatic on update.
+- OpenAI models offer Standard, Fast, and Ultrafast by Relay rule, even when an account or provider returns no speed list.
+- Model Rules lists every pooled model directly under its company, without family subgroups. The default company order is OpenAI, Anthropic, Google, then xAI.
+- Closing the window releases its page and leaves the pool running in the tray. Opening Relay creates the window again.
+- macOS builds are ad-hoc signed and are not notarized. The first launch can need one approval in Privacy & Security.
 
 <!-- relay-notes:ru -->
 
-Zenith Relay 1.1.3 улучшает восстановление аккаунтов, нативную интеграцию с
-ChatGPT, обнаружение моделей, устойчивость потоковой передачи и безопасность
-локальных данных.
+Zenith Relay 1.1.3 не блокирует аккаунт ChatGPT из-за общего отказа 403, добавляет Basis Points для таких аккаунтов и выравнивает компактные переключатели.
 
-### Исправления и улучшения
-
-- Хранилище Relay разделено на устойчивые папки для базы, vault, каталогов,
-  миграций, временных данных, экспорта и восстановления на Windows, macOS и
-  Linux. Миграция переносит только файлы Relay, не перезаписывает конфликтующие
-  данные и удаляет старый маркер после успешного переноса.
-- Перенос истории ChatGPT теперь обновляет и локальный каталог чатов клиента,
-  включая старые строки без `host_id`, очищает устаревшие маркеры видимости и
-  сохраняет резервную копию для отката.
-- Устаревший импорт аккаунта больше не затирает более новые OAuth-учётные
-  данные из работающего Relay; актуальная авторитетная версия сохраняется и
-  используется при перезапуске маршрута.
-- Relay наблюдает фактический переход клиента на страницу входа и показывает
-  предупреждение только у связанного аккаунта, не блокируя переключение
-  аккаунтов по локальному сроку действия токена.
-- Для собственных запросов ChatGPT Relay сразу использует стабильную резервную
-  версию Codex, а после загрузки и затем раз в час асинхронно проверяет
-  официальный GitHub-релиз Rust Codex. Бета-, альфа- и другие prerelease-версии
-  игнорируются; выбранная версия хранится только в памяти процесса, без
-  локального JSON-кэша. Идентификационные заголовки напрямую подключённого
-  клиента сохраняются.
-- При прямом подключении ChatGPT Codex снова получает нативные названия
-  моделей и собственное управление скоростью; временный каталог Relay при
-  этом корректно снимается и восстанавливается при смене профиля.
-- Метаданные моделей обновляются из публичных каталогов для API-источников,
-  аккаунтов, ChatGPT/Codex и OpenCode. Неизвестные модели не скрываются и не
-  получают вымышленных лимитов, инструментов или reasoning-возможностей.
-- Автоматический режим Responses Lite включается только при подтверждённой
-  нативной поддержке на каждом запасном маршруте. Явный запрос клиента Lite
-  остаётся без изменений.
-- После появления ответа поток больше не меняет upstream и не добавляет
-  искусственную ошибку Relay. До первого байта доступны безопасный failover,
-  отмена ожидания при отключении клиента и ожидание временного восстановления
-  ChatGPT без прежнего ограничения в 30 секунд.
-- Продолжения с function/custom tools сохраняют физический маршрут-владельца.
-  Неполные старые вызовы инструментов можно безопасно восстановить при смене
-  модели, а небезопасное продолжение блокируется локально.
-- Ошибки 502/503 до начала ответа переходят на следующий подходящий маршрут;
-  удалённые источники не остаются доступны для новых запросов. Ошибки OAuth
-  корректно относятся к аккаунту, а не к несуществующему API-провайдеру.
-- Правила моделей показывают выбранную общую политику Standard или Fast для
-  OpenAI-моделей без отдельного переопределения. Fast отправляет upstream
-  режим `priority`, но не является проверкой поддержки или гарантией скорости.
-  Порядок и группировка моделей стали стабильнее, а цены редактируются только
-  у конкретного источника.
-- Мониторинг кредитов, квот и еженедельного сброса устойчивее к временным
-  ошибкам; наличие подтверждённого положительного или безлимитного кредита
-  допускает аккаунт в пул без подмены расчёта стоимости.
-- Статус пула сохраняет последний использованный маршрут рядом со следующим
-  кандидатом и не теряет актуальную активность при поздних событиях. Таблицы
-  Usage не затираются устаревшими ответами при смене фильтра.
-- Интерфейс получил русские компактные заголовки, тематические подсказки,
-  видимый keyboard focus, аккуратные действия прокси и обновлённые иконки.
+- Общий отказ 403 больше не блокирует аккаунт ChatGPT навсегда. Явно отключённое рабочее пространство по-прежнему остаётся недоступным.
+- Переключатель **Использовать Basis Points** находится во вкладке API. Для аккаунтов ChatGPT в пуле запросы идут через Excel, а не через Responses. Это может помочь деградировавшему аккаунту, но результат не гарантирован.
+- В использовании срок записи кэша показывается только если его сообщил провайдер. Для GPT-5.6 и новее отдельная справка OpenAI говорит о минимуме 30 минут; это не обратный отсчёт. Цены записи кэша на 5 минут и 1 час относятся к ценам в стиле Anthropic.
+- Ротация пула: Автоматически, По порядку или По кругу. Сохранённый режим Smart при обновлении становится Автоматически.
+- Для моделей OpenAI доступны Standard, Fast и Ultrafast по правилу Relay, даже если аккаунт или провайдер не прислал список скоростей.
+- Правила моделей показывают каждую модель пула прямо в компании, без подгрупп семейств. По умолчанию компании идут так: OpenAI, Anthropic, Google, затем xAI.
+- Закрытие окна освобождает страницу, а пул продолжает работать в трее. Следующее открытие создаёт окно заново.
+- Сборки macOS подписаны ad-hoc и не нотаризованы Apple. Первый запуск может потребовать одно разрешение в конфиденциальности и безопасности.
 
 ## [1.1.2] - 2026-09-03
 
