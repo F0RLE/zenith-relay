@@ -94,6 +94,12 @@ pub const PRICED_AGGREGATE_CACHE_WRITE_SAMPLES: usize = 10;
 pub const PRICED_AGGREGATE_OUTPUT_SAMPLES: usize = 11;
 pub const PRICED_AGGREGATE_TOTAL_SAMPLES: usize = 12;
 
+/// First token column in a candidate rollup row.
+/// `candidate_kind`, `candidate_id`, and `model` come first. The columns after
+/// them follow [`API_EQUIVALENT_AGGREGATE_SQL`]. Historical rollups do not
+/// store the output and total sample counts at the end of that list.
+pub const CANDIDATE_ROLLUP_TOKEN_OFFSET: usize = 3;
+
 /// Converted SQL sums plus the sample counts that prove each bucket was observed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObservedUsageSums {

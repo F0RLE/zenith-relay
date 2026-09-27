@@ -2,6 +2,13 @@ use super::*;
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
+use zenith_relay_core::usage::{
+    CANDIDATE_ROLLUP_TOKEN_OFFSET, PRICED_AGGREGATE_CACHED_INPUT_TOKENS,
+    PRICED_AGGREGATE_CACHED_SAMPLES, PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS,
+    PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS, PRICED_AGGREGATE_CACHE_WRITE_SAMPLES,
+    PRICED_AGGREGATE_INPUT_SAMPLES, PRICED_AGGREGATE_INPUT_TOKENS, PRICED_AGGREGATE_OUTPUT_TOKENS,
+    PRICED_AGGREGATE_TOTAL_TOKENS, PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS,
+};
 
 impl TelemetryDb {
     #[cfg(test)]
@@ -326,16 +333,22 @@ impl TelemetryDb {
             .map_err(db_error)?;
         let rows = statement
             .query_map([], |row| {
-                let input_tokens: Option<i64> = row.get(3)?;
-                let cached_input_tokens: Option<i64> = row.get(4)?;
-                let cache_write_5m_tokens: Option<i64> = row.get(6)?;
-                let cache_write_1h_tokens: Option<i64> = row.get(7)?;
-                let unknown_cache_write_tokens: Option<i64> = row.get(8)?;
-                let output_tokens: Option<i64> = row.get(9)?;
-                let total_tokens: Option<i64> = row.get(10)?;
-                let input_samples: i64 = row.get(11)?;
-                let cached_samples: i64 = row.get(12)?;
-                let cache_write_samples: i64 = row.get(13)?;
+                let token = CANDIDATE_ROLLUP_TOKEN_OFFSET;
+                let input_tokens: Option<i64> = row.get(token + PRICED_AGGREGATE_INPUT_TOKENS)?;
+                let cached_input_tokens: Option<i64> =
+                    row.get(token + PRICED_AGGREGATE_CACHED_INPUT_TOKENS)?;
+                let cache_write_5m_tokens: Option<i64> =
+                    row.get(token + PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS)?;
+                let cache_write_1h_tokens: Option<i64> =
+                    row.get(token + PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS)?;
+                let unknown_cache_write_tokens: Option<i64> =
+                    row.get(token + PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS)?;
+                let output_tokens: Option<i64> = row.get(token + PRICED_AGGREGATE_OUTPUT_TOKENS)?;
+                let total_tokens: Option<i64> = row.get(token + PRICED_AGGREGATE_TOTAL_TOKENS)?;
+                let input_samples: i64 = row.get(token + PRICED_AGGREGATE_INPUT_SAMPLES)?;
+                let cached_samples: i64 = row.get(token + PRICED_AGGREGATE_CACHED_SAMPLES)?;
+                let cache_write_samples: i64 =
+                    row.get(token + PRICED_AGGREGATE_CACHE_WRITE_SAMPLES)?;
                 let model = row.get::<_, Option<String>>(2)?;
                 let kind = row.get::<_, String>(0)?;
                 let id = row.get::<_, String>(1)?;
