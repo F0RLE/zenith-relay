@@ -8,6 +8,32 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- The API tool optimization switch now says that schemas open on demand for a
+  normal Responses route, while Excel and other routes still send the full list.
+
+- The API switch for ChatGPT accounts in the pool is now **Use Basis Points**.
+  It sends those accounts through Excel instead of Responses and may help a
+  degraded account generate, without guaranteeing the result.
+
+- Closing the main window now releases its WebView and leaves the pool running
+  in the tray. Opening Relay creates the window again instead of reusing the
+  hidden page.
+
+- A generic provider 403 no longer marks a ChatGPT account as permanently
+  blocked. The account stays available, the dialog uses the upstream access
+  error, and a previously stored false block is cleared when desktop storage
+  opens or a quota refresh succeeds without a new denial. An explicit disabled
+  workspace still stays blocked.
+
+- Anthropic models now follow the provider's family order: Fable, Opus, Sonnet,
+  then Haiku. Newest releases remain first within each family, and unknown
+  families remain visible after the known lineup.
+
+- Pool and Connections now share a compact header with clear primary actions
+  and wrapping tabs. Pool presets live in the overflow menu; participant
+  status, account filters and routing controls use one consistent panel,
+  with current activity alongside the pool controls.
+
 - Named Responses WebSocket requests now validate the documented `stream_id`
   characters and length, and HTTP/SSE fallback events and Relay-generated
   request errors include their named stream ID. Invalid IDs return
@@ -79,8 +105,8 @@ release entries are kept concise and link to the corresponding tag.
   a non-object function argument is rejected instead of dispatching the wrong
   tool. Responses output is unwrapped before conversion to Chat Completions,
   Messages or Gemini, including their SSE event formats. Malformed completed
-  output remains terminal for that request and does not cool down the account
-  or trigger an automatic second generation.
+  output gets one bounded regeneration before Relay returns a terminal 502; it
+  does not cool down the account or retry again after that regeneration.
 
 - Account routes using Excel / Basis Points now use the v0.1.14 tool envelope:
   the client tool name is carried in `references`, while `code` contains the

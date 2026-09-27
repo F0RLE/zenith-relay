@@ -31,10 +31,10 @@ upstream controls; a loopback endpoint does not authorize account resale.
 | `relay-server` | User-managed runtime, vault, persistence, management API |
 
 Desktop and server share runtime contracts. React does not read secrets/files,
-call providers, or implement routing. Closing the main window hides and reuses
-its WebView while tray/background runtime survives; explicitly quitting the
-process stops the local pool. Distributed multi-server coordination is not
-implemented.
+call providers, or implement routing. Closing the main window destroys its
+WebView; the tray and local pool keep running, and the next open creates the
+window again. Explicitly quitting the process stops the local pool. Distributed
+multi-server coordination is not implemented.
 
 Renderer snapshot reads accept only the latest requested result. Mode changes
 and explicit refreshes retire previous background reads and retries without
@@ -175,17 +175,19 @@ provider-scoped leaves once; persistence and publication reuse the same merged p
 Cache-file equality checks use a bounded buffer instead of reading a second
 complete file into memory.
 Backend ordering places OpenAI, Anthropic, Google,
-then xAI first, followed by other companies alphabetically, and uses
-contiguous catalog families ranked by their newest release. Families that share
-the same numbered model generation form a cohort and use the newest release in
-that cohort, then normalized family IDs; this keeps sibling variants together
-instead of letting a later launch date outrank another variant. Release/update
-dates order versions within a family. Missing families follow known families;
-missing dates follow dated versions in the same family. Equal dates use
-normalized family and model IDs as deterministic tie-breakers, so provider
-inventory order cannot change catalog ranking. Company/family ordering comes
-from validated catalog metadata except for the documented company presentation
-order; no model-name or version lists are maintained. Selectors show catalog families within each
+then xAI first, followed by other companies alphabetically. Within a company,
+stable provider family precedence is used where the provider has a canonical
+product-tier order (Anthropic is Fable, Opus, Sonnet, then Haiku); unknown
+families follow the catalog fallback. Families that share the same numbered
+model generation form a cohort and use the newest release in that cohort, then
+normalized family IDs; this keeps sibling variants together instead of letting
+a later launch date outrank another variant. Release/update dates order
+versions within a family. Missing families follow known families; missing dates
+follow dated versions in the same family. Equal dates use normalized family and
+model IDs as deterministic tie-breakers, so provider inventory order cannot
+change catalog ranking. Company/family ordering comes from validated catalog
+metadata except for the documented company and provider-family presentation
+orders; no model-version lists are maintained. Selectors show catalog families within each
 company while preserving backend order. Explicit manual order takes precedence.
 The model-order editor keeps the supplied sequence and company blocks draggable;
 selection and price editors first align member inventory to snapshot order, then
@@ -517,7 +519,13 @@ Opening desktop storage alone does not start provider work; the native host
 starts the service, which keeps no strong host reference while idle. Start and
 completion events publish the committed in-flight state to existing UI listeners.
 Backoff retains the actual safe failure reason; successful refresh can restore
-health. Credential, proxy, auth, and capacity failures are not all quota errors.
+health. A generic HTTP 403 (`upstream_forbidden`) degrades the account and leaves
+it routable; the gateway cooldown still covers that route. Only an explicit
+disable, such as `upstream_account_disabled` or `deactivated_workspace`, sets a
+durable block. Opening desktop storage, and a successful quota refresh that
+reports no new denial, clears a stored block whose only code is
+`upstream_forbidden`.
+Credential, proxy, auth, and capacity failures are not all quota errors.
 Model discovery can recover its own errors, but cannot clear an independent
 account block, authentication failure, or verification requirement. Transient
 catalog errors preserve a previously terminal discovery failure until a
@@ -685,8 +693,10 @@ late responses hold the old jar. Browser/authentication cookies are excluded,
 and no cookie values enter storage, diagnostics, or client responses.
 
 The optional Excel / Basis Points transport is configured in API as
-**Model substitution protection** and identified in Usage. The name describes
-the intended workaround, not verification of the model running at the provider.
+**Use Basis Points** and identified in Usage. It sends ChatGPT account requests
+through Excel instead of Responses. It may help a degraded account generate,
+but Relay does not guarantee that and cannot verify the model running at the
+provider.
 The API control uses the existing shared routing setting and saves immediately.
 There are no switches in Connections, Pool or account cards.
 The control appears when a compatible account exists, even before it joins
@@ -695,9 +705,12 @@ Remote servers without the setting field do not expose the control. It uses the
 same physical OAuth account, quota and rotation slot.
 Clients use any of the four Relay protocols. The account executor maps
 function/custom calls and outputs through its native `run_officejs` envelope,
-then the protocol adapter converts the result to the client's format. The
-upstream returns completed JSON, so requested SSE is buffered and emitted only
-after completion.
+then the protocol adapter converts the result to the client's format.
+Historical client calls are restored to that envelope even when the current
+request no longer includes their catalog. A declared tool excluded by
+`tool_choice` is rejected as a choice error, not as a missing tool. Encrypted
+`agent_message` content is rejected before dispatch. The upstream returns
+completed JSON, so requested SSE is buffered and emitted only after completion.
 Images and explicit nonstandard service tiers are incompatible with this route;
 opaque `previous_response_id` continuation is rejected before dispatch rather
 than silently removed. Completed and incomplete buffered responses retain
@@ -723,8 +736,15 @@ budget or encountering an unsafe scope preserves the original schema atomically.
 Responses bridges accept Codex client tracing and cache-affinity keys without
 forwarding them as provider parameters. The optional encrypted-reasoning output
 selector does not require fabricated encrypted output; native bridge state stays
-local. Supplied encrypted input and compaction still require a compatible native
-route. Unsupported known controls report a safe field name in `error.param`
+local. Foreign encrypted reasoning and encrypted compaction still require a
+compatible native route. A non-native route can answer Codex auto-compact,
+including `/v1/responses/compact`, with a text summary and a Relay-owned
+compaction checkpoint; the next bridged turn expands that checkpoint back into
+text. This is the same path for every bridged model, not a single family.
+Codex receives the reference context
+window for those cards, or 272000 when the reference has no limit, so it can
+start compaction. Provider-declared windows are not copied. Unsupported known
+controls report a safe field name in `error.param`
 and the error message, never a request value. Neutral text/null controls do not
 claim structured-output or reasoning capabilities during admission.
 
@@ -789,7 +809,8 @@ performs its own tool search and loading. Catalog size does not affect whether
 automatic mode is applied.
 
 Automatic mode uses the provider-native Responses `tool_search` contract only
-on native Responses routes with automatic or unspecified `tool_choice`.
+for tools on OpenAI models, and only on native Responses routes with automatic
+or unspecified `tool_choice`.
 Converted protocols, explicit tool choices, and WebSocket payloads keep the
 ordinary full catalog path. If a compatible native endpoint rejects the
 deferred fields, Relay retries once before output without optimization. This

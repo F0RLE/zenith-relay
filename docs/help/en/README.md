@@ -431,7 +431,8 @@ payback estimate. An API source offers an automatic or manual failure recovery
 delay. It cannot shorten a provider's mandatory retry delay. Select **Save
 policy** to apply the dialog's changes; **Cancel** discards them.
 
-**Save preset** and **Apply preset** transfer membership, rotation, and model
+In the pool's **⋯** menu, **Save preset** and **Apply preset** transfer
+membership, rotation, and model
 settings. A preset contains no keys, sign-ins, actual quota balance, or request
 history. Relay previews changes and matches members to existing connections
 before applying it.
@@ -471,15 +472,14 @@ when needed. Unsupported conversion options fail before generation;
 native routes preserve provider-specific parameters. Realtime, cross-format
 WebSocket, audio/video conversion and server-side tool emulation are not offered.
 
-### Model substitution protection
+### Basis Points
 
-**Model substitution protection** is available in the **API** tab.
-It enables the alternative **Excel / Basis Points**
-route for compatible OpenAI accounts. This mode is intended to work around
-possible substitution of the selected model, but Relay
-cannot verify which model actually runs the request at the provider. Changes
-save immediately and apply to all compatible accounts. The route used is still
-shown in request details under **Usage**.
+**Use Basis Points** is available in the **API** tab. For ChatGPT accounts in
+the pool it sends requests through Excel instead of Responses. It may help a
+degraded account generate, but Relay does not guarantee that and cannot verify
+which model actually runs the request at OpenAI. Changes save immediately and
+apply to every compatible ChatGPT account. The route used is still shown in
+request details under **Usage**.
 
 The route shares the account's quota and rotation slot. Applications can use
 any of Relay's four supported request formats; client tool calls and results
@@ -493,17 +493,18 @@ field or use another route.
 
 If Excel / Basis Points returns `adapter_upstream_response_invalid` with
 `output.run_officejs.code`, the model generated invalid JSON for a tool call.
-Relay does not execute that call or cool down the account; retry the request
-manually. Share the error code and request ID, if available, for diagnosis;
-do not share tool arguments.
+Relay does not execute that call and regenerates the response once with a short
+format hint. If the retry is malformed again, Relay returns a terminal 502 and
+does not cool down the account. Share the error code and request ID, if
+available, for diagnosis; do not share tool arguments.
 
 ### Tool optimization
 
-Tools let an agent perform actions such as reading files or searching.
-Applications send their descriptions with requests. Relay can either send that
-catalog normally or ask a compatible provider to load large schemas on demand.
-Relay never hides tools by name or uses this setting as an execution permission
-boundary.
+The switch is on the **API** tab and applies to tools on OpenAI models.
+While it is off, the tool list is sent as the application provided it. When it
+is on, a normal Responses route opens schemas only when they are needed and
+does not cut the list. Excel, other models, and converted routes still send
+the full list. This is not permission to run or block an action.
 
 #### Setup
 
@@ -525,8 +526,9 @@ boundary.
   normal catalog behavior; Relay does not guess relevance from prompt text or
   truncate the list.
 
-Provider-native deferred loading is used only where the selected route is
-native Responses and the request uses automatic or unspecified `tool_choice`.
+Provider-native deferred loading is used only for tools on OpenAI models,
+where the selected route is native Responses and the request uses automatic or
+unspecified `tool_choice`.
 Individual flat functions still expose their names and descriptions; namespaces
 provide larger context savings because their parameter schemas stay out of the
 initial model context. Relay does not invent namespaces or perform local
@@ -626,13 +628,20 @@ response text or secrets.
 
 ## 6. Recovery
 
-This section is available in **Computer** mode and manages client
-application configuration on this device.
+This section is available in **Computer** mode. **Create snapshot** only saves
+a copy and does not change the current settings.
 
-**ChatGPT snapshots** are named copies of configuration and sign-in state.
-Restoring a selected snapshot replaces current settings and sign-in with its
-contents. This is an explicit return to that saved state, so check the
-snapshot's name and date.
+**ChatGPT.** A snapshot stores `config.toml` settings and the `auth.json`
+sign-in under the name you enter. You can keep several copies. **Restore**
+replaces the current settings and sign-in with the selected copy. The model
+catalog is not part of this snapshot.
+
+**OpenCode.** One configuration file is saved: `opencode.json`,
+`opencode.jsonc`, or `config.json`. The first copy stays until you restore it;
+creating another does not add a history. **Restore** replaces the current file
+with that copy.
+
+**Open backups folder** opens the folder that holds these files.
 
 The automatic backup made before connecting ChatGPT to Relay is separate.
 Disconnecting undoes only unchanged Relay-owned `config.toml` fields and restores
@@ -648,10 +657,7 @@ A catalog refresh will not overwrite it. Before reconnecting, preserve or move
 that file out of the backup folder if needed; Relay will not replace it without
 verification.
 
-OpenCode keeps an original configuration snapshot, created manually or before
-the first connection. It remains until restored; reconnecting does not build
-a history of new snapshots. Restoring it and resetting all Relay data are
-different actions.
+Restoring a snapshot and resetting all Relay data are different actions.
 
 ## 7. Settings
 
@@ -750,7 +756,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `adapter_binding_unsupported`, `source_protocol_invalid`, `source_pool_protocol_unsupported` | Relay could not build a compatible automatic route for the requested protocol and model. | Refresh the source catalog and verify its API address and model ID. Use another member when the provider does not expose a compatible native path or translatable format. |
 | `adapter_invalid_request` | The adapter cannot translate the request. | Remove the field named in the message or choose a native-format source. |
 | `adapter_parameter_unsupported` | A meaningful request parameter has no lossless mapping on the selected route. | Check the field named in the message and `error.param`. Use a native route or change that option. Encrypted input history requires its compatible native route; do not delete it from the conversation. Relay does not silently discard it. |
-| `adapter_compaction_unsupported` | The adapter cannot perform this compaction operation. | Use a native Responses route for compaction or start a new task with summarized ordinary history. |
+| `adapter_compaction_unsupported` | This route cannot accept another provider's encrypted compaction checkpoint. | Codex auto-compact on any non-native model, including `/v1/responses/compact`, is handled by Relay. Use a native Responses route for a foreign checkpoint, or start a new task. |
 | `adapter_continuation_missing`, `adapter_continuation_mismatch` | Adapter continuation state is lost or belongs to another binding. | Restore the former source/adapter. Transfer complete history or start a new conversation when it is unavailable. |
 | `adapter_tool_unsupported`, `adapter_reasoning_unsupported` | The adapter cannot represent the tool or reasoning mode. | Choose a supported capability or native format. Allowing a mode in model rules does not add upstream support. |
 | `adapter_upstream_response_invalid`, `adapter_upstream_stream_invalid` | The provider response does not match a supported conversion. | Update Relay and check the source's API address and format. If reproducible, use a source with a native format and report the code and request ID. |
