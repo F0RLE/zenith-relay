@@ -560,7 +560,7 @@ impl Store {
     ) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
         let connection = self.lock()?;
         let mut statement = connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT candidate_kind, candidate_id, model,
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
                     SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens), SUM(unknown_cache_write_tokens),
@@ -579,15 +579,14 @@ impl Store {
                         COALESCE(resolved_model, requested_model, ''),
                         COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
                         COALESCE(SUM(cache_write_input_tokens), 0),
-                        COALESCE(SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') THEN cache_write_input_tokens ELSE 0 END), 0),
+                        {cache_write_buckets},
                         COALESCE(SUM(output_tokens), 0),
                         COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
                         COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
                     FROM usage_events GROUP BY 1, 2, 3
                  ) GROUP BY candidate_kind, candidate_id, model",
-            )
+                cache_write_buckets = zenith_relay_core::usage::CACHE_WRITE_TTL_BUCKET_SUMS_SQL
+            ))
             .map_err(db_error)?;
         let rows = statement
             .query_map([], |row| {

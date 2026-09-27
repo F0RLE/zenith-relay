@@ -54,19 +54,29 @@ pub struct ApiEquivalentUsage {
     pub total_tokens: Option<u64>,
 }
 
+macro_rules! cache_write_ttl_bucket_sums_sql {
+    () => {
+        "SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
+         SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
+         SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') \
+             THEN cache_write_input_tokens ELSE 0 END)"
+    };
+}
+
+/// Priced cache-write buckets in a stable order: 5 minutes, 1 hour, then unknown.
+pub const CACHE_WRITE_TTL_BUCKET_SUMS_SQL: &str = cache_write_ttl_bucket_sums_sql!();
+
 /// SQL aggregate shared by the desktop log and the user-managed server.
 /// Column order is part of the contract: input, cached input, total cache
 /// write, then the 5-minute, 1-hour, and unknown write buckets, then output,
 /// total, and the sample counts those buckets need.
-pub const API_EQUIVALENT_AGGREGATE_SQL: &str = "SUM(input_tokens), SUM(cached_input_tokens), \
-    SUM(cache_write_input_tokens), \
-    SUM(CASE WHEN cache_write_ttl = '5m' THEN cache_write_input_tokens ELSE 0 END), \
-    SUM(CASE WHEN cache_write_ttl = '1h' THEN cache_write_input_tokens ELSE 0 END), \
-    SUM(CASE WHEN cache_write_ttl IS NULL OR cache_write_ttl NOT IN ('5m', '1h') \
-        THEN cache_write_input_tokens ELSE 0 END), \
-    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
-    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
-    COUNT(output_tokens), COUNT(total_tokens)";
+pub const API_EQUIVALENT_AGGREGATE_SQL: &str = concat!(
+    "SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), ",
+    cache_write_ttl_bucket_sums_sql!(),
+    ", SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
+     COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
+     COUNT(output_tokens), COUNT(total_tokens)"
+);
 
 /// Converted SQL sums plus the sample counts that prove each bucket was observed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
