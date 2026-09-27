@@ -78,6 +78,42 @@ pub const API_EQUIVALENT_AGGREGATE_SQL: &str = concat!(
      COUNT(output_tokens), COUNT(total_tokens)"
 );
 
+/// Usage totals shared by desktop logs and the user-managed server.
+/// `speed_guard` stays local: the server uses `MAX(COALESCE(output_tokens, 0), 0)`
+/// and desktop logs use `COALESCE(output_tokens, 0)`.
+#[macro_export]
+macro_rules! usage_total_columns_sql {
+    ($speed_guard:literal) => {
+        concat!(
+            "COUNT(*), \
+    COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
+    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
+        THEN generation_ms ELSE 0 END), 0), \
+    COUNT(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
+        THEN generation_ms END), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
+        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
+        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0), \
+    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
+    COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
+    COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
+    COALESCE(SUM(output_tokens), 0), \
+    COALESCE(SUM(total_tokens), 0)",
+            ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
+            $speed_guard,
+            " THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
+            $speed_guard,
+            " THEN latency_ms ELSE 0 END), 0)"
+        )
+    };
+}
+
 /// Offsets inside [`API_EQUIVALENT_AGGREGATE_SQL`].
 /// Offset 2 is the combined cache-write sum. Priced reads skip it and use the
 /// 5-minute, 1-hour, and unknown buckets that follow.
@@ -950,5 +986,27 @@ mod pricing_tests {
         )]))
         .unwrap();
         assert_eq!(normalized.get("claude-opus-4-8"), Some(&price));
+    }
+}
+
+#[cfg(test)]
+mod usage_sql_tests {
+    #[test]
+    fn usage_total_columns_keep_the_shared_activity_prefix_and_local_speed_guard() {
+        let server =
+            crate::usage_total_columns_sql!("MAX(COALESCE(output_tokens, 0), 0) <= latency_ms");
+        let desktop = crate::usage_total_columns_sql!("COALESCE(output_tokens, 0) <= latency_ms");
+        let marker = "COALESCE(SUM(total_tokens), 0)";
+        let server_at = server.find(marker).unwrap() + marker.len();
+        let desktop_at = desktop.find(marker).unwrap() + marker.len();
+        assert_eq!(&server[..server_at], &desktop[..desktop_at]);
+        assert_eq!(
+            &server[server_at..],
+            ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms THEN latency_ms ELSE 0 END), 0)"
+        );
+        assert_eq!(
+            &desktop[desktop_at..],
+            ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN latency_ms ELSE 0 END), 0)"
+        );
     }
 }

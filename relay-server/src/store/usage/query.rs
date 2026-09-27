@@ -16,32 +16,8 @@ use zenith_relay_core::{
     sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ObservedUsageSums,
 };
 
-pub(super) const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
-    COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
-    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
-    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
-        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
-        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
-        THEN generation_ms ELSE 0 END), 0), \
-    COUNT(CASE WHEN success != 0 AND generation_ms > 0 \
-        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
-        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
-        THEN generation_ms END), \
-    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
-        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
-        AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
-        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0), \
-    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
-    COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
-    COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
-    COALESCE(SUM(output_tokens), 0), \
-    COALESCE(SUM(total_tokens), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
-        AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms \
-        THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
-        AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms \
-        THEN latency_ms ELSE 0 END), 0)";
+pub(super) const USAGE_TOTAL_COLUMNS: &str =
+    zenith_relay_core::usage_total_columns_sql!("MAX(COALESCE(output_tokens, 0), 0) <= latency_ms");
 
 const USAGE_PRICING_AGGREGATE_COLUMNS: &str =
     zenith_relay_core::usage::API_EQUIVALENT_AGGREGATE_SQL;
