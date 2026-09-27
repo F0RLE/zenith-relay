@@ -14,40 +14,33 @@ async function savedTiers(page: Page) {
   });
 }
 
+function speedControl(page: Page) {
+  return page.getByRole("radiogroup", { name: "Request speed" });
+}
+
 for (const mode of ["local", "remote"] as const) {
-  test(`${mode} pool speed drags across all modes and saves only on release`, async ({ page }) => {
+  test(`${mode} pool speed selects each mode and keeps it after leaving the page`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
-    const speed = page.getByRole("slider", { name: "Request speed" });
-    await expect(speed).toHaveValue("0");
-    await expect(speed).toHaveAttribute("aria-valuetext", "Standard");
-    await expect(page.getByRole("switch", { name: "Request speed" })).toHaveCount(0);
-    await expect(page.locator(".pool-speed-control button")).toHaveCount(0);
-    const box = (await speed.boundingBox())!;
-    const y = box.y + box.height / 2;
-    await page.mouse.move(box.x + box.width / 6, y);
-    await page.mouse.down();
-    await page.mouse.move(box.x + box.width / 2, y, { steps: 8 });
-    await expect(speed).toHaveAttribute("aria-valuetext", "Fast");
+    const speed = speedControl(page);
+    await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
+    await speed.getByRole("radio", { name: "Standard", exact: true }).click();
     expect(await savedTiers(page)).toEqual([]);
-    await page.mouse.move(box.x + box.width * 5 / 6, y, { steps: 8 });
-    await expect(speed).toHaveAttribute("aria-valuetext", "Ultrafast");
-    expect(await savedTiers(page)).toEqual([]);
-    await page.mouse.up();
-    await expect(speed).toBeEnabled();
-    await expect.poll(() => savedTiers(page)).toEqual(["ultrafast"]);
+    await speed.getByRole("radio", { name: "Fast", exact: true }).click();
+    await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
+    await speed.getByRole("radio", { name: "Ultrafast", exact: true }).click();
+    await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeEnabled();
+    await expect.poll(() => savedTiers(page)).toEqual(["fast", "ultrafast"]);
 
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("button", { name: "Pool", exact: true }).click();
-    await expect(speed).toHaveValue("2");
-    await speed.press("ArrowLeft");
-    await expect(speed).toBeEnabled();
-    await expect(speed).toHaveAttribute("aria-valuetext", "Fast");
-    await speed.press("Home");
-    await expect(speed).toBeEnabled();
-    await expect(speed).toHaveValue("0");
-    await expect.poll(() => savedTiers(page)).toEqual(["ultrafast", "fast", "standard"]);
+    await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeChecked();
+    await speed.getByRole("radio", { name: "Ultrafast", exact: true }).press("ArrowLeft");
+    await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
+    await speed.getByRole("radio", { name: "Fast", exact: true }).press("Home");
+    await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
+    await expect.poll(() => savedTiers(page)).toEqual(["fast", "ultrafast", "fast", "standard"]);
   });
 
   test(`${mode} pool speed restores its saved position after a failed save`, async ({ page }, testInfo) => {
@@ -70,43 +63,26 @@ for (const mode of ["local", "remote"] as const) {
         return invoke(command, args, options);
       };
     });
-    const speed = page.getByRole("slider", { name: "Request speed" });
-    await speed.press("End");
-    await expect(speed).toBeDisabled();
-    await expect(speed).toHaveValue("2");
-    await expect(page.locator(".pool-speed-control")).toHaveAttribute("aria-busy", "true");
+    const speed = speedControl(page);
+    await speed.getByRole("radio", { name: "Ultrafast", exact: true }).click();
+    await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeDisabled();
+    await expect(speed).toHaveAttribute("aria-busy", "true");
+    await expect(speed).toHaveAttribute("data-speed-tier", "ultrafast");
     await page.locator(".pool-controls").screenshot({ path: testInfo.outputPath("saving.png") });
     await page.evaluate(() => (window as unknown as { __REJECT_SPEED__: () => void }).__REJECT_SPEED__());
-    await expect(speed).toBeEnabled();
-    await expect(speed).toHaveValue("0");
-    await expect(speed).toHaveAttribute("aria-valuetext", "Standard");
-    await expect(page.locator(".pool-speed-control")).toHaveAttribute("aria-busy", "false");
+    await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeEnabled();
+    await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
+    await expect(speed).toHaveAttribute("aria-busy", "false");
   });
 }
-
-test("pool speed discards a cancelled drag without changing the runtime", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("slider", { name: "Request speed" });
-  const box = (await speed.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 6, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 5 / 6, box.y + box.height / 2, { steps: 8 });
-  await expect(speed).toHaveValue("2");
-  await speed.dispatchEvent("pointercancel");
-  await page.mouse.up();
-  await expect(speed).toHaveValue("0");
-  expect(await savedTiers(page)).toEqual([]);
-});
 
 test("remote pool speed works without optional runtime routing telemetry", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["accounts", "sources", "models"] });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("slider", { name: "Request speed" });
-  await speed.press("End");
-  await expect(speed).toBeEnabled();
+  const speed = speedControl(page);
+  await speed.getByRole("radio", { name: "Ultrafast", exact: true }).click();
+  await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeEnabled();
   await expect.poll(() => savedTiers(page)).toEqual(["ultrafast"]);
 });
 
@@ -116,12 +92,12 @@ test.describe("touch pool speed", () => {
     await installTauriMock(page, { mode: "local", locale: "en", populated: true });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).tap();
-    const speed = page.getByRole("slider", { name: "Request speed" });
-    const box = (await speed.boundingBox())!;
-    for (const [position, tier] of [[1, "Fast"], [2, "Ultrafast"], [0, "Standard"]] as const) {
-      await page.touchscreen.tap(box.x + box.width * (position + 0.5) / 3, box.y + box.height / 2);
-      await expect(speed).toBeEnabled();
-      await expect(speed).toHaveAttribute("aria-valuetext", tier);
+    const speed = speedControl(page);
+    for (const tier of ["Fast", "Ultrafast", "Standard"] as const) {
+      const option = speed.getByRole("radio", { name: tier, exact: true });
+      await option.tap();
+      await expect(option).toBeEnabled();
+      await expect(option).toBeChecked();
     }
     expect(await savedTiers(page)).toEqual(["fast", "ultrafast", "standard"]);
   });
@@ -134,21 +110,24 @@ for (const theme of ["light", "dark"] as const) {
       await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true });
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
-      const speed = page.getByRole("slider", { name: "Скорость запроса" });
+      const speed = page.getByRole("radiogroup", { name: "Скорость запроса" });
       await expect(speed).toBeVisible();
-      for (const [key, tier] of [["Home", "standard"], ["ArrowRight", "fast"], ["End", "ultrafast"]]) {
-        await speed.press(key);
-        await expect(speed).toBeEnabled();
-        await expect(page.locator(".pool-speed-control")).toHaveAttribute("data-speed-tier", tier);
+      for (const [name, tier] of [["Обычная", "standard"], ["Быстрая", "fast"], ["Сверхбыстрая", "ultrafast"]] as const) {
+        const option = speed.getByRole("radio", { name, exact: true });
+        await option.click();
+        await expect(option).toBeEnabled();
+        await expect(speed).toHaveAttribute("data-speed-tier", tier);
         await page.locator(".pool-controls").screenshot({ path: testInfo.outputPath(`${tier}.png`), animations: "disabled" });
-        expect(await page.locator(".pool-speed-current").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-        expect(await page.locator(".pool-speed-control").evaluate((element) => {
-          const rect = element.getBoundingClientRect();
-          const label = element.querySelector(".pool-speed-current")!.getBoundingClientRect();
-          const slider = element.querySelector(".pool-speed-switch")!.getBoundingClientRect();
-          return rect.width === 200 && rect.height === 34 && label.right <= slider.left && slider.right <= rect.right;
+        expect(await speed.locator("button.active span").evaluate((element) => {
+          const control = element.closest(".pool-speed-control")!.getBoundingClientRect();
+          const text = element.getBoundingClientRect();
+          return element.scrollWidth <= element.clientWidth + 1 && text.left >= control.left && text.right <= control.right;
         })).toBe(true);
-        expect(await page.locator(".pool-speed-control").evaluate((element) => {
+        expect(await speed.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width === 200 && rect.height === 34;
+        })).toBe(true);
+        expect(await speed.evaluate((element) => {
           const rect = element.getBoundingClientRect();
           const group = element.closest(".pool-member-toolbar")!.getBoundingClientRect();
           return rect.left >= group.left && rect.right <= group.right && rect.left >= 0 && rect.right <= innerWidth;
@@ -164,10 +143,8 @@ test("pool speed animation respects reduced motion", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("slider", { name: "Request speed" });
-  await speed.press("End");
-  await expect(speed).toBeEnabled();
-  await expect(speed).toHaveAttribute("aria-valuetext", "Ultrafast");
-  expect(await page.locator(".pool-speed-label").evaluate((element) => getComputedStyle(element).animationName)).toBe("none");
-  expect(await page.locator(".pool-speed-selection").evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
+  const speed = speedControl(page);
+  await speed.getByRole("radio", { name: "Ultrafast", exact: true }).click();
+  await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeEnabled();
+  expect(await speed.locator("button.active").evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
 });

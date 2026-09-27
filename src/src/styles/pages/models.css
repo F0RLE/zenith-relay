@@ -52,7 +52,7 @@
   table-layout: fixed;
 }
 
-.model-rules-table col[data-column="actions"] { width: 286px; }
+.model-rules-table col[data-column="actions"] { width: 328px; }
 
 .model-rules-table th,
 .model-rules-table td {
@@ -660,56 +660,11 @@
   margin-right: auto;
 }
 
-.model-speed-toggle {
+.model-rule-actions .pool-speed-control {
+  flex: 1 1 auto;
+  width: auto;
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
-}
-
-.model-speed-select,
-.model-speed-select .relay-option-trigger {
-  width: 164px;
-  min-width: 0;
-}
-
-.model-speed-select .relay-option-trigger {
-  height: 34px;
-  gap: 7px;
-  padding: 4px 9px;
-  color: var(--relay-secondary);
-  font-weight: 500;
-}
-
-.model-speed-select .relay-option-trigger:hover:not(:disabled),
-.model-speed-select .relay-option-trigger[aria-expanded="true"] {
-  border-color: var(--relay-accent);
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent);
-}
-
-.model-speed-toggle[data-speed-tier="fast"] .relay-option-trigger,
-.model-speed-toggle[data-speed-tier="ultrafast"] .relay-option-trigger {
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent);
-}
-
-.model-speed-select .relay-option-trigger > svg {
-  width: 15px;
-  height: 15px;
-  color: inherit;
-}
-
-.model-speed-unavailable {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: var(--relay-muted);
-}
-
-.model-speed-unavailable svg {
-  width: 14px;
-  height: 14px;
+  max-width: 200px;
 }
 
 @media (max-width: 900px) {
@@ -752,14 +707,6 @@
   }
   .model-rules-table tbody tr[data-model-id] td:first-child { border-bottom: 0; }
   .model-rules-table tbody tr[data-model-id] td:last-child { padding-top: 0; }
-  .model-speed-select,
-  .model-speed-select .relay-option-trigger { width: 148px; }
-  .model-speed-select .relay-option-trigger > span {
-    white-space: normal;
-    overflow-wrap: anywhere;
-    text-align: center;
-    line-height: 1.15;
-  }
 }
 
 .relay-dialog.member-policy-dialog {
@@ -849,7 +796,8 @@
   }
 }
 
-.relay-dialog.member-policy-dialog:has(.member-price-section .source-price-table[data-cache-write="true"]) {
+.relay-dialog.member-policy-dialog:has(.member-price-section .source-price-table[data-cache-write="anthropic"]),
+.relay-dialog.member-policy-dialog:has(.member-price-section .source-price-table[data-cache-write="openai"]) {
   width: min(940px, 100%);
 }
 
@@ -1035,8 +983,16 @@
   --member-price-columns: 3;
 }
 
-.member-price-section:has(.source-price-table[data-cache-write="true"]) {
+.member-price-section:has(.source-price-table[data-cache-write="anthropic"]) {
   --member-price-columns: 5;
+}
+
+.source-price-table[data-cache-write="anthropic"] {
+  --member-price-columns: 5;
+}
+
+.source-price-table[data-cache-write="openai"] {
+  --member-price-columns: 4;
 }
 
 .member-price-section .source-price-table {

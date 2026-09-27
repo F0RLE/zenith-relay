@@ -167,14 +167,14 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
             <td><code className="connection-host" data-relay-tooltip={source.baseUrl}>{sourceHost(source.baseUrl)}</code></td>
             <td><span className="connection-model-count">{source.models.length}</span></td>
             <td className="row-actions-cell"><div className="row-actions">
-              <IconButton label={t("sources.launch")} icon={<Play aria-hidden />} busy={launchBusy} disabled={launchDisabled} title={launchTitle} onClick={() => setLaunchSourceId(source.id)} />
-              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
               <ActionMenu>
                 <ActionMenuItem icon={busy === `source-refresh-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => onRefresh(source.id)}>{t("sources.refreshData")}</ActionMenuItem>
                 {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}`} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
+              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
+              <IconButton label={t("sources.launch")} icon={<Play aria-hidden />} busy={launchBusy} disabled={launchDisabled} title={launchTitle} onClick={() => setLaunchSourceId(source.id)} />
             </div></td>
           </tr>;
         })}</tbody>

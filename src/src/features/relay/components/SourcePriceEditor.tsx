@@ -76,19 +76,30 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   );
   const content = <div className="source-price-content"><div className="source-price-groups">
       {groups.map((group) => {
-        const cacheWrite = group.items.some((model) => cacheWriteModels.has(model.toLowerCase()));
+        const anthropicWrites = group.provider === "anthropic" && group.items.some((model) => cacheWriteModels.has(model.toLowerCase()));
+        const openAiWrites = group.provider === "openai" && group.items.some((model) => {
+          const key = model.toLowerCase();
+          return cacheWritePrices(model).fiveMinutes != null || Boolean(drafts[key]?.cacheWrite5m.trim());
+        });
+        const cacheWriteKind = anthropicWrites ? "anthropic" : openAiWrites ? "openai" : "none";
         const groupEnabledCount = modelSelectionEnabled
           ? group.items.filter((model) => enabledModelIds.has(model.toLowerCase())).length
           : group.items.length;
+        const writeHeadings = cacheWriteKind === "anthropic"
+          ? <><span>{t("sources.cacheWrite5mPrice")}</span><span>{t("sources.cacheWrite1hPrice")}</span></>
+          : cacheWriteKind === "openai"
+            ? <span>{t("sources.cacheWrite30mPrice")}</span>
+            : null;
         return <details key={group.id} className="source-price-group" open={presentation === "member" || undefined}>
           <summary><strong>{group.provider === "other" ? t("modelGroups.other") : group.label}</strong><span>{modelSelectionEnabled ? `${t("common.enabled")}: ${groupEnabledCount}/${group.items.length}` : t("sources.groupModelsCount", { count: group.items.length })}</span><ChevronDown aria-hidden /></summary>
-          <div className={`source-price-table${compactRows ? " source-price-table-compact" : ""}`} data-cache-write={cacheWrite ? "true" : "false"}>
-            {compactRows ? <div className="member-price-grid-head"><span>{t("common.model")}</span><div><span>{t("sources.inputPrice")}</span><span>{t("sources.outputPrice")}</span><span>{t("sources.cachedInputPrice")}</span>{cacheWrite ? <><span>{t("sources.cacheWrite5mPrice")}</span><span>{t("sources.cacheWrite1hPrice")}</span></> : null}</div><span /></div> : <div className="source-price-grid-head"><span>{t("common.model")}</span><span>{t("sources.inputPrice")}</span><span>{t("sources.outputPrice")}</span><span>{t("sources.cachedInputPrice")}</span>{cacheWrite ? <><span>{t("sources.cacheWrite5mPrice")}</span><span>{t("sources.cacheWrite1hPrice")}</span></> : null}<span /></div>}
+          <div className={`source-price-table${compactRows ? " source-price-table-compact" : ""}`} data-cache-write={cacheWriteKind}>
+            {compactRows ? <div className="member-price-grid-head"><span>{t("common.model")}</span><div><span>{t("sources.inputPrice")}</span><span>{t("sources.outputPrice")}</span><span>{t("sources.cachedInputPrice")}</span>{writeHeadings}</div><span /></div> : <div className="source-price-grid-head"><span>{t("common.model")}</span><span>{t("sources.inputPrice")}</span><span>{t("sources.outputPrice")}</span><span>{t("sources.cachedInputPrice")}</span>{writeHeadings}<span /></div>}
             {group.items.map((model) => {
               const key = model.toLowerCase();
               const draft = drafts[key];
               const inherited = detectedPrices.get(key) ?? catalogPrices.get(key);
-              const showWrites = cacheWriteModels.has(key);
+              const showAnthropicWrites = cacheWriteKind === "anthropic" && cacheWriteModels.has(key);
+              const showOpenAiWrite = cacheWriteKind === "openai" && (cacheWritePrices(model).fiveMinutes != null || Boolean(draft?.cacheWrite5m.trim()));
               const writePrices = cacheWritePrices(model);
               const enabled = !modelSelectionEnabled || enabledModelIds.has(key);
               return <div className="source-price-row" key={key} data-custom-price={draft ? "true" : "false"} data-member-model-id={modelSelectionEnabled ? model : undefined} data-enabled={modelSelectionEnabled ? String(enabled) : undefined}>
@@ -100,10 +111,13 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                   <PriceInput label={t("sources.inputPriceFor", { model })} caption={compactRows ? t("sources.inputPrice") : undefined} value={draft?.input ?? ""} placeholder={formatModelPricePlaceholder(inherited?.inputMicroUsdPerMillion)} invalid={draft != null && parseEditableModelPrice(draft.input) == null} onChange={(value) => setField(key, "input", value)} />
                   <PriceInput label={t("sources.outputPriceFor", { model })} caption={compactRows ? t("sources.outputPrice") : undefined} value={draft?.output ?? ""} placeholder={formatModelPricePlaceholder(inherited?.outputMicroUsdPerMillion)} invalid={draft != null && parseEditableModelPrice(draft.output) == null} onChange={(value) => setField(key, "output", value)} />
                   <PriceInput label={t("sources.cachedInputPriceFor", { model })} caption={compactRows ? t("sources.cachedInputPrice") : undefined} value={draft?.cached ?? ""} placeholder={formatModelPricePlaceholder(inherited?.cachedInputMicroUsdPerMillion)} invalid={draft != null && draft.cached.trim() !== "" && parseEditableModelPrice(draft.cached) == null} onChange={(value) => setField(key, "cached", value)} />
-                  {showWrites ? <>
+                  {showAnthropicWrites ? <>
                     <PriceInput label={t("sources.cacheWrite5mPriceFor", { model })} caption={compactRows ? t("sources.cacheWrite5mPrice") : undefined} value={draft?.cacheWrite5m ?? ""} placeholder={formatModelPricePlaceholder(writePrices.fiveMinutes)} invalid={draft != null && draft.cacheWrite5m.trim() !== "" && parseEditableModelPrice(draft.cacheWrite5m) == null} onChange={(value) => setField(key, "cacheWrite5m", value)} />
                     <PriceInput label={t("sources.cacheWrite1hPriceFor", { model })} caption={compactRows ? t("sources.cacheWrite1hPrice") : undefined} value={draft?.cacheWrite1h ?? ""} placeholder={formatModelPricePlaceholder(writePrices.oneHour)} invalid={draft != null && draft.cacheWrite1h.trim() !== "" && parseEditableModelPrice(draft.cacheWrite1h) == null} onChange={(value) => setField(key, "cacheWrite1h", value)} />
-                  </> : cacheWrite ? <><span className="source-price-empty" aria-hidden /><span className="source-price-empty" aria-hidden /></> : null}
+                  </> : showOpenAiWrite ? <PriceInput label={t("sources.cacheWrite30mPriceFor", { model })} caption={compactRows ? t("sources.cacheWrite30mPrice") : undefined} value={draft?.cacheWrite5m ?? ""} placeholder={formatModelPricePlaceholder(writePrices.fiveMinutes)} invalid={draft != null && draft.cacheWrite5m.trim() !== "" && parseEditableModelPrice(draft.cacheWrite5m) == null} onChange={(value) => setField(key, "cacheWrite5m", value)} />
+                    : cacheWriteKind === "anthropic" ? <><span className="source-price-empty" aria-hidden /><span className="source-price-empty" aria-hidden /></>
+                    : cacheWriteKind === "openai" ? <span className="source-price-empty" aria-hidden />
+                    : null}
                 </div>
                 {draft ? <IconButton label={t("sources.useDefaultPrice", { model })} icon={<RotateCcw aria-hidden />} onClick={() => reset(key)} /> : <span className="source-price-action" />}
               </div>;

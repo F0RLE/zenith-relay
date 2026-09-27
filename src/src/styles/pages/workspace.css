@@ -1,0 +1,175 @@
+.relay-page-header.relay-workspace-header {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px 24px;
+  min-height: 0;
+  padding: 24px 0 16px;
+  border: 0;
+  background: var(--relay-bg);
+}
+
+.relay-workspace-header h1 {
+  font-size: 24px;
+  line-height: 32px;
+  letter-spacing: -.5px;
+}
+
+.relay-workspace-header .relay-page-actions {
+  width: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pool-header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.relay-page-navigation {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.relay-workspace-header .relay-tabs {
+  height: auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  overflow: visible;
+  border: 0;
+}
+
+.relay-workspace-header .relay-tabs button {
+  height: 34px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+.relay-workspace-header .relay-tabs button.active {
+  color: var(--relay-accent-hover);
+  background: var(--relay-accent-soft);
+}
+
+.relay-workspace-header .relay-tabs button:hover:not(.active) {
+  background: var(--relay-surface);
+  color: var(--relay-text);
+}
+
+.relay-workspace-header .relay-button,
+.relay-workspace-header .relay-icon-button,
+.relay-workspace-header .relay-action-menu > summary {
+  min-height: 36px;
+  border-radius: 7px;
+}
+
+.relay-workspace-header .relay-button {
+  padding-inline: 12px;
+}
+
+.relay-workspace-header .relay-icon-button {
+  width: 36px;
+  height: 36px;
+}
+
+.relay-workspace-header .relay-action-menu > summary {
+  width: 36px;
+  height: 36px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.relay-workspace-header .relay-action-menu > summary:hover,
+.relay-workspace-header .relay-action-menu[open] > summary {
+  background: var(--relay-surface);
+}
+
+.workspace-controls {
+  container-type: inline-size;
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
+}
+
+.workspace-controls .relay-status-summary {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+.workspace-controls .relay-status-summary strong {
+  font-size: 16px;
+}
+
+.workspace-controls .relay-status-summary > [data-summary="provider-credits"] > svg {
+  color: var(--relay-accent-hover);
+}
+
+.relay-workspace-page .connections-toolbar {
+  margin-block: 0 16px;
+  min-height: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
+}
+
+@media (min-width: 1400px) {
+  .relay-page-header.relay-workspace-header {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding-block: 24px;
+  }
+
+  .relay-workspace-header .relay-page-actions {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .relay-workspace-header .relay-page-navigation {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 620px) {
+  .relay-page-header.relay-workspace-header {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding-block: 18px 14px;
+  }
+
+  .relay-workspace-header .relay-page-actions,
+  .relay-workspace-header .pool-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .relay-workspace-header .relay-tabs button {
+    padding-inline: 10px;
+    font-size: 12px;
+  }
+
+  .relay-workspace-header .pool-header-actions [data-action="pool-connect"] > svg {
+    display: none;
+  }
+
+  .relay-workspace-header .pool-header-actions .relay-button {
+    padding-inline: 10px;
+  }
+
+  .relay-workspace-header .pool-header-actions {
+    gap: 6px;
+  }
+
+  .workspace-controls {
+    padding: 12px;
+  }
+}

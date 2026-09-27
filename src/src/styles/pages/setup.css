@@ -779,10 +779,16 @@
   padding: 8px 10px;
 }
 
-.source-price-table:not(.source-price-table-compact)[data-cache-write="true"] > .source-price-grid-head,
-.source-price-table:not(.source-price-table-compact)[data-cache-write="true"] > .source-price-row {
+.source-price-table:not(.source-price-table-compact)[data-cache-write="anthropic"] > .source-price-grid-head,
+.source-price-table:not(.source-price-table-compact)[data-cache-write="anthropic"] > .source-price-row {
   min-width: 820px;
   grid-template-columns: minmax(178px, 1.45fr) repeat(5, minmax(104px, 1fr)) 34px;
+}
+
+.source-price-table:not(.source-price-table-compact)[data-cache-write="openai"] > .source-price-grid-head,
+.source-price-table:not(.source-price-table-compact)[data-cache-write="openai"] > .source-price-row {
+  min-width: 740px;
+  grid-template-columns: minmax(178px, 1.45fr) repeat(4, minmax(104px, 1fr)) 34px;
 }
 
 .source-price-grid-head {

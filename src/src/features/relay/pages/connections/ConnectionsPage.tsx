@@ -128,10 +128,10 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   });
 
   return (
-    <section className="relay-page" data-view={view}>
+    <section className="relay-page relay-workspace-page" data-view={view}>
       <PageHeader
         title={t("nav.connections")}
-        subtitle={t(`connections.subtitles.${mode}`)}
+        navigation={<Tabs value={view} items={tabs} onChange={(id) => { if (id === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, id); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(id as ConnectionView); }} label={t("connections.views")} />}
         actions={
           <>
             {view === "accounts" && mode === "local" ? (
@@ -145,7 +145,6 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           </>
         }
       />
-      <Tabs value={view} items={tabs} onChange={(id) => { if (id === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, id); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(id as ConnectionView); }} label={t("connections.views")} />
       {showSourceToolbar ? <div className="table-toolbar connections-toolbar relay-compact-content">
         <label className="search-field">
           <span className="sr-only">{t("common.search")}</span>

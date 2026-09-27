@@ -137,14 +137,6 @@
   .relay-page-actions .relay-button span {
     white-space: normal;
   }
-  .pool-header-actions,
-  .pool-preset-actions {
-    flex-wrap: wrap;
-  }
-  .pool-header-actions {
-    width: 100%;
-    justify-content: flex-start;
-  }
   .metric-band,
   .runtime-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -181,7 +173,7 @@
     gap: 6px 10px;
   }
   .overview-token-trend-body {
-    grid-template-columns: 42px minmax(0, 1fr) 34px;
+    grid-template-columns: 42px minmax(0, 1fr);
     gap: 6px;
   }
   .overview-chart-body {
@@ -249,14 +241,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .subscription-plan-order-row,
-  .pool-speed-control,
-  .pool-speed-selection,
-  .pool-speed-rail::after {
+  .pool-speed-control button {
     transition: none;
   }
-
-  .pool-speed-label {
-    animation: none;
-  }
-
 }

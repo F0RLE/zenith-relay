@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ToolPolicy } from "../../api/types";
@@ -18,6 +18,7 @@ export function ToolPolicyControl() {
 function ToolPolicyEditor({ saved }: { saved: ToolPolicy }) {
   const { t } = useTranslation();
   const { mode, busy, perform } = useRelayState();
+  const id = useId();
   const [policyMode, setPolicyMode] = useState(saved.mode);
   const saving = busy === "tool-policy";
   useEffect(() => {
@@ -35,10 +36,13 @@ function ToolPolicyEditor({ saved }: { saved: ToolPolicy }) {
       : relayCommands.setRemoteToolPolicy(input), "feedback.saved");
     if (!success) setPolicyMode(saved.mode);
   };
-  return <div className="gateway-tool-policy gateway-api-toggle-setting">
+  return <div className="gateway-tool-policy gateway-api-toggle-setting" aria-busy={saving}>
     <div className="relay-toggle-setting">
-      <strong>{t("toolPolicy.title")}</strong>
-      <ToggleSwitch label={t("toolPolicy.optimize")} checked={policyMode === "automatic"} disabled={saving}
+      <label htmlFor={id} data-relay-tooltip={t("toolPolicy.hint")}>
+        <strong>{t("toolPolicy.title")}</strong>
+        <span id={`${id}-description`}>{t("toolPolicy.description")}</span>
+      </label>
+      <ToggleSwitch id={id} label={t("toolPolicy.optimize")} aria-describedby={`${id}-description`} checked={policyMode === "automatic"} disabled={saving}
         onChange={(checked) => void changeMode(checked)} />
     </div>
   </div>;

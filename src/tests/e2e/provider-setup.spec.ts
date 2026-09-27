@@ -17,13 +17,8 @@ for (const failedStep of ["state", "membership"] as const) {
     await error.locator("footer").getByRole("button", { name: "Close", exact: true }).click();
     await page.getByRole("dialog", { name: failedStep === "state" ? "Add API source" : "Edit source", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
     await expect(error).toBeHidden();
-    const editor = page.getByRole("dialog", { name: "Edit source", exact: true });
-    if (failedStep === "state") {
-      await expect(editor).toBeVisible();
-      await editor.getByRole("button", { name: "Cancel", exact: true }).click();
-    } else {
-      await expect(editor).toBeHidden();
-    }
+    await expect(page.getByRole("dialog", { name: "Add API source", exact: true })).toBeHidden();
+    await expect(page.getByRole("dialog", { name: "Edit source", exact: true })).toBeHidden();
     await expect(page.locator(".pool-member-card")).toHaveCount(1);
     const calls = await page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceIds?: string[] } } }>;
@@ -63,7 +58,7 @@ test("provider picker supports keyboard selection and preserves edits to the sel
   await expect(dialog.getByLabel("Upstream API key")).toHaveValue("synthetic-provider-key");
   await expect(dialog.getByRole("radio")).toHaveCount(4);
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Edit source" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   const input = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: unknown } }>;
   }).__TAURI_TEST_INVOKES__.find((call) => call.command === "create_local_source")?.args.input);
@@ -97,7 +92,7 @@ for (const theme of ["light", "dark"] as const) {
       }))).toBe(true);
       await page.screenshot({ path: `output/playwright/provider-custom-${theme}-${viewport.width}.png`, animations: "disabled" });
       await dialog.getByRole("button", { name: "Сохранить", exact: true }).click();
-      await expect(page.getByRole("dialog", { name: "Изменить источник" })).toBeVisible();
+      await expect(page.getByRole("dialog", { name: "Добавить источник" })).toBeHidden();
     });
   }
 }

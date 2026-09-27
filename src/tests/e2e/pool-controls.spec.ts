@@ -42,8 +42,8 @@ for (const theme of ["light", "dark"] as const) {
         expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(140);
       }
       await panel.screenshot({ path: testInfo.outputPath("panel-standard.png"), animations: "disabled" });
-      await panel.getByRole("slider").press("End");
-      await expect(panel.getByRole("slider")).toBeEnabled();
+      await panel.getByRole("radio", { name: "Сверхбыстрая", exact: true }).click();
+      await expect(panel.getByRole("radio", { name: "Сверхбыстрая", exact: true })).toBeEnabled();
       await page.mouse.click(1, 1);
       await panel.screenshot({ path: testInfo.outputPath("panel.png"), animations: "disabled" });
       await page.screenshot({ path: testInfo.outputPath("pool.png"), animations: "disabled" });

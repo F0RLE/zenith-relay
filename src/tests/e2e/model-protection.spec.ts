@@ -25,7 +25,7 @@ for (const mode of ["local", "remote"] as const) {
         return original(command, args);
       };
     });
-    const toggle = page.getByRole("checkbox", { name: "Model substitution protection" });
+    const toggle = page.getByRole("checkbox", { name: "Use Basis Points" });
     await toggle.check();
     await expect(toggle).toBeChecked();
     await expect(toggle).toBeDisabled();
@@ -48,7 +48,7 @@ test("model protection can be configured before adding an eligible account to th
   await installTauriMock(page, { mode: "local", basisPointsAvailable: true, poolMembers: false });
   await page.goto("/");
   await page.getByRole("button", { name: "API", exact: true }).click();
-  const toggle = page.getByRole("checkbox", { name: "Model substitution protection" });
+  const toggle = page.getByRole("checkbox", { name: "Use Basis Points" });
   await toggle.check();
   await expect(toggle).toBeEnabled();
   await expect(toggle).toBeChecked();
@@ -58,7 +58,7 @@ test("a saved model protection setting can still be disabled when no account sup
   await installTauriMock(page, { mode: "local", basisPointsAvailable: false, basisPointsEnabled: true });
   await page.goto("/");
   await page.getByRole("button", { name: "API", exact: true }).click();
-  const toggle = page.getByRole("checkbox", { name: "Model substitution protection" });
+  const toggle = page.getByRole("checkbox", { name: "Use Basis Points" });
   await expect(toggle).toBeChecked();
   // Successful disabling removes this control when no eligible accounts remain.
   await toggle.click();
@@ -99,8 +99,8 @@ for (const theme of ["light", "dark"] as const) {
       await page.goto("/");
       await page.getByRole("button", { name: "API", exact: true }).click();
       const control = page.locator(".model-protection-control");
-      await expect(control.getByRole("checkbox", { name: "Защита от подмены модели" })).toBeVisible();
-      await expect(control).toContainText("аккаунтах OpenAI");
+      await expect(control.getByRole("checkbox", { name: "Использовать Basis Points" })).toBeVisible();
+      await expect(control).toContainText("деградировавшем аккаунте");
       expect(await control.evaluate((element) => Array.from(element.querySelectorAll("label, input")).every((node) => {
         const rect = node.getBoundingClientRect();
         return node.scrollWidth <= node.clientWidth + 1 && rect.left >= 0 && rect.right <= innerWidth;

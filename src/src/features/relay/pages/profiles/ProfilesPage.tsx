@@ -29,9 +29,8 @@ export function ProfilesPage() {
   const HeaderAction = application.HeaderAction;
   const Content = application.Content;
 
-  return <section className="relay-page profile-recovery-page">
-    <PageHeader title={t("nav.profiles")} subtitle={t("profiles.subtitle")} actions={mode === "local" && HeaderAction ? <HeaderAction key={application.id} /> : null} />
-    <Tabs value={activeTab} onChange={(value) => setActiveTab(value as RecoveryTab)} label={t("profiles.tabs.label")} items={RECOVERY_APPLICATIONS.map(({ id, labelKey }) => ({ id, label: t(labelKey) }))} />
+  return <section className="relay-page relay-workspace-page profile-recovery-page">
+    <PageHeader title={t("nav.profiles")} navigation={<Tabs value={activeTab} onChange={(value) => setActiveTab(value as RecoveryTab)} label={t("profiles.tabs.label")} items={RECOVERY_APPLICATIONS.map(({ id, labelKey }) => ({ id, label: t(labelKey) }))} />} actions={mode === "local" && HeaderAction ? <HeaderAction key={application.id} /> : null} />
     {mode === "local" ? <Content key={application.id} /> : <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} />}
   </section>;
 }

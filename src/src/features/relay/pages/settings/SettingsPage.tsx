@@ -45,8 +45,8 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           : updateCheckState === "idle" ? { status: "disabled" as const, label: t("updates.notChecked") }
             : { status: "ready" as const, label: t("update.upToDate") };
 
-  return <section className="relay-page settings-page">
-    <PageHeader title={t("nav.settings")} subtitle={t("settings.subtitle")} />
+  return <section className="relay-page relay-workspace-page settings-page">
+    <PageHeader workspace title={t("nav.settings")} />
     <div className="settings-groups">
       <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
         <div className="settings-control-row"><div><strong>{t("settings.language")}</strong></div><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void setI18nLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>

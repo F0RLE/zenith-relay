@@ -9,8 +9,8 @@ for (const width of [1160, 840, 390, 360]) {
     await page.addStyleTag({ content: ".app { font-family: Verdana, sans-serif !important; }" });
 
     for (const [view, label, selector, maxHeight] of [
-      ["connections", "Подключения", ".connections-account-controls", 90],
-      ["pool", "Пул", ".pool-controls", 140],
+      ["connections", "Подключения", ".connections-account-controls", 120],
+      ["pool", "Пул", ".pool-controls", 170],
     ] as const) {
       await page.getByRole("button", { name: label, exact: true }).click();
       const panel = page.locator(selector);
@@ -21,13 +21,14 @@ for (const width of [1160, 840, 390, 360]) {
 
     const speed = page.locator(".pool-speed-control");
     const initial = (await speed.boundingBox())!;
-    for (const key of ["Home", "ArrowRight", "End"]) {
-      await speed.getByRole("slider").press(key);
-      await expect(speed.getByRole("slider")).toBeEnabled();
-      expect(await speed.locator(".pool-speed-current").evaluate((element) => {
-        const bounds = element.getBoundingClientRect();
-        const text = element.querySelector(".pool-speed-label > span")!.getBoundingClientRect();
-        return element.scrollWidth <= element.clientWidth
+    for (const name of ["Обычная", "Быстрая", "Сверхбыстрая"]) {
+      const option = speed.getByRole("radio", { name, exact: true });
+      await option.click();
+      await expect(option).toBeEnabled();
+      expect(await speed.locator("button.active span").evaluate((element) => {
+        const bounds = element.parentElement!.getBoundingClientRect();
+        const text = element.getBoundingClientRect();
+        return element.scrollWidth <= element.clientWidth + 1
           && text.left >= bounds.left && text.right <= bounds.right;
       })).toBe(true);
       const current = (await speed.boundingBox())!;

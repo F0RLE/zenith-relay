@@ -38,10 +38,6 @@
   margin-top: 16px;
 }
 
-.gateway-page > .relay-tabs {
-  margin-top: 14px;
-}
-
 .gateway-tab-panel {
   min-width: 0;
 }
@@ -1150,6 +1146,22 @@
   background: var(--relay-surface);
   box-shadow: var(--relay-shadow-soft);
 }
+
+@container (max-width: 340px) {
+  .gateway-api-toggle-setting .relay-toggle-setting {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .gateway-api-toggle-setting .relay-toggle-setting > label {
+    flex: 1 1 100%;
+  }
+
+  .gateway-api-toggle-setting .relay-switch {
+    margin-left: auto;
+  }
+}
+
 @media (max-width: 640px) {
   .gateway-api-toggle-setting { padding: 16px 18px; }
 }

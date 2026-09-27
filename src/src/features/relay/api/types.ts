@@ -724,6 +724,14 @@ export type UsageBucket = {
   totals: UsageTotals;
 };
 
+export type CacheSessionRecord = {
+  clientContextId: string;
+  startedAt: string;
+  touchedAt: string;
+  model: string | null;
+  cacheWriteTtl: string | null;
+};
+
 export type LocalUsagePage = {
   events: LocalUsage[];
   total: number;

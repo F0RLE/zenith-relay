@@ -42,7 +42,7 @@ function AnalyticsPanel({ range, setRange, windows, analytics, loading, error, s
     <div className="overview-chart-stack">
       <TokenUsageTrend buckets={buckets} totals={totals} windows={windows} loading={loading && !hasAnalytics} />
       <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading && !hasAnalytics} />
-      <OverviewChart icon={<Activity aria-hidden />} title={t("usage.requests")} summary={formatCompactNumber(totals.requests, locale)} values={requestValues} windows={windows} variant="bars" tone="requests" formatValue={(value) => formatFullNumber(value, locale)} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Activity aria-hidden />} title={t("usage.requests")} summary={formatCompactNumber(totals.requests, locale)} values={requestValues} windows={windows} variant="bars" tone="requests" formatValue={(value) => formatFullNumber(value, locale)} formatAxis={(value) => formatFullNumber(value, locale)} loading={loading && !hasAnalytics} />
       <OverviewChart icon={<Gauge aria-hidden />} title={t("usage.generationSpeed")} summary={formatTokenSpeed(averageGenerationSpeed, locale, t("usage.tokensPerSecondUnit"))} values={generationSpeedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })} loading={loading && !hasAnalytics} />
       <OverviewChart icon={<Timer aria-hidden />} title={t("usage.summaryMetrics.e2eSpeed")} summary={formatTokenSpeed(averageE2eSpeed, locale, t("usage.tokensPerSecondUnit"))} values={e2eSpeedValues} windows={windows} variant="line" tone="e2e-speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })} loading={loading && !hasAnalytics} />
     </div>
@@ -60,7 +60,6 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
     { key: "cacheRead", label: t("overview.tokenTrend.cacheRead"), color: "cache-read", values: buckets.map((totals) => totals.cachedInputSamples ? totals.cachedInputTokens : null) },
   ];
   const maxTokens = Math.max(0, ...tokenSeries.flatMap((series) => series.values.filter((value): value is number => value != null))) || 1;
-  const cacheRateValues = buckets.map((totals) => totals.requests > 0 && totals.inputTokens > 0 && totals.cachedInputSamples ? Math.min(100, totals.cachedInputTokens / totals.inputTokens * 100) : null);
   const cacheTotals = buckets.reduce((result, totals) => {
     if (totals.cachedInputSamples > 0 && totals.inputTokens > 0) {
       result.inputTokens += totals.inputTokens;
@@ -79,21 +78,19 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
     </header>
     <div className="overview-token-trend-legend" aria-label={t("overview.tokenTrend.legend")}>
       {tokenSeries.map((series) => <span key={series.key} className={`is-${series.color}`}><i aria-hidden />{series.label}</span>)}
-      <span className="is-cache-rate"><i aria-hidden />{t("overview.tokenTrend.cacheRate")}</span>
     </div>
     <div className="overview-token-trend-body">
       <div className="overview-token-trend-axis" aria-hidden><span>{formatCompactNumber(maxTokens, locale)}</span><span>{formatCompactNumber(maxTokens / 2, locale)}</span><span>0</span></div>
       <div className="overview-token-trend-plot">
         <div className="overview-token-trend-canvas">
-          <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none"><path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />{tokenSeries.map((series) => lineSegments(series.values, maxTokens).map((path, index) => <path className={`overview-token-trend-line is-${series.color}`} d={path} key={`${series.key}-${index}`} />))}{lineSegments(cacheRateValues, 100).map((path, index) => <path className="overview-token-trend-line is-cache-rate" d={path} key={`cache-rate-${index}`} />)}</svg>
+          <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none"><path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />{tokenSeries.map((series) => lineSegments(series.values, maxTokens).map((path, index) => <path className={`overview-token-trend-line is-${series.color}`} d={path} key={`${series.key}-${index}`} />))}</svg>
           <ol className="overview-token-trend-points" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }}>
-            {windows.map((window, index) => <li key={window.startMs}>{tokenSeries.map((series) => { const value = series.values[index]; return value == null ? null : <span key={series.key} tabIndex={0} className={`overview-token-trend-dot is-${series.color}`} style={{ top: `${(1 - value / maxTokens) * 100}%` }} aria-label={`${window.fullLabel}: ${series.label} ${formatCompactNumber(value, locale)}`}><span role="tooltip">{window.fullLabel}<strong>{series.label}: {formatCompactNumber(value, locale)}</strong></span></span>; })}{cacheRateValues[index] == null ? null : <span tabIndex={0} className="overview-token-trend-dot is-cache-rate" style={{ top: `${100 - cacheRateValues[index]}%` }} aria-label={`${window.fullLabel}: ${t("overview.tokenTrend.cacheRate")} ${cacheRateValues[index].toFixed(0)}%`}><span role="tooltip">{window.fullLabel}<strong>{t("overview.tokenTrend.cacheRate")}: {cacheRateValues[index].toFixed(0)}%</strong></span></span>}</li>)}
+            {windows.map((window, index) => <li key={window.startMs}>{tokenSeries.map((series) => { const value = series.values[index]; return value == null ? null : <span key={series.key} tabIndex={0} className={`overview-token-trend-dot is-${series.color}`} style={{ top: `${(1 - value / maxTokens) * 100}%` }} aria-label={`${window.fullLabel}: ${series.label} ${formatCompactNumber(value, locale)}`}><span role="tooltip">{window.fullLabel}<strong>{series.label}: {formatCompactNumber(value, locale)}</strong></span></span>; })}</li>)}
           </ol>
           {!loading && !hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
         </div>
         <div className="overview-chart-x-axis" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }} aria-hidden>{windows.map((window) => <span key={window.startMs} data-visible={window.showLabel}>{window.label}</span>)}</div>
       </div>
-      <div className="overview-token-trend-rate-axis" aria-hidden><span>100%</span><span>50%</span><span>0%</span></div>
     </div>
   </article>;
 }

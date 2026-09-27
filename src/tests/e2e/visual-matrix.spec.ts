@@ -247,13 +247,12 @@ for (const theme of ["light", "dark"] as const) {
       expect(headerBox).not.toBeNull();
       expect(groupsBox).not.toBeNull();
       expect(Math.abs(groupsBox!.x + groupsBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(2);
-      const availableBottom = pageBox!.y + pageBox!.height - 32;
-      const availableHeight = availableBottom - (headerBox!.y + headerBox!.height);
-      if (groupsBox!.height <= availableHeight) {
-        const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
-        const bottomGap = availableBottom - (groupsBox!.y + groupsBox!.height);
-        expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(2);
-      }
+      expect(groupsBox!.width).toBeGreaterThan(pageBox!.width - 80);
+      const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
+      expect(topGap).toBeGreaterThanOrEqual(-1);
+      expect(topGap).toBeLessThanOrEqual(4);
+      await expect(page.locator(".settings-page > .relay-page-header")).toHaveClass(/relay-workspace-header/);
+      await expect(page.locator(".settings-page > .relay-page-header p")).toHaveCount(0);
       await expect(groups).toHaveCount(3);
       const boxes = await groups.evaluateAll((items) => items.map((item) => {
         const rect = item.getBoundingClientRect();
@@ -520,9 +519,11 @@ for (const viewport of viewports) {
     })).toBe(true);
     const headerActions = page.locator(".pool-header-actions");
     await expect(headerActions.locator(":scope > *")).toHaveCount(3);
-    await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Сохранить пресет", exact: true })).toBeVisible();
-    await expect(headerActions.locator(".pool-preset-actions").getByRole("button", { name: "Применить пресет", exact: true })).toBeVisible();
-    await expect(headerActions.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Сохранить пресет", "Применить пресет", "Добавить участника", "Подключить"]);
+    await headerActions.locator(".pool-preset-menu summary").click();
+    await expect(headerActions.getByRole("menuitem", { name: "Сохранить пресет", exact: true })).toBeVisible();
+    await expect(headerActions.getByRole("menuitem", { name: "Применить пресет", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(headerActions.getByRole("menu")).toBeHidden();
     await expect(headerActions.getByRole("button", { name: "Добавить участника", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toHaveCount(0);
     await expect(headerActions.getByRole("button", { name: "Подключить", exact: true })).toBeDisabled();
@@ -531,7 +532,7 @@ for (const viewport of viewports) {
       return { width: rect.width, height: rect.height, overflow: button.scrollWidth - button.clientWidth };
     }));
     expect(Math.max(...actionBoxes.map((box) => box.height)) - Math.min(...actionBoxes.map((box) => box.height))).toBeLessThanOrEqual(1);
-    expect(actionBoxes.every((box) => box.height <= 34 && box.overflow === 0)).toBe(true);
+    expect(actionBoxes.every((box) => box.height <= 36 && box.overflow === 0)).toBe(true);
     expect(actionBoxes.reduce((total, box) => total + box.width, 0)).toBeLessThan(380);
     await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
 
@@ -541,8 +542,8 @@ for (const viewport of viewports) {
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
-    await expect(poolToolbarGroups.nth(0).getByRole("slider", { name: "Скорость запроса" })).toBeVisible();
-    await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки ротации пула"]);
+    await expect(poolToolbarGroups.nth(0).getByRole("radiogroup", { name: "Скорость запроса" })).toBeVisible();
+    await expect(poolToolbarGroups.nth(0).getByRole("button", { name: "Настройки ротации пула", exact: true })).toBeVisible();
     await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
@@ -563,14 +564,11 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
     const speed = page.locator(".pool-speed-control");
-    const speedSlider = speed.getByRole("slider", { name: "Скорость запроса" });
-    await expect(speedSlider).toHaveAttribute("aria-valuetext", "Обычная");
-    await expect(speedSlider).toHaveValue("0");
-    await expect(speed.locator(".pool-speed-current")).toHaveText("Обычная");
-    await speedSlider.press("ArrowRight");
-    await expect(speedSlider).toBeEnabled();
+    await expect(speed.getByRole("radio", { name: "Обычная", exact: true })).toBeChecked();
+    await speed.getByRole("radio", { name: "Быстрая", exact: true }).click();
+    await expect(speed.getByRole("radio", { name: "Быстрая", exact: true })).toBeEnabled();
     await expect(speed).toHaveAttribute("data-speed-tier", "fast");
-    await expect(speed.locator(".pool-speed-current")).toHaveText("Быстрая");
+    await expect(speed.locator("button.active")).toHaveText("Быстрая");
     await page.screenshot({ path: `output/playwright/pool-speed-slider-ru-dark-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Ротация пула" });
@@ -978,7 +976,7 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Sources" }).click();
     const sourceActions = page.locator(".relay-table .row-actions");
-    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Launch", "Edit", "Actions"]);
+    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
     await sourceActions.locator("summary").click();
     const sourceMenu = page.getByRole("menu");
     await expect(sourceMenu.getByRole("menuitem")).toHaveCount(4);
@@ -1265,34 +1263,44 @@ for (const scenario of [
 }
 
 for (const viewport of viewports) {
-  test(`empty profile recovery is centered ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`empty profile recovery follows the workspace ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Восстановление", exact: true }).click();
 
     const recovery = page.locator(".profile-recovery.is-empty");
-    await expect(recovery.locator(".profile-recovery-empty-state")).toBeVisible();
-    // Read every rectangle in one layout pass: separate boundingBox() calls can straddle a reflow and disagree.
+    const panel = recovery.locator(".profile-recovery-panel");
+    await expect(panel).toBeVisible();
+    await expect(recovery.locator(":scope > .relay-empty")).toBeVisible();
+    await expect(recovery.locator(".profile-recovery-empty-state")).toHaveCount(0);
     const readMetrics = () => recovery.evaluate((element) => {
-      const sections = Array.from(element.querySelectorAll(":scope > .profile-recovery-section"));
-      const emptyState = element.querySelector(".profile-recovery-empty-state");
-      if (sections.length !== 1 || !emptyState) return null;
-      const box = element.getBoundingClientRect();
-      const sectionBoxes = sections.map((section) => section.getBoundingClientRect());
-      const contentCenter = (Math.min(...sectionBoxes.map((rect) => rect.top)) + Math.max(...sectionBoxes.map((rect) => rect.bottom))) / 2;
-      return { centerOffset: Math.abs(contentCenter - (box.top + box.height / 2)), bottomOverflow: emptyState.getBoundingClientRect().bottom - box.bottom, horizontalOverflow: element.scrollWidth - element.clientWidth };
+      const page = element.closest(".relay-page");
+      const header = page?.querySelector(".relay-page-header");
+      const panel = element.querySelector(".profile-recovery-panel");
+      const empty = element.querySelector(":scope > .relay-empty");
+      if (!page || !header || !panel || !empty) return null;
+      const pageBox = page.getBoundingClientRect();
+      const headerBox = header.getBoundingClientRect();
+      const panelBox = panel.getBoundingClientRect();
+      const emptyBox = empty.getBoundingClientRect();
+      return {
+        panelAligns: Math.abs(panelBox.left - headerBox.left) <= 1 && Math.abs(panelBox.right - headerBox.right) <= 1,
+        belowHeader: panelBox.top >= headerBox.bottom - 1 && panelBox.top - headerBox.bottom <= 24,
+        emptyBelow: emptyBox.top >= panelBox.bottom - 1,
+        withinPage: panelBox.left >= pageBox.left && panelBox.right <= pageBox.right + 1,
+        horizontalOverflow: element.scrollWidth - element.clientWidth,
+      };
     });
-    await expect.poll(async () => (await readMetrics())?.centerOffset).toBeLessThanOrEqual(2);
+    await expect.poll(async () => (await readMetrics())?.panelAligns).toBe(true);
     const metrics = await readMetrics();
-    expect(metrics).not.toBeNull();
-    expect(metrics!.bottomOverflow).toBeLessThanOrEqual(1);
-    expect(metrics!.horizontalOverflow).toBeLessThanOrEqual(0);
+    expect(metrics).toEqual({ panelAligns: true, belowHeader: true, emptyBelow: true, withinPage: true, horizontalOverflow: 0 });
     await page.screenshot({ path: `output/playwright/profile-recovery-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await page.getByRole("tab", { name: "OpenCode", exact: true }).click();
     const openCodeRecovery = page.locator(".profile-recovery-opencode.is-empty");
-    await expect(openCodeRecovery.locator(".profile-recovery-empty-state")).toBeVisible();
+    await expect(openCodeRecovery.locator(".profile-recovery-panel")).toBeVisible();
+    await expect(openCodeRecovery.locator(":scope > .relay-empty")).toBeVisible();
     await page.screenshot({ path: `output/playwright/profile-recovery-opencode-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
   });
 }

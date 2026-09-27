@@ -63,9 +63,7 @@
 }
 
 .connections-account-controls {
-  container-type: inline-size;
   position: relative;
-  margin: 16px 0;
 }
 
 .connections-account-controls:has(.relay-action-menu[open]) {

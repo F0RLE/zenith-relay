@@ -41,8 +41,7 @@ test("adding an unknown source to the pool completes without format selection", 
   await add.getByLabel("API address").fill("https://manual.example.test/v1");
   await add.getByLabel("Upstream API key").fill("synthetic-key");
   await add.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Edit source" })).toBeVisible();
-  await page.getByRole("dialog", { name: "Edit source" }).getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
   await expect(page.locator(".pool-member-card").filter({ hasText: "Manual API" })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
   expect(calls.filter((call) => call.command === "set_local_pool_membership")).toHaveLength(1);

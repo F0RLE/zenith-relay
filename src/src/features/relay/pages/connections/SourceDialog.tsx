@@ -93,7 +93,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
       reportError: false,
       onError: (error, messageKey) => setOperationError({ error, messageKey }),
     });
-    if (ok && (source || onCreated)) {
+    if (ok) {
       onCreated?.();
       onClose();
     }

@@ -199,7 +199,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   };
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
   return <>
-    <div className="pool-controls" role="group" aria-label={t("pool.priorityTitle")}>
+    <div className="pool-controls workspace-controls" role="group" aria-label={t("pool.priorityTitle")}>
       <div className="pool-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
         <div data-tone={counts.rotation ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{counts.rotation}</strong><span>{t("pool.memberStatus.rotation")}</span></div>
         <div data-tone={counts.quotaWait ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.quotaWait}</strong><span>{t("pool.memberStatus.quotaWait")}</span></div>
@@ -208,7 +208,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         {providerCreditsValue != null ? <div data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
       </div>
       <div className="pool-member-toolbar">
-        <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><h2>{t("pool.priorityTitle")}</h2></div>
+        <div className="pool-priority-context">
+          <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><h2>{t("pool.priorityTitle")}</h2></div>
+          <div className="pool-runtime-strip">
+            <div className="pool-route-summary">
+              <strong className="pool-current-route" data-active={activeRequestTotal > 0}>{routingSummary}</strong>
+              {nextRouteSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
+            </div>
+            {activeRequestSummary ? <span className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")}><Cpu aria-hidden /><span>{activeRequestSummary}</span></span> : null}
+          </div>
+        </div>
         <div className="pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <PoolSpeedControl
@@ -225,13 +234,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
             <IconButton label={t("pool.refreshQuotas")} icon={busy === "pool-quota-refresh" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} aria-busy={busy === "pool-quota-refresh"} disabled={busy === "pool-quota-refresh" || !canRefreshQuota || !refreshableMemberCount} title={!refreshableMemberCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()} />
           </div>
         </div>
-      </div>
-      <div className="pool-runtime-strip">
-        <div className="pool-route-summary">
-          <strong className="pool-current-route" data-active={activeRequestTotal > 0}>{routingSummary}</strong>
-          {nextRouteSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
-        </div>
-        {activeRequestSummary ? <span className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")}><Cpu aria-hidden /><span>{activeRequestSummary}</span></span> : null}
       </div>
     </div>
     {routingAlert}

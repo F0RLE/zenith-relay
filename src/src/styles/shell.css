@@ -571,31 +571,6 @@
   white-space: nowrap;
 }
 
-.pool-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.pool-header-actions .relay-button {
-  min-height: 32px;
-  gap: 6px;
-  padding: 0 8px;
-  font-size: 12px;
-  line-height: 16px;
-}
-
-.pool-header-actions .relay-button svg {
-  width: 14px;
-  height: 14px;
-}
-
-.pool-preset-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
 .relay-button,
 .relay-icon-button {
   min-height: 34px;
@@ -667,10 +642,6 @@
   content: "";
   pointer-events: none;
   transform: translateX(-50%);
-}
-
-.pool-header-actions .pool-header-icon {
-  flex: 0 0 34px;
 }
 
 .relay-tooltip[data-placement="bottom"]::before {

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, Check, ChevronDown, ChevronRight, GripVertical, Zap } from "lucide-react";
+import { BrainCircuit, Check, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, OptionMenu, ToggleSwitch } from "../../components/Ui";
+import { Button, Dialog, EmptyState, IconButton, ToggleSwitch } from "../../components/Ui";
 import { currentPoolModelSummaries, groupModelSummaries } from "../../poolHelpers";
 import { formatReasoningEffort } from "../../poolFormatting";
 import {
@@ -19,6 +19,7 @@ import {
   supportedReasoningLevels,
 } from "./modelRulesModel";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { PoolSpeedControl } from "./PoolSpeedControl";
 import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
 
 type ModelDragState = {
@@ -29,13 +30,15 @@ type ModelDragState = {
   clientY: number;
 };
 
-function modelSpeedTiers(model: ModelSummary, current: DefaultServiceTier): DefaultServiceTier[] {
-  const declared: DefaultServiceTier[] = model.speedTiers?.length
-    ? model.speedTiers
-    : model.speedSupported
-      ? ["standard", "fast"] satisfies DefaultServiceTier[]
-      : ["standard"] satisfies DefaultServiceTier[];
-  return Array.from(new Set<DefaultServiceTier>([...declared, current]));
+const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies readonly DefaultServiceTier[];
+
+function modelSpeedTiers(model: ModelSummary): DefaultServiceTier[] {
+  const declared = new Set(model.speedTiers ?? []);
+  const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
+  // Configurable families always offer the same three modes. A missing or
+  // standard-only snapshot must not hide Fast or Ultrafast.
+  if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
+  return ordered.length ? [...ordered] : ["standard"];
 }
 
 export function ModelRulesView() {
@@ -145,7 +148,7 @@ export function ModelRulesView() {
   const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], id: string) => {
     if (orderMutation.current || busy) return;
     const target = event.target as HTMLElement;
-    if (event.button !== 0 || (target.closest("button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
+    if (event.button !== 0 || (target.closest(".pool-speed-control, button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
     event.preventDefault();
     modelDragRef.current = { kind, id, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
     setDragModelId(kind === "model" ? id : null);
@@ -166,7 +169,7 @@ export function ModelRulesView() {
   const startModelDrag = (event: React.DragEvent<HTMLTableRowElement>, modelId: string) => {
     // Interactive controls inside a draggable row must keep their normal
     // click/focus behavior; the row itself is the drag surface.
-    if (orderMutation.current || busy || (event.target as HTMLElement).closest("button, input, textarea, a")) {
+    if (orderMutation.current || busy || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
       event.preventDefault();
       return;
     }
@@ -194,8 +197,9 @@ export function ModelRulesView() {
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
       const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true;
       const canEditReasoning = Boolean(model.reasoningConfigurable);
-      const speedTier = model.speedTier ?? "standard";
-      const speedTiers = modelSpeedTiers(model, speedTier);
+      const speedTiers = modelSpeedTiers(model);
+      const requestedTier = model.speedTier ?? "standard";
+      const speedTier = speedTiers.includes(requestedTier) ? requestedTier : speedTiers[0] ?? "standard";
       const canEditSpeed = model.speedSupported === true
         && model.speedConfigurable === true
         && speedTiers.length > 1;
@@ -203,17 +207,11 @@ export function ModelRulesView() {
         <td data-column="model"><button className="model-rule-drag-handle" type="button" aria-label={t("models.dragModel", { model: displayName })} data-relay-tooltip={t("models.dragModel", { model: displayName })} onPointerDown={(event) => startPointerDrag(event, "model", model.id)}><GripVertical aria-hidden /></button><div className="model-rule-identity"><strong data-relay-tooltip={displayName}>{displayName}</strong>{displayName !== model.id ? <code data-relay-tooltip={model.id}>{model.id}</code> : null}</div></td>
         <td data-column="actions"><div className="model-rule-actions">
           <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} disabled={!hasReasoningModes} onClick={() => setReasoningModel(model)} />
-          {canEditSpeed ? <span className="model-speed-toggle" data-speed-tier={speedTier} data-model-speed-select={model.id} data-relay-tooltip={`${t("pool.serviceTier")}: ${t(`pool.serviceTiers.${speedTier}`)}`}>
-            <OptionMenu className="model-speed-select" label={t("pool.serviceTier")} value={speedTier} icon={<Zap aria-hidden />} disabled={busy === `model-speed-${model.id}`}
-              onChange={(value) => {
-                const nextTier = value as DefaultServiceTier;
-                void perform(`model-speed-${model.id}`, () => mode === "local"
-                  ? relayCommands.setModelServiceTier(model.id, nextTier)
-                  : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved");
-              }}
-              options={speedTiers.map((value) => ({ value, label: t(`pool.serviceTiers.${value}`) }))}
-            />
-          </span> : null}
+          {canEditSpeed ? <PoolSpeedControl className="model-speed-toggle" modelId={model.id} value={speedTier} tiers={speedTiers} disabled={false} saving={busy === `model-speed-${model.id}`} onChange={(nextTier) => {
+            void perform(`model-speed-${model.id}`, () => mode === "local"
+              ? relayCommands.setModelServiceTier(model.id, nextTier)
+              : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved");
+          }} /> : null}
           <ToggleSwitch data-model-toggle={model.id} label={toggleLabel} className="model-toggle" checked={model.enabled} aria-busy={toggling} disabled={Boolean(busy)} onChange={() => void toggleModel(model)} />
         </div></td>
       </tr>;

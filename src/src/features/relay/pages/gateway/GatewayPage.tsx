@@ -85,13 +85,12 @@ export function GatewayPage() {
     {t("gateway.launchOpenCode")}
   </Button> : null;
 
-  return <section className="relay-page gateway-page">
+  return <section className="relay-page relay-workspace-page gateway-page">
     <PageHeader
       title={t("nav.gateway")}
-      subtitle={t(`gateway.tabSubtitles.${activeTab}.${mode}`)}
+      navigation={<Tabs value={activeTab} onChange={(value) => setActiveTab(value as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />}
       actions={activeTab === "api" ? apiActions : activeTab === "chatgpt" ? chatGptActions : openCodeActions}
     />
-    <Tabs value={activeTab} onChange={(value) => setActiveTab(value as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />
     {activeTab === "api"
       ? <GatewayApiTab running={running} endpoint={endpoint} />
       : activeTab === "chatgpt" ? <GatewayChatGPTTab /> : <GatewayOpenCodeTab />}

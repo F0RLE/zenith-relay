@@ -47,9 +47,13 @@ export function OpenCodeRecoveryTab() {
     actions: <Button variant="secondary" icon={<RotateCcw aria-hidden />} aria-label={t("profiles.openCodeRestore")} disabled={Boolean(busy)} onClick={() => setRestoreRequested(true)}>{t("profiles.restoreAction")}</Button>,
   }] : [];
 
-  return <><RecoverySurface className="profile-recovery-opencode" isEmpty={!hasSnapshot} title={t("profiles.openCodeSectionTitle")} hint={t("profiles.openCodeSectionHint")}>
-    <form className="profile-snapshot-create opencode-snapshot-create" onSubmit={(event) => { event.preventDefault(); void createSnapshot(); }}><label className="relay-field"><span>{t("profiles.snapshotName")}</span><input value={snapshotName} maxLength={80} onChange={(event) => setSnapshotName(event.target.value)} placeholder={t("profiles.openCodeSnapshotPlaceholder")} /></label><Button type="submit" variant="primary" icon={<Camera aria-hidden />} busy={busy === "opencode-snapshot-create"} disabled={!snapshotName.trim() || hasSnapshot || Boolean(busy)}>{t("profiles.openCodeCreateSnapshot")}</Button></form>
-    {rows.length ? <RecoverySnapshotTable rows={rows} /> : <RecoveryEmptyState title={t("profiles.openCodeNoSnapshot")} description={t("profiles.openCodeNoSnapshotHint")} />}
+  return <><RecoverySurface className="profile-recovery-opencode" isEmpty={!hasSnapshot} composer={
+    <form className="profile-snapshot-create opencode-snapshot-create" onSubmit={(event) => { event.preventDefault(); void createSnapshot(); }}>
+      <label className="relay-field"><span>{t("profiles.snapshotName")}</span><input value={snapshotName} maxLength={80} onChange={(event) => setSnapshotName(event.target.value)} placeholder={t("profiles.openCodeSnapshotPlaceholder")} /></label>
+      <Button type="submit" variant="primary" icon={<Camera aria-hidden />} busy={busy === "opencode-snapshot-create"} disabled={!snapshotName.trim() || hasSnapshot || Boolean(busy)}>{t("profiles.openCodeCreateSnapshot")}</Button>
+    </form>
+  }>
+    {rows.length ? <RecoverySnapshotTable rows={rows} /> : <RecoveryEmptyState title={t("profiles.openCodeNoSnapshot")} />}
   </RecoverySurface>
   {restoreRequested ? <RecoveryConfirmationDialog title={t("profiles.openCodeRestoreTitle")} confirmation={t("profiles.openCodeRestoreConfirm")} hint={t("profiles.openCodeRestoreHint")} busy={busy === "opencode-restore"} onCancel={() => setRestoreRequested(false)} onConfirm={() => void restore()} /> : null}</>;
 }

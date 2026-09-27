@@ -17,6 +17,7 @@ import type {
   DiagnosticPaths,
   DiagnosticSettings,
   ImportSession,
+  CacheSessionRecord,
   LocalUsagePage,
   OpenCodeConfigStatus,
   ProfileSnapshot,
@@ -91,6 +92,7 @@ export const relayCommands = {
   revealRemoteGatewayApiKey: () => invoke<string>("reveal_remote_gateway_api_key"),
   rotateRemoteGatewayApiKey: () => invoke<string>("rotate_remote_gateway_api_key"),
   localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
+  localCacheSessions: (input: RemoteUsageQuery = {}) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", { input }),
   clearLocalUsage: () => invoke("clear_local_usage"),
   refreshLocalPricingCatalog: () => invoke<CatalogRefreshOutcome>("refresh_local_pricing_catalog"),
   refreshRemotePricingCatalog: () => invoke<CatalogRefreshOutcome>("execute_remote_server_action", {

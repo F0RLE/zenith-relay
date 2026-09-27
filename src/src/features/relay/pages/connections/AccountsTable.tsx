@@ -270,7 +270,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
   );
   return (
     <>
-    <div className="connections-account-controls">
+    <div className="connections-account-controls workspace-controls">
     <div className="connections-account-summary connection-status-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"} aria-label={t("accounts.summary.label")}>
       <div><UserRound aria-hidden /><strong>{allAccounts.length}</strong><span>{t("accounts.summary.total")}</span></div>
       <div data-tone={inPoolCount ? "ready" : "muted"}><CircleCheck aria-hidden /><strong>{inPoolCount}</strong><span>{t("accounts.summary.inPool")}</span></div>

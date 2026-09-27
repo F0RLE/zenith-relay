@@ -1,6 +1,51 @@
 import { expect, test, type Locator } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
+for (const width of [1440, 1160, 840, 390, 360]) {
+  test(`workspace headers keep navigation and primary actions accessible at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await installTauriMock(page, { mode: "local", locale: "ru", populated: true });
+    await page.goto("/");
+    for (const name of ["Подключения", "Пул"]) {
+      await page.getByRole("button", { name, exact: true }).click();
+      const header = page.locator(".relay-workspace-header");
+      await expect(header.getByRole("heading", { name, exact: true })).toBeVisible();
+      expect(await header.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        const targets = Array.from(element.querySelectorAll<HTMLElement>('h1, [role="tab"], .relay-page-actions > .relay-button, .pool-header-actions > .relay-button, summary'));
+        return targets.every((item) => {
+          const rect = item.getBoundingClientRect();
+          return rect.left >= bounds.left && rect.right <= bounds.right + 1
+            && rect.top >= bounds.top && rect.bottom <= bounds.bottom + 1
+            && item.scrollWidth <= item.clientWidth;
+        }) && targets.every((item, index) => {
+          const a = item.getBoundingClientRect();
+          return targets.slice(index + 1).every((next) => {
+            const b = next.getBoundingClientRect();
+            return a.right <= b.left + 1 || b.right <= a.left + 1 || a.bottom <= b.top + 1 || b.bottom <= a.top + 1;
+          });
+        });
+      })).toBe(true);
+      const firstTab = header.getByRole("tab").first();
+      await firstTab.focus();
+      await firstTab.press("ArrowRight");
+      await expect(header.getByRole("tab").nth(1)).toBeFocused();
+      await expect(header.getByRole("tab").nth(1)).toHaveAttribute("aria-selected", "true");
+      if (name === "Подключения") {
+        const toolbar = page.locator(".connections-toolbar");
+        const list = page.locator(".connection-list-wrap");
+        await expect(list).toBeVisible();
+        const [toolbarBox, listBox] = await Promise.all([toolbar.boundingBox(), list.boundingBox()]);
+        expect(Math.abs(toolbarBox!.x - listBox!.x)).toBeLessThanOrEqual(1);
+        expect(Math.abs(toolbarBox!.width - listBox!.width)).toBeLessThanOrEqual(1);
+      }
+      await header.getByRole("tab").nth(1).press("Home");
+      await expect(firstTab).toBeFocused();
+      await expect(firstTab).toHaveAttribute("aria-selected", "true");
+    }
+  });
+}
+
 async function expectControlsFit(panel: Locator) {
   expect(await panel.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
@@ -30,7 +75,7 @@ for (const theme of ["light", "dark"] as const) {
       const panel = page.locator(".connections-account-controls");
       await expect(panel.locator('[data-summary="provider-credits"] strong')).toHaveText("376,5");
       await expectControlsFit(panel);
-      if (width === 1160) expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(90);
+      if (width === 1160) expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(120);
       const summaryBox = (await panel.locator(".connection-status-summary").boundingBox())!;
       const toolbarBox = (await panel.locator(".account-command-bar").boundingBox())!;
       expect(summaryBox.y + summaryBox.height).toBeLessThan(toolbarBox.y);

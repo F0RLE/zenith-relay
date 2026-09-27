@@ -71,12 +71,13 @@ export function ChatGptRecoveryTab() {
   }));
 
   const notice = loadFailed ? <div className="profile-recovery-warning" role="alert"><CircleAlert aria-hidden /><span>{t("profiles.loadFailed")}</span><Button variant="secondary" onClick={loadSnapshots}>{t("common.retry")}</Button></div> : null;
-  return <><RecoverySurface isEmpty={!snapshots.length} title={t("profiles.chatGptSectionTitle")} hint={t("profiles.chatGptSectionHint")} notice={notice}>
+  return <><RecoverySurface isEmpty={!snapshots.length} notice={notice} composer={
     <form className="profile-snapshot-create" onSubmit={(event) => { event.preventDefault(); void createSnapshot(); }}>
       <label className="relay-field"><span>{t("profiles.snapshotName")}</span><input value={snapshotName} maxLength={80} onChange={(event) => setSnapshotName(event.target.value)} placeholder={t("profiles.snapshotNamePlaceholder")} /></label>
       <Button type="submit" variant="primary" icon={<Camera aria-hidden />} busy={busy === "profile-snapshot-create"} disabled={!snapshotName.trim() || Boolean(busy)}>{t("profiles.createSnapshot")}</Button>
     </form>
-    {rows.length ? <RecoverySnapshotTable rows={rows} /> : loadFailed ? null : <RecoveryEmptyState title={t("profiles.noSnapshots")} description={t("profiles.noSnapshotsHint")} />}
+  }>
+    {rows.length ? <RecoverySnapshotTable rows={rows} /> : loadFailed ? null : <RecoveryEmptyState title={t("profiles.noSnapshots")} />}
   </RecoverySurface>
   {restoreTarget ? <RecoveryConfirmationDialog title={t("profiles.snapshotRestoreTitle")} confirmation={t("profiles.snapshotRestoreConfirm", { name: restoreTarget.name })} hint={t("profiles.snapshotFullRestoreHint")} busy={busy === "profile-snapshot-restore"} onCancel={() => setRestoreTarget(null)} onConfirm={() => void restoreSnapshot()} /> : null}
   {deleteTarget ? <RecoveryConfirmationDialog title={t("profiles.snapshotDeleteTitle")} confirmation={t("profiles.snapshotDeleteConfirm", { name: deleteTarget.name })} busy={busy === "profile-snapshot-delete"} onCancel={() => setDeleteTarget(null)} onConfirm={() => void deleteSnapshot()} /> : null}</>;

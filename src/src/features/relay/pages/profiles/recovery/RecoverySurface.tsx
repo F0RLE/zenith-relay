@@ -1,29 +1,25 @@
 import type { ReactNode } from "react";
-import { History } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button, Dialog, EmptyState } from "../../../components/Ui";
 
 type RecoverySurfaceProps = {
   className?: string;
   isEmpty: boolean;
-  title: string;
-  hint: string;
   notice?: ReactNode;
+  composer: ReactNode;
   children: ReactNode;
 };
 
-export function RecoverySurface({ className = "", isEmpty, title, hint, notice, children }: RecoverySurfaceProps) {
+export function RecoverySurface({ className = "", isEmpty, notice, composer, children }: RecoverySurfaceProps) {
   return <section className={`profile-recovery${isEmpty ? " is-empty" : ""}${className ? ` ${className}` : ""}`}>
     {notice}
-    <section className="profile-recovery-section profile-named-section">
-      <header className="profile-recovery-section-heading"><span><History aria-hidden /></span><div><h2>{title}</h2><small>{hint}</small></div></header>
-      {children}
-    </section>
+    <div className="profile-recovery-panel">{composer}</div>
+    {children}
   </section>;
 }
 
-export function RecoveryEmptyState({ title, description }: { title: string; description: string }) {
-  return <div className="profile-recovery-empty-state"><EmptyState title={title} description={description} /></div>;
+export function RecoveryEmptyState({ title }: { title: string }) {
+  return <EmptyState title={title} />;
 }
 
 export type RecoverySnapshotRow = {

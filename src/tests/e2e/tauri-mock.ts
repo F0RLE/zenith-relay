@@ -40,6 +40,7 @@ export type MockOptions = {
   activeModelCounts?: Array<{ model: string; requestCount: number }>;
   usageToolDiagnostics?: "forwarded_text_only" | "dropped_text_only";
   usageTotalPages?: number;
+  cachePreview?: boolean;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
   codexBindingActive?: boolean;
@@ -521,7 +522,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       textOutput: true,
       terminalOutput: "text",
     } : undefined;
-    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
+    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, clientContextId: input.cachePreview ? "client_a1b2c3d4e5f6" : null, requestedModel: input.cachePreview ? "gpt-6-astra" : requestedUsageModel, resolvedModel: input.cachePreview ? "gpt-6-astra" : resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: input.cachePreview ? 74_905 : 20, cachedInputTokens: input.cachePreview ? 73_600 : 12, cacheWriteInputTokens: input.cachePreview ? null : 4, reasoningTokens: input.cachePreview ? 275 : 5, outputTokens: input.cachePreview ? 447 : 8, totalTokens: input.cachePreview ? 75_352 : 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
     let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, upstreamError: input.usageUpstreamError, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens?: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
@@ -600,6 +601,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "export_remote_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
           case "preview_remote_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "apply_remote_configuration_preset": remoteRuntime.gateway.maxRetryCandidates = 4; remoteRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: remoteRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
+          case "get_local_cache_sessions": {
+            if (!input.cachePreview) return [];
+            const now = Date.now();
+            const at = (offsetMs: number) => new Date(now - offsetMs).toISOString();
+            return [
+              { clientContextId: "client_a1b2c3d4e5f6", startedAt: at(2 * 60 * 60_000), touchedAt: at(12 * 60_000), model: "gpt-6-astra", cacheWriteTtl: null },
+              { clientContextId: "client_998877665544", startedAt: at(26 * 60 * 60_000), touchedAt: at(25 * 60_000), model: "claude-sonnet-4-6", cacheWriteTtl: "1h" },
+              { clientContextId: "client_aabbccddeeff", startedAt: at(3 * 60 * 60_000), touchedAt: at(8 * 60_000), model: "claude-opus-4-6", cacheWriteTtl: "5m" },
+              { clientContextId: "client_112233445566", startedAt: at(5 * 60 * 60_000), touchedAt: at(45 * 60_000), model: "gpt-6-sol", cacheWriteTtl: null },
+              { clientContextId: "client_ff00ff00ff00", startedAt: at(40 * 60_000), touchedAt: at(3 * 60_000), model: "claude-haiku-4-5", cacheWriteTtl: null },
+            ];
+          }
           case "get_local_usage_page": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string; includeEvents?: boolean; includeModels?: boolean; includePoolMembers?: boolean };
             const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
@@ -1265,7 +1278,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             ?? input.manualReasoningFallbackModels?.some((model) => model.toLowerCase() === id.toLowerCase())
             ?? false,
           speedTiers: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase())
-            ? ["standard", "fast"]
+            ? ["standard", "fast", "ultrafast"]
             : ["standard"],
           speedSupported: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase()),
           speedTier: input.modelSpeed?.[id.toLowerCase()] ?? "standard",

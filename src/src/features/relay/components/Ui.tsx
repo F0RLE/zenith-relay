@@ -33,11 +33,12 @@ export function AccountPlanBadge({ planType, unknown }: { planType: string | nul
   return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
 }
 
-export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
+export function PageHeader({ title, subtitle, actions, navigation, workspace = false }: { title: string; subtitle?: string; actions?: ReactNode; navigation?: ReactNode; workspace?: boolean }) {
   return (
-    <header className="relay-page-header">
+    <header className={`relay-page-header${navigation || workspace ? " relay-workspace-header" : ""}`}>
       <div><h1>{title}</h1>{subtitle ? <p>{subtitle}</p> : null}</div>
       {actions ? <div className="relay-page-actions">{actions}</div> : null}
+      {navigation ? <div className="relay-page-navigation">{navigation}</div> : null}
     </header>
   );
 }
@@ -623,8 +624,8 @@ export function ErrorDetailsDialog({ error, message, onClose }: { error: Feedbac
   </Dialog>;
 }
 
-export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <div className="relay-empty"><CircleHelp aria-hidden /><strong>{title}</strong><p>{description}</p>{action}</div>;
+export function EmptyState({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
+  return <div className="relay-empty"><CircleHelp aria-hidden /><strong>{title}</strong>{description ? <p>{description}</p> : null}{action}</div>;
 }
 
 export function ToggleSwitch({ label, checked, onChange, className = "", ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "checked" | "defaultChecked" | "onChange"> & {

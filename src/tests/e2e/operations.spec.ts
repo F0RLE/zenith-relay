@@ -601,21 +601,21 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await expect(page.getByRole("tab", { name: "Accounts", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.locator(".account-transport-badge")).toHaveCount(0);
-    const transport = page.getByRole("checkbox", { name: "Model substitution protection" });
+    const transport = page.getByRole("checkbox", { name: "Use Basis Points" });
     await expect(transport).toHaveCount(0);
 
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await expect(page.locator('.pool-member-card .account-transport-badge')).toHaveCount(0);
     await expect(page.locator(".pool-controls").getByRole("checkbox")).toHaveCount(0);
-    await page.getByRole("slider", { name: "Request speed" }).press("ArrowRight");
-    await expect(page.getByRole("slider", { name: "Request speed" })).toBeEnabled();
+    await page.getByRole("radio", { name: "Fast", exact: true }).click();
+    await expect(page.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
     await page.getByRole("button", { name: "API", exact: true }).click();
     await expect(transport).toBeVisible();
     await transport.check();
     await expect(transport).toBeChecked();
     await expect(transport).toBeEnabled();
     await page.getByRole("button", { name: "Pool", exact: true }).click();
-    await expect(page.getByRole("slider", { name: "Request speed" })).toHaveAttribute("aria-valuetext", "Fast");
+    await expect(page.getByRole("radio", { name: "Fast", exact: true })).toBeChecked();
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await expect(page.getByRole("tab", { name: "Accounts", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(transport).toHaveCount(0);
@@ -722,6 +722,47 @@ test("explicit cache-write prices remain visible without a Messages route", asyn
   await dialog.screenshot({ path: "output/playwright/source-cache-write-prices-light.png" });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await dialog.locator(".relay-dialog-body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
+});
+
+test("OpenAI cache-write price is one 30-minute field", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    serverModelOrder: ["gpt-5.4", "gpt-5.6-luna", "claude-opus-4-8"],
+    modelMetadata: {
+      "gpt-5.6-luna": { catalogProvider: "openai", catalogFamily: "gpt", catalogName: "GPT-5.6 Luna" },
+    },
+    sourceDetectedModelPrices: {
+      "gpt-5.6-luna": {
+        inputMicroUsdPerMillion: 200_000,
+        outputMicroUsdPerMillion: 1_200_000,
+        cachedInputMicroUsdPerMillion: 20_000,
+        cacheWrite5mMicroUsdPerMillion: 250_000,
+      },
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit source" });
+  await dialog.getByRole("tab", { name: "Pricing" }).click();
+
+  const openai = dialog.locator(".source-price-group").filter({ hasText: "OpenAI" });
+  await openai.locator("summary").click();
+  await expect(openai.locator(".member-price-grid-head")).toContainText("Cache write 30 min");
+  await expect(openai.locator(".member-price-grid-head")).not.toContainText("5 min");
+  await expect(openai.locator(".member-price-grid-head")).not.toContainText("1 hr");
+  await expect(openai.getByRole("textbox", { name: "30-minute cache write price for gpt-5.6-luna" })).toHaveAttribute("placeholder", "0.25");
+  await expect(openai.getByRole("textbox", { name: /cache write price for gpt-5.4/i })).toHaveCount(0);
+  await expect(openai.locator(".source-price-row").filter({ hasText: "gpt-5.4" }).locator(".source-price-empty")).toHaveCount(1);
+
+  const anthropic = dialog.locator(".source-price-group").filter({ hasText: "Anthropic" });
+  await anthropic.locator("summary").click();
+  await expect(anthropic.getByRole("textbox", { name: "5-minute cache write price for claude-opus-4-8" })).toHaveCount(1);
+  await expect(anthropic.getByRole("textbox", { name: "1-hour cache write price for claude-opus-4-8" })).toHaveCount(1);
+  await expect(anthropic.getByRole("textbox", { name: /30-minute cache write price/i })).toHaveCount(0);
 });
 
 test("API-reported source prices are hints, not manual overrides", async ({ page }) => {
@@ -1166,7 +1207,7 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
   await dialog.getByLabel("Upstream API key").fill("test-source-key");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await page.getByRole("dialog", { name: "Edit source" }).getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("Zenith API", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Mode: Choose API", exact: true })).toBeVisible();
   await expect(page.getByLabel("Launch", { exact: true })).toBeEnabled();
@@ -1194,8 +1235,8 @@ test("provider presets leave automatic protocol discovery to the connector", asy
 
   await dialog.getByLabel("Upstream API key").fill("sk-synthetic-ready-key");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Edit source" })).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "Edit source" }).getByText("OpenAI", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
+  await expect(page.getByText("OpenAI", { exact: true })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
   }).__TAURI_TEST_INVOKES__);
@@ -2334,7 +2375,7 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
     await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
     await sourceDialog.getByRole("button", { name: "Save" }).click();
-    await page.getByRole("dialog", { name: "Edit source" }).getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
     await expect(member).toContainText("Automatic");
@@ -2660,17 +2701,14 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(personalPlus.locator(".quota-meter-heading small").first()).toHaveText(/^\d+ h \d+ min$/);
   await expect(personalPlus.locator(".quota-meter-heading small").nth(1)).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
-  const speed = page.getByRole("slider", { name: "Request speed" });
-  await expect(speed).toHaveValue("0");
-  await speed.press("ArrowRight");
-  await expect(speed).toBeEnabled();
-  await expect(speed).toHaveValue("1");
-  await speed.press("Home");
-  await expect(speed).toBeEnabled();
-  await expect(speed).toHaveValue("0");
-  await speed.press("ArrowRight");
-  await expect(speed).toBeEnabled();
-  await expect(speed).toHaveValue("1");
+  const speed = page.getByRole("radiogroup", { name: "Request speed" });
+  await expect(speed.getByRole("radio", { name: "Standard" })).toBeChecked();
+  await speed.getByRole("radio", { name: "Fast", exact: true }).click();
+  await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
+  await speed.getByRole("radio", { name: "Standard", exact: true }).click();
+  await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeEnabled();
+  await speed.getByRole("radio", { name: "Fast", exact: true }).click();
+  await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
 
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation" });
@@ -2748,10 +2786,9 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("slider", { name: "Request speed" });
-  await speed.press("ArrowRight");
-  await expect(speed).toBeEnabled();
-  await expect(speed).toHaveValue("1");
+  const speed = page.getByRole("radiogroup", { name: "Request speed" });
+  await speed.getByRole("radio", { name: "Fast", exact: true }).click();
+  await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
@@ -2777,8 +2814,10 @@ test("remote configuration presets require preview before an explicit apply", as
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await page.getByRole("button", { name: "Save preset", exact: true }).click();
-  await page.getByRole("button", { name: "Apply preset", exact: true }).click();
+  await page.locator(".pool-preset-menu summary").click();
+  await page.getByRole("menuitem", { name: "Save preset", exact: true }).click();
+  await page.locator(".pool-preset-menu summary").click();
+  await page.getByRole("menuitem", { name: "Apply preset", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: "Configuration preset" });
   await expect(dialog.getByText("Changes: 1", { exact: true })).toBeVisible();
@@ -2799,8 +2838,10 @@ test("local configuration presets require preview before an explicit apply", asy
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await page.getByRole("button", { name: "Save preset", exact: true }).click();
-  await page.getByRole("button", { name: "Apply preset", exact: true }).click();
+  await page.locator(".pool-preset-menu summary").click();
+  await page.getByRole("menuitem", { name: "Save preset", exact: true }).click();
+  await page.locator(".pool-preset-menu summary").click();
+  await page.getByRole("menuitem", { name: "Apply preset", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: "Configuration preset" });
   await expect(dialog.getByText("Changes: 1", { exact: true })).toBeVisible();
@@ -2869,7 +2910,7 @@ test("connection tabs stay visible while the account list is scrolled", async ({
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   const content = page.locator(".relay-content");
-  const tabs = page.locator('.relay-page[data-view="accounts"] > .relay-tabs');
+  const tabs = page.locator('.relay-page[data-view="accounts"] .relay-workspace-header .relay-tabs');
   await expect(tabs).toBeVisible();
   await content.evaluate((element) => { element.scrollTop = 120; });
   await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
@@ -2885,7 +2926,7 @@ test("connection tabs stay visible while the account list is scrolled", async ({
     const rect = button.getBoundingClientRect();
     return { top: rect.top, bottom: rect.bottom, height: rect.height };
   });
-  expect(tabGeometry.content && tabButtonGeometry.top >= tabGeometry.content.top - 2 && tabButtonGeometry.bottom <= tabGeometry.content.bottom + 1 && tabButtonGeometry.height >= 40).toBe(true);
+  expect(tabGeometry.content && tabButtonGeometry.top >= tabGeometry.content.top - 2 && tabButtonGeometry.bottom <= tabGeometry.content.bottom + 1 && tabButtonGeometry.height >= 34).toBe(true);
 });
 
 test("invalid OAuth grants keep the account and explain the required action", async ({ page }) => {
@@ -2917,7 +2958,7 @@ test("source and automation rows keep rare actions in consistent menus", async (
 
   await page.getByRole("tab", { name: "Sources" }).click();
   let actions = page.locator(".relay-table .row-actions");
-  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Launch", "Edit", "Actions"]);
+  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
   await actions.locator("summary").click();
   expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Refresh API data", "Remove from pool", "Disable", "Delete"]);
   await page.keyboard.press("Escape");
@@ -3350,8 +3391,6 @@ for (const mode of ["local", "remote"] as const) {
 
     const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
     const speed = model.locator(".model-speed-toggle");
-    const speedTrigger = speed.locator(".relay-option-trigger");
-    await expect(speedTrigger).toBeVisible();
     await expect(speed).toBeVisible();
     await expect(model.locator(".model-rule-actions")).toHaveCSS("opacity", "1");
     expect(await model.locator(".model-rule-actions > *").evaluateAll((controls) => controls.map((control) => {
@@ -3361,11 +3400,10 @@ for (const mode of ["local", "remote"] as const) {
       return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
     }))).toEqual(["reasoning", "speed", "enabled"]);
     await expect(speed).toHaveAttribute("data-speed-tier", "standard");
-    await expect(speedTrigger).toHaveAttribute("data-value", "standard");
-    await speedTrigger.click();
-    await page.locator('[role="option"][data-value="fast"]').click();
+    await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
+    await speed.getByRole("radio", { name: "Fast", exact: true }).click();
     await expect(speed).toHaveAttribute("data-speed-tier", "fast");
-    await expect(speedTrigger).toHaveAttribute("data-value", "fast");
+    await expect(speed.getByRole("radio", { name: "Fast", exact: true })).toBeChecked();
     const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
     await expect(claude.locator(".model-speed-toggle")).toHaveCount(0);
 
@@ -4007,7 +4045,9 @@ test("pool toggle changes state without switching ChatGPT", async ({ page }) => 
   const header = page.locator(".relay-page-header");
   await expect(header.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
   await expect(header.locator(".pool-header-actions > *")).toHaveCount(3);
-  await expect(header.getByRole("button", { name: "Save preset", exact: true })).toBeVisible();
+  await header.locator(".pool-preset-menu summary").click();
+  await expect(header.getByRole("menuitem", { name: "Save preset", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   await page.getByRole("button", { name: "Stop API", exact: true }).click();
   await expect(page.getByText("Endpoint stopped.")).toBeVisible();
