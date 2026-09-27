@@ -16,9 +16,9 @@ mod history;
 mod prepare;
 mod response;
 
-pub(in crate::gateway::execution) use prepare::{
-    add_tool_relay_retry_hint, prepare_request, prepare_upstream, take_tool_relay_retry,
-};
+#[cfg(test)]
+pub(in crate::gateway::execution) use prepare::{add_tool_relay_retry_hint, prepare_request};
+pub(in crate::gateway::execution) use prepare::{prepare_upstream, take_tool_relay_retry};
 pub(in crate::gateway::execution) use response::{synthetic_stream, translate_response};
 
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";
