@@ -37,6 +37,7 @@ use super::super::turn_state::{
     relay_account_response_header, request_scope, CODEX_TURN_STATE_HEADER,
 };
 use super::mark_model_switch_reset;
+use super::repair_once;
 use super::{attempt_error_response, finish_request_failure};
 use super::{wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext};
 use crate::error_codes;
@@ -887,37 +888,43 @@ pub(super) async fn execute_request(context: RequestExecution) -> Response<Body>
             }
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
-                && !function_item_id_repair_attempted
-                && responses_function_item_id_requires_fc_prefix(&bytes)
-                && repair_call_prefixed_function_item_ids(&mut request)
+                && repair_once(
+                    &mut function_item_id_repair_attempted,
+                    responses_function_item_id_requires_fc_prefix(&bytes),
+                    &mut tried,
+                    &route.candidate_id,
+                    &lease,
+                    || repair_call_prefixed_function_item_ids(&mut request),
+                )
             {
-                function_item_id_repair_attempted = true;
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
                 lease.settle_rotation_repair(now_ms());
                 continue;
             }
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
-                && !custom_tool_item_id_repair_attempted
-                && responses_custom_tool_item_id_requires_ctc_prefix(&bytes)
-                && repair_custom_tool_item_ids(&mut request)
+                && repair_once(
+                    &mut custom_tool_item_id_repair_attempted,
+                    responses_custom_tool_item_id_requires_ctc_prefix(&bytes),
+                    &mut tried,
+                    &route.candidate_id,
+                    &lease,
+                    || repair_custom_tool_item_ids(&mut request),
+                )
             {
-                custom_tool_item_id_repair_attempted = true;
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
                 lease.settle_rotation_repair(now_ms());
                 continue;
             }
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
-                && !message_item_id_repair_attempted
-                && responses_message_item_id_requires_msg_prefix(&bytes)
-                && remove_item_prefixed_message_ids(&mut request)
+                && repair_once(
+                    &mut message_item_id_repair_attempted,
+                    responses_message_item_id_requires_msg_prefix(&bytes),
+                    &mut tried,
+                    &route.candidate_id,
+                    &lease,
+                    || remove_item_prefixed_message_ids(&mut request),
+                )
             {
-                message_item_id_repair_attempted = true;
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
                 lease.settle_rotation_repair(now_ms());
                 continue;
             }

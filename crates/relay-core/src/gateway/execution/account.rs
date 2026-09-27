@@ -32,7 +32,8 @@ use super::request::{
     should_wait_for_candidate_availability, BasisPointsRelayRetryContext,
 };
 use super::{
-    mark_model_switch_reset, wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext,
+    mark_model_switch_reset, repair_once, wait_for_candidate_retry, wait_for_recovery,
+    CandidateRetryContext,
 };
 use crate::error_codes;
 use crate::protocol::{
@@ -567,47 +568,47 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 &AttemptFailure::status_with_body(status, Some(&bytes)),
                 &response_headers,
             );
-            if !legacy_call_id_repair_attempted
-                && responses_tool_call_links_rejected(&bytes)
-                && repair_legacy_responses_call_ids(&mut request)
-            {
-                legacy_call_id_repair_attempted = true;
-
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
+            if repair_once(
+                &mut legacy_call_id_repair_attempted,
+                responses_tool_call_links_rejected(&bytes),
+                &mut tried,
+                &route.candidate_id,
+                &lease,
+                || repair_legacy_responses_call_ids(&mut request),
+            ) {
                 has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
                 requires_affinity_owner =
                     request_has_previous_response_id(&request) || has_unpaired_tool_output;
                 continue;
             }
-            if !function_item_id_repair_attempted
-                && responses_function_item_id_requires_fc_prefix(&bytes)
-                && repair_call_prefixed_function_item_ids(&mut request)
-            {
-                function_item_id_repair_attempted = true;
-
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
+            if repair_once(
+                &mut function_item_id_repair_attempted,
+                responses_function_item_id_requires_fc_prefix(&bytes),
+                &mut tried,
+                &route.candidate_id,
+                &lease,
+                || repair_call_prefixed_function_item_ids(&mut request),
+            ) {
                 continue;
             }
-            if !custom_tool_item_id_repair_attempted
-                && responses_custom_tool_item_id_requires_ctc_prefix(&bytes)
-                && repair_custom_tool_item_ids(&mut request)
-            {
-                custom_tool_item_id_repair_attempted = true;
-
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
+            if repair_once(
+                &mut custom_tool_item_id_repair_attempted,
+                responses_custom_tool_item_id_requires_ctc_prefix(&bytes),
+                &mut tried,
+                &route.candidate_id,
+                &lease,
+                || repair_custom_tool_item_ids(&mut request),
+            ) {
                 continue;
             }
-            if !message_item_id_repair_attempted
-                && responses_message_item_id_requires_msg_prefix(&bytes)
-                && remove_item_prefixed_message_ids(&mut request)
-            {
-                message_item_id_repair_attempted = true;
-
-                tried.remove(&route.candidate_id);
-                lease.allow_rotation_repair();
+            if repair_once(
+                &mut message_item_id_repair_attempted,
+                responses_message_item_id_requires_msg_prefix(&bytes),
+                &mut tried,
+                &route.candidate_id,
+                &lease,
+                || remove_item_prefixed_message_ids(&mut request),
+            ) {
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));

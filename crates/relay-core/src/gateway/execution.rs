@@ -34,6 +34,28 @@ pub(super) fn mark_model_switch_reset(
     *requires_affinity_owner = false;
 }
 
+/// Accepts one pre-output request repair and lets the same candidate be selected again.
+///
+/// The predicate and mutation stay with the caller so a failed repair does not
+/// consume the one-shot flag. Ordinary requests still settle the lease
+/// themselves; account-only execution does not.
+pub(super) fn repair_once(
+    attempted: &mut bool,
+    eligible: bool,
+    tried: &mut HashSet<String>,
+    candidate_id: &str,
+    lease: &crate::runtime::CandidateLease,
+    repair: impl FnOnce() -> bool,
+) -> bool {
+    if *attempted || !eligible || !repair() {
+        return false;
+    }
+    *attempted = true;
+    tried.remove(candidate_id);
+    lease.allow_rotation_repair();
+    true
+}
+
 /// Builds the final response after all pre-output route attempts are exhausted.
 /// Account and ordinary client execution use the same cooldown and preserved
 /// provider-error policy; keeping it here prevents the two retry loops from
