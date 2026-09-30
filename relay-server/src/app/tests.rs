@@ -375,7 +375,7 @@ async fn rebuild_runtime_accepts_messages_sources_for_the_multi_protocol_system_
     assert_eq!(snapshot.gateway.candidate_count, 2);
     assert_eq!(
         snapshot.gateway.visible_model_ids,
-        ["claude-native-test", "gpt-runtime-test"]
+        ["gpt-runtime-test", "claude-native-test"]
     );
 
     state.shutdown_runtime().await.unwrap();
