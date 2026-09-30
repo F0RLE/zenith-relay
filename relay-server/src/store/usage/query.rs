@@ -1,18 +1,13 @@
-use super::super::sqlite::{db_error, optional_u64};
-use super::UsagePriceResolver;
+use super::super::sqlite::db_error;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::HashMap;
-use zenith_relay_core::usage::{
-    PRICED_AGGREGATE_CACHED_INPUT_TOKENS, PRICED_AGGREGATE_CACHED_SAMPLES,
-    PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS, PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS,
-    PRICED_AGGREGATE_CACHE_WRITE_SAMPLES, PRICED_AGGREGATE_INPUT_SAMPLES,
-    PRICED_AGGREGATE_INPUT_TOKENS, PRICED_AGGREGATE_OUTPUT_SAMPLES, PRICED_AGGREGATE_OUTPUT_TOKENS,
-    PRICED_AGGREGATE_TOTAL_SAMPLES, PRICED_AGGREGATE_TOTAL_TOKENS,
-    PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS,
-};
+use zenith_relay_core::CatalogPriceResolver;
 use zenith_relay_core::{
     pricing::PriceSource,
-    protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
+    protocol::{
+        assign_bucket_equivalents, merge_model_equivalents, UsageBucket, UsageGroup, UsageQuery,
+        UsageTotals,
+    },
     sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ObservedUsageSums,
 };
 
@@ -107,7 +102,7 @@ pub(super) fn usage_model_equivalents(
     connection: &Connection,
     where_sql: &str,
     values: &[SqlValue],
-    resolver: &dyn UsagePriceResolver,
+    resolver: &CatalogPriceResolver<'_>,
 ) -> Result<(HashMap<String, ApiEquivalentSummary>, Vec<PriceSource>), String> {
     let sql = format!(
         "SELECT candidate_kind, candidate_hint, COALESCE(resolved_model, requested_model, ''),
@@ -127,14 +122,8 @@ pub(super) fn usage_model_equivalents(
             Ok((model.clone(), estimate, source))
         })
         .map_err(db_error)?;
-    let mut equivalents = HashMap::<String, ApiEquivalentSummary>::new();
-    let mut sources = Vec::new();
-    for row in rows {
-        let (model, estimate, source) = row.map_err(db_error)?;
-        equivalents.entry(model).or_default().merge(estimate);
-        sources.push(source);
-    }
-    Ok((equivalents, sources))
+    let rows = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+    Ok(merge_model_equivalents(rows))
 }
 
 pub(super) fn candidate_window_usage(
@@ -171,37 +160,12 @@ fn aggregate_usage_from_row(
     row: &rusqlite::Row<'_>,
     start: usize,
 ) -> rusqlite::Result<ApiEquivalentUsage> {
-    let input_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_INPUT_TOKENS)?);
-    let cached_input_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_CACHED_INPUT_TOKENS)?);
-    let cache_write_5m_tokens =
-        optional_u64(row.get(start + PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS)?);
-    let cache_write_1h_tokens =
-        optional_u64(row.get(start + PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS)?);
-    let unknown_cache_write_tokens =
-        optional_u64(row.get(start + PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS)?);
-    let output_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_OUTPUT_TOKENS)?);
-    let total_tokens = optional_u64(row.get(start + PRICED_AGGREGATE_TOTAL_TOKENS)?);
-    let input_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_INPUT_SAMPLES)?);
-    let cached_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_CACHED_SAMPLES)?);
-    let cache_write_samples =
-        nonnegative_u64(row.get(start + PRICED_AGGREGATE_CACHE_WRITE_SAMPLES)?);
-    let output_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_OUTPUT_SAMPLES)?);
-    let total_samples = nonnegative_u64(row.get(start + PRICED_AGGREGATE_TOTAL_SAMPLES)?);
-    Ok(ApiEquivalentUsage::from_observed_sums(ObservedUsageSums {
-        input_tokens,
-        cached_input_tokens,
-        cache_write_5m_tokens,
-        cache_write_1h_tokens,
-        unknown_cache_write_tokens,
-        output_tokens,
-        total_tokens,
-        input_samples,
-        cached_samples,
-        cache_write_samples,
-        output_samples,
-        total_samples,
-        gate_measured_buckets: true,
-    }))
+    Ok(ApiEquivalentUsage::from_observed_sums(
+        ObservedUsageSums::from_priced_aggregate(
+            |column| row.get(start + column),
+            |column| row.get(start + column),
+        )?,
+    ))
 }
 
 pub(super) fn usage_buckets(
@@ -209,7 +173,7 @@ pub(super) fn usage_buckets(
     where_sql: &str,
     values: &[SqlValue],
     query: &UsageQuery,
-    resolver: &dyn UsagePriceResolver,
+    resolver: &CatalogPriceResolver<'_>,
 ) -> Result<Vec<UsageBucket>, String> {
     let Some(bucket_ms) = query.bucket_ms else {
         return Ok(Vec::new());
@@ -260,39 +224,13 @@ pub(super) fn usage_buckets(
             ))
         })
         .map_err(db_error)?;
-    let mut equivalents = HashMap::<u64, ApiEquivalentSummary>::new();
-    for row in rows {
-        let (start_ms, estimate) = row.map_err(db_error)?;
-        equivalents.entry(start_ms).or_default().merge(estimate);
-    }
-    for bucket in &mut buckets {
-        bucket.totals.api_equivalent = equivalents.remove(&bucket.start_ms).unwrap_or_default();
-    }
+    let rows = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+    assign_bucket_equivalents(&mut buckets, rows);
     Ok(buckets)
 }
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
-    Ok(UsageTotals {
-        requests: nonnegative_u64(row.get(offset)?),
-        successful_requests: nonnegative_u64(row.get(offset + 1)?),
-        latency_ms: nonnegative_u64(row.get(offset + 2)?),
-        ttft_ms: nonnegative_u64(row.get(offset + 3)?),
-        ttft_samples: nonnegative_u64(row.get(offset + 4)?),
-        generation_ms: nonnegative_u64(row.get(offset + 5)?),
-        generation_samples: nonnegative_u64(row.get(offset + 6)?),
-        generation_output_tokens: nonnegative_u64(row.get(offset + 7)?),
-        input_tokens: nonnegative_u64(row.get(offset + 8)?),
-        cached_input_tokens: nonnegative_u64(row.get(offset + 9)?),
-        cached_input_samples: nonnegative_u64(row.get(offset + 10)?),
-        cache_write_input_tokens: nonnegative_u64(row.get(offset + 11)?),
-        cache_write_input_samples: nonnegative_u64(row.get(offset + 12)?),
-        reasoning_tokens: nonnegative_u64(row.get(offset + 13)?),
-        output_tokens: nonnegative_u64(row.get(offset + 14)?),
-        total_tokens: nonnegative_u64(row.get(offset + 15)?),
-        speed_output_tokens: nonnegative_u64(row.get(offset + 16)?),
-        speed_duration_ms: nonnegative_u64(row.get(offset + 17)?),
-        api_equivalent: ApiEquivalentSummary::default(),
-    })
+    UsageTotals::from_sql_counts(|column| row.get(offset + column))
 }
 
 fn nonnegative_u64(value: i64) -> u64 {

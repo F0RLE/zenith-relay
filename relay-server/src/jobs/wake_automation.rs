@@ -22,6 +22,7 @@ use zenith_relay_core::{
     },
     providers::chatgpt::CodexIdentityEnvelope,
     quota::{QuotaTransition, QuotaWindowKind},
+    ModelRules,
 };
 
 const INTERVAL: Duration = Duration::from_secs(30);
@@ -70,7 +71,7 @@ async fn run_due(state: &Arc<AppState>) -> Result<(), String> {
         permits
     };
     for permit in permits {
-        let completion = execute(state, &permit).await;
+        let completion = delivery::execute(state, &permit).await;
         let _guard = state.wake_lock.lock().await;
         let mut coordinator =
             WakeCoordinator::from_state(state.store.wake_state()?).map_err(str::to_string)?;
@@ -80,189 +81,7 @@ async fn run_due(state: &Arc<AppState>) -> Result<(), String> {
     Ok(())
 }
 
-async fn execute(state: &Arc<AppState>, permit: &WakePermit) -> WakeCompletion {
-    let started_at_ms = now_ms();
-    let started = Instant::now();
-    match execute_inner(state, permit).await {
-        Ok((outcome, input_tokens, output_tokens)) => WakeCompletion {
-            outcome,
-            completed_at_ms: now_ms(),
-            latency_ms: Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
-            input_tokens,
-            output_tokens,
-            error_code: None,
-        },
-        Err(code) => WakeCompletion {
-            outcome: WakeCompletionOutcome::Failed,
-            completed_at_ms: now_ms().max(started_at_ms),
-            latency_ms: Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
-            input_tokens: None,
-            output_tokens: None,
-            error_code: Some(code),
-        },
-    }
-}
-
-async fn execute_inner(
-    state: &Arc<AppState>,
-    permit: &WakePermit,
-) -> Result<(WakeCompletionOutcome, Option<u64>, Option<u64>), String> {
-    let account = state
-        .store
-        .accounts()?
-        .into_iter()
-        .find(|record| record.id == permit.account_id)
-        .ok_or_else(|| error_codes::WAKE_ACCOUNT_MISSING.to_string())?;
-    if account.last_used_at_ms.is_some_and(|value| {
-        value
-            >= permit
-                .verification
-                .baseline_window
-                .as_ref()
-                .map_or(permit.due_at_ms, |window| window.observed_at_ms)
-    }) {
-        return Err("wake_natural_use_observed".to_string());
-    }
-    let secret = state
-        .vault
-        .load(&account.secret_ref)?
-        .ok_or_else(|| "wake_secret_missing".to_string())?;
-    let credential: AccountCredential =
-        serde_json::from_str(&secret).map_err(|_| "wake_secret_invalid".to_string())?;
-    let (mut credential, mut authorization, _) =
-        prepare_server_account_authorization(state, &account, credential, None)
-            .await
-            .map_err(|_| "wake_authorization_prepare".to_string())?;
-    let identity = CodexIdentityEnvelope::standard(&credential.chatgpt_account_id)
-        .map_err(|_| "wake_account_id_invalid".to_string())?;
-    let proxy = account_proxy_config(state, &account, &credential)
-        .map_err(|_| error_codes::WAKE_PROXY_UNAVAILABLE.to_string())?;
-    let builder = reqwest::Client::builder()
-        .redirect(Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
-        .user_agent("Zenith Relay Server");
-    let client = match proxy.as_ref() {
-        Some(proxy) => proxy.apply(builder),
-        None => builder,
-    }
-    .build()
-    .map_err(|_| "wake_client_init".to_string())?;
-    let (mut status, mut bytes) = send_wake_request(
-        &client,
-        &identity,
-        &credential.responses_url,
-        authorization,
-        permit,
-    )
-    .await?;
-    if credential.is_agent_identity()
-        && zenith_relay_core::providers::chatgpt::is_agent_identity_task_invalid_response(
-            status.as_u16(),
-            &bytes,
-        )
-    {
-        let expected_task_id = credential.agent_task_id.clone().unwrap_or_default();
-        (credential, authorization, _) = prepare_server_account_authorization(
-            state,
-            &account,
-            credential,
-            Some(&expected_task_id),
-        )
-        .await
-        .map_err(|_| "wake_authorization_prepare".to_string())?;
-        (status, bytes) = send_wake_request(
-            &client,
-            &identity,
-            &credential.responses_url,
-            authorization,
-            permit,
-        )
-        .await?;
-    }
-    if !status.is_success() {
-        return Err(match status.as_u16() {
-            401 => error_codes::WAKE_UNAUTHORIZED,
-            403 => error_codes::WAKE_FORBIDDEN,
-            429 => error_codes::WAKE_RATE_LIMITED,
-            _ => "wake_upstream_failed",
-        }
-        .to_string());
-    }
-    let usage = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|value| value.get("usage").cloned());
-    drop(bytes);
-    tokio::time::sleep(Duration::from_millis(permit.verification_delay_ms)).await;
-    let updated = super::refresh::request(
-        state,
-        &account.id,
-        zenith_relay_core::scheduler::refresh::RefreshKind::Quota,
-    )
-    .await?
-    .account;
-    let after = updated.quota.window(permit.window_kind);
-    let outcome = match verify_wake_countdown(permit.verification.baseline_window.as_ref(), after) {
-        zenith_relay_core::automations::WakeVerificationOutcome::ConfirmedQuotaConsumed
-        | zenith_relay_core::automations::WakeVerificationOutcome::ConfirmedCountdownAdvanced => {
-            WakeCompletionOutcome::Confirmed
-        }
-        zenith_relay_core::automations::WakeVerificationOutcome::Unconfirmed => {
-            WakeCompletionOutcome::Unconfirmed
-        }
-    };
-    let input_tokens = usage
-        .as_ref()
-        .and_then(|value| value.get("input_tokens"))
-        .and_then(serde_json::Value::as_u64);
-    let output_tokens = usage
-        .as_ref()
-        .and_then(|value| value.get("output_tokens"))
-        .and_then(serde_json::Value::as_u64);
-    Ok((outcome, input_tokens, output_tokens))
-}
-
-async fn send_wake_request(
-    client: &reqwest::Client,
-    identity: &CodexIdentityEnvelope,
-    responses_url: &str,
-    authorization: HeaderValue,
-    permit: &WakePermit,
-) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
-    let (response, http_permit) =
-        zenith_relay_core::scheduler::refresh::http::management_http_gate()
-            .send(
-                client,
-                identity.apply(
-                    client
-                        .post(responses_url)
-                        .header(AUTHORIZATION, authorization)
-                        .json(&serde_json::json!({
-                            "model": permit.model_id,
-                            "input": WAKE_PROMPT,
-                            "stream": false,
-                            "max_output_tokens": permit.output_token_cap,
-                            "reasoning": { "effort": "minimal" },
-                            "tools": []
-                        })),
-                ),
-                zenith_relay_core::scheduler::refresh::http::HttpClass::Ordinary,
-            )
-            .await
-            .map_err(|_| error_codes::WAKE_TRANSPORT.to_string())?;
-    let status = response.status();
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| error_codes::WAKE_TRANSPORT.to_string())?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(error_codes::WAKE_RESPONSE_TOO_LARGE.to_string());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    drop(http_permit);
-    Ok((status, bytes))
-}
+mod delivery;
 
 pub(crate) fn core_account(account: &ServerAccountRecord) -> Result<AccountRecord, String> {
     let identity = AccountIdentity::from_hashed_parts(
@@ -298,6 +117,7 @@ pub(crate) fn core_account(account: &ServerAccountRecord) -> Result<AccountRecor
 }
 
 fn policy(account: &ServerAccountRecord) -> WakeAdapterPolicy {
+    let rules = ModelRules::from_allow_deny(&account.allowed_models, &account.excluded_models);
     WakeAdapterPolicy {
         windows_requiring_activity: BTreeSet::from([
             QuotaWindowKind::Primary,
@@ -306,6 +126,7 @@ fn policy(account: &ServerAccountRecord) -> WakeAdapterPolicy {
         models: account
             .effective_models()
             .iter()
+            .filter(|id| rules.allows(id))
             .enumerate()
             .map(|(index, id)| WakeModel {
                 id: id.clone(),
@@ -328,7 +149,33 @@ mod tests {
 
     #[test]
     fn core_account_keeps_secret_refs_out_of_debug_identity() {
-        let account = ServerAccountRecord {
+        let account = sample_account();
+        let mapped = core_account(&account).unwrap();
+        assert_eq!(mapped.id, "account_test");
+        assert!(!format!("{:?}", mapped.identity).contains("account:synthetic"));
+    }
+
+    #[test]
+    fn wake_models_follow_pool_allow_and_exclude_rules() {
+        let mut account = sample_account();
+        account.models = vec![
+            "gpt-codex".into(),
+            "gpt-excluded".into(),
+            "claude-sonnet".into(),
+        ];
+        account.allowed_models = vec!["gpt-*".into()];
+        account.excluded_models = vec!["gpt-excluded".into()];
+
+        let ids = policy(&account)
+            .models
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["gpt-codex".to_string()]);
+    }
+
+    fn sample_account() -> ServerAccountRecord {
+        ServerAccountRecord {
             id: "account_test".into(),
             label: "Test".into(),
             identity_hint: "abcdef123456".into(),
@@ -356,9 +203,6 @@ mod tests {
             last_error_code: None,
             proxy_id: None,
             bypass_common_proxy: false,
-        };
-        let mapped = core_account(&account).unwrap();
-        assert_eq!(mapped.id, "account_test");
-        assert!(!format!("{:?}", mapped.identity).contains("account:synthetic"));
+        }
     }
 }

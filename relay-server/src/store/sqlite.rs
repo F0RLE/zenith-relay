@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     fs::{self, OpenOptions},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::Duration,
 };
@@ -155,6 +155,18 @@ impl Store {
         self.connection
             .lock()
             .map_err(|_| "SQLite lock poisoned".to_string())
+    }
+
+    pub fn backup_to(&self, destination: &Path) -> Result<(), String> {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        if destination.exists() {
+            return Err("backup database destination already exists".to_string());
+        }
+        self.lock()?
+            .backup(rusqlite::MAIN_DB, destination, None)
+            .map_err(db_error)
     }
 }
 

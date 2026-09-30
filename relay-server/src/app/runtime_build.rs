@@ -96,7 +96,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             token_authority: state.token_authority.clone(),
             refresh_adapter: refresh,
             persistence_adapter: persistence,
-            refresh_skew_ms: 60_000,
+            refresh_skew_ms: zenith_relay_core::accounts::TOKEN_REFRESH_SKEW_MS,
             agent_identities,
         },
         GatewayRuntimeOptions {
@@ -165,9 +165,12 @@ pub(super) fn resolve_pool_routing(
     )
 }
 
-/// Candidate state remains available to management, while the internal profile
-/// credential derives its request scope solely from pool membership.
-fn pool_member_ids(
+/// Members that can receive pool traffic.
+///
+/// A source is included only when it is in the pool and resolves at least one
+/// client protocol. An account is included from pool membership alone.
+/// Management still lists candidates that fail this filter.
+pub(super) fn pool_member_ids(
     sources: &[SourceRecord],
     accounts: &[ServerAccountRecord],
 ) -> (Vec<String>, Vec<String>) {

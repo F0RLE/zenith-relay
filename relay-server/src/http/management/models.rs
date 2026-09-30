@@ -8,8 +8,8 @@ use std::sync::Arc;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     protocol::{
-        canonical_pool_model_id, complete_model_display_order, update_model_reasoning_policy,
-        ModelPolicyError, RuntimeStateSnapshot,
+        canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
+        update_model_reasoning_policy, ModelPolicyError, RuntimeStateSnapshot,
     },
     ApiModelPriceOverride, DefaultServiceTier,
 };
@@ -113,7 +113,8 @@ pub async fn set_model_price(
     )
     .map_err(|message| ManagementError::validation(error_codes::MODEL_PRICE_INVALID, message))?;
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?.to_ascii_lowercase();
+    let canonical =
+        zenith_relay_core::model_id_key(&canonical_model_id(&state, &snapshot, &input.model_id)?);
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
     let mut overrides = previous_overrides.clone();
     if let Some(price) = price {
@@ -174,7 +175,7 @@ pub async fn set_model_service_tier(
         .model_service_tier_overrides()
         .map_err(store_error)?;
     let mut next = previous.clone();
-    let key = canonical.to_ascii_lowercase();
+    let key = zenith_relay_core::model_id_key(&canonical);
     next.insert(key, input.service_tier);
     if next == previous {
         return Ok(Json(snapshot));
@@ -233,7 +234,8 @@ pub async fn set_model_reasoning(
     Json(input): Json<SetModelReasoningInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?.to_ascii_lowercase();
+    let canonical =
+        zenith_relay_core::model_id_key(&canonical_model_id(&state, &snapshot, &input.model_id)?);
     let runtime = state.runtime().map_err(runtime_error)?;
 
     let previous = state
@@ -297,14 +299,7 @@ fn configured_pool_model_ids<'a>(
     let source_models = sources
         .iter()
         .filter(|source| source.in_pool)
-        .flat_map(|source| {
-            source.models.iter().chain(
-                source
-                    .protocol_bindings
-                    .iter()
-                    .flat_map(|binding| &binding.model_ids),
-            )
-        });
+        .flat_map(|source| configured_source_model_ids(&source.models, &source.protocol_bindings));
     let account_models = accounts
         .iter()
         .filter(|account| account.in_pool)

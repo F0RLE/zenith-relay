@@ -1,5 +1,9 @@
 use crate::state::SourceRecord;
-use zenith_relay_core::{changed_runtime_source_policy_updates, RuntimeSourcePolicyUpdate};
+use zenith_relay_core::{
+    changed_runtime_source_policy_updates, pool_dispatch_permission_changed,
+    source_runtime_policy_compatible as transport_compatible, PoolParticipant,
+    RuntimeSourcePolicyUpdate,
+};
 
 pub(super) fn updates(
     previous: &[SourceRecord],
@@ -12,18 +16,7 @@ pub(super) fn source_runtime_policy_compatible(
     previous: &[SourceRecord],
     next: &[SourceRecord],
 ) -> bool {
-    previous.len() == next.len()
-        && previous.iter().all(|source| {
-            next.iter()
-                .find(|candidate| candidate.id == source.id)
-                .is_some_and(|candidate| {
-                    source.base_url == candidate.base_url
-                        && source.secret_ref == candidate.secret_ref
-                        && source.wire_api == candidate.wire_api
-                        && source.protocol_bindings == candidate.protocol_bindings
-                        && source.models == candidate.models
-                })
-        })
+    transport_compatible(previous, next)
 }
 
 pub(super) fn source_dispatch_permission_changed(
@@ -36,11 +29,7 @@ pub(super) fn source_dispatch_permission_changed(
             std::slice::from_ref(previous),
             std::slice::from_ref(next),
         )
-        || previous.enabled != next.enabled
-        || previous.in_pool != next.in_pool
-        || previous.draining != next.draining
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
+        || pool_dispatch_permission_changed(previous.pool_access(), next.pool_access())
 }
 
 #[cfg(test)]
@@ -101,6 +90,14 @@ mod tests {
         assert!(!source_runtime_policy_compatible(
             std::slice::from_ref(&previous),
             std::slice::from_ref(&transport_change)
+        ));
+
+        let mut catalog_change = previous.clone();
+        catalog_change.protocol_config.revision =
+            catalog_change.protocol_config.revision.saturating_add(1);
+        assert!(!source_runtime_policy_compatible(
+            std::slice::from_ref(&previous),
+            std::slice::from_ref(&catalog_change)
         ));
     }
 

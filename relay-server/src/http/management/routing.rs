@@ -42,7 +42,7 @@ pub async fn set_routing_policy(
     Json(input): Json<RoutingPolicyInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let _configuration = state.configuration_lock.lock().await;
-    if !(1..=8).contains(&input.max_retry_candidates) {
+    if !zenith_relay_core::protocol::max_retry_candidates_in_range(input.max_retry_candidates) {
         return Err(ManagementError::validation(
             error_codes::MAX_RETRY_CANDIDATES_INVALID,
             "max retry candidates must be between 1 and 8",

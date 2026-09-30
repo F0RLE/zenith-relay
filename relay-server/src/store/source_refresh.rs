@@ -7,7 +7,7 @@ use super::{
 };
 use crate::state::SourceRecord;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use zenith_relay_core::scheduler::refresh::RefreshIdentity;
+use zenith_relay_core::scheduler::{refresh::RefreshIdentity, source_member_key};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceRefreshFence {
@@ -21,7 +21,7 @@ impl SourceRefreshFence {
     }
 
     pub fn identity(&self) -> RefreshIdentity {
-        RefreshIdentity::new(format!("source:{}", self.source_id), self.revision, 0)
+        RefreshIdentity::new(source_member_key(&self.source_id), self.revision, 0)
     }
 }
 

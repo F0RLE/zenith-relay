@@ -1,7 +1,5 @@
 mod account_models;
 mod codex_release;
-mod model_metadata;
-mod pricing;
 pub(crate) mod quota_refresh;
 mod refresh;
 mod retention;
@@ -156,12 +154,20 @@ where
     })
 }
 
+fn start_model_metadata(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
+    start_catalog_job(state, shutdown, |state| state.model_metadata_loader())
+}
+
+fn start_pricing(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
+    start_catalog_job(state, shutdown, |state| state.pricing_loader())
+}
+
 pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> BackgroundJobs {
     BackgroundJobs {
         handles: vec![
             codex_release::start(state.clone(), shutdown.clone()),
-            model_metadata::start(state.clone(), shutdown.clone()),
-            pricing::start(state.clone(), shutdown.clone()),
+            start_model_metadata(state.clone(), shutdown.clone()),
+            start_pricing(state.clone(), shutdown.clone()),
             refresh::start(state.clone(), shutdown.clone()),
             retention::start(state.clone(), shutdown.clone()),
             wake_automation::start(state, shutdown),

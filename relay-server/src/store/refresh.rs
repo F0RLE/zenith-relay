@@ -7,7 +7,7 @@ use super::{
 };
 use crate::state::ServerAccountRecord;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use zenith_relay_core::scheduler::refresh::RefreshIdentity;
+use zenith_relay_core::scheduler::{account_member_key, refresh::RefreshIdentity};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccountRefreshFence {
@@ -19,7 +19,7 @@ pub(crate) struct AccountRefreshFence {
 impl AccountRefreshFence {
     pub fn identity(&self) -> RefreshIdentity {
         RefreshIdentity::new(
-            format!("account:{}", self.account_id),
+            account_member_key(&self.account_id),
             self.revision,
             self.configuration_revision,
         )

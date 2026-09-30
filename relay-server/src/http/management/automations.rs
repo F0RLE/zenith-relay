@@ -11,6 +11,7 @@ use zenith_relay_core::automations::{
 };
 use zenith_relay_core::error_codes;
 use zenith_relay_core::quota::QuotaWindowKind;
+use zenith_relay_core::ModelRules;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -222,15 +223,8 @@ fn account_supports_model(account: &ServerAccountRecord, model: &str) -> bool {
         .effective_models()
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(model))
-        && (account.allowed_models.is_empty()
-            || account
-                .allowed_models
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(model)))
-        && !account
-            .excluded_models
-            .iter()
-            .any(|excluded| excluded.eq_ignore_ascii_case(model))
+        && ModelRules::from_allow_deny(&account.allowed_models, &account.excluded_models)
+            .allows(model)
 }
 
 pub async fn wake_history(

@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{env, fmt, net::SocketAddr, path::PathBuf};
 use url::Url;
+use zenith_relay_core::url_has_userinfo;
 
 const MIN_MANAGEMENT_TOKEN_BYTES: usize = 24;
 
@@ -78,14 +79,10 @@ impl fmt::Debug for Config {
 fn validate_public_base_url(value: &str) -> Result<Url, String> {
     let mut url = Url::parse(value.trim())
         .map_err(|_| "ZENITH_RELAY_PUBLIC_BASE_URL is invalid".to_string())?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+    if !zenith_relay_core::is_http_endpoint(&url) {
         return Err("ZENITH_RELAY_PUBLIC_BASE_URL must use HTTP or HTTPS".to_string());
     }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
+    if url_has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
         return Err(
             "ZENITH_RELAY_PUBLIC_BASE_URL must not contain credentials, query, or fragment"
                 .to_string(),

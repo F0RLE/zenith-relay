@@ -25,11 +25,14 @@ use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{
     accounts::automatic_quota_monitoring_eligible,
     quota::QuotaTransition,
-    scheduler::refresh::{
-        http::ManagementHttpScope,
-        quota_reset_delay,
-        service::{RefreshRegistration, RefreshResult},
-        RefreshJob, RefreshKind, RefreshOutcome,
+    scheduler::{
+        account_member_key,
+        refresh::{
+            http::ManagementHttpScope,
+            quota_reset_delay,
+            service::{RefreshRegistration, RefreshResult},
+            RefreshJob, RefreshKind, RefreshOutcome,
+        },
     },
 };
 
@@ -117,7 +120,7 @@ fn reconcile(state: &Arc<AppState>) -> Result<(), String> {
     for account in accounts {
         let (account, fence) = state.store.account_refresh_scope(&account.id)?;
         let active = recently_used(account.last_used_at_ms)
-            || activity.contains(&format!("account:{}", account.id));
+            || activity.contains(&account_member_key(&account.id));
         current_ids.insert(fence.identity());
         for kind in [RefreshKind::Auth, RefreshKind::Quota, RefreshKind::Models] {
             register(state, &account, fence.clone(), kind, true, active)?;
@@ -200,7 +203,9 @@ fn register(
                 };
                 let value = if job.kind == RefreshKind::Auth {
                     Ok(RefreshRead::Authorization(
-                        prepare_authorization(&state, &fence).await.map(Box::new),
+                        authorization::prepare_authorization(&state, &fence)
+                            .await
+                            .map(Box::new),
                     ))
                 } else {
                     execute(&state, &fence, &job)
@@ -213,13 +218,11 @@ fn register(
                     Ok(RefreshRead::Account(read)) if read.succeeded => RefreshOutcome::Success,
                     _ if job.kind == RefreshKind::Auth => RefreshOutcome::NoProgress,
                     _ => {
-                        let delay = match &value {
+                        let delay_ms = match &value {
                             Ok(RefreshRead::Account(read)) => read.retry_after_ms,
                             _ => None,
-                        }
-                        .unwrap_or_default()
-                        .max(60_000);
-                        RefreshOutcome::FailedRetryAt(state.refresh.now_ms().saturating_add(delay))
+                        };
+                        RefreshOutcome::retry_after(state.refresh.now_ms(), delay_ms)
                     }
                 };
                 RefreshResult { value, outcome }
@@ -228,87 +231,30 @@ fn register(
         .map_err(|_| "account refresh could not be scheduled".to_string())
 }
 
-async fn prepare_authorization(
-    state: &Arc<AppState>,
-    fence: &AccountRefreshFence,
-) -> Result<PreparedAuthorization, AuthorizationFailure> {
-    let (account, current) = state
-        .store
-        .account_refresh_scope(&fence.account_id)
-        .map_err(|_| AuthorizationFailure::Stale)?;
-    if &current != fence {
-        return Err(AuthorizationFailure::Stale);
-    }
-    let secret = state
-        .vault
-        .load(&account.secret_ref)
-        .map_err(|_| AuthorizationFailure::SecretLoad)?
-        .ok_or(AuthorizationFailure::SecretMissing)?;
-    let credential: AccountCredential =
-        serde_json::from_str(&secret).map_err(|_| AuthorizationFailure::SecretInvalid)?;
-    let (credential, header, oauth_tokens) =
-        prepare_server_account_authorization(state, &account, credential, None)
-            .await
-            .map_err(|_| AuthorizationFailure::Prepare)?;
-    let (_, current) = state
-        .store
-        .account_refresh_scope(&fence.account_id)
-        .map_err(|_| AuthorizationFailure::Stale)?;
-    if &current != fence {
-        return Err(AuthorizationFailure::Stale);
-    }
-    Ok(PreparedAuthorization {
-        credential,
-        header,
-        oauth_tokens,
-    })
-}
-
-pub(super) async fn request_authorization(
-    state: &Arc<AppState>,
-    fence: &AccountRefreshFence,
-) -> Result<PreparedAuthorization, AuthorizationFailure> {
-    let result = state
-        .refresh
-        .request(&fence.identity(), RefreshKind::Auth)
-        .await
-        .map_err(|error| match error {
-            zenith_relay_core::scheduler::refresh::service::RefreshWaitError::Stale => {
-                AuthorizationFailure::Stale
-            }
-            _ => AuthorizationFailure::Prepare,
-        })?;
-    let prepared = match result.as_ref() {
-        Ok(RefreshRead::Authorization(Ok(prepared))) => Ok((**prepared).clone()),
-        Ok(RefreshRead::Authorization(Err(error))) => Err(*error),
-        _ => Err(AuthorizationFailure::Prepare),
-    }?;
-    // The shared read could have finished just before an operator changed the
-    // login/proxy. Do not start provider HTTP with that obsolete preparation.
-    let (_, current) = state
-        .store
-        .account_refresh_scope(&fence.account_id)
-        .map_err(|_| AuthorizationFailure::Stale)?;
-    if &current != fence {
-        return Err(AuthorizationFailure::Stale);
-    }
-    Ok(prepared)
-}
+mod authorization;
+#[cfg(test)]
+use authorization::prepare_authorization;
+pub(in crate::jobs) use authorization::request_authorization;
 
 fn is_active(state: &AppState, account: &ServerAccountRecord) -> Result<bool, String> {
     Ok(recently_used(account.last_used_at_ms)
-        || active_runtime_members(state)?.contains(&format!("account:{}", account.id)))
+        || active_runtime_members(state)?.contains(&account_member_key(&account.id)))
 }
 
 fn active_runtime_members(state: &AppState) -> Result<BTreeSet<String>, String> {
     Ok(state
         .runtime()?
-        .map(|runtime| runtime.active_member_keys(now_ms(), 10 * 60_000))
+        .map(|runtime| {
+            runtime.active_member_keys(
+                now_ms(),
+                zenith_relay_core::scheduler::refresh::RECENT_ACTIVITY_WINDOW_MS,
+            )
+        })
         .unwrap_or_default())
 }
 
 fn recently_used(last_used: Option<u64>) -> bool {
-    last_used.is_some_and(|at| at <= now_ms() && now_ms().saturating_sub(at) < 10 * 60_000)
+    zenith_relay_core::scheduler::refresh::recently_active(last_used, now_ms())
 }
 
 async fn execute(
