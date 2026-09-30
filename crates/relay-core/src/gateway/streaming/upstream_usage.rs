@@ -20,8 +20,7 @@ impl UpstreamUsage {
             return;
         }
         self.pending.extend_from_slice(bytes);
-        while let Some(end) = sse_event_end(&self.pending) {
-            let frame = self.pending.drain(..end).collect::<Vec<_>>();
+        while let Some(frame) = crate::protocol::take_sse_event(&mut self.pending) {
             let parsed = parse_sse_event(&frame);
             if let Some(usage) = parsed.usage {
                 apply_usage(&mut self.event, &usage);

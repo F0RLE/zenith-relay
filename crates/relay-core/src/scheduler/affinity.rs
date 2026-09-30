@@ -84,24 +84,12 @@ impl AffinityCache {
         if self.max_entries == 0 || ttl_ms == 0 {
             return;
         }
-        self.prune(now_ms);
-        let key = key.into();
-        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
-            self.evict_oldest();
-        }
-        self.next_revision = self
-            .next_revision
-            .checked_add(1)
-            .expect("affinity revision exhausted");
-        self.bindings.insert(
-            key,
-            Binding {
-                candidate_id: candidate_id.into(),
-                revision: self.next_revision,
-                ttl_ms,
-                expires_at: now_ms.saturating_add(ttl_ms),
-                last_touched_at: now_ms,
-            },
+        self.insert_binding(
+            key.into(),
+            candidate_id.into(),
+            ttl_ms,
+            now_ms.saturating_add(ttl_ms),
+            now_ms,
         );
     }
 
@@ -115,24 +103,12 @@ impl AffinityCache {
         if self.max_entries == 0 || expires_at <= now_ms {
             return;
         }
-        self.prune(now_ms);
-        let key = key.into();
-        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
-            self.evict_oldest();
-        }
-        self.next_revision = self
-            .next_revision
-            .checked_add(1)
-            .expect("affinity revision exhausted");
-        self.bindings.insert(
-            key,
-            Binding {
-                candidate_id: candidate_id.into(),
-                revision: self.next_revision,
-                ttl_ms: self.ttl_ms,
-                expires_at,
-                last_touched_at: now_ms,
-            },
+        self.insert_binding(
+            key.into(),
+            candidate_id.into(),
+            self.ttl_ms,
+            expires_at,
+            now_ms,
         );
     }
 
@@ -167,6 +143,34 @@ impl AffinityCache {
     fn prune(&mut self, now_ms: u64) {
         self.bindings
             .retain(|_, binding| binding.expires_at > now_ms);
+    }
+
+    fn insert_binding(
+        &mut self,
+        key: String,
+        candidate_id: String,
+        ttl_ms: u64,
+        expires_at: u64,
+        now_ms: u64,
+    ) {
+        self.prune(now_ms);
+        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
+            self.evict_oldest();
+        }
+        self.next_revision = self
+            .next_revision
+            .checked_add(1)
+            .expect("affinity revision exhausted");
+        self.bindings.insert(
+            key,
+            Binding {
+                candidate_id,
+                revision: self.next_revision,
+                ttl_ms,
+                expires_at,
+                last_touched_at: now_ms,
+            },
+        );
     }
 
     fn evict_oldest(&mut self) {

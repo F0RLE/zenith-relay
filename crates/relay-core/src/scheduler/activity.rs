@@ -36,7 +36,7 @@ impl SchedulerActivity {
             .active_models
             .entry((candidate_id.to_string(), lane))
             .or_default()
-            .entry(model.to_ascii_lowercase())
+            .entry(crate::model_id_key(model))
             .or_default();
         *request_count = request_count.saturating_add(1);
     }
@@ -120,7 +120,7 @@ impl SchedulerActivity {
     ) {
         let lane_key = (candidate_id.to_string(), lane);
         let model_key = model
-            .map(str::to_ascii_lowercase)
+            .map(crate::model_id_key)
             .or_else(|| self.active_models.get(&lane_key)?.keys().next().cloned());
         let Some(model_key) = model_key else {
             return;

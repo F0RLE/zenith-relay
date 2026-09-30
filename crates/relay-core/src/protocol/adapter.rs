@@ -13,7 +13,6 @@ mod store;
 mod stream;
 #[cfg(test)]
 mod tests;
-mod tool_policy;
 mod translation;
 
 pub(crate) use compaction::{

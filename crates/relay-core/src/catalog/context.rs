@@ -1,13 +1,11 @@
 use super::is_valid_model_id;
 use serde::{de::Error as _, Deserialize, Deserializer};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 const MAX_ADVERTISED_CONTEXT_WINDOW: u64 = 16_000_000;
 const MAX_REASONING_EFFORT_LENGTH: usize = 64;
 const MAX_MODEL_REASONING_LEVELS: usize = 64;
-mod images;
-pub use images::source_model_declares_image_input;
 
 pub fn normalize_model_reasoning_allowed_levels(
     allowed_levels: BTreeMap<String, Vec<String>>,
@@ -32,7 +30,7 @@ pub fn normalize_model_reasoning_allowed_levels(
         // An explicit empty list is meaningful: it is the user's override
         // that disables every provider-reported mode for this model.
         normalized.insert(
-            model.to_ascii_lowercase(),
+            crate::model_id_key(model),
             crate::canonicalize_reasoning_levels(model_levels),
         );
     }
@@ -77,4 +75,49 @@ fn valid_reasoning_effort(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_REASONING_EFFORT_LENGTH
         && !value.chars().any(char::is_control)
+}
+
+pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<bool> {
+    if let Some(input) = model.get("modalities").and_then(|value| value.get("input")) {
+        return Some(array_contains_image(input));
+    }
+    for key in [
+        "input_modalities",
+        "inputModalities",
+        "input_types",
+        "inputTypes",
+    ] {
+        if let Some(value) = model.get(key) {
+            return Some(array_contains_image(value));
+        }
+    }
+    for key in [
+        "supports_vision",
+        "supportsVision",
+        "supports_images",
+        "supportsImages",
+        "image_input",
+        "imageInput",
+    ] {
+        if let Some(value) = model.get(key).and_then(Value::as_bool) {
+            return Some(value);
+        }
+    }
+    model
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .and_then(source_model_declares_image_input)
+}
+
+fn array_contains_image(value: &Value) -> bool {
+    value.as_array().is_some_and(|values| {
+        values.iter().any(|value| {
+            value.as_str().is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "image" | "image_url" | "vision"
+                )
+            })
+        })
+    })
 }

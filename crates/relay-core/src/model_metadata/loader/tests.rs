@@ -1,5 +1,7 @@
+use super::source::valid_payload;
 use super::*;
 use crate::model_metadata::MetadataCacheEnvelope;
+use crate::pricing::CatalogRefreshKind;
 use axum::{
     extract::{Path as AxumPath, State},
     http::HeaderMap,
@@ -7,6 +9,7 @@ use axum::{
     routing::get,
     Router,
 };
+use serde_json::{value::RawValue, Value};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex,
@@ -20,7 +23,7 @@ impl CacheDir {
         let path = std::env::temp_dir().join(format!(
             "relay-metadata-{}-{}-{}",
             std::process::id(),
-            catalog_io::unix_time_ms(),
+            crate::unix_time_ms(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).unwrap();
@@ -348,7 +351,7 @@ async fn auxiliary_only_refresh_does_not_fetch_fresh_sources_or_change_primary_e
     loader.refresh(false).await.unwrap();
     {
         let mut state = loader.state.write().unwrap();
-        state[0].fail(ModelMetadataError::Network, catalog_io::unix_time_ms());
+        state[0].fail(ModelMetadataError::Network, crate::unix_time_ms());
         state[2].envelope.as_mut().unwrap().fetched_at_ms = 1;
     }
     server.reply(
@@ -356,7 +359,7 @@ async fn auxiliary_only_refresh_does_not_fetch_fresh_sources_or_change_primary_e
         StatusCode::OK,
         r#"{"data":[{"id":"vendor/model","reasoning":{"supported_efforts":["max"]}}]}"#,
     );
-    let deadline = loader.next_refresh_deadline(catalog_io::unix_time_ms());
+    let deadline = loader.next_refresh_deadline(crate::unix_time_ms());
     assert_eq!(deadline.kind, CatalogRefreshKind::Scheduled);
     loader.refresh(false).await.unwrap();
     assert_eq!(

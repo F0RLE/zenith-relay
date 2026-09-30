@@ -2,7 +2,12 @@
 
 use super::*;
 
+mod evidence;
+mod shared;
 mod waiting;
+
+pub use evidence::{ExecutionEvidence, IdempotencyContract, RetryEvidence};
+pub(crate) use shared::SharedRequestBudget;
 
 #[cfg(test)]
 mod regression;
@@ -227,181 +232,6 @@ impl RequestBudget {
         RetryDecision::Retry {
             next_dispatch: self.dispatches.saturating_add(1),
         }
-    }
-}
-
-/// The four independent proofs required before a non-trivial operation may be
-/// sent to another route.  A repeatable body alone is deliberately not enough.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RetryEvidence {
-    pub input_repeatable: bool,
-    pub execution: ExecutionEvidence,
-    pub target_portable: bool,
-    pub idempotency: IdempotencyContract,
-}
-
-impl RetryEvidence {
-    pub const fn pre_execution() -> Self {
-        Self {
-            input_repeatable: true,
-            execution: ExecutionEvidence::RejectedBeforeExecution,
-            target_portable: true,
-            idempotency: IdempotencyContract::None,
-        }
-    }
-
-    pub const fn unknown() -> Self {
-        Self {
-            input_repeatable: false,
-            execution: ExecutionEvidence::Unknown,
-            target_portable: false,
-            idempotency: IdempotencyContract::None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionEvidence {
-    NotSent,
-    RejectedBeforeExecution,
-    Accepted,
-    Unknown,
-    Terminal,
-}
-
-impl ExecutionEvidence {
-    const fn replay_allowed(self, idempotency: IdempotencyContract) -> bool {
-        matches!(self, Self::NotSent | Self::RejectedBeforeExecution)
-            || (matches!(self, Self::Accepted)
-                && matches!(idempotency, IdempotencyContract::Proven))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IdempotencyContract {
-    None,
-    /// The adapter has verified deduplication for this exact operation,
-    /// identity, endpoint and retention window.
-    Proven,
-}
-
-/// A request may cross an async transport boundary (WebSocket to HTTP), but
-/// its dispatch counter must not be copied or held locked across an await.
-#[derive(Clone, Debug)]
-pub(crate) struct SharedRequestBudget {
-    budget: Arc<Mutex<RequestBudget>>,
-    waiting: Arc<Mutex<QueueWaitBudget>>,
-    /// Admission incompatibility excludes an exact route. A real dispatch
-    /// instead visits a physical member, across every driver of this request.
-    /// At most one entry per dispatch can be added, so this is budget-bounded.
-    attempted_members: Arc<Mutex<BTreeSet<String>>>,
-}
-
-impl SharedRequestBudget {
-    pub(crate) fn for_incoming_request(configured_limit: usize) -> Self {
-        Self {
-            budget: Arc::new(Mutex::new(RequestBudget::for_incoming_request(
-                configured_limit,
-            ))),
-            attempted_members: Arc::default(),
-            waiting: Arc::default(),
-        }
-    }
-
-    pub(crate) fn can_dispatch(&self) -> bool {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .can_dispatch()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn start_dispatch(&self) -> Option<AttemptId> {
-        self.with_budget(RequestBudget::start_dispatch)
-    }
-
-    pub(crate) fn dispatches(&self) -> u8 {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .dispatches()
-    }
-
-    pub(crate) fn request_id(&self) -> RequestId {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .request_id()
-    }
-
-    pub(crate) fn with_budget<R>(&self, callback: impl FnOnce(&mut RequestBudget) -> R) -> R {
-        let mut budget = self
-            .budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        callback(&mut budget)
-    }
-
-    pub(crate) fn start_wire_attempt(&self) -> Option<u16> {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .start_wire_attempt()
-    }
-
-    pub(crate) fn configure_retry_window(&self, window_ms: u64, persistent: bool) {
-        self.with_budget(|budget| budget.configure_retry_window(window_ms, persistent));
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .persistent = persistent;
-    }
-
-    pub(crate) fn attempted_members(&self) -> BTreeSet<String> {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    pub(crate) fn record_member_attempt(&self, member: &str) {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(member.to_owned());
-    }
-
-    /// A verified compatibility repair may retry its owner; it cannot refund
-    /// dispatches or undo unknown/commit/cancel evidence.
-    pub(crate) fn allow_member_repair(&self, member: &str) {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(member);
-    }
-
-    /// Called only after the controller awaited actionable scheduler recovery.
-    pub(crate) fn begin_recovery_pass(&self) {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-    }
-
-    pub(crate) fn retry_wait_deadline(&self, window_ms: u64) -> tokio::time::Instant {
-        self.with_budget(|budget| {
-            let started = *budget
-                .retry_started_at
-                .get_or_insert_with(tokio::time::Instant::now);
-            budget.retry_deadline = budget
-                .retry_window_ms
-                .map(|window_ms| started + std::time::Duration::from_millis(window_ms));
-            started + std::time::Duration::from_millis(window_ms)
-        })
-    }
-
-    pub(crate) fn observe_rejection(&self) {
-        self.with_budget(|budget| budget.observe_execution(ExecutionObservation::not_sent()));
     }
 }
 

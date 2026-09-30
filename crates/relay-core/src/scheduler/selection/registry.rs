@@ -269,7 +269,7 @@ impl PoolScheduler {
         self.candidates.contains_key(candidate_id)
             && self
                 .capability_blocks
-                .insert((candidate_id.to_string(), model.to_ascii_lowercase()))
+                .insert((candidate_id.to_string(), crate::model_id_key(model)))
     }
 
     pub fn clear_capability_blocks(&mut self, candidate_id: &str) -> bool {

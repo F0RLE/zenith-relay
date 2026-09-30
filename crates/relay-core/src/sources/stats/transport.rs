@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::time::Duration;
 use url::Url;
 
+use super::super::{is_http_endpoint, url_has_userinfo};
 use super::SourceStatsStatus;
 use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
 
@@ -31,11 +32,7 @@ impl StatsClient {
     ) -> Result<Self, String> {
         let invalid = || "source stats base URL is invalid".to_owned();
         let mut base = super::super::normalized_base_url(base_url).map_err(|_| invalid())?;
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-        {
+        if !is_http_endpoint(&base) || url_has_userinfo(&base) {
             return Err(invalid());
         }
         base.set_query(None);

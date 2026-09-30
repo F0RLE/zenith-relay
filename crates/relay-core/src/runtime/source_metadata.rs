@@ -90,25 +90,6 @@ impl GatewayRuntime {
             .collect()
     }
 
-    /// Returns whether the key has at least one Responses route other than
-    /// the explicitly labelled Excel / Basis Points transport. The shared
-    /// speed policy can be projected for that model only when such a route
-    /// exists; Basis Points alone is standard speed.
-    pub(crate) fn codex_model_has_non_basis_responses_route(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        let Some(model) = self.resolve_model(key, model) else {
-            return false;
-        };
-        self.configured_executor_routes(key, &model, &[WireApi::Responses], false)
-            .iter()
-            .any(|route| {
-                route.account_transport != crate::runtime::AccountTransport::ExcelBasisPoints
-            })
-    }
-
     /// Responses Lite is a whole-request transport contract, not a property
     /// of an individual fallback candidate. Automatic Lite is safe only when
     /// every configured route in this key scope is an official Codex account
@@ -163,7 +144,7 @@ impl GatewayRuntime {
         if configured.is_empty() {
             return false;
         }
-        let model = model.to_ascii_lowercase();
+        let model = crate::model_id_key(&model);
         let lite_models = self
             .codex_responses_lite_models
             .lock()

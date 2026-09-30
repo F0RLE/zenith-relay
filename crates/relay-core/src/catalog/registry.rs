@@ -85,7 +85,7 @@ impl ModelRegistry {
             };
             for model in &registered.models {
                 // Route grouping must not change the source catalog order.
-                let normalized = model.to_ascii_lowercase();
+                let normalized = super::model_id_key(model);
                 let rank = catalog_order.len();
                 catalog_order.entry(normalized.clone()).or_insert(rank);
                 if candidate.is_catalog_visible(model, allowed_protocols, scope)
@@ -95,7 +95,7 @@ impl ModelRegistry {
                 }
             }
         }
-        visible.sort_by_key(|model| catalog_order.get(&model.to_ascii_lowercase()).copied());
+        visible.sort_by_key(|model| catalog_order.get(&super::model_id_key(model)).copied());
         visible
     }
 }

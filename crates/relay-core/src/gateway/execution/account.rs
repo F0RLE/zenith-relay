@@ -1,49 +1,38 @@
+mod dispatch;
+mod failure;
+mod prepare;
+mod selection;
+mod success;
+
 use super::super::continuation::{
-    clear_materialized_continuation, drop_materialized_previous_response_id,
     prepare_response_continuation, previous_response_id, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
     RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
-use super::super::errors::{
-    api_error, apply_failure_state, current_failure_state, is_deactivated_workspace,
-    preserved_upstream_error, previous_response_not_found, prompt_cache_write_rejected,
-    recoverable_response_affinity_miss, recoverable_response_model_switch,
-    responses_tool_call_links_rejected, retryable_failure, settle_attempt_failure, AttemptFailure,
-    PreservedUpstreamError,
-};
+use super::super::errors::{api_error, AttemptFailure, PreservedUpstreamError};
 use super::super::now_ms;
 use super::super::request::{
-    account_endpoint_url, apply_codex_routing_hint, client_context_fingerprint,
-    codex_client_version, forwarded_codex_headers, is_deferred_tool_search_compatibility_error,
-    repair_legacy_responses_call_ids, request_id, responses_lite_parallel_tool_calls_valid,
-    unpaired_tool_output_ids, AccountEndpoint, RequestToolPolicy, ServiceTierPolicy,
-    CODEX_RESPONSES_LITE_HEADER,
+    client_context_fingerprint, request_id, AccountEndpoint, RequestToolPolicy, ServiceTierPolicy,
 };
-use super::super::response::{
-    emit_usage, populate_tokens, proxy_error_response, proxy_response, proxy_sse_response,
-    route_error_origin, usage_event,
-};
-use super::super::turn_state::{relay_account_response_header, request_scope};
-use super::finish_request_failure;
-use super::request::{
-    adapter_error_response, adapter_error_response_for_origin, basis_points_relay_error_response,
-    handle_basis_points_relay_retry, recover_stale_tool_history,
-    should_wait_for_candidate_availability, BasisPointsRelayRetryContext,
-};
-use super::{
-    bind_responses_turn, mark_model_switch_reset, repair_once, repair_responses_item_prefixes,
-    wait_for_candidate_retry, wait_for_recovery, CandidateRetryContext, ResponsesItemPrefixRepairs,
-};
-use crate::error_codes;
-use crate::runtime::{AccountTransport, AuthenticatedKey, AuthorizedRequestError};
-use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
-use crate::usage::ReasoningEffortDiagnostics;
+use super::request::adapter_error_response;
+use super::AttemptRepairs;
+use super::CandidateRetryContext;
+use super::{finish_request_failure, RequestFailureInput};
+use crate::runtime::AuthenticatedKey;
+use crate::scheduler::rotation::{RotationOperation, SharedRequestBudget};
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
-use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
+use dispatch::{
+    dispatch_account_attempt, AccountDispatch, AccountDispatchInput, DispatchedAccountAttempt,
+};
+use failure::{handle_account_status_failure, AccountStatusFailure, AccountStatusFailureInput};
+use prepare::{
+    prepare_account_attempt, AccountPrepare, AccountPrepareInput, PreparedAccountAttempt,
+};
+use selection::{handle_account_selection_miss, AccountSelectionMiss, AccountSelectionMissInput};
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::Instant;
+use success::{complete_account_response, AccountSuccess, AccountSuccessInput};
 
 pub(in crate::gateway) struct AccountExecution {
     pub(in crate::gateway) runtime: Arc<GatewayRuntime>,
@@ -114,12 +103,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let account_only_exclusions = runtime.api_source_candidate_ids();
     let mut tried = account_only_exclusions.clone();
     let budget = SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget());
-    let mut function_item_id_repair_attempted = false;
-    let mut custom_tool_item_id_repair_attempted = false;
-    let mut message_item_id_repair_attempted = false;
-    let mut legacy_call_id_repair_attempted = false;
-    let mut model_switch_reset_attempted = false;
-    let mut stale_tool_history_recovered = false;
+    let mut repairs = AttemptRepairs::default();
     let mut basis_points_relay_retry_attempted = false;
     let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
@@ -182,681 +166,178 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             )
             .await
         else {
-            if let Some(error) = crate::gateway::errors::admission_error(&budget) {
-                return error;
-            }
-            if !requires_affinity_owner
-                && runtime.release_unroutable_response_affinity(
-                    &key,
-                    &mut response_affinity_key,
-                    &resolved_model,
-                    &[WireApi::Responses],
-                    now_ms(),
-                )
-            {
-                continue;
-            }
-            // Account-only continuations are pinned to their creating account
-            // while it remains in the key scope. If pool membership removes
-            // that owner, drop the opaque response id once so another account
-            // can continue the chat instead of waiting forever on an
-            // impossible affinity selection. Temporary health, quota, and
-            // cooldown misses remain retryable on the original owner.
-            if has_previous_response_id
-                && !has_unpaired_tool_output
-                && !model_switch_reset_attempted
-                && response_affinity_key.as_deref().and_then(|affinity_key| {
-                    runtime.response_affinity_owner_supports_route(
-                        &key,
-                        affinity_key,
-                        &resolved_model,
-                        &[WireApi::Responses],
-                        now_ms(),
-                    )
-                }) == Some(false)
-                && drop_materialized_previous_response_id(
-                    &runtime,
-                    &key.id,
-                    &mut request,
-                    &resolved_model,
-                    now_ms(),
-                )
-            {
-                mark_model_switch_reset(
-                    &mut model_switch_reset_attempted,
-                    &mut response_affinity_key,
-                    &mut requires_affinity_owner,
-                );
-                continue;
-            }
-            if wait_for_recovery(
-                &budget,
-                &retry_context,
-                &mut tried,
-                response_affinity_key.as_deref(),
-            )
+            match handle_account_selection_miss(AccountSelectionMissInput {
+                budget: &budget,
+                runtime: &runtime,
+                key: &key,
+                request: &mut request,
+                resolved_model: &resolved_model,
+                response_affinity_key: &mut response_affinity_key,
+                requires_affinity_owner: &mut requires_affinity_owner,
+                has_previous_response_id,
+                has_unpaired_tool_output,
+                repairs: &mut repairs,
+                tried: &mut tried,
+                retry_context: &retry_context,
+                last_failure: &last_failure,
+                wait_for_candidate_availability,
+            })
             .await
             {
-                continue;
-            }
-            if should_wait_for_candidate_availability(
-                wait_for_candidate_availability,
-                &last_failure,
-                false,
-                has_previous_response_id,
-            ) {
-                if !wait_for_candidate_retry(
-                    &budget,
-                    &retry_context,
-                    &mut tried,
-                    response_affinity_key.as_deref(),
-                )
-                .await
-                {
-                    retry_window_expired = true;
+                AccountSelectionMiss::Continue => continue,
+                AccountSelectionMiss::Stop {
+                    retry_window_expired: expired,
+                } => {
+                    retry_window_expired = expired;
                     break;
                 }
-                continue;
+                AccountSelectionMiss::Respond(response) => return response,
             }
-            break;
         };
         tried.insert(selected.candidate_id.clone());
         let response_affinity_hit = selected.response_affinity_hit;
-        let Some(mut route) = runtime.executor_route(
-            &selected.candidate_id,
-            &resolved_model,
-            &key.scope_snapshot(),
-            &[WireApi::Responses],
-            false,
-        ) else {
-            continue;
+        let prepared = match prepare_account_attempt(AccountPrepareInput {
+            runtime: &runtime,
+            key: &key,
+            request: &mut request,
+            resolved_model: &resolved_model,
+            endpoint,
+            responses_lite: &responses_lite,
+            rewrite_model,
+            automatic_responses_lite,
+            service_tier_policy: &service_tier_policy,
+            tool_policy: &mut tool_policy,
+            candidate_id: &selected.candidate_id,
+            half_open_probe: selected.half_open_probe,
+            diagnostics: selected.diagnostics,
+            client_context_id: &client_context_id,
+            basis_points_relay_retry_parameter,
+            last_failure: &mut last_failure,
+            last_adapter_error: &mut last_adapter_error,
+        }) {
+            AccountPrepare::Continue => continue,
+            AccountPrepare::Respond(response) => return response,
+            AccountPrepare::Ready(prepared) => *prepared,
         };
-        if route.account_id.is_none() {
-            continue;
-        }
-        let selected_service_tier =
-            service_tier_policy.select_for_model(&runtime, &route.source_model);
-        service_tier_policy.prepare_for_candidate(
-            &mut request,
-            selected_service_tier,
-            WireApi::Responses,
-        );
-        route.half_open_probe = selected.half_open_probe;
-        route.routing = Some(selected.diagnostics);
-        route.client_context_id = client_context_id.clone();
-        route.service_tier =
-            service_tier_policy.effective_tier(&request, selected_service_tier, WireApi::Responses);
-        let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
-        if basis_points_route {
-            if let Some(error) = super::compatibility::basis_points_admission_error(
-                &request,
-                request.get("stream").and_then(Value::as_bool) == Some(true),
-                &service_tier_policy,
-                selected_service_tier,
-                responses_lite.is_some(),
-                endpoint != AccountEndpoint::Wake,
-            ) {
-                last_adapter_error = Some(error);
-                continue;
-            }
-        }
-        let route_responses_lite = responses_lite.clone().or_else(|| {
-            (automatic_responses_lite
-                && route.account_id.as_deref().is_some_and(|candidate_id| {
-                    runtime
-                        .codex_model_responses_lite_candidates(&resolved_model)
-                        .iter()
-                        .any(|id| id == candidate_id)
-                }))
-            .then(|| HeaderValue::from_static("true"))
-        });
-        let selected_error_origin = route_error_origin(&route);
-        let upstream_url = if basis_points_route {
-            route.upstream_url.clone()
-        } else {
-            let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint)
-            else {
-                last_failure = Some(AttemptFailure::invalid_request());
-                continue;
-            };
-            upstream_url
-        };
-        let mut upstream_body = request.clone();
-        if rewrite_model {
-            upstream_body.as_object_mut().unwrap().insert(
-                "model".to_string(),
-                Value::String(route.source_model.clone()),
-            );
-        }
-        if route_responses_lite.is_some() && !basis_points_route {
-            if let Some(object) = upstream_body.as_object_mut() {
-                if !responses_lite_parallel_tool_calls_valid(object) {
-                    return api_error(
-                        StatusCode::BAD_REQUEST,
-                        "responses Lite requires parallel_tool_calls to be a boolean",
-                        error_codes::INVALID_REQUEST,
-                    );
-                }
-                if endpoint == AccountEndpoint::Compact {
-                    crate::gateway::request::normalize_compact_account_request(object, true);
-                } else {
-                    crate::gateway::request::normalize_account_request(object, true);
-                }
-            }
-        }
-        if basis_points_route {
-            if let Some(object) = upstream_body.as_object_mut() {
-                crate::gateway::request::normalize_basis_points_request(object);
-            }
-        }
-        // Only the native Responses wake path has the provider contract for
-        // `tool_search`. Compact and alpha/search are separate account
-        // endpoints and must keep their ordinary full catalog.
-        let allow_deferred_tool_search = endpoint == AccountEndpoint::Wake && !basis_points_route;
-        if let Err(message) =
-            tool_policy.apply_value(&mut upstream_body, allow_deferred_tool_search)
-        {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                message,
-                error_codes::INVALID_REQUEST,
-            );
-        }
-        if basis_points_route {
-            let prepared = match super::basis_points::prepare_upstream(
-                &upstream_body,
-                basis_points_relay_retry_parameter,
-            ) {
-                Ok(prepared) => prepared,
-                Err(error) if error.is_route_incompatible() => {
-                    last_adapter_error = Some(error);
-                    continue;
-                }
-                Err(error) => return super::request::adapter_error_response(error),
-            };
-            upstream_body = prepared;
-        }
-        let reasoning_effort =
-            ReasoningEffortDiagnostics::from_bodies(&request, &upstream_body, WireApi::Responses);
-        let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "request body could not be serialized",
-                error_codes::INVALID_REQUEST,
-            );
-        };
-        let tool_use = tool_policy.diagnostics.clone();
-
-        let started = Instant::now();
-        let failed_usage =
-            |route: &crate::runtime::ExecutorRoute, attempt, failure: AttemptFailure| {
-                usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    route,
-                    Some(&reasoning_effort),
-                    &requested_model,
-                    false,
-                    failure.status.as_u16(),
-                    Some(failure.category.to_string()),
-                    started.elapsed().as_millis() as u64,
-                    tool_use.clone(),
-                )
-            };
-        let mut request_headers = if basis_points_route {
-            route.upstream_headers.clone()
-        } else {
-            forwarded_codex_headers(&client_headers, &request_id)
-        };
-        if !basis_points_route {
-            apply_codex_routing_hint(
-                &mut request_headers,
-                &route.source_model,
-                route.service_tier,
-            );
-        }
-        let turn_account = route.account_id.clone();
-        let turn_model = route.source_model.clone();
-        let turn_scope = if basis_points_route {
-            None
-        } else {
-            request_scope(
-                &key.id,
-                &client_headers,
-                turn_account.as_deref(),
-                &turn_model,
-            )
-        };
-        let compaction_headers = request_headers.clone();
-        let mut upstream_request = runtime
-            .request_client(&route.candidate_id)
-            .post(upstream_url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json")
-            .headers(request_headers);
-        if endpoint == AccountEndpoint::Compact && !basis_points_route {
-            if let Some(value) = route_responses_lite.as_ref() {
-                upstream_request =
-                    upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
-            }
-        }
-        let upstream = runtime
-            .send_authorized_request(
-                &route.candidate_id,
-                upstream_request.body(request_body),
-                (!basis_points_route)
-                    .then(|| codex_client_version(&client_headers))
-                    .flatten(),
-                turn_scope.as_ref(),
-                Some(&budget),
-                Some(&lease),
-            )
-            .await;
-        let attempt = u16::from(budget.dispatches());
-        let upstream = match upstream {
-            Ok(upstream) => {
-                route.account_token_generation = upstream.account_token_generation;
-                upstream.response
-            }
-            Err(error) => {
-                let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
-                let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);
-                let failure = AttemptFailure::authorized_request(error);
-                let mut event = failed_usage(&route, attempt, failure);
-                if uncertain || exhausted {
-                    if uncertain {
-                        lease.settle_rotation_unknown(now_ms());
-                    }
-                    emit_usage(&runtime, event);
-                    return super::attempt_error_response(
-                        failure,
-                        None,
-                        selected_error_origin,
-                        &request_id,
-                    );
-                }
-                let state = settle_attempt_failure(
-                    &runtime,
-                    &lease,
-                    &route.source_model,
-                    &failure,
-                    &HeaderMap::new(),
-                );
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                last_failure_origin = selected_error_origin;
-                continue;
-            }
-        };
-        let mut status = upstream.status();
-        let mut response_headers = upstream.headers().clone();
-        let Ok(mut bytes) =
-            crate::transport::collect_limited(upstream, endpoint.response_limit()).await
-        else {
-            lease.settle_rotation_unknown(now_ms());
-            let failure = AttemptFailure::body();
-            let state = current_failure_state(&runtime, &route.candidate_id, &route.source_model);
-            let mut event = failed_usage(&route, attempt, failure);
-            apply_failure_state(&mut event, state);
-            emit_usage(&runtime, event);
-            last_failure = Some(failure);
-            last_failure_origin = selected_error_origin;
-            continue;
-        };
-        if endpoint == AccountEndpoint::Compact
-            && budget.can_dispatch()
-            && super::super::compaction::missing_legacy_endpoint(status, &bytes)
-        {
-            match super::super::compaction::execute(
-                &runtime,
-                &mut route,
-                &upstream_body,
-                &compaction_headers,
-                turn_scope.as_ref(),
-                &budget,
-                &lease,
-            )
-            .await
-            {
-                Ok((headers, body)) => {
-                    status = StatusCode::OK;
-                    response_headers = headers;
-                    bytes = body;
-                }
-                Err(error) => {
-                    let (failure, headers) = *error;
-                    let mut event = failed_usage(&route, u16::from(budget.dispatches()), failure);
-                    let state = settle_attempt_failure(
-                        &runtime,
-                        &lease,
-                        &route.source_model,
-                        &failure,
-                        &headers,
-                    );
-                    apply_failure_state(&mut event, state);
-                    emit_usage(&runtime, event);
-                    return finish_request_failure(
-                        &runtime,
-                        &key,
-                        &resolved_model,
-                        &[WireApi::Responses],
-                        operation,
-                        &account_only_exclusions,
-                        response_affinity_key.as_deref(),
-                        failure,
-                        None,
-                        selected_error_origin,
-                        &request_id,
-                    );
-                }
-            }
-        }
-        let attempt = u16::from(budget.dispatches());
-        if !status.is_success() {
-            if repair_once(
-                &mut legacy_call_id_repair_attempted,
-                responses_tool_call_links_rejected(&bytes),
-                &mut tried,
-                &route.candidate_id,
-                &lease,
-                || repair_legacy_responses_call_ids(&mut request),
-            ) {
-                has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
-                requires_affinity_owner =
-                    request_has_previous_response_id(&request) || has_unpaired_tool_output;
-                // The provider rejected the body before doing the work. Close
-                // that attempt as not sent so the repaired request can use the
-                // same account without a cooldown or an unknown cancellation.
-                lease.settle_rotation_repair(now_ms());
-                continue;
-            }
-            if repair_responses_item_prefixes(
-                &mut request,
-                &bytes,
-                true,
-                &mut ResponsesItemPrefixRepairs {
-                    function_ids: &mut function_item_id_repair_attempted,
-                    custom_tool_ids: &mut custom_tool_item_id_repair_attempted,
-                    message_ids: &mut message_item_id_repair_attempted,
-                },
-                &mut tried,
-                &route.candidate_id,
-                &lease,
-            ) {
-                lease.settle_rotation_repair(now_ms());
-                continue;
-            }
-            let failure = AttemptFailure::status_with_body(status, Some(&bytes));
-            if status == StatusCode::PAYMENT_REQUIRED
-                && route.account_id.is_some()
-                && is_deactivated_workspace(&bytes)
-            {
-                runtime.trip_chatgpt_team_breaker(&route.candidate_id, now_ms());
-            }
-            last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
-            let mut event = usage_event(
-                &request_id,
-                attempt,
-                &key.id,
-                &route,
-                Some(&reasoning_effort),
-                &requested_model,
-                false,
-                status.as_u16(),
-                Some(failure.category.to_string()),
-                started.elapsed().as_millis() as u64,
-                tool_use.clone(),
-            );
-            let cache_write_rejected = prompt_cache_write_rejected(&bytes);
-            let upstream_error =
-                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
-            event.upstream_error = Some(upstream_error.clone());
-            if endpoint == AccountEndpoint::Wake
-                && is_deferred_tool_search_compatibility_error(status, &upstream_error)
-                && tool_policy.prepare_deferred_fallback()
-            {
-                // Retry once with the original catalog. This is still before
-                // any client output because account responses are collected
-                // before this status branch.
-                event.tool_use.policy_fallback = true;
-                emit_usage(&runtime, event);
-                tried.remove(&route.candidate_id);
-                lease.settle_rotation_repair(now_ms());
-                last_failure = Some(failure);
-                last_failure_origin = selected_error_origin;
-                continue;
-            }
-            if has_previous_response_id
-                && recover_stale_tool_history(
-                    &runtime,
-                    &key.id,
-                    &mut request,
-                    &resolved_model,
-                    &bytes,
-                    &mut stale_tool_history_recovered,
-                )
-            {
-                clear_materialized_continuation(
-                    &mut response_affinity_key,
-                    &mut requires_affinity_owner,
-                    &mut has_unpaired_tool_output,
-                );
-                tried.remove(&route.candidate_id);
-                lease.settle_rotation_repair(now_ms());
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                last_failure_origin = selected_error_origin;
-                continue;
-            }
-            if !model_switch_reset_attempted
-                && recoverable_response_model_switch(
-                    status,
-                    failure.category,
-                    has_previous_response_id,
-                    has_unpaired_tool_output,
-                    &bytes,
-                )
-                && drop_materialized_previous_response_id(
-                    &runtime,
-                    &key.id,
-                    &mut request,
-                    &resolved_model,
-                    now_ms(),
-                )
-            {
-                mark_model_switch_reset(
-                    &mut model_switch_reset_attempted,
-                    &mut response_affinity_key,
-                    &mut requires_affinity_owner,
-                );
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                last_failure_origin = selected_error_origin;
-                lease.settle_rotation_repair(now_ms());
-                continue;
-            }
-            let affinity_miss = recoverable_response_affinity_miss(
-                status,
-                has_previous_response_id,
-                response_affinity_hit,
-                previous_response_not_found(&bytes),
-            );
-            if affinity_miss {
-                event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
-                emit_usage(&runtime, event);
-                if !model_switch_reset_attempted
-                    && drop_materialized_previous_response_id(
-                        &runtime,
-                        &key.id,
-                        &mut request,
-                        &resolved_model,
-                        now_ms(),
-                    )
-                {
-                    mark_model_switch_reset(
-                        &mut model_switch_reset_attempted,
-                        &mut response_affinity_key,
-                        &mut requires_affinity_owner,
-                    );
-                    tried.remove(&route.candidate_id);
-                    lease.settle_rotation_repair(now_ms());
-                    last_failure = Some(failure);
-                    last_failure_origin = selected_error_origin;
-                    continue;
-                }
-                settle_attempt_failure(
-                    &runtime,
-                    &lease,
-                    &route.source_model,
-                    &failure,
-                    &response_headers,
-                );
-                return api_error(
-                    StatusCode::CONFLICT,
-                    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
-                    RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
-                );
-            }
-            let rejection_state = settle_attempt_failure(
-                &runtime,
-                &lease,
-                &route.source_model,
-                &failure,
-                &response_headers,
-            );
-            if cache_write_rejected {
-                runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
-            }
-            if cache_write_rejected
-                || retryable_failure(status, failure.category, has_previous_response_id)
-            {
-                if response_affinity_hit && !requires_affinity_owner {
-                    response_affinity_key = None;
-                }
-                let state = rejection_state.clone();
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                last_failure_origin = selected_error_origin;
-                continue;
-            }
-            emit_usage(&runtime, event);
-            let mut response = proxy_error_response(
-                status,
-                &response_headers,
-                Body::from(bytes),
-                selected_error_origin,
-                failure.category,
-                Some(&request_id),
-            );
-            if route.account_id.is_some() {
-                relay_account_response_header(&client_headers, &response_headers, &mut response);
-            }
-            return response;
-        }
-
-        let client_stream = request.get("stream").and_then(Value::as_bool) == Some(true);
-        let mut event = usage_event(
-            &request_id,
-            attempt,
-            &key.id,
-            &route,
-            Some(&reasoning_effort),
-            &requested_model,
-            true,
-            status.as_u16(),
-            None,
-            started.elapsed().as_millis() as u64,
+        let PreparedAccountAttempt {
+            route,
+            basis_points_route,
+            route_responses_lite,
+            selected_error_origin,
+            upstream_url,
+            upstream_body,
+            request_body,
+            reasoning_effort,
             tool_use,
-        );
-        populate_tokens(&mut event, &bytes);
-        let client_bytes = if basis_points_route {
-            match super::basis_points::translate_response(&bytes, &request) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    match handle_basis_points_relay_retry(
-                        error,
-                        &bytes,
-                        event,
-                        BasisPointsRelayRetryContext {
-                            attempted: &mut basis_points_relay_retry_attempted,
-                            parameter: &mut basis_points_relay_retry_parameter,
-                            runtime: &runtime,
-                            tried: &mut tried,
-                            candidate_id: &route.candidate_id,
-                            lease: &lease,
-                            last_adapter_error: &mut last_adapter_error,
-                        },
-                    ) {
-                        Ok(()) => continue,
-                        Err(pair) => {
-                            let (error, event) = *pair;
-                            return basis_points_relay_error_response(
-                                error,
-                                event,
-                                &runtime,
-                                &lease,
-                                selected_error_origin,
-                            );
-                        }
-                    }
-                }
-            }
-        } else {
-            bytes
+        } = prepared;
+
+        let dispatched = match dispatch_account_attempt(AccountDispatchInput {
+            runtime: &runtime,
+            key: &key,
+            lease: &lease,
+            budget: &budget,
+            route,
+            endpoint,
+            basis_points_route,
+            route_responses_lite,
+            selected_error_origin,
+            upstream_url,
+            upstream_body,
+            request_body,
+            reasoning_effort,
+            tool_use,
+            request_id: &request_id,
+            requested_model: &requested_model,
+            resolved_model: &resolved_model,
+            client_headers: &client_headers,
+            operation,
+            account_only_exclusions: &account_only_exclusions,
+            response_affinity_key: response_affinity_key.as_deref(),
+            last_failure: &mut last_failure,
+            last_failure_origin: &mut last_failure_origin,
+        })
+        .await
+        {
+            AccountDispatch::Continue => continue,
+            AccountDispatch::Respond(response) => return response,
+            AccountDispatch::Ready(dispatched) => *dispatched,
         };
-        let basis_points_stream = if basis_points_route && client_stream {
-            match super::basis_points::synthetic_stream(&client_bytes) {
-                Ok(stream_body) => Some(stream_body),
-                Err(error) => {
-                    emit_usage(
-                        &runtime,
-                        super::request::mark_adapter_failure(event, &error),
-                    );
-                    lease.settle_rotation_terminal(now_ms());
-                    return adapter_error_response_for_origin(error, selected_error_origin);
-                }
+        let DispatchedAccountAttempt {
+            route,
+            status,
+            response_headers,
+            bytes,
+            attempt,
+            started,
+            reasoning_effort,
+            tool_use,
+            selected_error_origin,
+            basis_points_route,
+        } = dispatched;
+        if !status.is_success() {
+            match handle_account_status_failure(AccountStatusFailureInput {
+                status,
+                bytes,
+                response_headers: &response_headers,
+                runtime: &runtime,
+                lease: &lease,
+                route: &route,
+                attempt,
+                request_id: &request_id,
+                key: &key,
+                reasoning_effort: &reasoning_effort,
+                requested_model: &requested_model,
+                tool_use: &tool_use,
+                started,
+                endpoint: &endpoint,
+                request: &mut request,
+                resolved_model: &resolved_model,
+                client_headers: &client_headers,
+                selected_error_origin,
+                response_affinity_hit,
+                has_previous_response_id,
+                prompt_affinity_key: &prompt_affinity_key,
+                tried: &mut tried,
+                has_unpaired_tool_output: &mut has_unpaired_tool_output,
+                requires_affinity_owner: &mut requires_affinity_owner,
+                tool_policy: &mut tool_policy,
+                response_affinity_key: &mut response_affinity_key,
+                repairs: &mut repairs,
+                last_failure: &mut last_failure,
+                last_failure_origin: &mut last_failure_origin,
+                last_preserved_upstream_error: &mut last_preserved_upstream_error,
+            }) {
+                AccountStatusFailure::Continue => continue,
+                AccountStatusFailure::Respond(response) => return response,
             }
-        } else {
-            None
-        };
-        let recovered = runtime.record_success_with_metrics(
-            &route.candidate_id,
-            &route.source_model,
-            now_ms(),
-            event.output_tokens,
-            event.generation_ms.unwrap_or(event.latency_ms),
-        );
-        event.consecutive_failures = recovered.then_some(0);
-        runtime.bind_prompt_affinity(
-            prompt_affinity_key.as_deref(),
-            &route.candidate_id,
-            now_ms(),
-        );
-        bind_responses_turn(
-            &runtime,
-            &key.id,
-            &route.candidate_id,
-            &request,
-            &route.source_model,
-            &client_bytes,
-            true,
-        );
-        emit_usage(&runtime, event);
-        lease.settle_rotation_success(now_ms());
-        if let Some(stream_body) = basis_points_stream {
-            let mut response =
-                proxy_sse_response(status, &response_headers, Body::from(stream_body));
-            relay_account_response_header(&client_headers, &response_headers, &mut response);
-            return response;
         }
-        let mut response = proxy_response(status, &response_headers, Body::from(client_bytes));
-        if route.account_id.is_some() {
-            relay_account_response_header(&client_headers, &response_headers, &mut response);
+        match complete_account_response(AccountSuccessInput {
+            status,
+            bytes,
+            response_headers: &response_headers,
+            runtime: &runtime,
+            lease: &lease,
+            route: &route,
+            attempt,
+            request_id: &request_id,
+            key: &key,
+            reasoning_effort: &reasoning_effort,
+            requested_model: &requested_model,
+            tool_use,
+            started,
+            request: &request,
+            client_headers: &client_headers,
+            selected_error_origin,
+            basis_points_route,
+            prompt_affinity_key: &prompt_affinity_key,
+            tried: &mut tried,
+            basis_points_relay_retry_attempted: &mut basis_points_relay_retry_attempted,
+            basis_points_relay_retry_parameter: &mut basis_points_relay_retry_parameter,
+            last_adapter_error: &mut last_adapter_error,
+        }) {
+            AccountSuccess::Continue => continue,
+            AccountSuccess::Respond(response) => return response,
         }
-        return response;
     }
 
     if let Some(error) = crate::gateway::errors::admission_error(&budget) {
@@ -865,28 +346,20 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     if let Some(error) = last_adapter_error {
         return adapter_error_response(error);
     }
-    let failure = if retry_window_expired {
-        AttemptFailure::classified_with_hint(
-            StatusCode::SERVICE_UNAVAILABLE,
-            error_codes::UPSTREAM_UNAVAILABLE,
-            Default::default(),
-        )
-    } else {
-        last_failure.unwrap_or_else(AttemptFailure::no_candidate)
-    };
-    finish_request_failure(
-        &runtime,
-        &key,
-        &resolved_model,
-        &[WireApi::Responses],
+    let failure = AttemptFailure::after_exhausted_attempts(retry_window_expired, last_failure);
+    finish_request_failure(RequestFailureInput {
+        runtime: &runtime,
+        key: &key,
+        resolved_model: &resolved_model,
+        protocols: &[WireApi::Responses],
         operation,
-        &account_only_exclusions,
-        response_affinity_key.as_deref(),
+        exclusions: &account_only_exclusions,
+        response_affinity_key: response_affinity_key.as_deref(),
         failure,
-        last_preserved_upstream_error.as_ref(),
-        last_failure_origin,
-        &request_id,
-    )
+        preserved: last_preserved_upstream_error.as_ref(),
+        failure_origin: last_failure_origin,
+        request_id: &request_id,
+    })
 }
 
 fn request_has_previous_response_id(request: &Value) -> bool {

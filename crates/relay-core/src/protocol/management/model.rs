@@ -1,11 +1,24 @@
 use super::{AccountSummary, OperationalStatus, SourceSummary};
-use crate::model_metadata::{ModelMetadataCatalog, ReasoningMethod};
+use crate::model_metadata::ReasoningMethod;
 use crate::{
-    ApiModelPriceOverride, CandidateKind, CandidateRuntimeSnapshot, DefaultServiceTier,
-    GatewayRuntime, ImageRequestPrice,
+    ApiModelPriceOverride, CandidateRuntimeSnapshot, DefaultServiceTier, GatewayRuntime,
+    ImageRequestPrice,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+mod availability;
+mod order;
+
+pub use availability::{
+    model_has_api_source_route, pool_candidate_count, pooled_source_runtime_available,
+    source_runtime_available,
+};
+pub use order::{
+    apply_member_model_display_order, apply_model_display_order,
+    apply_model_display_order_with_catalog, apply_model_metadata, member_model_catalog,
+    ModelCatalogIdentity,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,7 +209,7 @@ pub fn apply_pool_model_configuration(
                 .iter()
                 .any(|route| route.client_wire_api == crate::WireApi::Responses);
         let cache_write_route = routes.has_cache_write_pricing(&model_id);
-        if let Some(price) = model_price_overrides.get(&model_id.trim().to_ascii_lowercase()) {
+        if let Some(price) = model_price_overrides.get(&crate::model_id_key(&model_id)) {
             model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
             model.cached_input_micro_usd_per_million = price.cached_input_micro_usd_per_million;
             model.cache_write_5m_micro_usd_per_million = cache_write_route
@@ -243,154 +256,12 @@ pub fn apply_pool_model_configuration(
         apply_model_speed_summary(
             model,
             model_service_tier_overrides
-                .get(&model_id.to_ascii_lowercase())
+                .get(&crate::model_id_key(&model_id))
                 .copied()
                 .or_else(|| runtime.map(GatewayRuntime::default_service_tier))
                 .unwrap_or(DefaultServiceTier::Standard),
             runtime,
         );
-    }
-}
-
-/// Counts pooled source and account candidates that are currently eligible
-/// for rotation. This is a snapshot statistic, not scheduler admission.
-pub fn pool_candidate_count(sources: &[SourceSummary], accounts: &[AccountSummary]) -> usize {
-    sources
-        .iter()
-        .filter(|source| {
-            source.in_pool
-                && source.supports_any_wire_api()
-                && source.operational_status == OperationalStatus::Rotation
-        })
-        .count()
-        + accounts
-            .iter()
-            .filter(|account| {
-                account.in_pool && account.operational_status == OperationalStatus::Rotation
-            })
-            .count()
-}
-
-/// Applies the operator's explicit presentation order without dropping a
-/// newly discovered upstream model. Unknown or stale saved IDs are ignored;
-/// models absent from the saved list keep their upstream-relative order.
-pub fn apply_model_display_order(models: &mut [ModelSummary], saved_order: &[String]) {
-    apply_model_display_order_with_catalog(models, saved_order, &ModelMetadataCatalog::empty());
-}
-
-/// Applies saved presentation order while placing new models through the
-/// catalog's stable release/update ordering. This changes presentation only;
-/// routing and eligibility continue to use the live pool evidence.
-pub fn apply_model_display_order_with_catalog(
-    models: &mut [ModelSummary],
-    saved_order: &[String],
-    catalog: &ModelMetadataCatalog,
-) {
-    let order = catalog.merge_display_order(models.iter().map(|model| &model.id), saved_order);
-    let positions = order
-        .iter()
-        .enumerate()
-        .map(|(position, model)| (model.to_ascii_lowercase(), position))
-        .collect::<BTreeMap<_, _>>();
-    models.sort_by_key(|model| {
-        positions
-            .get(&model.id.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelCatalogIdentity {
-    pub catalog_provider: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub catalog_family: Option<String>,
-}
-
-/// Resolve only IDs present in member inventory or saved rules/prices. Keep
-/// this independent from the pool's filtered operational model summaries.
-pub fn member_model_catalog(
-    sources: &[SourceSummary],
-    accounts: &[AccountSummary],
-    catalog: &ModelMetadataCatalog,
-) -> BTreeMap<String, ModelCatalogIdentity> {
-    let source_models = sources.iter().flat_map(|source| {
-        source
-            .models
-            .iter()
-            .chain(&source.allowed_models)
-            .chain(&source.excluded_models)
-            .chain(source.model_price_overrides.keys())
-            .chain(source.detected_model_prices.keys())
-    });
-    let account_models = accounts.iter().flat_map(|account| {
-        account
-            .models
-            .iter()
-            .chain(&account.allowed_models)
-            .chain(&account.excluded_models)
-    });
-    source_models
-        .chain(account_models)
-        .filter_map(|id| {
-            let metadata = catalog.resolve(id)?;
-            Some((
-                id.to_ascii_lowercase(),
-                ModelCatalogIdentity {
-                    catalog_provider: metadata.provider.clone(),
-                    catalog_family: metadata.family.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-/// Order complete member inventories for the editors, including excluded models
-/// and members outside the pool. Do not use the filtered public catalog here.
-/// This changes only snapshot presentation, never discovery or routing rules.
-pub fn apply_member_model_display_order(
-    sources: &mut [SourceSummary],
-    accounts: &mut [AccountSummary],
-    saved_order: &[String],
-    catalog: &ModelMetadataCatalog,
-) {
-    for models in sources
-        .iter_mut()
-        .map(|source| &mut source.models)
-        .chain(accounts.iter_mut().map(|account| &mut account.models))
-    {
-        *models = catalog.merge_display_order(models.iter(), saved_order);
-    }
-}
-
-pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadataCatalog) {
-    for model in models {
-        // Snapshots can be refreshed in place by callers. Clear the complete
-        // presentation projection before applying the new catalog so a model
-        // removed from metadata cannot retain fields from an older snapshot.
-        let metadata = catalog.resolve(&model.id);
-        model.codex_display_name = catalog.codex_display_name(&model.id);
-        model.catalog_provider = metadata.map(|metadata| metadata.provider.clone());
-        model.catalog_family = metadata.and_then(|metadata| metadata.family.clone());
-        model.catalog_name = metadata.and_then(|metadata| metadata.name.clone());
-        model.catalog_release_date = metadata.and_then(|metadata| metadata.release_date.clone());
-        model.catalog_last_updated = metadata.and_then(|metadata| metadata.last_updated.clone());
-        model.catalog_status = metadata.and_then(|metadata| metadata.status.clone());
-        let capabilities = catalog.capabilities_for(&model.id);
-        model.catalog_reasoning = capabilities.reasoning;
-        model.catalog_reasoning_method = capabilities.reasoning_method;
-        model.catalog_reasoning_effort_levels = capabilities.reasoning_effort_levels;
-        model.catalog_default_reasoning_effort = capabilities.default_reasoning_effort;
-        model.catalog_tool_call = capabilities.tool_call;
-        model.catalog_structured_output = capabilities.structured_output;
-        model.catalog_attachment = capabilities.attachment;
-        model.catalog_open_weights = capabilities.open_weights;
-        model.catalog_input_modalities = capabilities.input_modalities;
-        model.catalog_output_modalities = capabilities.output_modalities;
-        model.catalog_context_limit = capabilities.context_limit;
-        model.catalog_input_limit = capabilities.input_limit;
-        model.catalog_output_limit = capabilities.output_limit;
     }
 }
 
@@ -426,44 +297,4 @@ pub fn apply_model_reasoning_summary(
         model.reasoning_levels = model.reasoning_allowed_levels.clone();
     }
     model.reasoning_configurable = has_pool_route && !model.reasoning_supported_levels.is_empty();
-}
-
-/// Returns whether an enabled pooled API source has a route for this model.
-/// Account membership is counted separately by callers.
-pub fn model_has_api_source_route(sources: &[SourceSummary], model: &str) -> bool {
-    sources.iter().any(|source| {
-        source.enabled
-            && source.in_pool
-            && !source.draining
-            && source.secret_available
-            && source
-                .models_for_any_wire_api()
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    })
-}
-
-pub fn source_runtime_available(
-    routing_order: &[CandidateRuntimeSnapshot],
-    source_id: &str,
-) -> bool {
-    routing_order.iter().any(|candidate| {
-        candidate.kind == CandidateKind::ApiSource
-            && candidate.available
-            && (candidate.candidate_id == source_id
-                || candidate
-                    .candidate_id
-                    .strip_prefix(source_id)
-                    .is_some_and(|suffix| suffix.starts_with("::")))
-    })
-}
-
-/// Returns whether an API source has any healthy runtime route exposed through
-/// the pool's multi-protocol system key. Candidate ids may be the legacy source
-/// id or a protocol-specific child such as `source::messages`.
-pub fn pooled_source_runtime_available(
-    routing_order: &[CandidateRuntimeSnapshot],
-    source_id: &str,
-) -> bool {
-    source_runtime_available(routing_order, source_id)
 }

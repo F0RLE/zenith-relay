@@ -139,13 +139,6 @@ pub(crate) async fn response_json(
     serde_json::from_slice(&bytes).map_err(|_| CatalogIoError::InvalidJson)
 }
 
-pub(crate) fn unix_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
-}
-
 fn temporary_path(path: &Path) -> PathBuf {
     path.with_extension(format!(
         "tmp-{}-{}",

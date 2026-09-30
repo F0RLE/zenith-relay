@@ -44,14 +44,7 @@ pub(in crate::gateway) async fn responses_compact(
             error_codes::INVALID_REQUEST,
         );
     };
-    let resolved_model = runtime
-        .resolve_visible_account_model(&key, &requested_model)
-        .or_else(|| {
-            runtime
-                .route_recovery_enabled()
-                .then(|| runtime.resolve_configured_account_model(&key, &requested_model))
-                .flatten()
-        });
+    let resolved_model = resolved_account_model(&runtime, &key, &requested_model);
     let Some(resolved_model) = resolved_model else {
         return execute_routed_compaction(runtime, headers, Value::Object(request)).await;
     };
@@ -186,14 +179,7 @@ pub(in crate::gateway) async fn alpha_search(
             error_codes::NO_ELIGIBLE_SOURCE,
         );
     };
-    let resolved_model = runtime
-        .resolve_visible_account_model(&key, &requested_model)
-        .or_else(|| {
-            runtime
-                .route_recovery_enabled()
-                .then(|| runtime.resolve_configured_account_model(&key, &requested_model))
-                .flatten()
-        });
+    let resolved_model = resolved_account_model(&runtime, &key, &requested_model);
     let Some(resolved_model) = resolved_model else {
         return api_error(
             StatusCode::NOT_FOUND,
@@ -298,4 +284,19 @@ pub(in crate::gateway) fn account_endpoint_url(
     }
     drop(segments);
     Some(responses_url)
+}
+
+fn resolved_account_model(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    requested_model: &str,
+) -> Option<String> {
+    runtime
+        .resolve_visible_account_model(key, requested_model)
+        .or_else(|| {
+            runtime
+                .route_recovery_enabled()
+                .then(|| runtime.resolve_configured_account_model(key, requested_model))
+                .flatten()
+        })
 }

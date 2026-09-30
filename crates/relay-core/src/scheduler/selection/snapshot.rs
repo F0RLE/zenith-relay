@@ -201,7 +201,7 @@ impl PoolScheduler {
                             && models.allows(model)
                             && candidate.is_configured(model, protocols, scope)
                     })
-                    .map(|model| (model.to_ascii_lowercase(), candidate.protocol))
+                    .map(|model| (crate::model_id_key(model), candidate.protocol))
             })
             .collect::<BTreeSet<_>>();
         let mut next: Option<String> = None;

@@ -1,4 +1,4 @@
-use super::{model_leaf, normalize};
+use super::super::order::{model_leaf, normalize};
 use std::collections::BTreeMap;
 
 // None is an ambiguous match, distinct from a missing key. Do not fall back to

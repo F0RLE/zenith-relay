@@ -9,6 +9,8 @@ use std::{
 use tokio::{sync::Notify, time::Instant};
 use url::Url;
 
+use crate::{is_http_endpoint, url_has_userinfo};
+
 #[derive(Clone, Copy, Debug)]
 pub struct HttpLimits {
     pub concurrent: usize,
@@ -156,11 +158,7 @@ impl ManagementHttpGate {
         url: &Url,
         class: HttpClass,
     ) -> Result<HttpPermit, HttpAdmissionError> {
-        if !matches!(url.scheme(), "http" | "https")
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-        {
+        if !is_http_endpoint(url) || url_has_userinfo(url) {
             return Err(HttpAdmissionError::InvalidOrigin);
         }
         let origin = url.origin().ascii_serialization();

@@ -1,6 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
 
 const MAX_MODEL_ID_BYTES: usize = 256;
+/// Shared ceiling for a stored model list. Callers count the input length,
+/// including blanks, before trimming and de-duplication.
+pub const MAX_MODEL_LIST_LEN: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelIdListError {
+    TooLarge,
+    InvalidId,
+}
 
 #[derive(Clone, Copy)]
 enum KnownModelFamily {
@@ -32,7 +41,7 @@ pub fn reasoning_policy_key(model: &str) -> String {
         Some(KnownModelFamily::Gemini) => "group:gemini".to_string(),
         Some(KnownModelFamily::Grok) => "group:grok".to_string(),
         Some(KnownModelFamily::Zai) => "group:zai".to_string(),
-        None => model.trim().to_ascii_lowercase(),
+        None => model_id_key(model),
     }
 }
 
@@ -48,7 +57,7 @@ pub fn reasoning_policy_levels<'a>(
     let key = reasoning_policy_key(model);
     policies
         .get(&key)
-        .or_else(|| policies.get(&model.trim().to_ascii_lowercase()))
+        .or_else(|| policies.get(&model_id_key(model)))
         .map(Vec::as_slice)
 }
 
@@ -76,8 +85,8 @@ where
     ordered.into_iter().map(|(_, level)| level).collect()
 }
 
-fn reasoning_level_rank(level: &str) -> u8 {
-    match level.replace('-', "_").as_str() {
+pub fn reasoning_level_rank(level: &str) -> u8 {
+    match level.trim().to_ascii_lowercase().replace('-', "_").as_str() {
         "none" => 0,
         "minimal" => 1,
         "low" => 2,
@@ -110,10 +119,10 @@ where
     let source_order = normalize_model_ids(models);
     let source_keys = source_order
         .iter()
-        .map(|model| model.to_ascii_lowercase())
+        .map(|model| model_id_key(model))
         .collect::<HashSet<_>>();
     if !saved_order.iter().any(|model| {
-        let key = model.trim().to_ascii_lowercase();
+        let key = model_id_key(model);
         !key.is_empty() && source_keys.contains(&key)
     }) {
         return source_order;
@@ -122,25 +131,25 @@ where
     let catalog_positions = catalog
         .iter()
         .enumerate()
-        .map(|(position, model)| (model.to_ascii_lowercase(), position))
+        .map(|(position, model)| (model_id_key(model), position))
         .collect::<BTreeMap<_, _>>();
     let mut saved = HashSet::new();
     let mut ordered = Vec::with_capacity(catalog.len());
     for model in saved_order {
-        let key = model.trim().to_ascii_lowercase();
+        let key = model_id_key(model);
         if !key.is_empty() && saved.insert(key.clone()) && catalog_positions.contains_key(&key) {
             ordered.push(catalog[catalog_positions[&key]].clone());
         }
     }
     for model in catalog {
-        let key = model.to_ascii_lowercase();
+        let key = model_id_key(&model);
         if saved.contains(&key) {
             continue;
         }
         let model_position = catalog_positions[&key];
-        let insert_at = ordered.iter().position(|existing| {
-            catalog_positions[&existing.to_ascii_lowercase()] > model_position
-        });
+        let insert_at = ordered
+            .iter()
+            .position(|existing| catalog_positions[&model_id_key(existing)] > model_position);
         if let Some(insert_at) = insert_at {
             ordered.insert(insert_at, model);
         } else {
@@ -148,6 +157,12 @@ where
         }
     }
     ordered
+}
+
+/// Compare model ids without regard to case or surrounding whitespace.
+/// Callers keep the original spelling.
+pub fn model_id_key(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
 }
 
 /// Trim and de-duplicate model IDs while preserving the first spelling and
@@ -164,8 +179,34 @@ where
         .into_iter()
         .map(|model| model.as_ref().trim().to_string())
         .filter(|model| !model.is_empty())
-        .filter(|model| seen.insert(model.to_ascii_lowercase()))
+        .filter(|model| seen.insert(model_id_key(model)))
         .collect()
+}
+
+/// Trim, drop blanks, and de-duplicate model IDs without changing the first
+/// spelling or source order. The input length is checked before trimming.
+pub fn normalize_bounded_model_ids(
+    models: Vec<String>,
+    limit: usize,
+) -> Result<Vec<String>, ModelIdListError> {
+    if models.len() > limit {
+        return Err(ModelIdListError::TooLarge);
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if !is_valid_model_id(model) {
+            return Err(ModelIdListError::InvalidId);
+        }
+        if seen.insert(model_id_key(model)) {
+            normalized.push(model.to_string());
+        }
+    }
+    Ok(normalized)
 }
 
 fn known_model_family(model: &str) -> Option<KnownModelFamily> {
@@ -184,7 +225,7 @@ fn known_model_family(model: &str) -> Option<KnownModelFamily> {
     }
 }
 
-fn model_leaf(model: &str) -> &str {
+pub(super) fn model_leaf(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model).trim()
 }
 
@@ -213,6 +254,23 @@ mod tests {
                 "CLAUDE-SONNET".to_string(),
             ]),
             ["GPT-5", "claude-sonnet"]
+        );
+    }
+
+    #[test]
+    fn bounded_model_ids_keep_the_first_spelling_and_reject_the_limit() {
+        assert_eq!(
+            normalize_bounded_model_ids(vec![" GPT-5 ".into(), "gpt-5".into(), "  ".into()], 4)
+                .unwrap(),
+            vec!["GPT-5".to_string()]
+        );
+        assert_eq!(
+            normalize_bounded_model_ids(vec!["ok".into(), "a".repeat(257)], 4),
+            Err(ModelIdListError::InvalidId)
+        );
+        assert_eq!(
+            normalize_bounded_model_ids(vec!["a".into(), "b".into()], 1),
+            Err(ModelIdListError::TooLarge)
         );
     }
 

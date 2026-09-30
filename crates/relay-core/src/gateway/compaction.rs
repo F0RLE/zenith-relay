@@ -166,24 +166,8 @@ pub(super) fn compaction_document(response: &Value) -> Result<Vec<u8>, AttemptFa
 pub(super) fn prepare_routed_compaction_request(
     object: &mut serde_json::Map<String, Value>,
 ) -> bool {
-    match object.get("input") {
-        Some(Value::String(text)) if text.trim().is_empty() => {
-            object.insert("input".to_string(), Value::Array(Vec::new()));
-        }
-        Some(Value::String(text)) => {
-            object.insert(
-                "input".to_string(),
-                json!([{"role": "user", "content": [{"type": "input_text", "text": text}]}]),
-            );
-        }
-        Some(Value::Object(item)) => {
-            object.insert(
-                "input".to_string(),
-                Value::Array(vec![Value::Object(item.clone())]),
-            );
-        }
-        Some(Value::Array(_)) => {}
-        _ => return false,
+    if !super::request::coerce_responses_input_array(object) {
+        return false;
     }
     let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
         return false;

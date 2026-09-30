@@ -1,6 +1,7 @@
 use super::{AccountSummary, ModelSummary, SourceSummary};
 use crate::{
-    CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter, WireApi,
+    CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter,
+    SourceProtocolResolution, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,22 +56,15 @@ impl ModelProtocolIndex {
                 allowed: source.allowed_models.iter().cloned().collect(),
                 excluded: source.excluded_models.iter().cloned().collect(),
             };
-            for binding in source
-                .protocol_config
-                .resolve(
-                    &source.base_url,
-                    &source.models,
-                    &source.protocol_bindings,
-                    source.wire_api,
-                )
-                .unwrap_or_default()
+            for binding in
+                SourceProtocolResolution::resolved_protocol_bindings(source).unwrap_or_default()
             {
                 let upstream = binding
                     .adapter
                     .upstream_protocol(binding.wire_api)
                     .wire_api();
                 for model in binding.model_ids {
-                    let key = model.to_ascii_lowercase();
+                    let key = crate::model_id_key(&model);
                     // Editable inventory keeps its price fields while a member
                     // is offline or excluded; this does not grant a route.
                     if upstream == WireApi::Messages {
@@ -95,7 +89,7 @@ impl ModelProtocolIndex {
             };
             for model in account.models.iter().filter(|model| rules.allows(model)) {
                 for client in WireApi::ALL {
-                    index.insert(model.to_ascii_lowercase(), client, WireApi::Responses);
+                    index.insert(crate::model_id_key(model), client, WireApi::Responses);
                 }
             }
         }
@@ -121,14 +115,14 @@ impl ModelProtocolIndex {
 
     pub(super) fn routes_for(&self, model: &str) -> Vec<ModelProtocolRoute> {
         self.routes
-            .get(&model.to_ascii_lowercase())
+            .get(&crate::model_id_key(model))
             .cloned()
             .unwrap_or_default()
     }
 
     pub(super) fn has_cache_write_pricing(&self, model: &str) -> bool {
         self.cache_write_models
-            .contains(&model.to_ascii_lowercase())
+            .contains(&crate::model_id_key(model))
     }
 }
 

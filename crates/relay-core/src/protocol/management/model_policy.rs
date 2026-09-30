@@ -1,5 +1,6 @@
 use crate::{
-    error_codes, is_valid_model_id, normalize_model_reasoning_allowed_levels, reasoning_policy_key,
+    error_codes, is_valid_model_id, model_id_key, normalize_model_reasoning_allowed_levels,
+    reasoning_policy_key,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -48,9 +49,20 @@ pub fn canonical_pool_model_id<'a>(
     }
     model_ids
         .into_iter()
-        .find(|id| id.eq_ignore_ascii_case(requested))
+        .find(|id| model_id_key(id) == model_id_key(requested))
         .map(String::as_str)
         .ok_or(ModelPolicyError::NotFound)
+}
+
+/// Configured source inventory, including model ids that exist only on a
+/// protocol binding. Runtime health does not filter this list.
+pub fn configured_source_model_ids<'a>(
+    models: &'a [String],
+    bindings: &'a [crate::SourceProtocolBinding],
+) -> impl Iterator<Item = &'a String> + 'a {
+    models
+        .iter()
+        .chain(bindings.iter().flat_map(|binding| binding.model_ids.iter()))
 }
 
 /// Complete a partial display order without losing inventory absent from a
@@ -66,13 +78,13 @@ pub fn complete_model_display_order<'a>(
     }
     let mut remaining = BTreeMap::new();
     for id in model_ids {
-        remaining.entry(id.to_ascii_lowercase()).or_insert(id);
+        remaining.entry(model_id_key(id)).or_insert(id);
     }
 
     let mut order = Vec::with_capacity(remaining.len());
     let mut requested = BTreeSet::new();
     for id in requested_ids {
-        let key = id.trim().to_ascii_lowercase();
+        let key = model_id_key(id);
         if !requested.insert(key.clone()) {
             return Err(ModelPolicyError::DuplicateOrderEntry);
         }
@@ -80,7 +92,7 @@ pub fn complete_model_display_order<'a>(
         order.push(canonical.clone());
     }
     for id in saved_order {
-        if let Some(canonical) = remaining.remove(&id.trim().to_ascii_lowercase()) {
+        if let Some(canonical) = remaining.remove(&model_id_key(id)) {
             order.push(canonical.clone());
         }
     }
@@ -100,7 +112,7 @@ pub fn update_model_reasoning_policy(
         reasoning_policy_key(model),
         requested_levels,
     )]))?;
-    policies.remove(&model.trim().to_ascii_lowercase());
+    policies.remove(&model_id_key(model));
     policies.extend(normalized);
     Ok(())
 }

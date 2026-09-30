@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-mod upgrade;
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolRoutingMode {
@@ -185,89 +183,19 @@ pub fn resolve_pool_routing(
     policy.reconcile(members)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn policy() -> PoolRoutingPolicy {
-        resolve_pool_routing(
-            None,
-            vec![
-                (PoolMemberKind::Source, "primary".into(), 1_000_005, 3),
-                (PoolMemberKind::Source, "reserve".into(), -1_000_000, 1),
-                (PoolMemberKind::Account, "account".into(), 0, 1),
-            ],
-        )
-    }
-
-    #[test]
-    fn reconciles_inventory_without_losing_custom_order_or_limits() {
-        let mut saved = policy();
-        saved.mode = PoolRoutingMode::InOrder;
-        saved.members.swap(0, 1);
-        saved.members[0].max_concurrency = 2;
-        let resolved = resolve_pool_routing(
-            Some(&saved),
-            vec![
-                (PoolMemberKind::Source, "primary".into(), -5, 1),
-                (PoolMemberKind::Account, "account".into(), -10, 1),
-                (PoolMemberKind::Source, "new".into(), 2_000_000, 4),
-            ],
-        );
-        assert_eq!(
-            resolved
-                .members
-                .iter()
-                .map(|m| m.id.as_str())
-                .collect::<Vec<_>>(),
-            ["account", "primary", "new"]
-        );
-        assert_eq!(resolved.members[0].max_concurrency, 2);
-        assert_eq!(resolved.members[1].weight, 3);
-        assert_eq!(resolved.mode, PoolRoutingMode::InOrder);
-    }
-
-    #[test]
-    fn rejects_stale_updates_and_invalid_or_changed_membership() {
-        let current = policy();
-        let mut next = current.clone();
-        next.members.swap(0, 1);
-        assert!(next.validate_update(&current, Some(&current)).is_ok());
-        assert!(next.validate_update(&current, Some(&next)).is_err());
-        next.members.pop();
-        assert!(next.validate_update(&current, Some(&current)).is_err());
-        let mut invalid = current.clone();
-        invalid.members[0].weight = 0;
-        assert!(invalid.validate().is_err());
-        invalid = current.clone();
-        invalid.members.push(current.members[0].clone());
-        assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn remaps_portable_ids_atomically_and_rejects_collisions() {
-        let mut saved = policy();
-        let original = saved.clone();
-        let mut ids: BTreeMap<_, _> = saved
-            .members
-            .iter()
-            .map(|m| ((m.kind, m.id.clone()), format!("local-{}", m.id)))
-            .collect();
-        ids.remove(&(PoolMemberKind::Account, "account".into()));
-        assert!(saved.remap_member_ids(&ids).is_err());
-        assert_eq!(saved, original);
-        ids.insert(
-            (PoolMemberKind::Account, "account".into()),
-            "local-account".into(),
-        );
-        saved.remap_member_ids(&ids).unwrap();
-        assert!(saved.members.iter().all(|m| m.id.starts_with("local-")));
-        let mut collision = original.clone();
-        ids.insert(
-            (PoolMemberKind::Source, "reserve".into()),
-            "local-primary".into(),
-        );
-        assert!(collision.remap_member_ids(&ids).is_err());
-        assert_eq!(collision, original);
+impl PoolRoutingPolicy {
+    /// Only the known version-one mode/version pair changes. Inventory order,
+    /// weights, concurrency and all unrelated settings remain untouched.
+    /// Validation remains mandatory: unknown versions and corrupt values are
+    /// never silently clamped or treated as a supported legacy policy.
+    pub(crate) fn upgrade_legacy_format(&mut self) {
+        if self.version == 1 && self.mode != PoolRoutingMode::Automatic {
+            self.version = 2;
+            if self.mode == PoolRoutingMode::Smart {
+                self.mode = PoolRoutingMode::Automatic;
+            }
+        }
     }
 }
+#[cfg(test)]
+mod tests;

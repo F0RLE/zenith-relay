@@ -1,6 +1,7 @@
 use super::super::errors::{
-    is_deactivated_workspace_value, previous_response_not_found_value, rate_limit_body_hint_value,
-    upstream_event_failure_category, upstream_status_from_value, RateLimitBodyHint,
+    classify_upstream_error, is_deactivated_workspace_value, previous_response_not_found_value,
+    rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
+    upstream_status_from_value, RateLimitBodyHint,
 };
 use super::super::now_ms;
 use crate::error_codes;
@@ -95,6 +96,19 @@ pub(super) fn terminal_failure_status(status: Option<StatusCode>) -> StatusCode 
     status
         .filter(|status| !status.is_success())
         .unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+/// Category and non-success status for one terminal event. Callers that need
+/// the gateway's canonical status apply that separately.
+pub(super) fn resolved_terminal_failure(terminal: &EventTerminal) -> (StatusCode, &'static str) {
+    let category = terminal.error_category.unwrap_or_else(|| {
+        classify_upstream_error(terminal_failure_status(terminal.status), None).category
+    });
+    let status = terminal
+        .status
+        .filter(|status| !status.is_success())
+        .unwrap_or_else(|| upstream_failure_status(category));
+    (status, category)
 }
 
 pub(super) fn websocket_retry_headers(value: &Value) -> HeaderMap {

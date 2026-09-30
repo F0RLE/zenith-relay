@@ -5,13 +5,20 @@ use super::codec::{
 };
 use super::history::translate_input_items;
 use super::response::has_encrypted_agent_message;
-use super::{TRANSPORT_RETRY_HINT, TRANSPORT_TOOL};
+use super::{FUNCTION_RELAY_ENCODING, TRANSPORT_RETRY_HINT, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
 use crate::protocol::AdapterError;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String {
     if tools.is_empty() {
-        return "This request is relayed by an external Responses API client, not by the live Excel workbook. The native run_officejs function is a transport endpoint owned by this proxy; the proxy intercepts it before execution, so it never runs Office code or changes the workbook. Do not call server-injected Excel, Office, connector, or workbook tools. Return the answer as assistant text.".to_string();
+        // No callable client tool means the transport must not be taught.
+        // Mentioning run_officejs here invites a call the proxy cannot route.
+        return concat!(
+            "This request is relayed by an external Responses API client, not by the live Excel workbook. ",
+            "Do not call server-injected Excel, Office, connector, or workbook tools. ",
+            "Return the answer as assistant text.",
+        )
+        .to_string();
     }
     // Keep the injected catalog stable even when providers reorder the input
     // tool array. A deterministic prologue improves prompt-cache reuse and
@@ -26,27 +33,26 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let schema = tool
-            .spec
-            .get("parameters")
-            .or_else(|| tool.spec.get("input_schema"));
-        let schema_text = schema.and_then(|value| serde_json::to_string(value).ok());
         let mut line = format!("- {} ({})", tool.key(), tool.kind);
         if !description.is_empty() {
             line.push_str(": ");
             line.push_str(description);
         }
         if tool.kind == "custom" {
-            line.push_str(". It receives raw text in input; preserve every quote, backslash, newline, and space without another encoding layer");
-            if let Some(format) = tool.spec.get("format") {
+            line.push_str(". It receives raw text in input.");
+            if let Some(format) = tool.spec.get("format").filter(|format| format.is_object()) {
                 if let Ok(format) = serde_json::to_string(format) {
-                    line.push_str(". Input format: ");
+                    line.push_str(" Input format: ");
                     line.push_str(&format);
                 }
             }
-        } else if let Some(schema_text) = schema_text {
-            line.push_str(" JSON Schema: ");
-            line.push_str(&schema_text);
+        } else if let Some(schema) = tool_parameter_schema(tool) {
+            line.push_str(". Its arguments are an object with ");
+            line.push_str(&describe_parameter_names(schema));
+            if let Ok(schema_text) = serde_json::to_string(schema) {
+                line.push_str(". JSON Schema: ");
+                line.push_str(&schema_text);
+            }
         }
         lines.push(line);
     }
@@ -61,10 +67,234 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
         .filter(|parallel| !parallel)
         .map(|_| " Invoke at most one client tool in this response.")
         .unwrap_or_default();
+    let examples = tool_relay_examples(&sorted_tools);
     format!(
-        "This request is relayed by an external Responses API client, not by the live Excel workbook. The native {TRANSPORT_TOOL} function is a transport endpoint owned by this proxy; the proxy intercepts it before execution, so it never runs Office code or changes the workbook. Other native server-injected Excel, Office, connector, workbook, list_skills, and web-search tools are unavailable. Never claim shell, filesystem, or workspace access is unavailable when the catalog contains a suitable client tool. Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. Set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. Put only that tool payload in code. For function tools, code is one JSON object of arguments serialized once. For custom tools, code is the unchanged raw input text, without JSON encoding. Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code. Historical calls may contain the old tool/args envelope; do not copy that format into new calls. The proxy converts this native call into the real client tool call, then replays the original {TRANSPORT_TOOL} identity with the client tool result on the next request. Interpret that result as the named client tool output. Never repeat a tool request whose output is already present. Example function envelope: {{\"summary\":\"Run client tool exec_command\",\"extended_summary\":\"Relay a shell command through the external client\",\"destructive\":false,\"references\":[\"exec_command\"],\"code\":\"{{\\\"cmd\\\":\\\"pwd\\\"}}\"}}. Example custom envelope: {{\"summary\":\"Run client tool apply_patch\",\"extended_summary\":\"Relay an unchanged patch through the external client\",\"destructive\":false,\"references\":[\"apply_patch\"],\"code\":\"*** Begin Patch\\n*** End Patch\"}}. The available client tools are authoritative:{choice}{parallel}\n{}",
-        lines.join("\n")
+        "This request is relayed by an external Responses API client, not by the live Excel workbook. \
+         The native {TRANSPORT_TOOL} function is a transport endpoint owned by this proxy; the proxy intercepts it before execution, so it never runs Office code or changes the workbook. \
+         Other native server-injected Excel, Office, connector, workbook, list_skills, and web-search tools are unavailable. \
+         Never claim shell, filesystem, or workspace access is unavailable when the catalog contains a suitable client tool. \
+         For repository inspection, invoke a suitable catalog shell tool through {TRANSPORT_TOOL}. \
+         Use exactly one outer native {TRANSPORT_TOOL} call for each client tool invocation. \
+         Set references to an array containing exactly one fully qualified client tool name from the catalog; references is the routing field, not a list of files or cells. \
+         Put only that tool payload in code. \
+         For a function tool, code contains one JSON object of arguments. \
+         {FUNCTION_RELAY_ENCODING} \
+         For a custom tool, code contains the exact raw input text, not JSON: preserve every quote, backslash, newline and space without another encoding layer. \
+         The proxy parses function arguments but does not parse custom input. \
+         Serialize the outer arguments object once. \
+         Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code. \
+         Historical calls may contain the old tool/args envelope; do not copy that format into new calls.{examples} \
+         The proxy converts this native call into the real client tool call, then replays the original {TRANSPORT_TOOL} identity with the client tool result on the next request. \
+         Interpret that result as the named client tool output. \
+         Never repeat a tool request whose output is already present. \
+         The available client tools are authoritative:{choice}{parallel}\n{}",
+        lines.join("\n"),
     )
+}
+
+fn tool_relay_examples(tools: &[ClientTool]) -> String {
+    const PATCH: &str =
+        "*** Begin Patch\n*** Add File: hello.js\n+console.log(\"hello\");\n*** End Patch";
+    let mut examples = String::new();
+    for tool in tools {
+        let function_arguments = if is_named_tool(tool, "exec_command") {
+            if tool.kind != "function" {
+                continue;
+            }
+            Some(json!({"cmd": "printf '%s\\n' \"hello\""}))
+        } else if is_named_tool(tool, "apply_patch") {
+            if tool.kind == "custom" {
+                None
+            } else if tool.kind == "function" {
+                Some(json!({"patch": PATCH}))
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+        let payload = if tool.kind == "function" {
+            let Some(arguments) = function_arguments else {
+                continue;
+            };
+            let Some(schema) = tool_parameter_schema(tool) else {
+                continue;
+            };
+            if !schema_matches(&arguments, &Value::Object(schema.clone())) {
+                continue;
+            }
+            let Ok(payload) = serde_json::to_string(&arguments) else {
+                continue;
+            };
+            payload
+        } else {
+            PATCH.to_string()
+        };
+        let outer = json!({
+            "summary": format!("Run client tool {}", tool.key()),
+            "extended_summary": "Relay one client tool through the external client",
+            "destructive": false,
+            "references": [tool.key()],
+            "code": payload,
+        });
+        let Ok(encoded) = serde_json::to_string(&outer) else {
+            continue;
+        };
+        examples.push_str(&format!(
+            " Example outer arguments for {} ({}): {encoded}.",
+            tool.key(),
+            tool.kind
+        ));
+    }
+    examples
+}
+
+fn is_named_tool(tool: &ClientTool, bare: &str) -> bool {
+    // Match the bare client name only. A dotted name such as `my.exec_command`
+    // is a different tool; the qualified key is not a name suffix.
+    let suffix = format!("_{bare}");
+    tool.name == bare || tool.name.ends_with(&suffix)
+}
+
+/// The adapter repeats the transport rule in its own developer message so it
+/// stays next to the conversation instead of only inside the long catalog.
+pub(super) fn tool_protocol_reminder(tools: &[ClientTool]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
+    let mut ordered = tools.to_vec();
+    ordered.sort_by_key(ClientTool::key);
+    let names = ordered
+        .iter()
+        .map(ClientTool::key)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut reminder = format!(
+        "Reminder: use the outer native {TRANSPORT_TOOL} transport. \
+         Set references to an array containing exactly one catalog client tool name; put only that tool payload in code. \
+         Never put a tool/args wrapper in code or route to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
+         {FUNCTION_RELAY_ENCODING} \
+         Do not merely say you will act; make the tool call. \
+         Client tools: {names}. \
+         Other native tools are unavailable."
+    );
+    for tool in ordered.iter().filter(|tool| tool.kind == "custom") {
+        reminder.push_str(&format!(
+            " Custom tool {} takes raw input directly in code; do not JSON-encode that input.",
+            tool.key()
+        ));
+    }
+    reminder
+}
+
+fn tool_parameter_schema(tool: &ClientTool) -> Option<&Map<String, Value>> {
+    ["parameters", "inputSchema", "input_schema"]
+        .into_iter()
+        .find_map(|key| tool.spec.get(key).and_then(Value::as_object))
+}
+
+fn describe_parameter_names(schema: &serde_json::Map<String, Value>) -> String {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return "the arguments required by the client".to_string();
+    };
+    if properties.is_empty() {
+        return "the arguments required by the client".to_string();
+    }
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut names = properties
+        .keys()
+        .map(|name| {
+            let suffix = if required.contains(name.as_str()) {
+                "required"
+            } else {
+                "optional"
+            };
+            format!("{name} ({suffix})")
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.join(", ")
+}
+
+fn schema_matches(value: &Value, schema: &Value) -> bool {
+    let Some(schema) = schema.as_object() else {
+        return false;
+    };
+    if schema.is_empty() {
+        return true;
+    }
+    if let Some(alternatives) = schema.get("type").and_then(Value::as_array) {
+        return alternatives.iter().any(|alternative| {
+            let mut copy = schema.clone();
+            copy.insert("type".to_string(), alternative.clone());
+            schema_matches(value, &Value::Object(copy))
+        });
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let Some(object) = value.as_object() else {
+                return false;
+            };
+            if schema
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|name| name.as_str().is_none_or(|name| !object.contains_key(name)))
+                })
+            {
+                return false;
+            }
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (key, nested) in object {
+                    let nested_schema = properties.get(key).filter(|schema| schema.is_object());
+                    if let Some(nested_schema) = nested_schema {
+                        if !schema_matches(nested, nested_schema) {
+                            return false;
+                        }
+                        continue;
+                    }
+                    // A missing or non-object property schema is not validated.
+                    // `additionalProperties: false` still rejects that key,
+                    // matching the upstream object-schema check.
+                    if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        Some("array") => {
+            let Some(items) = value.as_array() else {
+                return false;
+            };
+            if let Some(item_schema) = schema.get("items").filter(|schema| schema.is_object()) {
+                if items.iter().any(|item| !schema_matches(item, item_schema)) {
+                    return false;
+                }
+            }
+        }
+        Some("string") if !value.is_string() => return false,
+        Some("integer" | "number") if !value.is_number() => return false,
+        Some("boolean") if !value.is_boolean() => return false,
+        Some("null") if !value.is_null() => return false,
+        _ => {}
+    }
+    if let Some(options) = schema.get("enum").and_then(Value::as_array) {
+        if !options.is_empty() && !options.iter().any(|option| option == value) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The upstream Basis Points adapter regenerates one malformed client-tool
@@ -105,9 +335,9 @@ pub(in crate::gateway::execution) fn take_tool_relay_retry(
     true
 }
 
-/// Add the one-shot regeneration hint ahead of the conversation history. The
-/// diagnostic contains only the adapter's safe parameter name; provider data
-/// and tool arguments never enter the prompt or logs.
+/// Add the one-shot regeneration hint after the prepared input. The diagnostic
+/// contains only the adapter's safe parameter name; provider data and tool
+/// arguments never enter the prompt or logs.
 pub(in crate::gateway::execution) fn add_tool_relay_retry_hint(
     body: &mut Value,
     parameter: Option<&str>,
@@ -116,8 +346,19 @@ pub(in crate::gateway::execution) fn add_tool_relay_retry_hint(
         return false;
     };
     let diagnostic = parameter.unwrap_or("output.run_officejs");
-    let hint = format!("{TRANSPORT_RETRY_HINT} Diagnostic: {diagnostic}");
-    input.insert(0, text_message("developer", "input_text", hint));
+    let hint = format!("{TRANSPORT_RETRY_HINT} {FUNCTION_RELAY_ENCODING} Diagnostic: {diagnostic}");
+    let message = text_message("developer", "input_text", hint);
+    // The adapter appends the correction after the prepared input. A trailing
+    // compaction trigger stays last so the hint does not become the trigger.
+    let insert_at = match input
+        .last()
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("compaction_trigger") if !input.is_empty() => input.len() - 1,
+        _ => input.len(),
+    };
+    input.insert(insert_at, message);
     true
 }
 
@@ -143,6 +384,7 @@ pub(in crate::gateway::execution) fn prepare_request(
             "input.agent_message.encrypted_content",
         ));
     }
+    validate_text_format(object.get("text"))?;
     let all_tools = client_tools(request);
     let callable = selected_tools(request, &all_tools);
     let tool_choice_requires_call = requires_tool_call(object.get("tool_choice"));
@@ -206,6 +448,10 @@ pub(in crate::gateway::execution) fn prepare_request(
         "input_text",
         tool_instructions(&callable, request),
     ));
+    let reminder = tool_protocol_reminder(&callable);
+    if !reminder.is_empty() {
+        prologue.push(text_message("developer", "input_text", reminder));
+    }
     input.splice(0..0, prologue);
     output.insert("input".to_string(), Value::Array(input));
 
@@ -238,6 +484,31 @@ pub(in crate::gateway::execution) fn prepare_request(
         Value::String(basis_points_reasoning_effort(object)),
     );
     Ok(Value::Object(output))
+}
+
+/// Structured `text.format` is not implemented on this transport. Dropping it
+/// and returning ordinary text would look like a successful JSON response.
+fn validate_text_format(value: Option<&Value>) -> Result<(), AdapterError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let Some(text) = value.as_object() else {
+        return Err(AdapterError::invalid_request().with_parameter("text"));
+    };
+    let Some(format) = text.get("format").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let Some(format) = format.as_object() else {
+        return Err(AdapterError::invalid_request().with_parameter("text.format"));
+    };
+    match format.get("type").and_then(Value::as_str) {
+        Some("text") if format.len() == 1 => Ok(()),
+        Some("text") => Err(AdapterError::invalid_request().with_parameter("text.format")),
+        Some("json_object" | "json_schema") => {
+            Err(AdapterError::parameter_unsupported_for("text.format"))
+        }
+        _ => Err(AdapterError::invalid_request().with_parameter("text.format")),
+    }
 }
 
 /// Prepare the upstream body and attach the one-shot relay hint when a retry is already claimed.

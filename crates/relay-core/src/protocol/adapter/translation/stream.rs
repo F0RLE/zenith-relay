@@ -2,8 +2,11 @@ use super::*;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-mod input;
+mod chat;
+mod gemini;
+mod messages;
 mod output;
+mod responses;
 
 const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 64 * 1024 * 1024;
@@ -65,17 +68,19 @@ impl TranslationStream {
             self.fail();
             return;
         }
-        self.pending.extend_from_slice(bytes);
-        while let Some(end) = crate::protocol::sse_event_end(&self.pending) {
-            let event = self.pending.drain(..end).collect::<Vec<_>>();
-            if self.consume(&event).is_err() {
-                self.fail();
-            }
-            if self.terminal {
-                self.pending.clear();
-                break;
-            }
-        }
+        let mut pending = std::mem::take(&mut self.pending);
+        crate::protocol::consume_sse_frames(
+            &mut pending,
+            bytes,
+            self,
+            |stream| stream.terminal,
+            |stream, event| {
+                if stream.consume(event).is_err() {
+                    stream.fail();
+                }
+            },
+        );
+        self.pending = pending;
     }
 
     pub fn finish(&mut self) {

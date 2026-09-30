@@ -4,13 +4,21 @@ use super::*;
 use crate::{PoolMemberKind, PoolRoutingMember, PoolRoutingPolicy};
 use std::cmp::Ordering;
 
+/// Physical member ids used by routing, refresh fences, and activity.
+/// Credential `secret_ref` values are a different namespace.
+pub fn account_member_key(account_id: &str) -> String {
+    format!("account:{account_id}")
+}
+
+/// Source member id in the same namespace as [`account_member_key`].
+pub fn source_member_key(source_id: &str) -> String {
+    format!("source:{source_id}")
+}
+
 pub(super) fn member_key(candidate: &RuntimeCandidate) -> String {
-    match candidate.kind {
-        CandidateKind::OAuthAccount => format!(
-            "account:{}",
-            candidate.account_id.as_deref().unwrap_or(&candidate.id)
-        ),
-        CandidateKind::ApiSource => format!("source:{}", candidate.source_id),
+    match identity(candidate) {
+        (PoolMemberKind::Account, id) => account_member_key(id),
+        (PoolMemberKind::Source, id) => source_member_key(id),
     }
 }
 

@@ -16,6 +16,26 @@ fn identity(revision: u64) -> RefreshIdentity {
 }
 
 #[test]
+fn refresh_failure_waits_at_least_one_minute_and_keeps_a_longer_delay() {
+    assert_eq!(
+        RefreshOutcome::retry_after(1_000, None),
+        RefreshOutcome::FailedRetryAt(61_000)
+    );
+    assert_eq!(
+        RefreshOutcome::retry_after(1_000, Some(0)),
+        RefreshOutcome::FailedRetryAt(61_000)
+    );
+    assert_eq!(
+        RefreshOutcome::retry_after(1_000, Some(120_000)),
+        RefreshOutcome::FailedRetryAt(121_000)
+    );
+    assert_eq!(
+        RefreshOutcome::retry_after(u64::MAX, None),
+        RefreshOutcome::FailedRetryAt(u64::MAX)
+    );
+}
+
+#[test]
 fn quota_reset_delay_uses_the_earliest_future_window_and_stable_jitter() {
     let window = |kind, reset_at_ms| QuotaWindow {
         kind,

@@ -23,7 +23,7 @@ impl PoolScheduler {
     }
 
     pub(super) fn rotation_route_key(model: &str, operation: RotationOperation) -> String {
-        format!("{}:{operation:?}", model.to_ascii_lowercase())
+        format!("{}:{operation:?}", crate::model_id_key(model))
     }
 
     pub(super) fn rotation_candidate(
@@ -257,8 +257,32 @@ impl PoolScheduler {
             && !self.execution_fences.contains_key(&candidate.id)
             && !self
                 .capability_blocks
-                .contains(&(candidate.id.clone(), model.to_ascii_lowercase()))
+                .contains(&(candidate.id.clone(), crate::model_id_key(model)))
             && self.quota_reserve_allows(candidate, now_ms)
             && candidate.is_configured(model, allowed_protocols, scope)
+    }
+}
+
+impl PoolScheduler {
+    pub(super) fn routing_quota_factor(&self, candidate: &RuntimeCandidate) -> u64 {
+        let reserve = self
+            .protected_candidate
+            .as_ref()
+            .filter(|(candidate_id, _)| candidate_id == &candidate.id)
+            .map_or(0, |(_, reserve)| *reserve);
+        match candidate.quota {
+            CandidateQuota::Available(remaining) => remaining.saturating_sub(reserve),
+            CandidateQuota::Unknown if reserve == 0 => 1,
+            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => 0,
+        }
+    }
+
+    pub(super) fn routing_quota(&self, candidate: &RuntimeCandidate) -> CandidateQuota {
+        match candidate.quota {
+            CandidateQuota::Available(_) => {
+                CandidateQuota::Available(self.routing_quota_factor(candidate))
+            }
+            quota => quota,
+        }
     }
 }

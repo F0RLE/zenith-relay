@@ -24,7 +24,7 @@ pub(crate) fn retry_after_ms(
     )
 }
 
-pub(crate) async fn collect_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+pub async fn collect_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)

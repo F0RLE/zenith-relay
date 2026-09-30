@@ -7,17 +7,30 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 /// Admission happens before a member consumes rotation credit or capacity.
-#[allow(clippy::too_many_arguments)]
+pub(super) struct RouteCompatibility<'a> {
+    pub(super) runtime: &'a GatewayRuntime,
+    pub(super) key: &'a AuthenticatedKey,
+    pub(super) model: &'a str,
+    pub(super) client: WireApi,
+    pub(super) request: &'a Value,
+    pub(super) stream: bool,
+    pub(super) tier_policy: &'a ServiceTierPolicy,
+    pub(super) now_ms: u64,
+}
+
 pub(super) fn incompatible_routes(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    model: &str,
-    client: WireApi,
-    request: &Value,
-    stream: bool,
-    tier_policy: &ServiceTierPolicy,
-    now_ms: u64,
+    input: RouteCompatibility<'_>,
 ) -> (HashSet<String>, Option<AdapterError>) {
+    let RouteCompatibility {
+        runtime,
+        key,
+        model,
+        client,
+        request,
+        stream,
+        tier_policy,
+        now_ms,
+    } = input;
     let mut excluded = HashSet::new();
     let mut last_error = None;
     let features = requested_features(request, stream);
@@ -26,13 +39,15 @@ pub(super) fn incompatible_routes(
     {
         let validate = || {
             if route.account_transport == AccountTransport::ExcelBasisPoints {
-                if let Some(error) = basis_points_route_error(
-                    request,
-                    stream,
-                    tier_policy,
-                    tier_policy.select_for_model(runtime, &route.source_model),
-                ) {
-                    return Err(error);
+                let selected = tier_policy.select_for_model(runtime, &route.source_model);
+                // A non-standard speed leaves Basis Points for the normal
+                // Responses endpoint, so it must not remove the only account.
+                if selected == DefaultServiceTier::Standard {
+                    if let Some(error) =
+                        basis_points_route_error(request, stream, tier_policy, selected)
+                    {
+                        return Err(error);
+                    }
                 }
             }
 
@@ -124,7 +139,9 @@ pub(super) fn basis_points_route_error(
     tier_policy: &ServiceTierPolicy,
     selected_tier: DefaultServiceTier,
 ) -> Option<AdapterError> {
-    if tier_policy.has_explicit_client_tier() || selected_tier != DefaultServiceTier::Standard {
+    if tier_policy.rejects_basis_points_client_speed()
+        || selected_tier != DefaultServiceTier::Standard
+    {
         return Some(AdapterError::parameter_unsupported_for("service_tier"));
     }
 
@@ -278,6 +295,19 @@ mod tests {
             DefaultServiceTier::Standard,
         )
         .is_none());
+        for tier in ["auto", "default", "standard"] {
+            let ordinary = ServiceTierPolicy::pool_owned(&json!({"service_tier": tier}));
+            assert!(
+                basis_points_route_error(
+                    &json!({"input": "hello"}),
+                    false,
+                    &ordinary,
+                    DefaultServiceTier::Standard,
+                )
+                .is_none(),
+                "{tier}"
+            );
+        }
 
         let explicit_speed = ServiceTierPolicy::pool_owned(&json!({"service_tier": "priority"}));
         assert_eq!(

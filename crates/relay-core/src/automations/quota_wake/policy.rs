@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 const MODEL_RANK_STRIDE: u32 = 4_096;
 
 pub fn model_lightness_rank(model: &str, index: usize) -> u32 {
-    let model = model.to_ascii_lowercase();
+    let model = crate::model_id_key(model);
     let tier = if model.contains("nano") {
         0
     } else if model.contains("mini") {

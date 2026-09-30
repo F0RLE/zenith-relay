@@ -46,9 +46,9 @@ fn has_compacted_history(request: &Value) -> bool {
                 if !matches!(
                     object.get("role").and_then(Value::as_str),
                     Some("user" | "assistant" | "developer" | "system")
-                ) || !super::message_has_plaintext_content(object)
-                    || super::is_tool_state_item(item)
-                    || super::contains_encrypted_content(item)
+                ) || !super::replay::message_has_plaintext_content(object)
+                    || super::replay::is_tool_state_item(item)
+                    || super::replay::contains_encrypted_content(item)
                 {
                     return false;
                 }

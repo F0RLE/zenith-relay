@@ -1,9 +1,9 @@
 mod availability;
 mod lifecycle;
 mod members;
+pub use members::{account_member_key, source_member_key};
 mod ownership;
 mod projection;
-mod quota;
 mod recovery;
 mod registry;
 mod reservations;

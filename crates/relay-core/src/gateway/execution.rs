@@ -31,6 +31,21 @@ use axum::http::{Response, StatusCode};
 use serde_json::Value;
 use std::collections::HashSet;
 
+/// One-shot request repairs shared by ordinary and account execution.
+///
+/// Each flag records that its repair already ran for this request. The attempt
+/// loop owns the value; failure, selection, and stream steps borrow it.
+#[derive(Default)]
+pub(super) struct AttemptRepairs {
+    pub(super) native_replay: bool,
+    pub(super) function_item_id: bool,
+    pub(super) custom_tool_item_id: bool,
+    pub(super) message_item_id: bool,
+    pub(super) legacy_call_id: bool,
+    pub(super) model_switch_reset: bool,
+    pub(super) stale_tool_history: bool,
+}
+
 /// Records the one allowed model-switch reset and drops the opaque continuation binding.
 ///
 /// Usage, lease, and retry steps stay with the caller: ordinary requests and
@@ -43,6 +58,61 @@ pub(super) fn mark_model_switch_reset(
     *attempted = true;
     *response_affinity_key = None;
     *requires_affinity_owner = false;
+}
+
+/// Drops one opaque continuation after the caller has decided the reset is allowed.
+///
+/// The one-shot flag stays unchanged when the drop does not apply. Usage, lease,
+/// and candidate retry remain with the caller.
+fn reset_opaque_continuation(
+    attempted: &mut bool,
+    eligible: bool,
+    drop_previous: impl FnOnce() -> bool,
+    response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+) -> bool {
+    if *attempted || !eligible || !drop_previous() {
+        return false;
+    }
+    mark_model_switch_reset(attempted, response_affinity_key, requires_affinity_owner);
+    true
+}
+
+/// The one-shot state for dropping an opaque `previous_response_id`.
+pub(super) struct ContinuationReset<'a> {
+    pub(super) attempted: &'a mut bool,
+    pub(super) response_affinity_key: &'a mut Option<String>,
+    pub(super) requires_affinity_owner: &'a mut bool,
+}
+
+/// Restores a saved turn and forgets its opaque response id.
+///
+/// The caller decides whether that reset is allowed. Usage, lease, and candidate
+/// retry stay with the caller. A failed restore does not consume the one-shot flag.
+pub(super) fn reset_materialized_continuation(
+    reset: &mut ContinuationReset<'_>,
+    eligible: bool,
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    resolved_model: &str,
+) -> bool {
+    let now = now_ms();
+    reset_opaque_continuation(
+        reset.attempted,
+        eligible,
+        || {
+            super::continuation::drop_materialized_previous_response_id(
+                runtime,
+                local_key_id,
+                request,
+                resolved_model,
+                now,
+            )
+        },
+        reset.response_affinity_key,
+        reset.requires_affinity_owner,
+    )
 }
 
 /// Accepts one pre-output request repair and lets the same candidate be selected again.
@@ -119,20 +189,34 @@ pub(super) fn repair_responses_item_prefixes(
 /// Account and ordinary client execution use the same cooldown and preserved
 /// provider-error policy; keeping it here prevents the two retry loops from
 /// drifting apart.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn finish_request_failure(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    resolved_model: &str,
-    protocols: &[crate::WireApi],
-    operation: RotationOperation,
-    exclusions: &HashSet<String>,
-    response_affinity_key: Option<&str>,
-    failure: AttemptFailure,
-    preserved: Option<&PreservedUpstreamError>,
-    failure_origin: ErrorOrigin,
-    request_id: &str,
-) -> Response<Body> {
+pub(super) struct RequestFailureInput<'a> {
+    pub(super) runtime: &'a GatewayRuntime,
+    pub(super) key: &'a AuthenticatedKey,
+    pub(super) resolved_model: &'a str,
+    pub(super) protocols: &'a [crate::WireApi],
+    pub(super) operation: RotationOperation,
+    pub(super) exclusions: &'a HashSet<String>,
+    pub(super) response_affinity_key: Option<&'a str>,
+    pub(super) failure: AttemptFailure,
+    pub(super) preserved: Option<&'a PreservedUpstreamError>,
+    pub(super) failure_origin: ErrorOrigin,
+    pub(super) request_id: &'a str,
+}
+
+pub(super) fn finish_request_failure(input: RequestFailureInput<'_>) -> Response<Body> {
+    let RequestFailureInput {
+        runtime,
+        key,
+        resolved_model,
+        protocols,
+        operation,
+        exclusions,
+        response_affinity_key,
+        failure,
+        preserved,
+        failure_origin,
+        request_id,
+    } = input;
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
         if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             key,

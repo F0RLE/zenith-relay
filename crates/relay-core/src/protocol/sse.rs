@@ -9,6 +9,12 @@ pub(crate) fn event_end(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+/// Removes the next complete SSE event, including its blank-line terminator.
+pub(crate) fn take_event(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let end = event_end(pending)?;
+    Some(pending.drain(..end).collect())
+}
+
 pub(crate) fn lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     std::iter::from_fn(move || {
         if bytes.is_empty() {
@@ -45,9 +51,32 @@ fn line_end(bytes: &[u8]) -> Option<(usize, usize)> {
     Some((position, position + 1 + usize::from(crlf)))
 }
 
+/// Delivers each complete SSE event until `stop` is true.
+/// Bytes after the stopping event are discarded. An already stopped caller
+/// does not append `bytes`.
+pub(crate) fn consume_frames<T>(
+    pending: &mut Vec<u8>,
+    bytes: &[u8],
+    state: &mut T,
+    stop: impl Fn(&T) -> bool,
+    mut handle: impl FnMut(&mut T, &[u8]),
+) {
+    if stop(state) {
+        return;
+    }
+    pending.extend_from_slice(bytes);
+    while let Some(event) = take_event(pending) {
+        handle(state, &event);
+        if stop(state) {
+            pending.clear();
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{data, event_end, lines};
+    use super::{consume_frames, data, event_end, lines};
 
     #[test]
     fn data_preserves_empty_lines_and_only_strips_one_optional_space() {
@@ -144,5 +173,43 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn consume_frames_keeps_an_incomplete_tail_and_discards_after_stop() {
+        let mut pending = Vec::new();
+        let mut seen = Vec::new();
+        consume_frames(
+            &mut pending,
+            b"data: one\n\ndata: two",
+            &mut (),
+            |_| false,
+            |_, event| seen.push(event.to_vec()),
+        );
+        assert_eq!(seen, vec![b"data: one\n\n".to_vec()]);
+        assert_eq!(pending, b"data: two");
+
+        let mut delivered = 0;
+        consume_frames(
+            &mut pending,
+            b"\n\ndata: three\n\n",
+            &mut delivered,
+            |delivered| *delivered > 0,
+            |delivered, _| *delivered += 1,
+        );
+        assert_eq!(delivered, 1);
+        assert!(pending.is_empty());
+
+        let mut stopped = true;
+        let mut handled = false;
+        consume_frames(
+            &mut pending,
+            b"data: ignored\n\n",
+            &mut stopped,
+            |stopped| *stopped,
+            |_, _| handled = true,
+        );
+        assert!(pending.is_empty());
+        assert!(!handled);
     }
 }
