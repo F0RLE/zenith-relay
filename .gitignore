@@ -6,7 +6,7 @@ src/dist/
 src/node_modules/
 src/.env
 src/.env.local
-windows/
+/windows/
 node_modules/
 dist/
 src-tauri/target/
