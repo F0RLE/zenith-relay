@@ -1,12 +1,17 @@
 use std::env;
-use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(target_os = "windows")]
+use std::ffi::OsStr;
+#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::thread;
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 
 const CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENCODE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -19,7 +24,7 @@ mod identity;
 pub(crate) use identity::is_codex_process;
 #[cfg(any(target_os = "windows", test))]
 pub(super) use identity::process_stop_is_stable;
-#[cfg(any(not(target_os = "windows"), test))]
+#[cfg(test)]
 pub(super) use identity::running_target_pids;
 #[cfg(target_os = "windows")]
 use identity::wait_for_codex_state;
@@ -28,7 +33,7 @@ pub(super) use identity::wait_for_pids_exit;
 pub(super) use identity::{codex_process_pids, codex_process_system};
 #[cfg(target_os = "windows")]
 use identity::{codex_process_pids_for, opencode_process_pids_for};
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 pub(super) use identity::{is_codex_process_identity, is_opencode_process_identity};
 use identity::{is_opencode_process, opencode_process_pids};
 

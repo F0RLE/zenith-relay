@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
 use super::is_codex_running;
 use super::opencode_desktop::{
     is_linux_opencode_desktop_path, is_macos_app_executable, is_macos_opencode_desktop_path,

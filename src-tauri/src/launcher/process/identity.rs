@@ -1,7 +1,12 @@
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{ProcessesToUpdate, System};
+
+#[cfg(not(target_os = "windows"))]
+use crate::launcher::opencode_desktop::is_macos_app_executable;
+#[cfg(target_os = "windows")]
+use sysinfo::Pid;
 
 pub(in crate::launcher) fn codex_process_system() -> System {
     let mut system = System::new();

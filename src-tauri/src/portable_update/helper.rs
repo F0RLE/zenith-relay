@@ -8,13 +8,15 @@ const HELPER_WAIT: Duration = Duration::from_secs(120);
 const FILE_WAIT: Duration = Duration::from_secs(20);
 
 #[cfg(target_os = "windows")]
+use std::path::PathBuf;
+#[cfg(target_os = "windows")]
 use std::{env, process::Command};
 #[cfg(any(target_os = "windows", test))]
 use std::{
     fs,
     fs::OpenOptions,
     io,
-    path::{Path, PathBuf},
+    path::Path,
     thread,
     time::{Duration, Instant},
 };
