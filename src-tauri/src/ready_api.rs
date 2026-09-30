@@ -90,12 +90,6 @@ fn setup_desktop(
         crate::tray::create_main_window(&handle)?;
         let window_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let _ = relay_state.record_performance("window", window_ms, Some("cold"));
-        if cfg!(debug_assertions) {
-            eprintln!(
-                "[startup] native_window={}ms",
-                started.elapsed().as_millis()
-            );
-        }
     }
     local_pool::background::start(handle.clone());
     let state = app.state::<AppState>();

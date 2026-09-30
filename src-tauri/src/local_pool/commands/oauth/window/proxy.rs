@@ -309,34 +309,33 @@ mod tests {
         ));
 
         let direct = sign_in_proxy_plan(Some("http://proxy.example:8080")).unwrap();
-        match direct {
-            SignInProxyPlan::Http(url) => {
-                assert_eq!(url.as_str(), "http://proxy.example:8080/");
-                assert!(url.username().is_empty());
-                assert!(url.password().is_none());
-            }
-            other => panic!("expected plain http proxy, got {other:?}"),
-        }
+        assert!(matches!(direct, SignInProxyPlan::Http(_)));
+        let SignInProxyPlan::Http(url) = direct else {
+            return;
+        };
+        assert_eq!(url.as_str(), "http://proxy.example:8080/");
+        assert!(url.username().is_empty());
+        assert!(url.password().is_none());
 
         let bridged =
             sign_in_proxy_plan(Some("proxy.example:8080:login-name:secret-value")).unwrap();
         let rendered = format!("{bridged:?}");
         assert!(!rendered.contains("login-name"));
         assert!(!rendered.contains("secret-value"));
-        match bridged {
-            SignInProxyPlan::Bridge {
-                host,
-                port,
-                username,
-                password,
-            } => {
-                assert_eq!(host, "proxy.example");
-                assert_eq!(port, 8080);
-                assert_eq!(username, "login-name");
-                assert_eq!(password, "secret-value");
-            }
-            other => panic!("expected authenticated proxy, got {other:?}"),
-        }
+        assert!(matches!(bridged, SignInProxyPlan::Bridge { .. }));
+        let SignInProxyPlan::Bridge {
+            host,
+            port,
+            username,
+            password,
+        } = bridged
+        else {
+            return;
+        };
+        assert_eq!(host, "proxy.example");
+        assert_eq!(port, 8080);
+        assert_eq!(username, "login-name");
+        assert_eq!(password, "secret-value");
 
         let error = sign_in_proxy_plan(Some("https://login-name:secret-value@proxy.example:8443"))
             .unwrap_err();

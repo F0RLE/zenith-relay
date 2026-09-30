@@ -370,9 +370,12 @@ async fn import_still_rejects_a_rejected_token_without_an_account_id() {
     let result =
         build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 2, &endpoint)
             .await;
-    let error = match result {
-        Err(error) => error,
-        Ok(_) => panic!("a rejected token without an account id was imported"),
+    assert!(
+        result.is_err(),
+        "a rejected token without an account id was imported"
+    );
+    let Err(error) = result else {
+        return;
     };
 
     assert_eq!(error.code, "access_token_rejected");
