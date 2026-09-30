@@ -25,6 +25,13 @@ const providerIcons = {
   custom: Settings2,
 };
 
+function nextProviderIndex(key: string, index: number, count: number) {
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  const offset = key === "ArrowRight" || key === "ArrowDown" ? 1 : key === "ArrowLeft" || key === "ArrowUp" ? -1 : 0;
+  return offset ? (index + offset + count) % count : null;
+}
+
 export function ApiProviderForm({
   value,
   onChange,
@@ -41,18 +48,28 @@ export function ApiProviderForm({
     <div className="api-provider-options" role="radiogroup" aria-label={t("apiProviders.choose")}>
       {providerOrder.map((kind, index) => {
         const Icon = providerIcons[kind];
-        return <button key={kind} type="button" role="radio" aria-checked={value.kind === kind} className={value.kind === kind ? "selected" : undefined} tabIndex={value.kind === kind || (!value.kind && index === 0) ? 0 : -1} onClick={() => select(kind)} onKeyDown={(event) => {
-          const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
-          if (!offset && event.key !== "Home" && event.key !== "End") return;
-          event.preventDefault();
-          const next = event.key === "Home" ? 0 : event.key === "End" ? providerOrder.length - 1 : (index + offset + providerOrder.length) % providerOrder.length;
-          const nextKind = providerOrder[next];
-          if (!nextKind) return;
-          select(nextKind);
-          event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus();
-        }}>
-          <span className="api-provider-title"><Icon aria-hidden /><strong>{providerDefaults[kind].name || t("apiProviders.custom")}</strong></span>
-        </button>;
+        return (
+          <button
+            key={kind}
+            type="button"
+            role="radio"
+            aria-checked={value.kind === kind}
+            className={value.kind === kind ? "selected" : undefined}
+            tabIndex={value.kind === kind || (!value.kind && index === 0) ? 0 : -1}
+            onClick={() => select(kind)}
+            onKeyDown={(event) => {
+              const next = nextProviderIndex(event.key, index, providerOrder.length);
+              if (next == null) return;
+              event.preventDefault();
+              const nextKind = providerOrder[next];
+              if (!nextKind) return;
+              select(nextKind);
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus();
+            }}
+          >
+            <span className="api-provider-title"><Icon aria-hidden /><strong>{providerDefaults[kind].name || t("apiProviders.custom")}</strong></span>
+          </button>
+        );
       })}
     </div>
     {value.kind ? <div className="api-provider-configuration">
@@ -69,8 +86,27 @@ export function ApiProviderForm({
             : undefined}
         />
       </div>
-      <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required spellCheck={false} autoCapitalize="none" /></label>
-      <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} placeholder={t("apiProviders.namePlaceholder")} required /></label>
+      <label className="relay-field">
+        <span>{t("sources.address")}</span>
+        <input
+          type="url"
+          value={value.baseUrl}
+          onChange={(event) => onChange({ ...value, baseUrl: event.target.value })}
+          placeholder="https://api.example.com/v1"
+          required
+          spellCheck={false}
+          autoCapitalize="none"
+        />
+      </label>
+      <label className="relay-field">
+        <span>{t("common.name")}</span>
+        <input
+          value={value.name}
+          onChange={(event) => onChange({ ...value, name: event.target.value })}
+          placeholder={t("apiProviders.namePlaceholder")}
+          required
+        />
+      </label>
     </div> : <p className="api-provider-empty">{t("apiProviders.hint")}</p>}
   </div>;
 }

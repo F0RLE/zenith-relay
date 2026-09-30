@@ -2,14 +2,16 @@ import { describe, expect, test } from "bun:test";
 import {
   codexRequestOriginFromErrorCategory,
   normalizeObservedServiceTier,
-  documentedCacheRetentionMinimum,
-  cacheLifetime,
-  cacheWriteDurationWindows,
   totalsFromRows,
   usageRowsFromLocal,
   usageRowsFromRemote,
   type UsageRow,
 } from "../src/features/relay/pages/usage/usageData";
+import {
+  cacheLifetime,
+  cacheWriteDurationWindows,
+  documentedCacheRetentionMinimum,
+} from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
 

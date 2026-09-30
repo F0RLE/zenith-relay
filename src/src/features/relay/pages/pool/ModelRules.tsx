@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { DefaultServiceTier, ModelSummary } from "../../api/types";
+import type { ModelSummary } from "../../api/types";
 import { Button, Dialog, EmptyState, IconButton, ToggleSwitch } from "../../components/Ui";
-import { currentPoolModelSummaries, groupModelSummaries } from "../../poolHelpers";
+import { currentPoolModelSummaries, groupModelSummaries } from "../../modelSummaries";
 import { formatReasoningEffort } from "../../poolFormatting";
 import {
   initialReasoningLevels,
@@ -13,6 +13,7 @@ import {
 import {
   completeModelDisplayOrder,
   modelSignature,
+  modelSpeedTiers,
   normalizeReasoningSelection,
   reorderById,
   reorderModelGroups,
@@ -30,17 +31,6 @@ type ModelDragState = {
   clientY: number;
 };
 
-const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies readonly DefaultServiceTier[];
-
-function modelSpeedTiers(model: ModelSummary): DefaultServiceTier[] {
-  const declared = new Set(model.speedTiers ?? []);
-  const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
-  // Configurable families always offer the same three modes. A missing or
-  // standard-only snapshot must not hide Fast or Ultrafast.
-  if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
-  return ordered.length ? [...ordered] : ["standard"];
-}
-
 export function ModelRulesView() {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
@@ -51,12 +41,7 @@ export function ModelRulesView() {
   const models = runtime ? currentPoolModelSummaries(runtime) : [];
   const poolModels = models;
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
-  const [dragModelId, setDragModelId] = useState<string | null>(null);
-  const [dragGroupId, setDragGroupId] = useState<string | null>(null);
-  const [dropModelId, setDropModelId] = useState<string | null>(null);
-  const [dropGroupId, setDropGroupId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const modelDragRef = useRef<ModelDragState | null>(null);
   const orderMutation = useRef(false);
   const currentModels = useRef(models);
   currentModels.current = models;
@@ -102,6 +87,162 @@ export function ModelRulesView() {
     if (!next) return;
     void saveModelOrder(next);
   };
+  const {
+    dragModelId,
+    dragGroupId,
+    dropModelId,
+    dropGroupId,
+    startPointerDrag,
+    startGroupDrag,
+    startModelDrag,
+    endGroupDrag,
+    hoverGroup,
+    dropGroup,
+    endModelDrag,
+    hoverModel,
+    dropModel,
+  } = useModelRuleDrag({ busy, blocked: orderMutation, reorderModels, reorderGroups });
+  const toggleGroup = (groupId: string) => {
+    setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
+  };
+  if (!models.length) {
+    return <div className="model-rules-empty"><EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
+  }
+  return <>
+    <section className="model-rules relay-compact-content" aria-label={t("models.visible")}>
+      <div className="relay-table-wrap">
+        <table className="relay-table model-rules-table">
+          <colgroup><col data-column="model" /><col data-column="actions" /></colgroup>
+          <thead><tr><th>{t("common.model")}</th><th>{t("common.actions")}</th></tr></thead>
+          {modelGroups.map((group) => {
+            const groupCollapsed = Boolean(collapsedGroups[group.id]);
+            const groupLabel = t(`modelGroups.${group.id}`, { defaultValue: group.label });
+            return <tbody key={group.id} id={`model-group-${group.id}`}>
+              <tr
+                className={`model-group-row${dragGroupId === group.id ? " model-dragging" : ""}`}
+                data-group-id={group.id}
+                data-drop-target={dropGroupId === group.id ? "true" : undefined}
+                draggable
+                onPointerDown={(event) => startPointerDrag(event, "group", group.id)}
+                onDragStart={(event) => startGroupDrag(event, group.id)}
+                onDragEnd={endGroupDrag}
+                onDragOver={(event) => { event.preventDefault(); hoverGroup(group.id); }}
+                onDrop={() => dropGroup(group.id)}
+              >
+                <th colSpan={2} scope="rowgroup">
+                  <span className="model-group-content">
+                    <button
+                      className="model-group-toggle"
+                      type="button"
+                      aria-expanded={!groupCollapsed}
+                      aria-controls={`model-group-${group.id}`}
+                      aria-label={t(groupCollapsed ? "models.expandGroup" : "models.collapseGroup", { group: groupLabel })}
+                      data-relay-tooltip={t(groupCollapsed ? "models.expandGroup" : "models.collapseGroup", { group: groupLabel })}
+                      onClick={() => toggleGroup(group.id)}
+                    >{groupCollapsed ? <ChevronRight aria-hidden /> : <ChevronDown aria-hidden />}</button>
+                    <span className="model-group-drag-handle" data-relay-tooltip={t("models.dragGroup", { group: groupLabel })}><GripVertical aria-hidden /></span>
+                    <strong>{groupLabel}</strong>
+                    <small>{t("models.groupCount", { count: group.items.length })}</small>
+                  </span>
+                </th>
+              </tr>
+              {!groupCollapsed && group.items.map((model) => {
+                const toggling = busy === `model-toggle-${model.id}`;
+                const displayName = model.catalogName || model.codexDisplayName || model.id;
+                const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
+                const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true;
+                const canEditReasoning = Boolean(model.reasoningConfigurable);
+                const speedTiers = modelSpeedTiers(model);
+                const requestedTier = model.speedTier ?? "standard";
+                const speedTier = speedTiers.includes(requestedTier) ? requestedTier : speedTiers[0] ?? "standard";
+                const canEditSpeed = model.speedSupported === true
+                  && model.speedConfigurable === true
+                  && speedTiers.length > 1;
+                return <tr
+                  key={model.id}
+                  data-model-id={model.id}
+                  data-enabled={model.enabled ? "true" : "false"}
+                  data-drop-target={dropModelId === model.id ? "true" : undefined}
+                  className={dragModelId === model.id ? "model-dragging" : undefined}
+                  draggable
+                  onPointerDown={(event) => startPointerDrag(event, "model", model.id)}
+                  onDragStart={(event) => startModelDrag(event, model.id)}
+                  onDragEnd={endModelDrag}
+                  onDragOver={(event) => { event.preventDefault(); hoverModel(model.id); }}
+                  onDrop={() => dropModel(model.id)}
+                >
+                  <td data-column="model">
+                    <button
+                      className="model-rule-drag-handle"
+                      type="button"
+                      aria-label={t("models.dragModel", { model: displayName })}
+                      data-relay-tooltip={t("models.dragModel", { model: displayName })}
+                      onPointerDown={(event) => startPointerDrag(event, "model", model.id)}
+                    >
+                      <GripVertical aria-hidden />
+                    </button>
+                    <div className="model-rule-identity">
+                      <strong data-relay-tooltip={displayName}>{displayName}</strong>
+                      {displayName !== model.id ? <code data-relay-tooltip={model.id}>{model.id}</code> : null}
+                    </div>
+                  </td>
+                  <td data-column="actions"><div className="model-rule-actions">
+                    <IconButton
+                      data-model-reasoning-edit={model.id}
+                      label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
+                      icon={<BrainCircuit aria-hidden />}
+                      disabled={!hasReasoningModes}
+                      onClick={() => setReasoningModel(model)}
+                    />
+                    {canEditSpeed ? <PoolSpeedControl
+                      className="model-speed-toggle"
+                      modelId={model.id}
+                      value={speedTier}
+                      tiers={speedTiers}
+                      disabled={false}
+                      saving={busy === `model-speed-${model.id}`}
+                      onChange={(nextTier) => {
+                      void perform(`model-speed-${model.id}`, () => mode === "local"
+                        ? relayCommands.setModelServiceTier(model.id, nextTier)
+                        : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved");
+                    }} /> : null}
+                    <ToggleSwitch
+                      data-model-toggle={model.id}
+                      label={toggleLabel}
+                      className="model-toggle"
+                      checked={model.enabled}
+                      aria-busy={toggling}
+                      disabled={Boolean(busy)}
+                      onChange={() => void toggleModel(model)}
+                    />
+                  </div></td>
+                </tr>;
+              })}
+            </tbody>;
+          })}
+        </table>
+      </div>
+    </section>
+    {reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}
+  </>;
+}
+
+function useModelRuleDrag({
+  busy,
+  blocked,
+  reorderModels,
+  reorderGroups,
+}: {
+  busy: string | null;
+  blocked: { current: boolean };
+  reorderModels: (sourceId: string, targetId: string) => void;
+  reorderGroups: (sourceId: string, targetId: string) => void;
+}) {
+  const [dragModelId, setDragModelId] = useState<string | null>(null);
+  const [dragGroupId, setDragGroupId] = useState<string | null>(null);
+  const [dropModelId, setDropModelId] = useState<string | null>(null);
+  const [dropGroupId, setDropGroupId] = useState<string | null>(null);
+  const modelDragRef = useRef<ModelDragState | null>(null);
   const clearModelDrag = () => {
     modelDragRef.current = null;
     setDragModelId(null);
@@ -114,14 +255,12 @@ export function ModelRulesView() {
     if (!drag) return;
     const target = document.elementFromPoint(clientX, clientY);
     if (drag.kind === "group") {
-      const row = target?.closest<HTMLElement>("[data-group-id]");
-      const targetId = row?.dataset["groupId"] ?? null;
+      const targetId = target?.closest<HTMLElement>("[data-group-id]")?.dataset["groupId"] ?? null;
       setDropGroupId(targetId && targetId !== drag.id ? targetId : null);
       setDropModelId(null);
       return;
     }
-    const row = target?.closest<HTMLElement>("[data-model-id]");
-    const targetId = row?.dataset["modelId"] ?? null;
+    const targetId = target?.closest<HTMLElement>("[data-model-id]")?.dataset["modelId"] ?? null;
     setDropModelId(targetId && targetId !== drag.id ? targetId : null);
     setDropGroupId(null);
   };
@@ -146,7 +285,7 @@ export function ModelRulesView() {
     onCancel: clearModelDrag,
   });
   const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], id: string) => {
-    if (orderMutation.current || busy) return;
+    if (blocked.current || busy) return;
     const target = event.target as HTMLElement;
     if (event.button !== 0 || (target.closest(".pool-speed-control, button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
     event.preventDefault();
@@ -157,7 +296,7 @@ export function ModelRulesView() {
     setDropGroupId(null);
   };
   const startGroupDrag = (event: React.DragEvent<HTMLTableRowElement>, groupId: string) => {
-    if (orderMutation.current || busy) {
+    if (blocked.current || busy) {
       event.preventDefault();
       return;
     }
@@ -169,7 +308,7 @@ export function ModelRulesView() {
   const startModelDrag = (event: React.DragEvent<HTMLTableRowElement>, modelId: string) => {
     // Interactive controls inside a draggable row must keep their normal
     // click/focus behavior; the row itself is the drag surface.
-    if (orderMutation.current || busy || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
+    if (blocked.current || busy || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
       event.preventDefault();
       return;
     }
@@ -178,47 +317,29 @@ export function ModelRulesView() {
     setDragModelId(modelId);
     setDropModelId(null);
   };
-  const toggleGroup = (groupId: string) => {
-    setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
+  return {
+    dragModelId,
+    dragGroupId,
+    dropModelId,
+    dropGroupId,
+    startPointerDrag,
+    startGroupDrag,
+    startModelDrag,
+    endGroupDrag: () => { setDragGroupId(null); setDropGroupId(null); },
+    hoverGroup: (groupId: string) => setDropGroupId(dragGroupId && dragGroupId !== groupId ? groupId : null),
+    dropGroup: (groupId: string) => {
+      if (dragGroupId) reorderGroups(dragGroupId, groupId);
+      setDragGroupId(null);
+      setDropGroupId(null);
+    },
+    endModelDrag: () => { setDragModelId(null); setDropModelId(null); },
+    hoverModel: (modelId: string) => setDropModelId(dragModelId && dragModelId !== modelId ? modelId : null),
+    dropModel: (modelId: string) => {
+      if (dragModelId) reorderModels(dragModelId, modelId);
+      setDragModelId(null);
+      setDropModelId(null);
+    },
   };
-  if (!models.length) return <div className="model-rules-empty"><EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
-  return <><section className="model-rules relay-compact-content" aria-label={t("models.visible")}>
-      <div className="relay-table-wrap"><table className="relay-table model-rules-table">
-      <colgroup><col data-column="model" /><col data-column="actions" /></colgroup>
-      <thead><tr><th>{t("common.model")}</th><th>{t("common.actions")}</th></tr></thead>
-      {modelGroups.map((group) => {
-      const groupCollapsed = Boolean(collapsedGroups[group.id]);
-      const groupLabel = t(`modelGroups.${group.id}`, { defaultValue: group.label });
-      return <tbody key={group.id} id={`model-group-${group.id}`}>
-      <tr className={`model-group-row${dragGroupId === group.id ? " model-dragging" : ""}`} data-group-id={group.id} data-drop-target={dropGroupId === group.id ? "true" : undefined} draggable onPointerDown={(event) => startPointerDrag(event, "group", group.id)} onDragStart={(event) => startGroupDrag(event, group.id)} onDragEnd={() => { setDragGroupId(null); setDropGroupId(null); }} onDragOver={(event) => { event.preventDefault(); setDropGroupId(dragGroupId && dragGroupId !== group.id ? group.id : null); }} onDrop={() => { if (dragGroupId) reorderGroups(dragGroupId, group.id); setDragGroupId(null); setDropGroupId(null); }}><th colSpan={2} scope="rowgroup"><span className="model-group-content"><button className="model-group-toggle" type="button" aria-expanded={!groupCollapsed} aria-controls={`model-group-${group.id}`} aria-label={t(groupCollapsed ? "models.expandGroup" : "models.collapseGroup", { group: groupLabel })} data-relay-tooltip={t(groupCollapsed ? "models.expandGroup" : "models.collapseGroup", { group: groupLabel })} onClick={() => toggleGroup(group.id)}>{groupCollapsed ? <ChevronRight aria-hidden /> : <ChevronDown aria-hidden />}</button><span className="model-group-drag-handle" data-relay-tooltip={t("models.dragGroup", { group: groupLabel })}><GripVertical aria-hidden /></span><strong>{groupLabel}</strong><small>{t("models.groupCount", { count: group.items.length })}</small></span></th></tr>
-      {!groupCollapsed && group.items.map((model) => {
-      const toggling = busy === `model-toggle-${model.id}`;
-      const displayName = model.catalogName || model.codexDisplayName || model.id;
-      const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
-      const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true;
-      const canEditReasoning = Boolean(model.reasoningConfigurable);
-      const speedTiers = modelSpeedTiers(model);
-      const requestedTier = model.speedTier ?? "standard";
-      const speedTier = speedTiers.includes(requestedTier) ? requestedTier : speedTiers[0] ?? "standard";
-      const canEditSpeed = model.speedSupported === true
-        && model.speedConfigurable === true
-        && speedTiers.length > 1;
-      return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"} data-drop-target={dropModelId === model.id ? "true" : undefined} className={dragModelId === model.id ? "model-dragging" : undefined} draggable onPointerDown={(event) => startPointerDrag(event, "model", model.id)} onDragStart={(event) => startModelDrag(event, model.id)} onDragEnd={() => { setDragModelId(null); setDropModelId(null); }} onDragOver={(event) => { event.preventDefault(); setDropModelId(dragModelId && dragModelId !== model.id ? model.id : null); }} onDrop={() => { if (dragModelId) reorderModels(dragModelId, model.id); setDragModelId(null); setDropModelId(null); }}>
-        <td data-column="model"><button className="model-rule-drag-handle" type="button" aria-label={t("models.dragModel", { model: displayName })} data-relay-tooltip={t("models.dragModel", { model: displayName })} onPointerDown={(event) => startPointerDrag(event, "model", model.id)}><GripVertical aria-hidden /></button><div className="model-rule-identity"><strong data-relay-tooltip={displayName}>{displayName}</strong>{displayName !== model.id ? <code data-relay-tooltip={model.id}>{model.id}</code> : null}</div></td>
-        <td data-column="actions"><div className="model-rule-actions">
-          <IconButton data-model-reasoning-edit={model.id} label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} disabled={!hasReasoningModes} onClick={() => setReasoningModel(model)} />
-          {canEditSpeed ? <PoolSpeedControl className="model-speed-toggle" modelId={model.id} value={speedTier} tiers={speedTiers} disabled={false} saving={busy === `model-speed-${model.id}`} onChange={(nextTier) => {
-            void perform(`model-speed-${model.id}`, () => mode === "local"
-              ? relayCommands.setModelServiceTier(model.id, nextTier)
-              : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved");
-          }} /> : null}
-          <ToggleSwitch data-model-toggle={model.id} label={toggleLabel} className="model-toggle" checked={model.enabled} aria-busy={toggling} disabled={Boolean(busy)} onChange={() => void toggleModel(model)} />
-        </div></td>
-      </tr>;
-      })}</tbody>;
-      })}
-    </table></div>
-  </section>{reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}</>;
 }
 
 function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
@@ -275,7 +396,15 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
     <div className="model-reasoning-form">
       <code className="model-reasoning-model" data-relay-tooltip={model.id}>{model.id}</code>
       <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
-        {supportedLevels.map((level) => <button key={level} type="button" role="checkbox" aria-checked={allowedLevels.includes(level)} className={allowedLevels.includes(level) ? "selected" : undefined} disabled={!editable || manualBusy} onClick={() => toggleAllowedLevel(level)}><Check aria-hidden /><span>{label(level)}</span></button>)}
+        {supportedLevels.map((level) => <button
+          key={level}
+          type="button"
+          role="checkbox"
+          aria-checked={allowedLevels.includes(level)}
+          className={allowedLevels.includes(level) ? "selected" : undefined}
+          disabled={!editable || manualBusy}
+          onClick={() => toggleAllowedLevel(level)}
+        ><Check aria-hidden /><span>{label(level)}</span></button>)}
       </div>
     </div>
   </Dialog>;

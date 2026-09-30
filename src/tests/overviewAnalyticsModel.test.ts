@@ -35,7 +35,8 @@ describe("overview analytics model", () => {
     const month = chartWindows("month", "en-US", now);
 
     expect(today).toHaveLength(24);
-    expect(today[0].startMs).toBe(new Date(2026, 7, 28).getTime());
+    expect(today[0].startMs).toBe(new Date(2026, 7, 27, 13).getTime());
+    expect(today[23].startMs).toBe(new Date(2026, 7, 28, 12).getTime());
     expect(today[23].endMs - today[0].startMs + 1).toBe(24 * HOUR_MS);
     expect(week).toHaveLength(7);
     expect(week[1].startMs - week[0].startMs).toBe(DAY_MS);

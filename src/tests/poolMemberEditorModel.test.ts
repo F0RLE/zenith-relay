@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AccountSummary, RuntimeSnapshot, SourceSummary } from "../src/features/relay/api/types";
 import { groupModels, memberModelCatalog } from "../src/features/relay/modelGroups";
 import {
+  memberModelIsEnabled,
   modelSelectionForMember,
   modelSelectionPayload,
 } from "../src/features/relay/components/poolMemberEditorModel";
@@ -76,13 +77,19 @@ describe("pool member editor model", () => {
       modelPriceOverrides: { "model-x": { inputMicroUsdPerMillion: 1, outputMicroUsdPerMillion: 2 } },
     }), kind: "source" })).toEqual({
       modelIds: ["GPT-5.4", "custom", "model-x"],
-      enabledModels: ["GPT-5.4"],
+      enabledModels: ["GPT-5.4", "model-x"],
     });
   });
 
   test("serializes a full selection as empty allow/deny lists", () => {
     expect(modelSelectionPayload(["A", "b"], ["a", "B"])).toEqual({ allowedModels: [], excludedModels: [] });
-    expect(modelSelectionPayload(["A", "b"], ["a"])).toEqual({ allowedModels: ["A"], excludedModels: ["b"] });
+    expect(modelSelectionPayload(["A", "b"], ["a"])).toEqual({ allowedModels: [], excludedModels: ["b"] });
+  });
+
+  test("a model missing from an exact saved snapshot stays enabled", () => {
+    expect(memberModelIsEnabled(["gpt-5.4"], ["gpt-old"], "gpt-5.5")).toBe(true);
+    expect(memberModelIsEnabled(["gpt-5.4"], ["gpt-old"], "gpt-old")).toBe(false);
+    expect(memberModelIsEnabled(["gpt-*"], [], "claude-new")).toBe(false);
   });
 
   test("account rules cannot reorder the complete backend inventory", () => {

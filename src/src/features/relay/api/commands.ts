@@ -3,6 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AccountExportInput,
   AccountExportResult,
+  AccountLoginDetails,
+  AccountLoginUpdate,
+  AccountTotpPreview,
   AccountImportProgress,
   AccountTransferProgress,
   CandidateRuntimeSnapshot,
@@ -146,9 +149,12 @@ export const relayCommands = {
   forceActivateRemoteAccountLocally: (localAccountId: string) => invoke<{ localAccountId: string }>("force_activate_remote_account_locally", { input: { localAccountId, confirmRemoteMayStillBeRunning: true } }),
   onAccountTransferProgress: (callback: (event: AccountTransferProgress) => void) => listen<AccountTransferProgress>("relay-account-transfer-progress", (event) => callback(event.payload)),
   revealLocalAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_local_account_identity", { accountId }),
+  revealLocalAccountLogin: (accountId: string) => invoke<AccountLoginDetails>("reveal_local_account_login", { accountId }),
+  updateAccountLogin: (input: AccountLoginUpdate) => invoke<AccountLoginDetails>("update_local_account_login", { input }),
+  previewTotpCode: (secret: string) => invoke<AccountTotpPreview>("preview_totp_code", { secret }),
   revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
 
-  startOAuth: (openBrowser = true, accountId?: string) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}) }),
+  startOAuth: (openBrowser = true, accountId?: string, proxyId?: string) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}), ...(proxyId ? { proxyId } : {}) }),
   resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
   onOAuthStatus: (callback: (event: OAuthFlowEvent) => void) => listen<OAuthFlowEvent>("relay-oauth-status", (event) => callback(event.payload)),
   completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),

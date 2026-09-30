@@ -429,12 +429,6 @@
 .usage-column-heading:hover,
 .usage-column-heading:focus-visible { color: var(--relay-text); }
 
-.usage-column-heading:focus-visible {
-  border-radius: 3px;
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 2px;
-}
-
 .usage-sortable-table th[data-dragging="true"] .usage-column-heading { opacity: 0.55; }
 .usage-sortable-table th[data-drop="before"] { box-shadow: inset 2px 0 var(--relay-accent); }
 .usage-sortable-table th[data-drop="after"] { box-shadow: inset -2px 0 var(--relay-accent); }

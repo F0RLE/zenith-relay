@@ -7,6 +7,7 @@ import type { ImportSession, RelayMode } from "../api/types";
 import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
+import { captureOperationResult } from "../state/relayOperationModel";
 
 const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ImportDialog")).ImportDialog }));
 const SourceDialog = lazy(async () => ({ default: (await import("../pages/connections/SourceDialog")).SourceDialog }));
@@ -107,32 +108,31 @@ export function QuickSetupWizard() {
 
   const openCurrentProfileImport = async () => {
     const run = ++currentProfileImportRun.current;
-    const result: {
-      current: ImportSession | null;
-      confirmation: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null;
-    } = { current: null, confirmation: null };
     setCurrentProfileImport({ kind: "importing" });
-    const ok = await perform("onboarding-current-profile", async () => {
-      result.current = await relayCommands.previewCurrentCodexImport();
-      if (run !== currentProfileImportRun.current) {
-        await relayCommands.cancelImport(result.current.sessionId).catch(() => undefined);
-        return;
-      }
-      currentProfileImportSession.current = result.current.sessionId;
-      const selectedItemIds = result.current.preview.rows
-        .filter((row) => row.selectable && row.defaultSelected)
-        .map((row) => row.itemId);
-      if (!selectedItemIds.length) throw new Error("current_profile_import_has_no_selectable_items");
-      result.confirmation = await relayCommands.confirmImport(result.current.sessionId, selectedItemIds, true);
-    });
+    const captured = await captureOperationResult(
+      (work) => perform("onboarding-current-profile", work),
+      async () => {
+        const session = await relayCommands.previewCurrentCodexImport();
+        if (run !== currentProfileImportRun.current) {
+          await relayCommands.cancelImport(session.sessionId).catch(() => undefined);
+          return null;
+        }
+        currentProfileImportSession.current = session.sessionId;
+        const selectedItemIds = session.preview.rows
+          .filter((row) => row.selectable && row.defaultSelected)
+          .map((row) => row.itemId);
+        if (!selectedItemIds.length) throw new Error("current_profile_import_has_no_selectable_items");
+        return relayCommands.confirmImport(session.sessionId, selectedItemIds, true);
+      },
+    );
     if (run !== currentProfileImportRun.current) return;
-    if (!ok || !result.current || !result.confirmation) {
+    if (!captured.ok || !captured.value) {
       await cancelCurrentProfileImport();
       if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
     }
-    const importedCount = result.confirmation.results.filter((item) => item.status === "succeeded").length;
-    if (!importedCount || result.confirmation.results.some((item) => item.status === "failed")) {
+    const importedCount = captured.value.results.filter((item) => item.status === "succeeded").length;
+    if (!importedCount || captured.value.results.some((item) => item.status === "failed")) {
       await cancelCurrentProfileImport();
       if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
@@ -162,15 +162,7 @@ export function QuickSetupWizard() {
     setImportSession(null);
   };
 
-  if (intro) {
-    return <main className="setup-shell setup-shell-intro">
-      <SetupHeader />
-      <section className="product-intro">
-        <div className="intro-copy"><h1>Zenith Relay</h1><p>{t("onboarding.intro")}</p></div>
-        <div className="intro-actions"><Button variant="primary" onClick={() => setIntro(false)}>{t("onboarding.start")}</Button><Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={finishLater}>{t("onboarding.skip")}</Button></div>
-      </section>
-    </main>;
-  }
+  if (intro) return <SetupIntro onStart={() => setIntro(false)} onSkip={finishLater} />;
 
   const insecureRemote = serverUrl.trim().toLowerCase().startsWith("http://");
   const remoteReady = connectionReady || Boolean(serverUrl && serverToken && (!insecureRemote || allowInsecureRemote));
@@ -180,7 +172,12 @@ export function QuickSetupWizard() {
 
   const next = async () => {
     if (step === 2 && mode === "remote" && !connectionReady) {
-      const ok = await perform("onboarding-remote", () => relayCommands.connectRemote({ baseUrl: serverUrl, managementToken: serverToken, allowInsecureHttp: insecureRemote && allowInsecureRemote, confirmIdentityChange: false }), "feedback.connected");
+      const ok = await perform("onboarding-remote", () => relayCommands.connectRemote({
+        baseUrl: serverUrl,
+        managementToken: serverToken,
+        allowInsecureHttp: insecureRemote && allowInsecureRemote,
+        confirmIdentityChange: false,
+      }), "feedback.connected");
       if (!ok) return;
       setConnectionReady(true);
     }
@@ -209,26 +206,95 @@ export function QuickSetupWizard() {
   return <main className="setup-shell">
     <SetupHeader />
     <div className="setup-workspace">
-    <ol className="setup-progress" aria-label={t("onboarding.progress")}>{[1, 2, 3, 4].map((value) => <li key={value} className={value < step ? "complete" : value === step ? "active" : ""} aria-current={value === step ? "step" : undefined}><span>{value < step ? <Check aria-hidden /> : value}</span><div><strong>{t(`onboarding.steps.${value}`)}</strong><small>{t(`onboarding.stepHints.${value}`)}</small></div></li>)}</ol>
+    <SetupProgress step={step} />
     <div className="setup-content">
     <section className="setup-body">
-      {step === 1 ? <div className="setup-step setup-mode-step"><div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div><div className="mode-options" role="group" aria-label={t("onboarding.steps.1")}>{(["local", "remote"] as RelayMode[]).map((value) => { const Icon = value === "local" ? Laptop : Server; return <button key={value} type="button" aria-pressed={mode === value} className={mode === value ? "selected" : ""} onClick={() => selectMode(value)}><Icon aria-hidden /><span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span><i>{mode === value ? <Check aria-hidden /> : null}</i></button>; })}</div></div> : null}
-      {step === 2 ? <div className="setup-step"><ConnectionStep mode={mode} connectionReady={connectionReady} serverUrl={serverUrl} setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }} serverToken={serverToken} setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }} currentProfileAvailable={currentProfileAvailable} currentProfileImport={currentProfileImport} onConnected={() => setConnectionReady(true)} onOAuthPendingChange={setOauthPending} onImport={openFileImport} onAddSource={() => setShowSource(true)} onImportCurrent={() => void openCurrentProfileImport()} onRetryCurrent={retryCurrentProfileImport} onUseAnotherConnection={resetCurrentProfileImport} />{mode === "remote" && insecureRemote ? <label className="check-line"><input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} /><span>{t("onboarding.allowInsecureRemote")}</span></label> : null}</div> : null}
-      {step === 3 ? <div className="setup-step"><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options" role="group" aria-label={t("onboarding.steps.3")}>{["codex", "opencode", "later"].map((value) => {
-        const Icon = value === "codex" ? MessageSquare : value === "opencode" ? Terminal : Clock3;
-        return <button type="button" key={value} aria-label={t(`clients.${value}`)} aria-describedby={`setup-client-${value}-hint`} aria-pressed={client === value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><Icon aria-hidden /><span><strong>{t(`clients.${value}`)}</strong><small id={`setup-client-${value}-hint`}>{t(`onboarding.clientDescriptions.${value}`)}</small></span><i>{client === value ? <Check aria-hidden /> : null}</i></button>;
-      })}</div></div> : null}
-      {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint")}</p><dl className="setup-ready-summary"><div><dt>{t("onboarding.steps.1")}</dt><dd>{t(`modes.${mode}`)}</dd></div><div><dt>{t("onboarding.steps.3")}</dt><dd>{t(`clients.${client}`)}</dd></div></dl></div> : null}
+      {step === 1 ? <ModeStep mode={mode} onSelect={selectMode} /> : null}
+      {step === 2 ? <div className="setup-step">
+        <ConnectionStep
+          mode={mode}
+          connectionReady={connectionReady}
+          serverUrl={serverUrl}
+          setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }}
+          serverToken={serverToken}
+          setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }}
+          currentProfileAvailable={currentProfileAvailable}
+          currentProfileImport={currentProfileImport}
+          onConnected={() => setConnectionReady(true)}
+          onOAuthPendingChange={setOauthPending}
+          onImport={openFileImport}
+          onAddSource={() => setShowSource(true)}
+          onImportCurrent={() => void openCurrentProfileImport()}
+          onRetryCurrent={retryCurrentProfileImport}
+          onUseAnotherConnection={resetCurrentProfileImport}
+        />
+        {mode === "remote" && insecureRemote ? <label className="check-line">
+          <input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} />
+          <span>{t("onboarding.allowInsecureRemote")}</span>
+        </label> : null}
+      </div> : null}
+      {step === 3 ? <ClientStep client={client} onSelect={setClient} /> : null}
+      {step === 4 ? <ReadyStep mode={mode} client={client} /> : null}
     </section>
-    <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 3 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={finishLater}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>
+    <footer className="setup-footer">
+      <div>
+        <Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>
+        {step < 3 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={finishLater}>{t("onboarding.skipStep")}</Button> : null}
+      </div>
+      <Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button>
+    </footer>
     </div>
     </div>
-    {showImport ? <Suspense fallback={null}><ImportDialog {...(importSession ? { initialSession: importSession } : {})} modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={closeImport} /></Suspense> : null}
+    {showImport ? (
+      <Suspense fallback={null}>
+        <ImportDialog
+          {...(importSession ? { initialSession: importSession } : {})}
+          modeOverride="local"
+          defaultAddToPool
+          onImported={() => setConnectionReady(true)}
+          onClose={closeImport}
+        />
+      </Suspense>
+    ) : null}
     {showSource ? <Suspense fallback={null}><SourceDialog source={null} modeOverride="local" addToPool onCreated={() => setConnectionReady(true)} onClose={() => setShowSource(false)} /></Suspense> : null}
   </main>;
 }
 
-function ConnectionStep({ mode, connectionReady, serverUrl, setServerUrl, serverToken, setServerToken, currentProfileAvailable, currentProfileImport, onConnected, onOAuthPendingChange, onImport, onAddSource, onImportCurrent, onRetryCurrent, onUseAnotherConnection }: { mode: RelayMode; connectionReady: boolean; serverUrl: string; setServerUrl: (value: string) => void; serverToken: string; setServerToken: (value: string) => void; currentProfileAvailable: boolean; currentProfileImport: CurrentProfileImportState; onConnected: () => void; onOAuthPendingChange: (pending: boolean) => void; onImport: () => void; onAddSource: () => void; onImportCurrent: () => void; onRetryCurrent: () => void; onUseAnotherConnection: () => void }) {
+type ConnectionStepProps = {
+  mode: RelayMode;
+  connectionReady: boolean;
+  serverUrl: string;
+  setServerUrl: (value: string) => void;
+  serverToken: string;
+  setServerToken: (value: string) => void;
+  currentProfileAvailable: boolean;
+  currentProfileImport: CurrentProfileImportState;
+  onConnected: () => void;
+  onOAuthPendingChange: (pending: boolean) => void;
+  onImport: () => void;
+  onAddSource: () => void;
+  onImportCurrent: () => void;
+  onRetryCurrent: () => void;
+  onUseAnotherConnection: () => void;
+};
+
+function ConnectionStep({
+  mode,
+  connectionReady,
+  serverUrl,
+  setServerUrl,
+  serverToken,
+  setServerToken,
+  currentProfileAvailable,
+  currentProfileImport,
+  onConnected,
+  onOAuthPendingChange,
+  onImport,
+  onAddSource,
+  onImportCurrent,
+  onRetryCurrent,
+  onUseAnotherConnection,
+}: ConnectionStepProps) {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
   const oauth = useOAuthSignIn(async (result) => {
@@ -240,7 +306,16 @@ function ConnectionStep({ mode, connectionReady, serverUrl, setServerUrl, server
     return () => onOAuthPendingChange(false);
   }, [oauth.flow, onOAuthPendingChange]);
 
-  if (mode === "remote") return <><div className="setup-heading"><h1>{t("onboarding.connectionRemote")}</h1><p>{t("onboarding.remoteHint")}</p></div><div className="setup-fields"><label className="relay-field"><span>{t("remote.address")}</span><input type="url" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://relay.example.com" /></label><SecretField label={t("remote.token")} value={serverToken} onChange={setServerToken} /></div></>;
+  if (mode === "remote") return <>
+    <div className="setup-heading"><h1>{t("onboarding.connectionRemote")}</h1><p>{t("onboarding.remoteHint")}</p></div>
+    <div className="setup-fields">
+      <label className="relay-field">
+        <span>{t("remote.address")}</span>
+        <input type="url" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://relay.example.com" />
+      </label>
+      <SecretField label={t("remote.token")} value={serverToken} onChange={setServerToken} />
+    </div>
+  </>;
   const flow = oauth.flow;
   const flowFailed = flow && (flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed");
   return <>
@@ -252,19 +327,48 @@ function ConnectionStep({ mode, connectionReady, serverUrl, setServerUrl, server
       <div className="setup-oauth-pending-mark"><Loader2 className="spin" aria-hidden /></div>
       <div className="setup-oauth-pending-copy">
         <strong>{t(flow.status === "callback_received" || busy === "oauth-complete" ? "accounts.completingSignIn" : "onboarding.signInWaiting")}</strong>
+        {flow.status === "pending" ? <small>{t("accounts.waitingForSignInHint")}</small> : null}
       </div>
       {flowFailed ? <p role="alert" className="form-note error-text">{t(`accounts.oauthStatus.${flow.status}`)}</p> : null}
       <div className="setup-oauth-pending-actions">
-        <a className="setup-oauth-reopen" href={flow.authorizationUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden /><span>{t("accounts.openSignIn")}</span></a>
+        <button
+          type="button"
+          className="setup-oauth-reopen"
+          disabled={flow.status !== "pending" || busy === "oauth-reopen"}
+          onClick={() => void perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId))}
+        >
+          <ExternalLink aria-hidden />
+          <span>{t("accounts.openSignIn")}</span>
+        </button>
         <Button variant="ghost" disabled={busy === "oauth-cancel"} onClick={() => void oauth.cancel()}>{t("common.cancel")}</Button>
       </div>
     </section> : <>
       {currentProfileImport.kind === "complete" ? <CurrentProfileImportStatus state={currentProfileImport} onRetry={onRetryCurrent} onUseAnotherConnection={onUseAnotherConnection} /> : connectionReady ? <p className="setup-pool-ready" role="status"><Check aria-hidden />{t("onboarding.poolReady")}</p> : null}
       <div className="setup-connect-options">
         <div className="setup-connect-group"><strong>{t("connections.accounts")}</strong><div className="setup-connect-cards">
-          {currentProfileAvailable && currentProfileImport.kind !== "complete" ? <button type="button" onClick={onImportCurrent}><UserRoundCheck aria-hidden /><span><strong>{t("onboarding.importCurrentProfile")}</strong><small>{t("onboarding.importCurrentProfileDescription")}</small></span></button> : null}
-          <button type="button" disabled={busy === "oauth-start"} onClick={() => void oauth.start()}><LogIn aria-hidden /><span><strong>{t("accounts.signIn")}</strong><small>{t("onboarding.signInDescription")}</small></span></button>
-          <button type="button" onClick={onImport}><Upload aria-hidden /><span><strong>{t("accounts.import")}</strong><small>{t("onboarding.importDescription")}</small></span></button>
+          {currentProfileAvailable && currentProfileImport.kind !== "complete" ? (
+            <button type="button" onClick={onImportCurrent}>
+              <UserRoundCheck aria-hidden />
+              <span>
+                <strong>{t("onboarding.importCurrentProfile")}</strong>
+                <small>{t("onboarding.importCurrentProfileDescription")}</small>
+              </span>
+            </button>
+          ) : null}
+          <button type="button" disabled={busy === "oauth-start"} onClick={() => void oauth.start()}>
+            <LogIn aria-hidden />
+            <span>
+              <strong>{t("accounts.signIn")}</strong>
+              <small>{t("onboarding.signInDescription")}</small>
+            </span>
+          </button>
+          <button type="button" onClick={onImport}>
+            <Upload aria-hidden />
+            <span>
+              <strong>{t("accounts.import")}</strong>
+              <small>{t("onboarding.importDescription")}</small>
+            </span>
+          </button>
         </div></div>
         <div className="setup-connect-group"><strong>{t("connections.sources")}</strong><div className="setup-connect-cards">
           <button type="button" onClick={onAddSource}><Cloud aria-hidden /><span><strong>{t("onboarding.addApiSource")}</strong><small>{t("onboarding.addApiSourceHint")}</small></span></button>
@@ -283,16 +387,134 @@ function CurrentProfileImportStatus({ state, onRetry, onUseAnotherConnection }: 
       {state.kind === "importing" ? <Loader2 className="spin" aria-hidden /> : failed ? <CircleAlert aria-hidden /> : <Check aria-hidden />}
     </div>
     <div className="setup-current-profile-copy">
-      <strong>{t(state.kind === "importing" ? "onboarding.currentProfileImporting" : failed ? state.phase === "runtime" ? "onboarding.currentProfileSetupFailed" : "onboarding.currentProfileImportFailed" : "onboarding.currentProfileImported")}</strong>
+      <strong>
+        {t(state.kind === "importing"
+          ? "onboarding.currentProfileImporting"
+          : failed
+            ? state.phase === "runtime"
+              ? "onboarding.currentProfileSetupFailed"
+              : "onboarding.currentProfileImportFailed"
+            : "onboarding.currentProfileImported")}
+      </strong>
       {complete ? <small>{t("onboarding.poolReady")}</small> : null}
     </div>
-    {failed ? <div className="setup-current-profile-actions"><Button variant="secondary" onClick={onRetry}>{t("common.retry")}</Button><Button variant="ghost" onClick={onUseAnotherConnection}>{t("onboarding.chooseAnotherConnection")}</Button></div> : null}
+    {failed ? (
+      <div className="setup-current-profile-actions">
+        <Button variant="secondary" onClick={onRetry}>{t("common.retry")}</Button>
+        <Button variant="ghost" onClick={onUseAnotherConnection}>{t("onboarding.chooseAnotherConnection")}</Button>
+      </div>
+    ) : null}
   </section>;
 }
 
 function SetupHeader() {
   const { t } = useTranslation();
   return <header className="setup-header"><strong>{t("onboarding.setupTitle")}</strong><LanguageSelect /></header>;
+}
+
+function SetupIntro({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <main className="setup-shell setup-shell-intro">
+      <SetupHeader />
+      <section className="product-intro">
+        <div className="intro-copy">
+          <h1>Zenith Relay</h1>
+          <p>{t("onboarding.intro")}</p>
+        </div>
+        <div className="intro-actions">
+          <Button variant="primary" onClick={onStart}>{t("onboarding.start")}</Button>
+          <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={onSkip}>{t("onboarding.skip")}</Button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function SetupProgress({ step }: { step: number }) {
+  const { t } = useTranslation();
+  return (
+    <ol className="setup-progress" aria-label={t("onboarding.progress")}>
+      {[1, 2, 3, 4].map((value) => (
+        <li
+          key={value}
+          className={value < step ? "complete" : value === step ? "active" : ""}
+          aria-current={value === step ? "step" : undefined}
+        >
+          <span>{value < step ? <Check aria-hidden /> : value}</span>
+          <div>
+            <strong>{t(`onboarding.steps.${value}`)}</strong>
+            <small>{t(`onboarding.stepHints.${value}`)}</small>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function ModeStep({ mode, onSelect }: { mode: RelayMode; onSelect: (mode: RelayMode) => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="setup-step setup-mode-step">
+      <div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div>
+      <div className="mode-options" role="group" aria-label={t("onboarding.steps.1")}>
+        {(["local", "remote"] as RelayMode[]).map((value) => {
+          const Icon = value === "local" ? Laptop : Server;
+          return (
+            <button key={value} type="button" aria-pressed={mode === value} className={mode === value ? "selected" : ""} onClick={() => onSelect(value)}>
+              <Icon aria-hidden />
+              <span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span>
+              <i>{mode === value ? <Check aria-hidden /> : null}</i>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ClientStep({ client, onSelect }: { client: string; onSelect: (client: string) => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="setup-step">
+      <div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div>
+      <div className="client-options" role="group" aria-label={t("onboarding.steps.3")}>
+        {["codex", "opencode", "later"].map((value) => {
+          const Icon = value === "codex" ? MessageSquare : value === "opencode" ? Terminal : Clock3;
+          return (
+            <button
+              type="button"
+              key={value}
+              aria-label={t(`clients.${value}`)}
+              aria-describedby={`setup-client-${value}-hint`}
+              aria-pressed={client === value}
+              className={client === value ? "selected" : ""}
+              onClick={() => onSelect(value)}
+            >
+              <Icon aria-hidden />
+              <span><strong>{t(`clients.${value}`)}</strong><small id={`setup-client-${value}-hint`}>{t(`onboarding.clientDescriptions.${value}`)}</small></span>
+              <i>{client === value ? <Check aria-hidden /> : null}</i>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ReadyStep({ mode, client }: { mode: RelayMode; client: string }) {
+  const { t } = useTranslation();
+  return (
+    <div className="setup-ready">
+      <div className="setup-ready-mark"><Check aria-hidden /></div>
+      <h1>{t("onboarding.readyTitle")}</h1>
+      <p>{t("onboarding.readyHint")}</p>
+      <dl className="setup-ready-summary">
+        <div><dt>{t("onboarding.steps.1")}</dt><dd>{t(`modes.${mode}`)}</dd></div>
+        <div><dt>{t("onboarding.steps.3")}</dt><dd>{t(`clients.${client}`)}</dd></div>
+      </dl>
+    </div>
+  );
 }
 
 function LanguageSelect() {

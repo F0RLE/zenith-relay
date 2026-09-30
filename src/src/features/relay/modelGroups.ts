@@ -19,11 +19,16 @@ type GroupModelsOptions<T> = {
 
 const OTHER_PROVIDER = "other";
 
+/** Model ids compare trimmed and case-insensitively. Callers keep the original spelling. */
+export function modelIdKey(value: string) {
+  return value.trim().toLowerCase();
+}
+
 /** Older servers expose metadata only on operational model rows. */
 export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefined) {
   return new Map<string, ModelCatalogIdentity>([
-    ...(gateway?.models ?? []).map((model): [string, ModelCatalogIdentity] => [model.id.toLowerCase(), model]),
-    ...Object.entries(gateway?.modelCatalog ?? {}).map(([id, identity]): [string, ModelCatalogIdentity] => [id.toLowerCase(), identity]),
+    ...(gateway?.models ?? []).map((model): [string, ModelCatalogIdentity] => [modelIdKey(model.id), model]),
+    ...Object.entries(gateway?.modelCatalog ?? {}).map(([id, identity]): [string, ModelCatalogIdentity] => [modelIdKey(id), identity]),
   ]);
 }
 
@@ -61,7 +66,7 @@ export function groupModels<T>(
 export function uniqueModelIds(models: readonly string[]) {
   const seen = new Set<string>();
   return models.filter((model) => {
-    const key = model.trim().toLowerCase();
+    const key = modelIdKey(model);
     return Boolean(key) && !seen.has(key) && seen.add(key);
   });
 }
@@ -76,12 +81,12 @@ export function orderModelIdsBySnapshot(
   options: { unknownOrder?: "first-seen" | "stable-id" } = {},
 ) {
   const unique = uniqueModelIds(models);
-  const byId = new Map(unique.map((model) => [model.toLowerCase(), model]));
+  const byId = new Map(unique.map((model) => [modelIdKey(model), model]));
   const ordered = summaries
-    .map((model) => byId.get(model.id.toLowerCase()))
+    .map((model) => byId.get(modelIdKey(model.id)))
     .filter((model): model is string => Boolean(model));
-  const known = new Set(ordered.map((model) => model.toLowerCase()));
-  const unknown = unique.filter((model) => !known.has(model.toLowerCase()));
+  const known = new Set(ordered.map((model) => modelIdKey(model)));
+  const unknown = unique.filter((model) => !known.has(modelIdKey(model)));
   if (options.unknownOrder === "stable-id") {
     unknown.sort(compareModelIds);
   }
@@ -89,8 +94,8 @@ export function orderModelIdsBySnapshot(
 }
 
 function compareModelIds(left: string, right: string) {
-  const leftKey = left.trim().toLowerCase();
-  const rightKey = right.trim().toLowerCase();
+  const leftKey = modelIdKey(left);
+  const rightKey = modelIdKey(right);
   return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : left < right ? -1 : left > right ? 1 : 0;
 }
 

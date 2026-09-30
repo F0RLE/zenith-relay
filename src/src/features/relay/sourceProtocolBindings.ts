@@ -6,6 +6,7 @@ import type {
   SourceSummary,
   SourceWireApi,
 } from "./api/types";
+import { modelIdKey } from "./modelGroups";
 
 export const sourceWireApis = [
   "responses",
@@ -50,11 +51,11 @@ export function normalizedReasoningMode(
 
 export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
   const knownModels = new Map(
-    availableModels.map((model) => [model.toLowerCase(), model] as const),
+    availableModels.map((model) => [modelIdKey(model), model] as const),
   );
   const seen = new Set<string>();
   return modelIds.flatMap((model) => {
-    const normalized = model.trim().toLowerCase();
+    const normalized = modelIdKey(model);
     const known = knownModels.get(normalized);
     if (!known || seen.has(normalized)) return [];
     seen.add(normalized);
@@ -131,7 +132,7 @@ export function sourceModelsForWireApi(
   return bindings.flatMap((binding) => {
     if (binding.wireApi !== wireApi) return [];
     return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = model.toLowerCase();
+      const normalized = modelIdKey(model);
       if (seen.has(normalized)) return false;
       seen.add(normalized);
       return true;
@@ -150,7 +151,7 @@ export function sourceModelsWithCacheWritePricing(source: ProtocolBindingSource)
     const messagesUpstream = upstreamWireApi(binding) === "messages";
     if (!messagesUpstream) return [];
     return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = model.toLowerCase();
+      const normalized = modelIdKey(model);
       if (seen.has(normalized)) return false;
       seen.add(normalized);
       return true;

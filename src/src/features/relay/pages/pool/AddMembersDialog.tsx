@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Check, CheckCheck, Layers, Plus, Search, Server, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AccountPlanBadge, Button, Dialog, EmptyState, OptionMenu } from "../../components/Ui";
-import { accountPlanOption, compareAccountPlans } from "../../routingOrder";
+import { accountPlanOption, compareAccountPlans } from "../../accountPlans";
 import { compareStableText, toggle } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -80,37 +80,109 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
     { id: "selected", label: t("pool.selectedMembers"), icon: <CheckCheck aria-hidden /> },
   ];
   return <Dialog className="pool-add-dialog" title={t("pool.addMembersTitle")} onClose={onClose} footer={<>
-    <div className="pool-picker-summary" role="status"><span className="pool-picker-summary-icon" data-active={selectedCount > 0}><Check aria-hidden /></span><span>{selectedCount ? t("pool.selectionCount", { count: selectedCount }) : t("pool.chooseMembers")}</span></div>
+    <div className="pool-picker-summary" role="status">
+      <span className="pool-picker-summary-icon" data-active={selectedCount > 0}><Check aria-hidden /></span>
+      <span>{selectedCount ? t("pool.selectionCount", { count: selectedCount }) : t("pool.chooseMembers")}</span>
+    </div>
     <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
-    <Button variant="primary" busy={saving} disabled={!selectedCount} aria-label={t("pool.addSelected", { count: selectedCount })} onClick={add}>{t("pool.confirmAdd")}</Button>
+    <Button
+      variant="primary"
+      busy={saving}
+      disabled={!selectedCount}
+      aria-label={t("pool.addSelected", { count: selectedCount })}
+      onClick={add}
+    >
+      {t("pool.confirmAdd")}
+    </Button>
   </>}>
     <div className="pool-member-picker">
       <aside className="pool-picker-sidebar">
         <nav aria-label={t("pool.memberTypes")}>
-          {views.map((item) => <button key={item.id} type="button" aria-pressed={view === item.id} onClick={() => setView(item.id)}>{item.icon}<span>{item.label}</span>{item.id === "selected" && selectedCount ? <small>{selectedCount}</small> : null}</button>)}
+          {views.map((item) => (
+            <button key={item.id} type="button" aria-pressed={view === item.id} onClick={() => setView(item.id)}>
+              {item.icon}
+              <span>{item.label}</span>
+              {item.id === "selected" && selectedCount ? <small>{selectedCount}</small> : null}
+            </button>
+          ))}
         </nav>
-        <Button className="pool-picker-new" variant="ghost" icon={<Plus aria-hidden />} aria-label={t("sources.addToPool")} disabled={!canAddSource || saving} title={!canAddSource ? t("remote.capabilityUnavailable") : undefined} onClick={onAddSource}>{t("pool.newSource")}</Button>
+        <Button
+          className="pool-picker-new"
+          variant="ghost"
+          icon={<Plus aria-hidden />}
+          aria-label={t("sources.addToPool")}
+          disabled={!canAddSource || saving}
+          title={!canAddSource ? t("remote.capabilityUnavailable") : undefined}
+          onClick={onAddSource}
+        >
+          {t("pool.newSource")}
+        </Button>
       </aside>
       <div className="pool-picker-content">
         <div className="pool-picker-toolbar">
-          <label className="pool-picker-search"><Search aria-hidden /><input type="search" aria-label={t("pool.searchMembers")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchMembersPlaceholder")} /></label>
+          <label className="pool-picker-search">
+            <Search aria-hidden />
+            <input
+              type="search"
+              aria-label={t("pool.searchMembers")}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t("pool.searchMembersPlaceholder")}
+            />
+          </label>
           {view === "accounts" && plans.length > 1 ? <OptionMenu className="pool-picker-plan" label={t("accounts.filterByPlan")} value={activePlan} options={[
             { value: "all", label: t("accounts.allPlans") },
             ...plans.map((plan) => ({ value: plan.id, label: plan.label })),
           ]} onChange={setPlanFilter} /> : null}
         </div>
         <div className="pool-picker-selection">
-          <label><input type="checkbox" ref={(node) => { if (node) node.indeterminate = checkedCount > 0 && !shownSelected; }} checked={shownSelected} disabled={!shownCount || saving} onChange={toggleShown} /><span>{t("pool.selectVisible")}</span></label>
+          <label>
+            <input
+              type="checkbox"
+              ref={(node) => { if (node) node.indeterminate = checkedCount > 0 && !shownSelected; }}
+              checked={shownSelected}
+              disabled={!shownCount || saving}
+              onChange={toggleShown}
+            />
+            <span>{t("pool.selectVisible")}</span>
+          </label>
           {selectedCount ? <Button variant="ghost" disabled={saving} onClick={() => { setAccountIds([]); setSourceIds([]); }}>{t("accounts.clearSelection")}</Button> : null}
         </div>
         <div ref={listRef} className="pool-picker-list">
           {accounts.length ? <section aria-label={t("connections.accounts")} className="pool-member-options">
-            {accounts.map((account) => <MemberOption key={account.id} name={account.label} icon={<UserRound />} badge={<AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} />} checked={accountIds.includes(account.id)} disabled={saving} onChange={() => setAccountIds((current) => toggle(current, account.id))} />)}
+            {accounts.map((account) => (
+              <MemberOption
+                key={account.id}
+                name={account.label}
+                icon={<UserRound />}
+                badge={<AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} />}
+                checked={accountIds.includes(account.id)}
+                disabled={saving}
+                onChange={() => setAccountIds((current) => toggle(current, account.id))}
+              />
+            ))}
           </section> : null}
           {sources.length ? <section aria-label={t("connections.sources")} className="pool-member-options">
-            {sources.map((source) => <MemberOption key={source.id} name={source.name} detail={source.baseUrl} icon={<Server />} checked={sourceIds.includes(source.id)} disabled={saving} onChange={() => setSourceIds((current) => toggle(current, source.id))} />)}
+            {sources.map((source) => (
+              <MemberOption
+                key={source.id}
+                name={source.name}
+                detail={source.baseUrl}
+                icon={<Server />}
+                checked={sourceIds.includes(source.id)}
+                disabled={saving}
+                onChange={() => setSourceIds((current) => toggle(current, source.id))}
+              />
+            ))}
           </section> : null}
-          {!availableCount ? <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} /> : !shownCount ? <EmptyState title={t(view === "selected" && !selectedCount ? "pool.noSelectedMembers" : "pool.noMatchingMembers")} description={t(view === "selected" && !selectedCount ? "pool.noSelectedMembersHint" : "pool.noMatchingMembersHint")} /> : null}
+          {!availableCount ? (
+            <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} />
+          ) : !shownCount ? (
+            <EmptyState
+              title={t(view === "selected" && !selectedCount ? "pool.noSelectedMembers" : "pool.noMatchingMembers")}
+              description={t(view === "selected" && !selectedCount ? "pool.noSelectedMembersHint" : "pool.noMatchingMembersHint")}
+            />
+          ) : null}
         </div>
       </div>
     </div>

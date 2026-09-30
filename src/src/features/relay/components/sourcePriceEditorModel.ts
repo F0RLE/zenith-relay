@@ -1,6 +1,6 @@
 import type { ApiModelPriceOverride, SourceSummary } from "../api/types";
 import { formatEditableModelPrice, parseEditableModelPrice } from "../modelPricing";
-import { uniqueModelIds } from "../modelGroups";
+import { modelIdKey, uniqueModelIds } from "../modelGroups";
 
 export type SourcePriceDraft = {
   input: string;
@@ -33,7 +33,7 @@ export function updateSourcePriceDraft(
   field: SourcePriceDraftField,
   value: string,
 ): SourcePriceDrafts {
-  const key = model.toLowerCase();
+  const key = modelIdKey(model);
   return {
     ...drafts,
     [key]: { ...(drafts[key] ?? emptyDraft()), [field]: value },
@@ -42,12 +42,12 @@ export function updateSourcePriceDraft(
 
 export function removeSourcePriceDraft(drafts: SourcePriceDrafts, model: string): SourcePriceDrafts {
   const next = { ...drafts };
-  delete next[model.toLowerCase()];
+  delete next[modelIdKey(model)];
   return next;
 }
 
 export function sourcePriceDrafts(prices: Record<string, ApiModelPriceOverride>): SourcePriceDrafts {
-  return Object.fromEntries(Object.entries(prices).map(([model, price]) => [model.toLowerCase(), {
+  return Object.fromEntries(Object.entries(prices).map(([model, price]) => [modelIdKey(model), {
     input: formatEditableModelPrice(price.inputMicroUsdPerMillion),
     output: formatEditableModelPrice(price.outputMicroUsdPerMillion),
     cached: formatEditableModelPrice(price.cachedInputMicroUsdPerMillion),

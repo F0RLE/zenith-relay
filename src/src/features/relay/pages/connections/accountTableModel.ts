@@ -1,6 +1,7 @@
 import type { AccountSummary } from "../../api/types";
 import { compareOperationalStatus, currentAccountErrorCode } from "../../accountStatus";
-import { accountPlanOption, compareAccountPlans, compareRoutingOrder } from "../../routingOrder";
+import { accountPlanOption, compareAccountPlans } from "../../accountPlans";
+import { compareRoutingOrder } from "../../routingOrder";
 import { compareStableText } from "../../poolHelpers";
 import { matchesQuery } from "./connectionHelpers";
 

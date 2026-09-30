@@ -16,3 +16,10 @@
 @import "./styles/pages/connections-workspace.css";
 @import "./styles/responsive.css";
 @import "./styles/pages/workspace.css";
+
+/* Focus stays visible to the keyboard user through the caret and the
+   control itself. The green ring is not used anywhere in the launcher. */
+:focus,
+:focus-visible {
+  outline: none !important;
+}

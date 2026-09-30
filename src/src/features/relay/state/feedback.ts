@@ -14,7 +14,7 @@ const MAX_FEEDBACK_CODE_LENGTH = 120;
 const MAX_FEEDBACK_MESSAGE_LENGTH = 600;
 const MAX_FEEDBACK_FIELD_LENGTH = 160;
 const SAFE_CODE = /^[a-z0-9][a-z0-9_.:-]{0,119}$/i;
-const SENSITIVE_VALUE_FIELD = "(?:api[_-]?key|x[_-]?api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|password|client[_-]?secret|secret|token|set[_-]?cookie|cookie|session(?:[_-]?id)?|csrf(?:[_-]?token)?|account(?:[_-]?(?:id|email|identity|name|label))?|user(?:[_-]?(?:id|email|identity|name))?|email|identity)";
+const SENSITIVE_VALUE_FIELD = "(?:api[_-]?key|x[_-]?api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|password|2fa|totp(?:[_-]?secret)?|otp(?:[_-]?secret)?|phone|client[_-]?secret|secret|token|set[_-]?cookie|cookie|session(?:[_-]?id)?|csrf(?:[_-]?token)?|account(?:[_-]?(?:id|email|identity|name|label))?|user(?:[_-]?(?:id|email|identity|name))?|email|identity)";
 const SENSITIVE_VALUE = new RegExp(`(["']?${SENSITIVE_VALUE_FIELD}["']?\\s*[:=]\\s*)("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^\\s,;}]+)`, "gi");
 const SENSITIVE_QUERY_VALUE = new RegExp(`([?&]${SENSITIVE_VALUE_FIELD}=)[^&\\s]*`, "gi");
 const URL_CREDENTIALS = /([a-z][a-z\d+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi;

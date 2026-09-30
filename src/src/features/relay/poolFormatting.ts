@@ -55,6 +55,6 @@ export function sortReasoningEfforts(levels: string[]) {
     .map(({ level }) => level);
 }
 
-function normalizeReasoningEffort(value: string) {
+export function normalizeReasoningEffort(value: string) {
   return value.trim().toLowerCase();
 }

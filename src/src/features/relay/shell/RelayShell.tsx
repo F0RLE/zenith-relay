@@ -169,10 +169,28 @@ export function RelayShell() {
         </nav>
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
-          {availableUpdate ? <div className="sidebar-update-row"><button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} onClick={openUpdateDialog}><Download aria-hidden /><span>{t("updates.available")}</span></button></div> : null}
+          {availableUpdate ? (
+            <div className="sidebar-update-row">
+              <button
+                className="sidebar-update"
+                type="button"
+                aria-label={t("updates.open", { version: availableUpdate.version })}
+                onClick={openUpdateDialog}
+              >
+                <Download aria-hidden />
+                <span>{t("updates.available")}</span>
+              </button>
+            </div>
+          ) : null}
           <div className="sidebar-footer">
             <div className="sidebar-footer-row">
-              <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
+              <button
+                className={`sidebar-help ${page === "help" ? "active" : ""}`}
+                type="button"
+                aria-label={t("common.help")}
+                aria-current={page === "help" ? "page" : undefined}
+                onClick={() => setPage("help")}
+              >
                 <CircleHelp aria-hidden />
                 <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
               </button>
@@ -186,11 +204,44 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
-        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates({ openWhenAvailable: true, includeSkipped: true })} /></Suspense>}
+        {loading ? <div className="relay-loading">{t("common.loading")}</div> : (
+          <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}>
+            <Page
+              page={page}
+              onImport={() => openImport()}
+              updateCheckState={updateCheckState}
+              updateVersion={availableUpdate?.version ?? null}
+              onCheckUpdates={() => checkUpdates({ openWhenAvailable: true, includeSkipped: true })}
+            />
+          </Suspense>
+        )}
       </div>
-      {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
-      {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} {...(importRequest.paths ? { initialPaths: importRequest.paths } : {})} onClose={() => setImportRequest(null)} /></Suspense> : null}
-      {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={closeUpdateDialog} /> : null}
+      {importDragActive ? (
+        <div className="import-drop-overlay" role="status">
+          <span className="import-drop-visual"><Upload aria-hidden /></span>
+          <strong>{t("accounts.dropImportFiles")}</strong>
+        </div>
+      ) : null}
+      {importRequest ? (
+        <Suspense fallback={null}>
+          <ImportDialog
+            key={importRequest.id}
+            {...(importRequest.paths ? { initialPaths: importRequest.paths } : {})}
+            onClose={() => setImportRequest(null)}
+          />
+        </Suspense>
+      ) : null}
+      {updateDialogOpen && availableUpdate ? (
+        <UpdateDialog
+          update={availableUpdate}
+          installing={installingUpdate}
+          progress={updateProgress}
+          installError={updateInstallError}
+          onInstall={() => void applyUpdate()}
+          onSkip={skipUpdate}
+          onClose={closeUpdateDialog}
+        />
+      ) : null}
     </div>
   );
 }

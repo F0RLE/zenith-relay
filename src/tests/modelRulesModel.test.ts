@@ -3,6 +3,7 @@ import type { ModelSummary } from "../src/features/relay/api/types";
 import {
   completeModelDisplayOrder,
   modelSignature,
+  modelSpeedTiers,
   normalizeReasoningSelection,
   reorderById,
   reorderModelGroups,
@@ -38,6 +39,12 @@ describe("model rules model", () => {
     expect(current.map((item) => item.id)).toEqual(["a", "b", "c"]);
     expect(reorderById(current, "a", "a")).toBeNull();
     expect(reorderById(current, "missing", "a")).toBeNull();
+  });
+
+  test("keeps the three speed modes for a configurable family", () => {
+    expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["standard"] }))).toEqual(["standard", "fast", "ultrafast"]);
+    expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["fast", "standard"] }))).toEqual(["standard", "fast"]);
+    expect(modelSpeedTiers(model("other", { speedSupported: false }))).toEqual(["standard"]);
   });
 
   test("moves complete groups while preserving each group's model order", () => {

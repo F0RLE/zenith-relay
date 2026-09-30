@@ -36,11 +36,64 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
             const last = history[history.length - 1];
             return (
               <article className="automation-card" role="listitem" key={task.id}>
-                <header><ToggleSwitch checked={task.enabled} label={t("common.enabled")} disabled={Boolean(busy)} aria-busy={busy === `automation-${task.id}`} onChange={() => void perform(`automation-${task.id}`, () => mode === "local" ? relayCommands.setAutomationEnabled(task.id, !task.enabled) : relayCommands.remoteAction({ type: "update_wake_task", id: task.id }, { ...task, enabled: !task.enabled, executionPolicy: "automatic" }), "feedback.saved")} /><div className="connection-identity"><strong>{name}</strong>{name !== typeName ? <small>{typeName}</small> : null}</div>
-                <div className="row-actions"><IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} /><ActionMenu><ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("automations.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem></ActionMenu></div></header>
-                <dl className="automation-details"><div><dt>{t("automations.condition")}</dt><dd>{t(type.conditionKey)}{type.requiresModel ? <small>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</small> : null}</dd></div>
-                <div><dt>{t("connections.accounts")}</dt><dd>{task.accountSelector.kind === "all_eligible" ? t("automations.allEligible") : task.accountSelector.kind === "account_ids" ? task.accountSelector.values.map((id) => runtime.accounts.find((account) => account.id === id)?.label ?? t("accounts.importUnknownAccount")).join(", ") : task.accountSelector.values.join(", ")}</dd></div>
-                <div><dt>{t("automations.lastResult")}</dt><dd>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</dd></div></dl>
+                <header>
+                  <ToggleSwitch
+                    checked={task.enabled}
+                    label={t("common.enabled")}
+                    disabled={Boolean(busy)}
+                    aria-busy={busy === `automation-${task.id}`}
+                    onChange={() => void perform(
+                      `automation-${task.id}`,
+                      () => mode === "local"
+                        ? relayCommands.setAutomationEnabled(task.id, !task.enabled)
+                        : relayCommands.remoteAction({ type: "update_wake_task", id: task.id }, { ...task, enabled: !task.enabled, executionPolicy: "automatic" }),
+                      "feedback.saved",
+                    )}
+                  />
+                  <div className="connection-identity">
+                    <strong>{name}</strong>
+                    {name !== typeName ? <small>{typeName}</small> : null}
+                  </div>
+                  <div className="row-actions">
+                    <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} />
+                    <ActionMenu>
+                      <ActionMenuItem
+                        danger
+                        icon={<Trash2 aria-hidden />}
+                        onClick={() => void confirm(t("automations.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(
+                          `delete-${task.id}`,
+                          () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }),
+                          "feedback.deleted",
+                        ))}
+                      >
+                        {t("common.delete")}
+                      </ActionMenuItem>
+                    </ActionMenu>
+                  </div>
+                </header>
+                <dl className="automation-details">
+                  <div>
+                    <dt>{t("automations.condition")}</dt>
+                    <dd>
+                      {t(type.conditionKey)}
+                      {type.requiresModel ? <small>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</small> : null}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t("connections.accounts")}</dt>
+                    <dd>
+                      {task.accountSelector.kind === "all_eligible"
+                        ? t("automations.allEligible")
+                        : task.accountSelector.kind === "account_ids"
+                          ? task.accountSelector.values.map((id) => runtime.accounts.find((account) => account.id === id)?.label ?? t("accounts.importUnknownAccount")).join(", ")
+                          : task.accountSelector.values.join(", ")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t("automations.lastResult")}</dt>
+                    <dd>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</dd>
+                  </div>
+                </dl>
               </article>
             );
           })}
@@ -80,21 +133,110 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
     if (!valid) return;
     const now = Date.now();
     const submission = buildAutomationSubmission({ task, name, triggerKind, selectorKind, accountIds, selectedModel, nowMs: now });
-    const ok = await perform(submission.operationId, () => mode === "local" ? (task ? relayCommands.updateAutomation(task.id, submission.base) : relayCommands.createAutomation(submission.base)) : relayCommands.remoteAction({ type: task ? "update_wake_task" : "create_wake_task", ...(task ? { id: task.id } : {}) }, submission.remoteInput), task ? "feedback.saved" : "feedback.automationAdded");
+    const ok = await perform(
+      submission.operationId,
+      () => mode === "local"
+        ? task
+          ? relayCommands.updateAutomation(task.id, submission.base)
+          : relayCommands.createAutomation(submission.base)
+        : relayCommands.remoteAction(
+          { type: task ? "update_wake_task" : "create_wake_task", ...(task ? { id: task.id } : {}) },
+          submission.remoteInput,
+        ),
+      task ? "feedback.saved" : "feedback.automationAdded",
+    );
     if (ok) onClose();
   };
-  return <Dialog wide className="connection-dialog automation-dialog" title={task ? t("automations.edit") : t("automations.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === (task ? `automation-update-${task.id}` : "automation-create")} disabled={!valid} onClick={save}>{t("common.save")}</Button></>}>
+  return (
+    <Dialog
+      wide
+      className="connection-dialog automation-dialog"
+      title={task ? t("automations.edit") : t("automations.add")}
+      onClose={onClose}
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button
+            variant="primary"
+            busy={busy === (task ? `automation-update-${task.id}` : "automation-create")}
+            disabled={!valid}
+            onClick={save}
+          >
+            {t("common.save")}
+          </Button>
+        </>
+      )}
+    >
     <div className="relay-form automation-form">
-      <div className="relay-field"><span>{t("automations.type")}</span><OptionMenu className="field-option-menu" label={t("automations.type")} value={triggerKind} onChange={(value) => setTriggerKind(value as WakeTask["trigger"]["kind"])} options={typeOptions} /><small className="automation-trigger-note">{t(type.conditionKey)}</small></div>
-      <div className="automation-target-grid">
-        <div className="relay-field"><span>{t("automations.accountSelection")}</span><OptionMenu className="field-option-menu" label={t("automations.accountSelection")} value={selectorKind} onChange={(value) => setSelectorKind(value as WakeTask["accountSelector"]["kind"])} options={selectorOptions} /></div>
-        {type.requiresModel ? <div className="relay-field"><span>{t("common.model")}</span><OptionMenu className="field-option-menu" label={t("common.model")} value={selectedModel} onChange={setModelId} options={modelOptions} disabled={!availableModels.length} /></div> : null}
+      <div className="relay-field">
+        <span>{t("automations.type")}</span>
+        <OptionMenu
+          className="field-option-menu"
+          label={t("automations.type")}
+          value={triggerKind}
+          onChange={(value) => setTriggerKind(value as WakeTask["trigger"]["kind"])}
+          options={typeOptions}
+        />
+        <small className="automation-trigger-note">{t(type.conditionKey)}</small>
       </div>
-      {selectorKind === "account_ids" ? <fieldset className="automation-account-picker"><legend>{t("automations.selectedAccounts")}</legend><div className="scope-grid">{poolAccounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => toggleAccount(account.id)} /><span>{account.label}</span></label>)}</div></fieldset> : null}
-      {selectorKind === "tags" ? <><label className="relay-field"><span>{t("automations.tags")}</span><input value={task?.accountSelector.kind === "tags" ? task.accountSelector.values.join(", ") : ""} readOnly /></label><p role="alert" className="automation-validation">{t("automations.legacyTags")}</p></> : null}
-      <label className="relay-field"><span>{t("common.name")}</span><input value={customName ?? ""} placeholder={t("automations.optionalName")} onChange={(event) => setCustomName(event.target.value)} /></label>
+      <div className="automation-target-grid">
+        <div className="relay-field">
+          <span>{t("automations.accountSelection")}</span>
+          <OptionMenu
+            className="field-option-menu"
+            label={t("automations.accountSelection")}
+            value={selectorKind}
+            onChange={(value) => setSelectorKind(value as WakeTask["accountSelector"]["kind"])}
+            options={selectorOptions}
+          />
+        </div>
+        {type.requiresModel ? (
+          <div className="relay-field">
+            <span>{t("common.model")}</span>
+            <OptionMenu
+              className="field-option-menu"
+              label={t("common.model")}
+              value={selectedModel}
+              onChange={setModelId}
+              options={modelOptions}
+              disabled={!availableModels.length}
+            />
+          </div>
+        ) : null}
+      </div>
+      {selectorKind === "account_ids" ? (
+        <fieldset className="automation-account-picker">
+          <legend>{t("automations.selectedAccounts")}</legend>
+          <div className="scope-grid">
+            {poolAccounts.map((account) => (
+              <label key={account.id}>
+                <input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => toggleAccount(account.id)} />
+                <span>{account.label}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : null}
+      {selectorKind === "tags" ? (
+        <>
+          <label className="relay-field">
+            <span>{t("automations.tags")}</span>
+            <input value={task?.accountSelector.kind === "tags" ? task.accountSelector.values.join(", ") : ""} readOnly />
+          </label>
+          <p role="alert" className="automation-validation">{t("automations.legacyTags")}</p>
+        </>
+      ) : null}
+      <label className="relay-field">
+        <span>{t("common.name")}</span>
+        <input
+          value={customName ?? ""}
+          placeholder={t("automations.optionalName")}
+          onChange={(event) => setCustomName(event.target.value)}
+        />
+      </label>
       {!accountSelectionValid ? <p role="alert" className="automation-validation">{t("automations.accountsRequired")}</p> : null}
       {type.requiresModel && accountSelectionValid && !selectedModel ? <p role="alert" className="automation-validation">{t("automations.modelUnavailable")}</p> : null}
     </div>
-  </Dialog>;
+    </Dialog>
+  );
 }

@@ -102,11 +102,6 @@
   opacity: 1;
 }
 
-.source-sort-button:focus-visible {
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 1px;
-}
-
 .source-table td:not(:last-child) > .relay-status {
   margin-inline: auto;
 }
@@ -268,11 +263,6 @@
 .reset-credits-control:disabled {
   cursor: wait;
   opacity: 0.72;
-}
-
-.reset-credits-control:focus-visible {
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 1px;
 }
 
 .reset-credits-copy {

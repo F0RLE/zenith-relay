@@ -99,18 +99,66 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
     }
   };
   const dialogClassName = source ? `source-edit-dialog connection-dialog${activeTab === "prices" ? " source-prices-dialog" : ""}` : "source-add-dialog";
-  const footer = source
-    ? <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>
-    : <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!apiProviderReady(provider)} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>;
-  return <><Dialog wide className={dialogClassName} title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={footer}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><div className="connection-dialog-context"><Link2 aria-hidden /><strong>{source.name}</strong><span>{t("sources.groupModelsCount", { count: source.models.length })}</span></div><Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />
-    {activeTab === "main" ? <section className="source-editor-tab-panel source-editor-main" role="tabpanel" aria-label={t("sources.editorMainTab")}>
-      <section className="source-form-section source-basic-fields"><div className="source-identity-grid">
-        <label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-        <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label>
-      </div><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /><p className="form-note">{t("sources.keepKeyHint")}</p></div></section>
-    </section> : null}
-    {activeTab === "prices" ? <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorPricesTab")}><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} presentation="tab" /></section> : null}
-  </> : <>
-    <ApiProviderForm value={provider} onChange={setProvider} />
-  </>}</form></Dialog>{operationError ? <ErrorDetailsDialog error={operationError.error} message={t(operationError.messageKey)} onClose={() => setOperationError(null)} /> : null}</>;
+  const submitSourceForm = () => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit();
+  const footer = (
+    <>
+      <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+      <Button
+        variant="primary"
+        busy={busy === "source-save"}
+        disabled={source ? !modelPriceOverrides : !apiProviderReady(provider)}
+        onClick={submitSourceForm}
+      >
+        {t("common.save")}
+      </Button>
+    </>
+  );
+  return (
+    <>
+      <Dialog
+        wide
+        className={dialogClassName}
+        title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")}
+        onClose={onClose}
+        footer={footer}
+      >
+        <form id="source-form" className="relay-form source-form" onSubmit={submit}>
+          {source ? (
+            <>
+              <div className="connection-dialog-context">
+                <Link2 aria-hidden />
+                <strong>{source.name}</strong>
+                <span>{t("sources.groupModelsCount", { count: source.models.length })}</span>
+              </div>
+              <Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />
+              {activeTab === "main" ? (
+                <section className="source-editor-tab-panel source-editor-main" role="tabpanel" aria-label={t("sources.editorMainTab")}>
+                  <section className="source-form-section source-basic-fields">
+                    <div className="source-identity-grid">
+                      <label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+                      <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label>
+                    </div>
+                    <div className="source-access-grid">
+                      <SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} />
+                      <p className="form-note">{t("sources.keepKeyHint")}</p>
+                    </div>
+                  </section>
+                </section>
+              ) : null}
+              {activeTab === "prices" ? (
+                <section className="source-editor-tab-panel" role="tabpanel" aria-label={t("sources.editorPricesTab")}>
+                  <SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} presentation="tab" />
+                </section>
+              ) : null}
+            </>
+          ) : (
+            <ApiProviderForm value={provider} onChange={setProvider} />
+          )}
+        </form>
+      </Dialog>
+      {operationError ? (
+        <ErrorDetailsDialog error={operationError.error} message={t(operationError.messageKey)} onClose={() => setOperationError(null)} />
+      ) : null}
+    </>
+  );
 }

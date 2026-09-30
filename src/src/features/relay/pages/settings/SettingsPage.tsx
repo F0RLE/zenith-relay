@@ -49,13 +49,48 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
     <PageHeader workspace title={t("nav.settings")} />
     <div className="settings-groups">
       <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
-        <div className="settings-control-row"><div><strong>{t("settings.language")}</strong></div><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void setI18nLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>
-        <div className="settings-control-row"><div><strong>{t("settings.theme")}</strong></div><div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>{(["system", "light", "dark"] as const).map((value) => <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>{t(`settings.themes.${value}`)}</button>)}</div></div>
+        <div className="settings-control-row">
+          <div><strong>{t("settings.language")}</strong></div>
+          <OptionMenu
+            className="field-option-menu"
+            label={t("settings.language")}
+            value={i18n.language.startsWith("ru") ? "ru" : "en"}
+            onChange={(value) => void setI18nLanguage(value)}
+            options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]}
+          />
+        </div>
+        <div className="settings-control-row">
+          <div><strong>{t("settings.theme")}</strong></div>
+          <div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>
+            {(["system", "light", "dark"] as const).map((value) => (
+              <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>
+                {t(`settings.themes.${value}`)}
+              </button>
+            ))}
+          </div>
+        </div>
       </SettingsGroup>
 
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>
-        <div className="settings-control-row"><div><strong>{t("settings.currentVersion")}</strong><div className="settings-version-meta" role="status" aria-live="polite"><span>v{APP_VERSION}</span><StatusBadge status={updateStatus.status} label={updateStatus.label} /></div></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={updateCheckState === "checking"} onClick={() => void onCheckUpdates()}>{t("common.check")}</Button></div>
-        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.dataPath")}</strong><small><code data-relay-tooltip={storageInfo?.dataPath}>{storageInfo?.dataPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
+        <div className="settings-control-row">
+          <div>
+            <strong>{t("settings.currentVersion")}</strong>
+            <div className="settings-version-meta" role="status" aria-live="polite">
+              <span>v{APP_VERSION}</span>
+              <StatusBadge status={updateStatus.status} label={updateStatus.label} />
+            </div>
+          </div>
+          <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={updateCheckState === "checking"} onClick={() => void onCheckUpdates()}>{t("common.check")}</Button>
+        </div>
+        <SettingsPathRow
+          title={t("settings.dataPath")}
+          path={storageInfo?.dataPath}
+          missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
+          icon={<FolderOpen aria-hidden />}
+          action={t("settings.openData")}
+          busy={busy === "open-data"}
+          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}
+        />
       </SettingsGroup>
 
       {mode === "local" ? <SettingsGroup icon={<Database aria-hidden />} title={t("settings.localData")}>
@@ -72,14 +107,50 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             onChange={(enabled) => void perform("diagnostics-debug", () => updateDiagnosticDebug(enabled), "feedback.saved")}
           />
         </div>
-        <div className="settings-control-row settings-danger-row"><div><strong>{t("settings.resetData")}</strong><small>{t("settings.resetDataHint")}</small></div><Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("common.reset")}</Button></div>
+        <div className="settings-control-row settings-danger-row">
+          <div><strong>{t("settings.resetData")}</strong><small>{t("settings.resetDataHint")}</small></div>
+          <Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("common.reset")}</Button>
+        </div>
       </SettingsGroup> : null}
 
       {mode === "local" && diagnosticSettings?.debugEnabled ? <SettingsGroup icon={<Bug aria-hidden />} title={t("settings.diagnostics")}>
-        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.logsPath")}</strong><small>{t("settings.logsHint")}<code data-relay-tooltip={storageInfo?.logsPath}>{storageInfo?.logsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-logs"} onClick={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened")}>{t("settings.openLogs")}</Button></div>
-        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.errorLogs")}</strong><small><code data-relay-tooltip={storageInfo?.errorLogsPath}>{storageInfo?.errorLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FileWarning aria-hidden />} busy={busy === "open-error-logs"} onClick={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened")}>{t("settings.openErrors")}</Button></div>
-        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.crashLogs")}</strong><small><code data-relay-tooltip={storageInfo?.crashLogsPath}>{storageInfo?.crashLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<Bug aria-hidden />} busy={busy === "open-crash-logs"} onClick={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened")}>{t("settings.openCrashes")}</Button></div>
-        <div className="settings-control-row settings-path-row"><div><strong>{t("settings.operationLogs")}</strong><small><code data-relay-tooltip={storageInfo?.operationLogsPath}>{storageInfo?.operationLogsPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FileText aria-hidden />} busy={busy === "open-operation-logs"} onClick={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened")}>{t("settings.openOperations")}</Button></div>
+        <SettingsPathRow
+          title={t("settings.logsPath")}
+          hint={t("settings.logsHint")}
+          path={storageInfo?.logsPath}
+          missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
+          icon={<FolderOpen aria-hidden />}
+          action={t("settings.openLogs")}
+          busy={busy === "open-logs"}
+          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened")}
+        />
+        <SettingsPathRow
+          title={t("settings.errorLogs")}
+          path={storageInfo?.errorLogsPath}
+          missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
+          icon={<FileWarning aria-hidden />}
+          action={t("settings.openErrors")}
+          busy={busy === "open-error-logs"}
+          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened")}
+        />
+        <SettingsPathRow
+          title={t("settings.crashLogs")}
+          path={storageInfo?.crashLogsPath}
+          missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
+          icon={<Bug aria-hidden />}
+          action={t("settings.openCrashes")}
+          busy={busy === "open-crash-logs"}
+          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened")}
+        />
+        <SettingsPathRow
+          title={t("settings.operationLogs")}
+          path={storageInfo?.operationLogsPath}
+          missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
+          icon={<FileText aria-hidden />}
+          action={t("settings.openOperations")}
+          busy={busy === "open-operation-logs"}
+          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened")}
+        />
       </SettingsGroup> : null}
     </div>
   </section>;
@@ -87,4 +158,25 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
 
 function SettingsGroup({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return <section className="settings-group"><header>{icon}<h2>{title}</h2></header><div className="settings-group-body">{children}</div></section>;
+}
+
+function SettingsPathRow({ title, hint, path, missing, icon, action, busy, onOpen }: {
+  title: string;
+  hint?: string;
+  path: string | undefined;
+  missing: string;
+  icon: ReactNode;
+  action: string;
+  busy: boolean;
+  onOpen: () => void | Promise<unknown>;
+}) {
+  return (
+    <div className="settings-control-row settings-path-row">
+      <div>
+        <strong>{title}</strong>
+        <small>{hint}<code data-relay-tooltip={path}>{path ?? missing}</code></small>
+      </div>
+      <Button variant="secondary" icon={icon} busy={busy} onClick={onOpen}>{action}</Button>
+    </div>
+  );
 }

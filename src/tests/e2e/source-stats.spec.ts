@@ -25,7 +25,8 @@ for (const mode of ["local", "remote", "zenith"] as const) {
     const refresh = mode === "zenith" ? page.getByRole("button", { name: "Refresh", exact: true })
       : page.locator('.pool-member-card[data-member-kind="source"]').getByRole("button", { name: "Refresh balance", exact: true });
     await refresh.click();
-    await expect(panel).toContainText("Not refreshed");
+    if (mode === "zenith") await expect(panel).toContainText("Not refreshed");
+    else await expect(panel.getByText("Not refreshed", { exact: true })).toHaveCount(0);
     await expect(panel).toContainText("$12.34");
   });
 }

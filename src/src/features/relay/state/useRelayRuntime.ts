@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { recordPerformance } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
+import { preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayPreference,
@@ -10,15 +10,14 @@ import {
 } from "./relayPreferences";
 import { LatestRequestGate } from "./latestRequestGate";
 import {
-  ROUTING_REFRESH_INTERVAL_MS,
   RUNTIME_EVENT_REFRESH_DEBOUNCE_MS,
   RUNTIME_REFRESH_INTERVAL_MS,
   STARTUP_RUNTIME_RETRY_DELAYS_MS,
   isRuntimeRefreshPage,
-  isUsageRefreshPage,
   startupSnapshotNeedsRetry,
-  usageRefreshDebounceMs,
 } from "./refreshPolicy";
+import { useRuntimeEvents, visibleLocalRoutingOrder } from "./useRuntimeEvents";
+import { useRuntimeRouting } from "./useRuntimeRouting";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
 
 type RelayRuntimeDependencies = {
@@ -235,42 +234,15 @@ export function useRelayRuntime({
     };
   }, [mode, refresh, reportErrorFeedback]);
 
-  useEffect(() => {
-    if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith" || !runtimeRoutingSupported) return;
-    let active = true;
-    let pending = false;
-    const refreshRouting = async () => {
-      if (!active || pending || document.visibilityState !== "visible") return;
-      pending = true;
-      try {
-        const routingOrder = mode === "local"
-          ? await relayCommands.localRuntimeOrder()
-          : await relayCommands.remoteRuntimeOrder();
-        if (!active || routingOrder == null) return;
-        if (mode === "local") {
-          runtimeRoutingOrderBase.current = preferNewerRuntimeOrder(runtimeRoutingOrderBase.current, routingOrder);
-          reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
-        }
-        const visibleRoutingOrder = mode === "local"
-          ? visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current)
-          : routingOrder;
-        setRuntime((snapshot) => snapshot ? {
-          ...snapshot,
-          gateway: { ...snapshot.gateway, routingOrder: visibleRoutingOrder },
-        } : snapshot);
-      } catch {
-        // The full refresh keeps the last known order if the lightweight probe fails.
-      } finally {
-        pending = false;
-      }
-    };
-    void refreshRouting();
-    const interval = window.setInterval(() => void refreshRouting(), ROUTING_REFRESH_INTERVAL_MS);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [mode, page, runtime?.gateway.running, runtimeRoutingSupported]);
+  useRuntimeRouting({
+    mode,
+    page,
+    gatewayRunning: runtime?.gateway.running,
+    runtimeRoutingSupported,
+    runtimeRoutingOrderBase,
+    runtimeActivityOverlay,
+    setRuntime,
+  });
 
   useEffect(() => {
     const enteredRuntimeRefreshPage = isRuntimeRefreshPage(page) && !isRuntimeRefreshPage(runtimeRefreshPage.current);
@@ -299,178 +271,39 @@ export function useRelayRuntime({
 
   useEffect(() => invalidateRefreshes, [invalidateRefreshes]);
 
-  useEffect(() => {
-    let active = true;
-    let runtimeRefreshQueued = false;
-    let runtimeRefreshTimer: number | undefined;
-    let usageRefreshTimer: number | undefined;
-    let unlisten: (() => void) | undefined;
-    let unlistenUsage: (() => void) | undefined;
-    let unlistenRuntimeActivity: (() => void) | undefined;
-    let runtimeActivityFrame: number | undefined;
-    let runtimeActivityFallbackTimer: number | undefined;
-    let runtimeActivityFlushQueued = false;
-    let pendingRuntimeActivity: RuntimeActivityState | null = null;
-    const flushRuntimeActivity = () => {
-      runtimeActivityFrame = undefined;
-      runtimeActivityFallbackTimer = undefined;
-      runtimeActivityFlushQueued = false;
-      if (!active || modeRef.current !== "local") {
-        pendingRuntimeActivity = null;
-        return;
-      }
-      const pending = pendingRuntimeActivity;
-      pendingRuntimeActivity = null;
-      if (pending) {
-        const candidates = Object.fromEntries(runtimeActivityOverlay.current);
-        setRuntimeActivity((current) => compareRuntimeActivity(pending, current) > 0
-          ? { ...pending, candidates }
-          : current);
-      }
-      if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
-      setRuntime((snapshot) => {
-        if (!snapshot) return snapshot;
-        const currentOrder = snapshot.gateway.routingOrder ?? [];
-        const baseOrder = runtimeRoutingOrderBase.current.length
-          ? runtimeRoutingOrderBase.current
-          : currentOrder;
-        const nextOrder = visibleLocalRoutingOrder(baseOrder, runtimeActivityOverlay.current);
-        return nextOrder === currentOrder
-          ? snapshot
-          : { ...snapshot, gateway: { ...snapshot.gateway, routingOrder: nextOrder } };
-      });
-    };
-    const scheduleRuntimeActivityFlush = () => {
-      if (runtimeActivityFlushQueued) return;
-      runtimeActivityFlushQueued = true;
-      if (document.visibilityState === "visible") {
-        runtimeActivityFrame = window.requestAnimationFrame(flushRuntimeActivity);
-      } else {
-        // Background documents may throttle animation frames indefinitely.
-        runtimeActivityFallbackTimer = window.setTimeout(flushRuntimeActivity, 16);
-      }
-    };
-    const handleActivityVisibilityChange = () => {
-      if (document.visibilityState === "hidden" && runtimeActivityFrame !== undefined) {
-        window.cancelAnimationFrame(runtimeActivityFrame);
-        runtimeActivityFrame = undefined;
-        flushRuntimeActivity();
-      }
-    };
-    document.addEventListener("visibilitychange", handleActivityVisibilityChange);
-    const scheduleUsageRefresh = () => {
-      const targetPage = pageRef.current;
-      if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(targetPage) || usageRefreshTimer !== undefined) return;
-      usageRefreshTimer = window.setTimeout(() => {
-        usageRefreshTimer = undefined;
-        if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(pageRef.current)) return;
-        setUsageRevision((current) => current + 1);
-      }, usageRefreshDebounceMs(targetPage));
-    };
-    void relayCommands.onStateChanged(() => {
-      stateRevision.current += 1;
-      if (!active || document.visibilityState !== "visible") return;
-      if (isUsageRefreshPage(pageRef.current)) {
-        scheduleUsageRefresh();
-        if (pageRef.current === "usage") return;
-      }
-      if (runtimeRefreshQueued || !isRuntimeRefreshPage(pageRef.current)) return;
-      runtimeRefreshQueued = true;
-      runtimeRefreshTimer = window.setTimeout(() => {
-        if (!active) return;
-        runBackgroundRefresh();
-        runtimeRefreshQueued = false;
-      }, RUNTIME_EVENT_REFRESH_DEBOUNCE_MS);
-    }).then((stop) => {
-      if (active) unlisten = stop;
-      else stop();
-    }).catch(() => {
-      // Initial load and periodic refresh still keep the UI current if Tauri event wiring is unavailable.
-    });
-    void relayCommands.onRuntimeActivity((activity) => {
-      if (!active || modeRef.current !== "local") return;
-      const runtimeId = activity.runtimeId ?? 0;
-      if (runtimeId < Math.max(runtimeActivityRuntimeId.current, runtimeRoutingOrderBase.current[0]?.runtimeId ?? 0)) return;
-      if (runtimeId > runtimeActivityRuntimeId.current) {
-        runtimeActivityOverlay.current.clear();
-        runtimeActivityRuntimeId.current = runtimeId;
-      }
-      const previous = runtimeActivityOverlay.current.get(activity.candidateId);
-      if (previous && compareRuntimeActivity(activity, previous) <= 0) return;
-      // Keep both active and zero-count snapshots. A zero-count snapshot is a
-      // tombstone for an older live poll state and must be applied to the next
-      // base order as well as the current one.
-      runtimeActivityOverlay.current.set(activity.candidateId, activity);
-      if (!pendingRuntimeActivity || compareRuntimeActivity(activity, pendingRuntimeActivity) > 0) {
-        pendingRuntimeActivity = {
-          ...(activity.runtimeId == null ? {} : { runtimeId: activity.runtimeId }),
-          revision: activity.revision,
-          lastCandidateId: activity.candidateId,
-          candidates: {},
-        };
-      }
-      scheduleRuntimeActivityFlush();
-    }).then((stop) => {
-      if (active) unlistenRuntimeActivity = stop;
-      else stop();
-    }).catch(() => {
-      // The short routing poll remains the fallback when activity events are unavailable.
-    });
-    void relayCommands.onUsageRecorded(() => {
-      if (modeRef.current === "local" && isUsageRefreshPage(pageRef.current)) scheduleUsageRefresh();
-    }).then((stop) => {
-      if (active) unlistenUsage = stop;
-      else stop();
-    }).catch(() => {
-      // The manual refresh remains available if event wiring is unavailable.
-    });
-    return () => {
-      active = false;
-      if (runtimeRefreshTimer !== undefined) window.clearTimeout(runtimeRefreshTimer);
-      if (usageRefreshTimer !== undefined) window.clearTimeout(usageRefreshTimer);
-      if (runtimeActivityFrame !== undefined) window.cancelAnimationFrame(runtimeActivityFrame);
-      if (runtimeActivityFallbackTimer !== undefined) window.clearTimeout(runtimeActivityFallbackTimer);
-      pendingRuntimeActivity = null;
-      document.removeEventListener("visibilitychange", handleActivityVisibilityChange);
-      unlisten?.();
-      unlistenUsage?.();
-      unlistenRuntimeActivity?.();
-    };
-  }, [runBackgroundRefresh]);
+  useRuntimeEvents({
+    modeRef,
+    pageRef,
+    stateRevision,
+    runtimeActivityOverlay,
+    runtimeActivityRuntimeId,
+    runtimeRoutingOrderBase,
+    setRuntime,
+    setRuntimeActivity,
+    setUsageRevision,
+    runBackgroundRefresh,
+  });
 
-  useEffect(() => {
-    const pending = modeSwitchStartedAt.current;
-    if (!runtime || !pending || pending.mode !== mode) return;
-    let secondFrame = 0;
-    const firstFrame = requestAnimationFrame(() => {
-      secondFrame = requestAnimationFrame(() => {
-        if (modeSwitchStartedAt.current !== pending) return;
-        modeSwitchStartedAt.current = null;
-        void recordPerformance("mode_switch", performance.now() - pending.startedAt, mode);
-      });
-    });
-    return () => {
-      cancelAnimationFrame(firstFrame);
-      cancelAnimationFrame(secondFrame);
-    };
-  }, [mode, runtime]);
-
-  useEffect(() => {
-    const pending = pageOpenStartedAt.current;
-    if (!pending || pending.page !== page) return;
-    let secondFrame = 0;
-    const firstFrame = requestAnimationFrame(() => {
-      secondFrame = requestAnimationFrame(() => {
-        if (pageOpenStartedAt.current !== pending) return;
-        pageOpenStartedAt.current = null;
-        void recordPerformance("page_open", performance.now() - pending.startedAt, page);
-      });
-    });
-    return () => {
-      cancelAnimationFrame(firstFrame);
-      cancelAnimationFrame(secondFrame);
-    };
-  }, [page]);
+  usePaintDuration(
+    modeSwitchStartedAt.current,
+    runtime,
+    (pending) => Boolean(runtime) && pending.mode === mode && modeSwitchStartedAt.current === pending,
+    () => {
+      modeSwitchStartedAt.current = null;
+    },
+    "mode_switch",
+    mode,
+  );
+  usePaintDuration(
+    pageOpenStartedAt.current,
+    page,
+    (pending) => pending.page === page && pageOpenStartedAt.current === pending,
+    () => {
+      pageOpenStartedAt.current = null;
+    },
+    "page_open",
+    page,
+  );
 
   return {
     mode,
@@ -487,12 +320,30 @@ export function useRelayRuntime({
   };
 }
 
-function visibleLocalRoutingOrder(
-  base: RuntimeRoutingOrder,
-  overlay: ReadonlyMap<string, RuntimeActivitySnapshot>,
+// `watch` restarts the two-frame measurement when the screen becomes ready.
+// The callbacks read refs, so they stay tied to the pending mark rather than
+// to a new function on every render.
+function usePaintDuration<T extends { startedAt: number }>(
+  pending: T | null,
+  watch: unknown,
+  accept: (pending: T) => boolean,
+  clear: () => void,
+  name: string,
+  detail: string,
 ) {
-  return applyRuntimeActivities(
-    base,
-    overlay.values(),
-  );
+  useEffect(() => {
+    if (!pending || !accept(pending)) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (!accept(pending)) return;
+        clear();
+        void recordPerformance(name, performance.now() - pending.startedAt, detail);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, [pending, watch, name, detail]);
 }

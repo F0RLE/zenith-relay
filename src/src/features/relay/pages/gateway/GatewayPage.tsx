@@ -149,7 +149,20 @@ function ChatGPTSetup() {
         <span className="gateway-config-icon"><UserRound aria-hidden /></span>
         <div><h2>{t("gateway.clientSetup")}</h2><p>{t("gateway.remoteClientHint")}</p></div>
       </header>
-      <Button variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running || !canAttach} title={!canAttach ? t("remote.capabilityUnavailable") : !runtime?.gateway.running ? t("pool.start") : t("gateway.remoteClientSwitchHint")} onClick={() => void switchRemote()}>{t("gateway.remoteClientSwitch")}</Button>
+      <Button
+        variant="secondary"
+        icon={<ArrowRightLeft aria-hidden />}
+        busy={busy === "gateway-client-switch"}
+        disabled={!runtime?.gateway.running || !canAttach}
+        title={!canAttach
+          ? t("remote.capabilityUnavailable")
+          : !runtime?.gateway.running
+            ? t("pool.start")
+            : t("gateway.remoteClientSwitchHint")}
+        onClick={() => void switchRemote()}
+      >
+        {t("gateway.remoteClientSwitch")}
+      </Button>
     </section>;
   }
 
@@ -180,9 +193,32 @@ function ChatGPTSetup() {
       <div className="relay-field oauth-binding-account-control">
         <OptionMenu className="field-option-menu" label={t("gateway.oauthBindingAccount")} value={codexPoolOauthSelection} onChange={setCodexPoolOauthSelection} options={accountOptions} />
       </div>
-      <Button className="oauth-binding-switch" variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")} onClick={() => void switchNow()}>{t("gateway.oauthBindingSwitch")}</Button>
+      <Button
+        className="oauth-binding-switch"
+        variant="secondary"
+        icon={<ArrowRightLeft aria-hidden />}
+        busy={busy === "gateway-client-switch"}
+        disabled={!runtime?.gateway.running}
+        title={!runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")}
+        onClick={() => void switchNow()}
+      >
+        {t("gateway.oauthBindingSwitch")}
+      </Button>
       {automaticUnavailable ? <small className="oauth-binding-selection-hint warning"><CircleAlert aria-hidden /><span>{t("gateway.oauthBindingUnavailable")}</span></small> : null}
     </div>
-    {codexPoolOauthSelection !== "none" ? <SettingToggle className="oauth-binding-reserve-toggle" label={t("gateway.oauthBindingReserve")} description={t("gateway.oauthBindingReserveHint")} checked={reserveEnabled} disabled={busy === "chatgpt-quota-reserve"} onChange={(checked) => void perform("chatgpt-quota-reserve", () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0), "feedback.saved")} /> : null}
+    {codexPoolOauthSelection !== "none" ? (
+      <SettingToggle
+        className="oauth-binding-reserve-toggle"
+        label={t("gateway.oauthBindingReserve")}
+        description={t("gateway.oauthBindingReserveHint")}
+        checked={reserveEnabled}
+        disabled={busy === "chatgpt-quota-reserve"}
+        onChange={(checked) => void perform(
+          "chatgpt-quota-reserve",
+          () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0),
+          "feedback.saved",
+        )}
+      />
+    ) : null}
   </section>;
 }

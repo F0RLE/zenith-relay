@@ -109,7 +109,7 @@
   width: min(640px, 100%);
 }
 
-.relay-dialog.account-import-dialog:not(:has(.import-preview)) {
+.relay-dialog.account-import-dialog {
   width: min(640px, 100%);
 }
 
@@ -446,6 +446,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -623,44 +624,189 @@
   border-top: 0;
 }
 
-.import-preview .relay-table {
-  table-layout: fixed;
-  white-space: normal;
+.import-account-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
 }
 
-.import-preview .relay-table th:first-child { width: 42px; }
-.import-preview .relay-table th:nth-child(2) { width: 120px; }
-.import-preview .relay-table th:nth-child(4) { width: 22%; }
-.import-preview .relay-table th:nth-child(5) { width: 90px; }
-
-.import-preview .relay-table .import-select-cell {
-  padding-inline: 8px;
-  text-align: center;
+.import-account-card {
+  min-width: 0;
+  border-bottom: 1px solid var(--relay-border);
+  background: transparent;
 }
 
-.import-preview .relay-table .import-select-cell input {
-  margin-inline: auto;
+.import-account-card:last-child {
+  border-bottom: 0;
 }
 
-.import-preview .relay-table tbody tr.selected td {
-  background: var(--relay-accent-soft);
+.import-account-card:hover,
+.import-account-card:focus-within {
+  background: color-mix(in srgb, var(--relay-subtle) 70%, transparent);
 }
 
-.import-preview .relay-table tbody tr.selected:hover td,
-.import-preview .relay-table tbody tr.selected:focus-within td {
-  background: color-mix(in srgb, var(--relay-accent-soft) 78%, var(--relay-subtle));
+.import-account-card.selected {
+  background: color-mix(in srgb, var(--relay-accent) 8%, var(--relay-surface));
 }
 
-.import-preview .relay-table td {
+.import-account-card > label {
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.import-select-all-row {
+  background: var(--relay-subtle);
+}
+
+.import-select-all-row:hover,
+.import-select-all-row:focus-within {
+  background: var(--relay-subtle);
+}
+
+.import-account-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.import-account-copy > strong,
+.import-account-title > strong {
+  overflow: hidden;
+  color: var(--relay-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-select-all-row small,
+.import-account-note {
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.import-account-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.import-account-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.import-account-identity {
   min-width: 0;
   overflow: hidden;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 16px;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.import-preview .relay-table td code {
+.import-row-status {
+  flex: 0 0 auto;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.import-row-status[data-status="warning"] {
+  background: var(--relay-warning-soft);
+  color: var(--relay-warning);
+}
+
+.import-row-status[data-status="error"] {
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
+}
+
+.import-row-status[data-status="info"] {
+  background: var(--relay-info-soft);
+  color: var(--relay-info);
+}
+
+.import-account-note {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-account-note.error-text {
+  color: var(--relay-error);
+}
+
+.import-after {
+  box-shadow: none;
+}
+
+.import-after .import-after-toggle {
+  min-height: 64px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--relay-border);
+  background: transparent;
+}
+
+.import-after .import-after-toggle:last-child {
+  border-bottom: 0;
+}
+
+.import-after .import-after-toggle:hover,
+.import-after .import-after-toggle:has(input:checked),
+.import-after .import-after-toggle:has(input:checked):hover {
+  border-color: transparent;
+  border-bottom-color: var(--relay-border);
+  background: color-mix(in srgb, var(--relay-subtle) 72%, transparent);
+}
+
+.import-after .import-after-toggle:last-child:hover,
+.import-after .import-after-toggle:last-child:has(input:checked),
+.import-after .import-after-toggle:last-child:has(input:checked):hover {
+  border-bottom-color: transparent;
+}
+
+.import-after .import-after-toggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.import-after .import-after-toggle strong {
+  color: var(--relay-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.import-after .import-after-toggle small {
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .import-file-loading {
@@ -826,8 +972,7 @@
 }
 
 .secret-field:has(input:focus-visible, button:focus-visible) {
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 1px;
+  outline: none;
 }
 
 .secret-field input:focus-visible,

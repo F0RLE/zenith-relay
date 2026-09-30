@@ -669,6 +669,11 @@
   gap: 4px;
 }
 
+.sign-in-proxy-options {
+  max-height: min(360px, 52vh);
+  overflow: auto;
+}
+
 .proxy-route-options > button {
   min-width: 0;
   min-height: 54px;

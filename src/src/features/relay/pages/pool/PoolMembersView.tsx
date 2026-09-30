@@ -1,33 +1,26 @@
 import { useMemo, useState } from "react";
-import { ArrowRight, CheckCheck, CircleAlert, CircleCheck, CirclePause, Clock3, Cloud, Coins, Cpu, DollarSign, ListMinus, Loader2, Pencil, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
+import { ArrowRight, CheckCheck, CircleAlert, CircleCheck, CirclePause, Clock3, Coins, Cpu, DollarSign, Loader2, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier } from "../../api/types";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { currentAccountErrorCode } from "../../accountStatus";
 import {
   refreshAllAccountQuotas,
-  refreshOneAccountQuota,
   type AccountQuotaRefreshReport,
 } from "../../accountQuotaRefresh";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { PoolMemberEditor } from "../../components/PoolMemberEditor";
-import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { AccountPlanBadge, Button, EmptyState, IconButton, StatusIcon, accountErrorLabel, useConfirm } from "../../components/Ui";
-import { AccountValueStrip } from "../../components/AccountValueStrip";
-import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
-import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
-import { AccountSubscriptionLine } from "../../components/AccountSubscriptionLine";
-import { formatDetailedRemainingTime } from "../../quotaFormatting";
+import { Button, EmptyState, IconButton, accountErrorLabel, useConfirm } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
-import { activeRequestCount, upcomingModelRetries } from "../../routingOrder";
+import { activeRequestCount } from "../../routingOrder";
 import { memberName, type PoolMember } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
-import { SourceStatsPanel } from "../../components/SourceStatsPanel";
 import { useSourceStats } from "../../hooks/useSourceStats";
 import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayActivity, useRelayState } from "../../state/relayStateContext";
-import { AccountErrorDialog } from "../connections/AccountsTable";
+import { AccountErrorDialog } from "../connections/AccountErrorDialog";
 import { PoolSpeedControl } from "./PoolSpeedControl";
+import { PoolMemberCard } from "./PoolMemberCard";
 import {
   orderedPoolMembers,
   poolActivityState,
@@ -45,7 +38,7 @@ const EMPTY_VISIBLE_MODELS: string[] = [];
 
 export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; onReauthenticate: (account: AccountSummary) => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, refresh, busy, codexPoolOauthSelection, accountValueVisible, setAccountValueVisible } = useRelayState();
+  const { mode, runtime, perform, busy, accountValueVisible, setAccountValueVisible } = useRelayState();
   const runtimeActivity = useRelayActivity();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
@@ -147,11 +140,32 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     .map((member) => member.kind === "source" ? member.lastErrorCode?.trim() : currentAccountErrorCode(member))
     .filter((code): code is string => Boolean(code))
     .map((code) => accountErrorLabel(code, t)))];
-  const routingAlert = noAvailableModels
-    ? <div className="pool-routing-alert" role="alert"><CircleAlert aria-hidden /><span><strong>{t("pool.noAvailableModels")}</strong><small>{t("pool.noAvailableModelsHint")}</small></span></div>
-    : availability === "unavailable"
-      ? <div className="pool-routing-alert" role="alert"><CircleAlert aria-hidden /><span><strong>{t("pool.noAvailableRoute")}</strong><small>{t("pool.noAvailableRouteHint", { quotaWait: counts.quotaWait, unavailable: unavailableMembers.length, disabled: counts.disabled })}{unavailableRouteErrors.length ? ` ${t("pool.routeErrors", { errors: unavailableRouteErrors.slice(0, 3).join("; ") })}` : ""}</small></span></div>
-      : null;
+  const routingAlert = noAvailableModels ? (
+    <div className="pool-routing-alert" role="alert">
+      <CircleAlert aria-hidden />
+      <span>
+        <strong>{t("pool.noAvailableModels")}</strong>
+        <small>{t("pool.noAvailableModelsHint")}</small>
+      </span>
+    </div>
+  ) : availability === "unavailable" ? (
+    <div className="pool-routing-alert" role="alert">
+      <CircleAlert aria-hidden />
+      <span>
+        <strong>{t("pool.noAvailableRoute")}</strong>
+        <small>
+          {t("pool.noAvailableRouteHint", {
+            quotaWait: counts.quotaWait,
+            unavailable: unavailableMembers.length,
+            disabled: counts.disabled,
+          })}
+          {unavailableRouteErrors.length
+            ? ` ${t("pool.routeErrors", { errors: unavailableRouteErrors.slice(0, 3).join("; ") })}`
+            : ""}
+        </small>
+      </span>
+    </div>
+  ) : null;
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   const remove = async (member: Member) => {
     const ok = await perform(`pool-remove-${member.id}`, () => updatePoolMembership(mode, {
@@ -180,11 +194,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     });
     if (ok && report) setQuotaReport(report);
   };
-  const refreshAccountQuota = (account: AccountSummary) => perform(
-    `pool-account-quota-${account.id}`,
-    () => refreshOneAccountQuota(mode, account.id),
-    "feedback.refreshed",
-  );
   const updateServiceTier = async (defaultServiceTier: DefaultServiceTier) => {
     if (defaultServiceTier === serviceTier) return;
     setPendingServiceTier(defaultServiceTier);
@@ -197,7 +206,24 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       setPendingServiceTier(null);
     }
   };
-  if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
+  if (!members.length) {
+    return (
+      <EmptyState
+        title={t("pool.emptyTitle")}
+        description={t("pool.emptyDescription")}
+        action={(
+          <Button
+            variant="primary"
+            disabled={!canAdd}
+            title={!canAdd ? t("remote.capabilityUnavailable") : undefined}
+            onClick={onAdd}
+          >
+            {t("pool.addMember")}
+          </Button>
+        )}
+      />
+    );
+  }
   return <>
     <div className="pool-controls workspace-controls" role="group" aria-label={t("pool.priorityTitle")}>
       <div className="pool-summary relay-status-summary" data-has-provider-credits={providerCreditsValue != null ? "true" : "false"}>
@@ -205,7 +231,13 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         <div data-tone={counts.quotaWait ? "warning" : "muted"}><Clock3 aria-hidden /><strong>{counts.quotaWait}</strong><span>{t("pool.memberStatus.quotaWait")}</span></div>
         <div data-tone={counts.errors ? "error" : "muted"}><CircleAlert aria-hidden /><strong>{counts.errors}</strong><span>{t("accounts.summary.errors")}</span></div>
         <div data-tone="muted"><CirclePause aria-hidden /><strong>{counts.disabled}</strong><span>{t("pool.memberStatus.disabled")}</span></div>
-        {providerCreditsValue != null ? <div data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}><Coins aria-hidden /><strong>{providerCreditsValue}</strong><span>{t("pool.totalProviderCredits")}</span></div> : null}
+        {providerCreditsValue != null ? (
+          <div data-summary="provider-credits" data-relay-tooltip={t("pool.totalProviderCreditsHint")}>
+            <Coins aria-hidden />
+            <strong>{providerCreditsValue}</strong>
+            <span>{t("pool.totalProviderCredits")}</span>
+          </div>
+        ) : null}
       </div>
       <div className="pool-member-toolbar">
         <div className="pool-priority-context">
@@ -215,7 +247,16 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
               <strong className="pool-current-route" data-active={activeRequestTotal > 0}>{routingSummary}</strong>
               {nextRouteSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
             </div>
-            {activeRequestSummary ? <span className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")}><Cpu aria-hidden /><span>{activeRequestSummary}</span></span> : null}
+            {activeRequestSummary ? (
+              <span
+                className="pool-active-models"
+                data-active-request-count={activeRequestTotal}
+                data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")}
+              >
+                <Cpu aria-hidden />
+                <span>{activeRequestSummary}</span>
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="pool-quota-actions">
@@ -227,110 +268,75 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
               saving={pendingServiceTier !== null || busy === "pool-service-tier"}
               onChange={(value) => void updateServiceTier(value)}
             />
-            <IconButton label={t("pool.routingSettings")} icon={<SlidersHorizontal aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
+            <IconButton
+              label={t("pool.routingSettings")}
+              icon={<SlidersHorizontal aria-hidden />}
+              disabled={!supportsRoutingSettings}
+              title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined}
+              onClick={onRoutingPolicy}
+            />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
-            {hasAccountMembers ? <IconButton className="account-calculation-toggle" label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<DollarSign aria-hidden />} aria-pressed={accountValueVisible} onClick={() => setAccountValueVisible(!accountValueVisible)} /> : null}
-            <IconButton label={t("pool.refreshQuotas")} icon={busy === "pool-quota-refresh" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} aria-busy={busy === "pool-quota-refresh"} disabled={busy === "pool-quota-refresh" || !canRefreshQuota || !refreshableMemberCount} title={!refreshableMemberCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()} />
+            {hasAccountMembers ? (
+              <IconButton
+                className="account-calculation-toggle"
+                label={t(accountValueVisible ? "pool.hideCalculation" : "pool.showCalculation")}
+                icon={<DollarSign aria-hidden />}
+                aria-pressed={accountValueVisible}
+                onClick={() => setAccountValueVisible(!accountValueVisible)}
+              />
+            ) : null}
+            <IconButton
+              label={t("pool.refreshQuotas")}
+              icon={busy === "pool-quota-refresh" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />}
+              aria-busy={busy === "pool-quota-refresh"}
+              disabled={busy === "pool-quota-refresh" || !canRefreshQuota || !refreshableMemberCount}
+              title={!refreshableMemberCount
+                ? t("pool.noQuotaMembers")
+                : !canRefreshQuota
+                  ? t("remote.capabilityUnavailable")
+                  : undefined}
+              onClick={() => void refreshQuotas()}
+            />
           </div>
         </div>
       </div>
     </div>
     {routingAlert}
-    {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><CheckCheck aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
+    {quotaReport ? (
+      <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status">
+        <CheckCheck aria-hidden />
+        <span>{t("accounts.quotaRefreshReport", quotaReport)}</span>
+        <button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}>
+          <X aria-hidden />
+        </button>
+      </div>
+    ) : null}
     <div className="pool-member-list" role="list" aria-label={t("pool.members")}>
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
         const runtimeState = runtimeByMember.get(member.id);
-        const statusKey = member.operationalStatus;
-        const statusTone = operationalStatusTone(statusKey);
-        const quotaStatus = member.kind === "account" ? accountQuotaRefreshState(member) : "updated";
-        const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
-        const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
-        const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
-        const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
-        const detail = member.kind === "source"
-          ? `${member.wireApi} · ${member.baseUrl}`
-          : member.label;
         const isCurrent = activeRequestCount(runtimeState) > 0;
         const isNext = !isCurrent && nextMember?.kind === member.kind && nextMember.id === member.id;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.lastUsedAtMs != null && runtimeState.lastUsedAtMs === lastUsedRuntime?.lastUsedAtMs;
-        const modelRetries = upcomingModelRetries(runtimeState, nowMs);
-        const firstModelRetry = modelRetries[0];
-        const modelRetryHint = firstModelRetry
-          ? t("pool.modelRetryAt", {
-            models: modelRetries.map((retry) => retry.model).join(", "),
-            time: formatDetailedRemainingTime(firstModelRetry.retryAtMs, nowMs, t),
-          })
-          : null;
-        const memberErrorCode = member.kind === "source" ? member.lastErrorCode?.trim() : errorCode;
-        const visibleMemberErrorCode = member.kind === "source" ? memberErrorCode : displayedErrorCode;
-        const runtimeTone = statusKey === "rotation"
-          ? member.kind === "source"
-            ? transientCandidateTone(runtimeState, nowMs, true)
-            : modelRetries.length > 0
-              ? "warning"
-              : transientCandidateTone(runtimeState, nowMs, false)
-          : null;
-        const indicatorTone = visibleMemberErrorCode
-          ? "error"
-          : statusKey === "unavailable" || statusKey === "disabled"
-          ? statusTone
-          : quotaStatus === "refreshing"
-            ? "disabled"
-            : quotaStatus === "failed" || quotaStatus === "requires_reauth"
-              ? "error"
-              : quotaStatus === "pending"
-                ? "disabled"
-                : runtimeTone ?? statusTone;
-        const runtimeHint = runtimeState?.halfOpen
-          ? t("pool.recoveryProbe")
-          : modelRetryHint
-            ? modelRetryHint
-            : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
-            ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
-            : undefined;
-        const parallelRequests = activeRequestCount(runtimeState);
-        const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
-        const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;
-        const removing = busy === `pool-remove-${member.id}`;
-        const statusLabel = t(`pool.memberStatus.${statusKey}`);
-        const indicatorLabel = visibleMemberErrorCode
-          ? member.kind === "account" ? accountErrorLabel(visibleMemberErrorCode, t) : t("pool.runtimeError", { code: visibleMemberErrorCode })
-          : quotaStatus === "updated" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
-        const indicatorHint = member.kind === "source"
-          ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
-          : [runtimeHint, indicatorLabel].filter(Boolean).join(" · ");
-        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-next={isNext ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
-          <header className="pool-member-card-header">
-            {member.kind === "account" && displayedErrorCode
-              ? <IconButton className="pool-member-kind-icon" data-status="error" label={indicatorLabel} icon={<UserRound aria-hidden />} onClick={() => setErrorDetails(member)} />
-              : <StatusIcon className="pool-member-kind-icon" status={indicatorTone} label={[indicatorHint, codexInterface ? t("pool.codexInterfaceHint") : null].filter(Boolean).join(" · ")} showTooltip={!(member.kind === "source" && visibleMemberErrorCode)}>{member.kind === "source" ? <Cloud aria-hidden /> : <UserRound aria-hidden />}</StatusIcon>}
-            <div className="pool-member-identity">
-              <strong className="pool-member-name" data-relay-tooltip={member.kind === "account" && identity !== detail ? `${identity} · ${detail}` : identity}>{identity}</strong>
-              <div className="pool-member-meta">{member.kind === "account" ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /> : <small data-relay-tooltip={detail}>{detail}</small>}</div>
-            </div>
-          </header>
-          <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>
-            {member.kind === "account" ? <AccountQuotaPanel account={member} nowMs={nowMs} onReauthenticate={onReauthenticate} /> : <SourceStatsPanel source={member} {...(sourceStats[member.id] ? { state: sourceStats[member.id] } : {})} />}
-            {mode === "local" && member.kind === "account" ? <ResetCreditsControl account={member} onCompleted={() => refresh()} /> : null}
-          </div>
-          {member.kind === "account" ? <AccountProviderQuotaStrip account={member} /> : null}
-          {member.kind === "account" ? <><AccountSubscriptionLine activeUntilMs={member.subscription.activeUntilMs} nowMs={nowMs} />{runtimeHint ? <div className="account-runtime-line" data-warning={modelRetries.length > 0}><Clock3 aria-hidden /><span>{runtimeHint}</span></div> : null}</> : <div className="pool-member-context" data-kind="source"><div className="pool-member-runtime-meta">{rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode}`)}</strong></div> : null}<div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div></div></div>}
-          {member.kind === "account" && accountValueVisible ? <AccountValueStrip account={member} /> : null}
-          <footer className="pool-member-card-footer" data-kind={member.kind}>
-            <div className="pool-member-actions">
-              <IconButton className="danger" data-relay-context-action label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                void remove(member);
-              }} />
-              {member.kind === "source" ? <IconButton label={t("pool.refreshSourceStats")} icon={sourceStats[member.id]?.loading ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!member.secretAvailable || sourceStats[member.id]?.loading || Boolean(busy)} onClick={() => void refreshSourceStats(member.id, true)} /> : null}
-              {member.kind === "account" ? <IconButton label={t("accounts.refreshQuota")} icon={busy === `pool-account-quota-${member.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !member.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(member)} /> : null}
-              <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
-            </div>
-          </footer>
-        </article>;
+        return <PoolMemberCard
+          key={`${member.kind}-${member.id}`}
+          member={member}
+          nowMs={nowMs}
+          runtimeState={runtimeState}
+          selected={selectedId === memberId}
+          isNext={isNext}
+          isLastUsed={isLastUsed}
+          sourceState={member.kind === "source" ? sourceStats[member.id] : undefined}
+          rotationMode={rotationMode}
+          canRefreshQuota={canRefreshQuota}
+          onShowError={setErrorDetails}
+          onEdit={() => setSelectedId(memberId)}
+          onRemove={() => void remove(member)}
+          onConfirmRemove={() => void confirmRemove(member)}
+          onRefreshSource={() => void refreshSourceStats(member.id, true)}
+          onReauthenticate={onReauthenticate}
+        />;
       })}
     </div>
     {selected ? <PoolMemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} /> : null}

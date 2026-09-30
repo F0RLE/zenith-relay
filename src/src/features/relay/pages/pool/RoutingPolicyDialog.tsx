@@ -77,30 +77,125 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   return <Dialog wide className="pool-routing-dialog" title={t("pool.routingSettingsTitle")} onClose={() => { if (dragRef.current) clearDrag(); else void close(); }} footer={
     <Button variant="secondary" busy={saving} onClick={() => void close()}>{t("common.close")}</Button>
   }>
-    <div className="pool-routing-editor" data-manual-order={manualOrder} aria-busy={saving} onKeyDown={(event) => { if (event.key === "Escape" && dragRef.current) { event.preventDefault(); clearDrag(); } }}>
+    <div
+      className="pool-routing-editor"
+      data-manual-order={manualOrder}
+      aria-busy={saving}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && dragRef.current) {
+          event.preventDefault();
+          clearDrag();
+        }
+      }}
+    >
       <div className="pool-routing-modes" role="radiogroup" aria-label={t("pool.routingStrategy")}>
-        {MODES.map(({ value, icon: Icon }, index) => <button key={value} type="button" role="radio" aria-checked={policy.mode === value} tabIndex={policy.mode === value ? 0 : -1} disabled={!available} onKeyDown={(event) => chooseModeWithKeyboard(event, index)} onClick={() => edit({ type: "mode", mode: value })}>
+        {MODES.map(({ value, icon: Icon }, index) => (
+          <button
+            key={value}
+            type="button"
+            role="radio"
+            aria-checked={policy.mode === value}
+            tabIndex={policy.mode === value ? 0 : -1}
+            disabled={!available}
+            onKeyDown={(event) => chooseModeWithKeyboard(event, index)}
+            onClick={() => edit({ type: "mode", mode: value })}
+          >
           <Icon aria-hidden /><span>{t(`pool.rotationModes.${value}`)}</span>
-        </button>)}
+          </button>
+        ))}
       </div>
       {errorKey ? <p role="alert" className="form-error">{t(errorKey)}</p> : null}
       {!runtime?.capabilities.features.includes("rotation_v2") ? <p role="alert" className="form-error">{t("remote.capabilityUnavailable")}</p> : null}
-      <div className="pool-routing-columns" aria-hidden><span>{listLabel}</span>{!manualOrder ? <span>{t("pool.rotationWeight")}</span> : null}<span>{t("pool.rotationConcurrency")}</span>{manualOrder ? <span /> : null}</div>
+      <div className="pool-routing-columns" aria-hidden>
+        <span>{listLabel}</span>
+        {!manualOrder ? <span>{t("pool.rotationWeight")}</span> : null}
+        <span>{t("pool.rotationConcurrency")}</span>
+        {manualOrder ? <span /> : null}
+      </div>
       <div className="pool-routing-order" ref={listRef} role="list" aria-label={listLabel}>
         {rows.map(({ rule, index, member }) => {
           const key = `${rule.kind}:${rule.id}`;
           const label = member ? memberName(member) : rule.id;
           const status = member?.operationalStatus ?? "unavailable";
           const Icon = rule.kind === "account" ? UserRound : Cloud;
-          return <div className="pool-routing-member" key={key} role="listitem" data-member-id={key} data-status={status} data-dragging={dragged === key || undefined} data-drop-target={dropTarget === key || undefined}>
+          return <div
+            className="pool-routing-member"
+            key={key}
+            role="listitem"
+            data-member-id={key}
+            data-status={status}
+            data-dragging={dragged === key || undefined}
+            data-drop-target={dropTarget === key || undefined}
+          >
             <div className="pool-routing-identity">
-              {manualOrder ? <><button type="button" className="pool-routing-handle" disabled={!available} aria-label={t("pool.reorderMember", { name: label })} data-relay-tooltip={t("pool.reorderMember", { name: label })} onPointerDown={(event) => startDrag(event, key)}><GripVertical aria-hidden /></button><span className="pool-routing-rank">{index + 1}</span></> : null}
+              {manualOrder ? (
+                <>
+                  <button
+                    type="button"
+                    className="pool-routing-handle"
+                    disabled={!available}
+                    aria-label={t("pool.reorderMember", { name: label })}
+                    data-relay-tooltip={t("pool.reorderMember", { name: label })}
+                    onPointerDown={(event) => startDrag(event, key)}
+                  >
+                    <GripVertical aria-hidden />
+                  </button>
+                  <span className="pool-routing-rank">{index + 1}</span>
+                </>
+              ) : null}
               <Icon aria-hidden />
-              <span className="pool-routing-name"><strong>{label}</strong><span className="pool-routing-meta"><small>{t(rule.kind === "account" ? "pool.accountMember" : "pool.apiMember")}</small><StatusBadge status={operationalStatusTone(status)} label={t(`pool.memberStatus.${status}`)} /></span></span>
+              <span className="pool-routing-name">
+                <strong>{label}</strong>
+                <span className="pool-routing-meta">
+                  <small>{t(rule.kind === "account" ? "pool.accountMember" : "pool.apiMember")}</small>
+                  <StatusBadge status={operationalStatusTone(status)} label={t(`pool.memberStatus.${status}`)} />
+                </span>
+              </span>
             </div>
-            {!manualOrder ? <label className="pool-routing-number"><span>{t("pool.rotationWeight")}</span><input aria-label={t("pool.memberWeight", { name: label })} type="number" disabled={!available} min={1} max={100} value={rule.weight} onChange={(event) => updateMember(key, "weight", event.currentTarget.valueAsNumber)} /></label> : null}
-            <label className="pool-routing-number"><span>{t("pool.rotationConcurrency")}</span><input aria-label={t("pool.memberConcurrency", { name: label })} aria-valuetext={rule.maxConcurrency === 0 ? t("pool.unlimitedConcurrency") : undefined} placeholder={t("pool.unlimitedConcurrency")} type="number" disabled={!available} min={1} max={1024} value={rule.maxConcurrency || ""} onChange={(event) => updateMember(key, "maxConcurrency", event.currentTarget.value === "" ? 0 : event.currentTarget.valueAsNumber)} /></label>
-            {manualOrder ? <div className="inline-actions"><IconButton label={t("pool.moveMemberUp", { name: label })} icon={<ArrowUp aria-hidden />} disabled={!available || index === 0} onClick={() => move(index, index - 1)} /><IconButton label={t("pool.moveMemberDown", { name: label })} icon={<ArrowDown aria-hidden />} disabled={!available || index === policy.members.length - 1} onClick={() => move(index, index + 1)} /></div> : null}
+            {!manualOrder ? (
+              <label className="pool-routing-number">
+                <span>{t("pool.rotationWeight")}</span>
+                <input
+                  aria-label={t("pool.memberWeight", { name: label })}
+                  type="number"
+                  disabled={!available}
+                  min={1}
+                  max={100}
+                  value={rule.weight}
+                  onChange={(event) => updateMember(key, "weight", event.currentTarget.valueAsNumber)}
+                />
+              </label>
+            ) : null}
+            <label className="pool-routing-number">
+              <span>{t("pool.rotationConcurrency")}</span>
+              <input
+                aria-label={t("pool.memberConcurrency", { name: label })}
+                aria-valuetext={rule.maxConcurrency === 0 ? t("pool.unlimitedConcurrency") : undefined}
+                placeholder={t("pool.unlimitedConcurrency")}
+                type="number"
+                disabled={!available}
+                min={1}
+                max={1024}
+                value={rule.maxConcurrency || ""}
+                onChange={(event) => updateMember(key, "maxConcurrency", event.currentTarget.value === "" ? 0 : event.currentTarget.valueAsNumber)}
+              />
+            </label>
+            {manualOrder ? (
+              <div className="inline-actions">
+                <IconButton
+                  label={t("pool.moveMemberUp", { name: label })}
+                  icon={<ArrowUp aria-hidden />}
+                  disabled={!available || index === 0}
+                  onClick={() => move(index, index - 1)}
+                />
+                <IconButton
+                  label={t("pool.moveMemberDown", { name: label })}
+                  icon={<ArrowDown aria-hidden />}
+                  disabled={!available || index === policy.members.length - 1}
+                  onClick={() => move(index, index + 1)}
+                />
+              </div>
+            ) : null}
           </div>;
         })}
       </div>

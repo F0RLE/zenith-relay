@@ -13,22 +13,27 @@ export function modelSelectionForMember(member: PoolMember): ModelSelection {
     ...member.allowedModels,
     ...member.excludedModels,
   ]);
-  const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
-  const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
   return {
     modelIds,
-    enabledModels: modelIds.filter((model) =>
-      (!allowed.size || allowed.has(model.toLocaleLowerCase()))
-      && !excluded.has(model.toLocaleLowerCase()),
-    ),
+    enabledModels: modelIds.filter((model) => memberModelIsEnabled(member.allowedModels, member.excludedModels, model)),
   };
+}
+
+/** A model is off only when a saved rule says so. A later exact model stays on. */
+export function memberModelIsEnabled(allowedModels: readonly string[], excludedModels: readonly string[], model: string) {
+  const key = model.toLocaleLowerCase();
+  const allowed = allowedModels.map((item) => item.toLocaleLowerCase());
+  const excluded = excludedModels.map((item) => item.toLocaleLowerCase());
+  if (excluded.includes(key)) return false;
+  if (!allowed.length || allowed.includes(key)) return true;
+  return excluded.length > 0 && allowed.every((rule) => !rule.includes("*")) && excluded.every((rule) => !rule.includes("*"));
 }
 
 export function modelSelectionPayload(modelIds: readonly string[], enabledModels: readonly string[]) {
   const enabled = new Set(enabledModels.map((model) => model.toLocaleLowerCase()));
   const allEnabled = modelIds.every((model) => enabled.has(model.toLocaleLowerCase()));
   return {
-    allowedModels: allEnabled ? [] : modelIds.filter((model) => enabled.has(model.toLocaleLowerCase())),
+    allowedModels: [] as string[],
     excludedModels: allEnabled ? [] : modelIds.filter((model) => !enabled.has(model.toLocaleLowerCase())),
   };
 }

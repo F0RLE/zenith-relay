@@ -376,14 +376,16 @@
 .overview-token-trend-legend .is-output { color: #13a68a; }
 .overview-token-trend-legend .is-cache-write { color: #c48b1b; }
 .overview-token-trend-legend .is-cache-read { color: #1799b6; }
+.overview-token-trend-legend .is-cache-rate { color: #7650b1; }
 
 .overview-token-trend-body {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr) 38px;
   gap: 8px;
 }
 
-.overview-token-trend-axis {
+.overview-token-trend-axis,
+.overview-token-trend-rate-axis {
   height: 132px;
   display: flex;
   justify-content: space-between;
@@ -391,6 +393,11 @@
   color: var(--relay-muted);
   font-size: 10px;
   line-height: 12px;
+}
+
+.overview-token-trend-rate-axis {
+  align-items: flex-end;
+  color: #7650b1;
 }
 
 .overview-token-trend-plot {
@@ -422,6 +429,7 @@
 .overview-token-trend-line.is-output { stroke: #13a68a; }
 .overview-token-trend-line.is-cache-write { stroke: #c48b1b; }
 .overview-token-trend-line.is-cache-read { stroke: #1799b6; }
+.overview-token-trend-line.is-cache-rate { stroke: #7650b1; stroke-dasharray: 4 3; }
 
 .overview-token-trend-points {
   display: grid;
@@ -456,12 +464,11 @@
 .overview-token-trend-dot.is-output { color: #13a68a; }
 .overview-token-trend-dot.is-cache-write { color: #c48b1b; }
 .overview-token-trend-dot.is-cache-read { color: #1799b6; }
+.overview-token-trend-dot.is-cache-rate { color: #7650b1; }
 
 .overview-token-trend-dot:hover,
 .overview-token-trend-dot:focus-visible {
   background: currentColor;
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 2px;
 }
 
 .overview-token-trend-dot > span {
@@ -664,12 +671,6 @@
   background: var(--chart-color);
 }
 
-.overview-chart-bar:focus-visible,
-.overview-chart-dot:focus-visible {
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 2px;
-}
-
 .overview-chart-bar > span,
 .overview-chart-dot > span {
   position: absolute;
@@ -855,8 +856,4 @@
   display: inline-grid;
   place-items: center;
   border-radius: 4px;
-}
-
-.relay-status-icon:focus-visible {
-  box-shadow: 0 0 0 2px var(--relay-focus);
 }

@@ -33,7 +33,30 @@ export type RecoverySnapshotRow = {
 
 export function RecoverySnapshotTable({ rows }: { rows: RecoverySnapshotRow[] }) {
   const { t } = useTranslation();
-  return <div className="relay-table-wrap profile-snapshot-table-wrap"><table className="relay-table profile-snapshot-table"><thead><tr><th>{t("common.name")}</th><th>{t("profiles.created")}</th><th>{t("profiles.contents")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong>{row.detail ? <small>{row.detail}</small> : null}</td><td>{row.createdAt}</td><td>{row.contents}</td><td><div className="inline-actions">{row.actions}</div></td></tr>)}</tbody></table></div>;
+  return (
+    <div className="relay-table-wrap profile-snapshot-table-wrap">
+      <table className="relay-table profile-snapshot-table">
+        <thead>
+          <tr>
+            <th>{t("common.name")}</th>
+            <th>{t("profiles.created")}</th>
+            <th>{t("profiles.contents")}</th>
+            <th><span className="sr-only">{t("common.actions")}</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td><strong>{row.name}</strong>{row.detail ? <small>{row.detail}</small> : null}</td>
+              <td>{row.createdAt}</td>
+              <td>{row.contents}</td>
+              <td><div className="inline-actions">{row.actions}</div></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 type RecoveryConfirmationDialogProps = {
@@ -47,5 +70,19 @@ type RecoveryConfirmationDialogProps = {
 
 export function RecoveryConfirmationDialog({ title, confirmation, hint, busy, onCancel, onConfirm }: RecoveryConfirmationDialogProps) {
   const { t } = useTranslation();
-  return <Dialog title={title} onClose={() => { if (!busy) onCancel(); }} footer={<><Button variant="secondary" disabled={busy} onClick={onCancel}>{t("common.no")}</Button><Button variant="danger" busy={busy} disabled={busy} onClick={onConfirm}>{t("common.yes")}</Button></>}><p className="confirm-dialog-message">{confirmation}</p>{hint ? <p className="confirm-dialog-message">{hint}</p> : null}</Dialog>;
+  return (
+    <Dialog
+      title={title}
+      onClose={() => { if (!busy) onCancel(); }}
+      footer={
+        <>
+          <Button variant="secondary" disabled={busy} onClick={onCancel}>{t("common.no")}</Button>
+          <Button variant="danger" busy={busy} disabled={busy} onClick={onConfirm}>{t("common.yes")}</Button>
+        </>
+      }
+    >
+      <p className="confirm-dialog-message">{confirmation}</p>
+      {hint ? <p className="confirm-dialog-message">{hint}</p> : null}
+    </Dialog>
+  );
 }

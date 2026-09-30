@@ -58,24 +58,91 @@ export function PoolPage() {
     if (preview) setConfigurationPreview(preview);
   });
   const action = <div className="pool-header-actions">
-    {view === "members" ? <Button data-action="pool-add" aria-label={t("pool.addMember")} icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMemberShort")}</Button> : null}
-    {view === "models" && supportsModelOrderReset ? <IconButton className="pool-header-icon" label={t("models.resetOrder")} icon={busy === "model-order-reset" ? <Loader2 className="spin" aria-hidden /> : <RotateCcw aria-hidden />} disabled={Boolean(busy) || !runtime?.gateway.models?.length} onClick={() => void perform("model-order-reset", () => mode === "local" ? relayCommands.setModelDisplayOrder([]) : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved")} /> : null}
-    {mode === "local" ? <Button data-action="pool-connect" variant="primary" icon={<Plug aria-hidden />} aria-label={t("pool.connect")} busy={busy === "pool-switch"} disabled={!running} title={!running ? t("pool.start") : undefined} onClick={() => setConnectDialog(true)}>{t("pool.connect")}</Button> : null}
+    {view === "members" ? (
+      <Button
+        data-action="pool-add"
+        aria-label={t("pool.addMember")}
+        icon={<Plus aria-hidden />}
+        disabled={!supportsMembers}
+        title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined}
+        onClick={() => setAddMembers(true)}
+      >
+        {t("pool.addMemberShort")}
+      </Button>
+    ) : null}
+    {view === "models" && supportsModelOrderReset ? (
+      <IconButton
+        className="pool-header-icon"
+        label={t("models.resetOrder")}
+        icon={busy === "model-order-reset" ? <Loader2 className="spin" aria-hidden /> : <RotateCcw aria-hidden />}
+        disabled={Boolean(busy) || !runtime?.gateway.models?.length}
+        onClick={() => void perform("model-order-reset", () => mode === "local"
+          ? relayCommands.setModelDisplayOrder([])
+          : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved")}
+      />
+    ) : null}
+    {mode === "local" ? (
+      <Button
+        data-action="pool-connect"
+        variant="primary"
+        icon={<Plug aria-hidden />}
+        aria-label={t("pool.connect")}
+        busy={busy === "pool-switch"}
+        disabled={!running}
+        title={!running ? t("pool.start") : undefined}
+        onClick={() => setConnectDialog(true)}
+      >
+        {t("pool.connect")}
+      </Button>
+    ) : null}
     {canSaveConfigurationPreset ? <ActionMenu className="pool-preset-menu" label={t("pool.configurationPreset")}>
-      <ActionMenuItem icon={busy === "configuration-preset-export" ? <Loader2 className="spin" aria-hidden /> : <Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void exportConfiguration()}>{t("pool.exportConfiguration")}</ActionMenuItem>
-      {supportsConfigurationPresets ? <ActionMenuItem icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />} disabled={Boolean(busy)} onClick={() => void previewConfiguration()}>{t("pool.importConfiguration")}</ActionMenuItem> : null}
+      <ActionMenuItem
+        icon={busy === "configuration-preset-export" ? <Loader2 className="spin" aria-hidden /> : <Download aria-hidden />}
+        disabled={Boolean(busy)}
+        onClick={() => void exportConfiguration()}
+      >
+        {t("pool.exportConfiguration")}
+      </ActionMenuItem>
+      {supportsConfigurationPresets ? (
+        <ActionMenuItem
+          icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}
+          disabled={Boolean(busy)}
+          onClick={() => void previewConfiguration()}
+        >
+          {t("pool.importConfiguration")}
+        </ActionMenuItem>
+      ) : null}
     </ActionMenu> : null}
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page relay-workspace-page" data-view={view}>
     <PageHeader title={t("nav.pool")} actions={action} navigation={<Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />} />
-    {view === "members" ? <PoolMembersView onAdd={() => setAddMembers(true)} onRoutingPolicy={() => setRoutingPolicy(true)} onReauthenticate={reauthenticateAccount} supportsRoutingSettings={supportsRoutingSettings} /> : null}
+    {view === "members" ? (
+      <PoolMembersView
+        onAdd={() => setAddMembers(true)}
+        onRoutingPolicy={() => setRoutingPolicy(true)}
+        onReauthenticate={reauthenticateAccount}
+        supportsRoutingSettings={supportsRoutingSettings}
+      />
+    ) : null}
     {view === "models" ? <ModelRulesView /> : null}
     {addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}
-    {connectDialog ? <ApplicationPickerDialog onClose={() => setConnectDialog(false)} onChatGPT={(launchAfterConnect) => void switchCodexToPool(launchAfterConnect)} onOpenCode={(launchAfterConnect) => void connectOpenCode(launchAfterConnect)} /> : null}
+    {connectDialog ? (
+      <ApplicationPickerDialog
+        onClose={() => setConnectDialog(false)}
+        onChatGPT={(launchAfterConnect) => void switchCodexToPool(launchAfterConnect)}
+        onOpenCode={(launchAfterConnect) => void connectOpenCode(launchAfterConnect)}
+      />
+    ) : null}
     {createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}
     {routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}
-    {configurationPreview ? <ConfigurationPresetDialog preview={configurationPreview} mode={mode === "remote" ? "remote" : "local"} onClose={() => setConfigurationPreview(null)} /> : null}
+    {configurationPreview ? (
+      <ConfigurationPresetDialog
+        preview={configurationPreview}
+        mode={mode === "remote" ? "remote" : "local"}
+        onClose={() => setConfigurationPreview(null)}
+      />
+    ) : null}
     {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}
     {!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}
   </section>;
@@ -89,12 +156,58 @@ function ConfigurationPresetDialog({ preview, mode, onClose }: { preview: Config
     const applyPreset = mode === "local" ? relayCommands.applyLocalConfigurationPreset : relayCommands.applyRemoteConfigurationPreset;
     if (await perform("configuration-preset-apply", () => applyPreset(preview), "feedback.saved")) onClose();
   };
-  return <Dialog wide title={t("pool.configurationPreset")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" icon={<Upload aria-hidden />} busy={busy === "configuration-preset-apply"} disabled={!preview.changes.length} onClick={() => void apply()}>{t("pool.applyConfiguration")}</Button></>}>
-    <div className="configuration-preset-preview">
-      <header><strong>{t("pool.configurationChanges", { count: preview.changes.length })}</strong><code data-relay-tooltip={preview.baseRevision}>{preview.baseRevision.slice(0, 16)}</code></header>
-      {preview.changes.length ? <div className="table-wrap"><table><thead><tr><th>{t("pool.configurationSetting")}</th><th>{t("pool.configurationCurrent")}</th><th>{t("pool.configurationNext")}</th></tr></thead><tbody>{preview.changes.map((change) => <tr key={change.path}><th scope="row"><code>{formatConfigurationPath(change.path)}</code></th><td><code>{formatConfigurationValue(change.before)}</code></td><td><code>{formatConfigurationValue(change.after)}</code></td></tr>)}</tbody></table></div> : <EmptyState title={t("pool.configurationUnchanged")} description={t("pool.configurationUnchangedHint")} />}
-    </div>
-  </Dialog>;
+  return (
+    <Dialog
+      wide
+      title={t("pool.configurationPreset")}
+      onClose={onClose}
+      footer={(
+        <>
+          <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button
+            variant="primary"
+            icon={<Upload aria-hidden />}
+            busy={busy === "configuration-preset-apply"}
+            disabled={!preview.changes.length}
+            onClick={() => void apply()}
+          >
+            {t("pool.applyConfiguration")}
+          </Button>
+        </>
+      )}
+    >
+      <div className="configuration-preset-preview">
+        <header>
+          <strong>{t("pool.configurationChanges", { count: preview.changes.length })}</strong>
+          <code data-relay-tooltip={preview.baseRevision}>{preview.baseRevision.slice(0, 16)}</code>
+        </header>
+        {preview.changes.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("pool.configurationSetting")}</th>
+                  <th>{t("pool.configurationCurrent")}</th>
+                  <th>{t("pool.configurationNext")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.changes.map((change) => (
+                  <tr key={change.path}>
+                    <th scope="row"><code>{formatConfigurationPath(change.path)}</code></th>
+                    <td><code>{formatConfigurationValue(change.before)}</code></td>
+                    <td><code>{formatConfigurationValue(change.after)}</code></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState title={t("pool.configurationUnchanged")} description={t("pool.configurationUnchangedHint")} />
+        )}
+      </div>
+    </Dialog>
+  );
 }
 
 function formatConfigurationPath(path: string) {

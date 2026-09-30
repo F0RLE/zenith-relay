@@ -1019,11 +1019,6 @@
   color: var(--relay-error);
 }
 
-.account-quota-refresh-state.is-action:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--relay-error) 45%, transparent);
-  outline-offset: 1px;
-}
-
 .account-quota-refresh-state svg {
   width: 16px;
   height: 16px;
@@ -1200,6 +1195,226 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.oauth-open-with-lock {
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--relay-accent);
+  border-radius: 6px;
+  background: var(--relay-accent);
+  color: var(--relay-on-accent);
+  box-shadow: 0 1px 2px rgb(5 78 58 / 22%);
+}
+
+.oauth-open-with-lock:hover:not(.is-disabled) {
+  border-color: var(--relay-accent-hover);
+  background: var(--relay-accent-hover);
+}
+
+.oauth-open-with-lock.is-disabled {
+  border-color: var(--relay-border-strong);
+  background: var(--relay-border);
+  color: var(--relay-secondary);
+  box-shadow: none;
+}
+
+.oauth-sign-in-dialog .oauth-open-with-lock > .relay-button,
+.oauth-sign-in-dialog .oauth-open-with-lock > .relay-disabled-tooltip-anchor:not(:has(.oauth-open-lock)) {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+.oauth-sign-in-dialog .oauth-open-with-lock .relay-button.primary,
+.oauth-sign-in-dialog .oauth-open-with-lock .relay-button.primary:hover:not(:disabled),
+.oauth-sign-in-dialog .oauth-open-with-lock .relay-button.primary:disabled {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+.oauth-sign-in-dialog .oauth-open-with-lock > .oauth-open-lock,
+.oauth-sign-in-dialog .oauth-open-with-lock > .relay-disabled-tooltip-anchor:has(.oauth-open-lock) {
+  flex: 0 0 30px;
+  width: 30px;
+  min-width: 30px;
+  align-self: center;
+  margin-right: 3px;
+}
+
+.oauth-sign-in-dialog .oauth-open-with-lock .oauth-open-lock {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+.oauth-sign-in-dialog .oauth-open-with-lock .oauth-open-lock:hover:not(:disabled) {
+  border: 0;
+  background: color-mix(in srgb, var(--relay-on-accent) 18%, transparent);
+  color: inherit;
+}
+
+.oauth-sign-in-dialog .oauth-open-with-lock.is-disabled .oauth-open-lock,
+.oauth-sign-in-dialog .oauth-open-with-lock.is-disabled .oauth-open-lock:disabled {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.oauth-notes-toggle {
+  width: 100%;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--relay-subtle) 55%, var(--relay-surface));
+  color: var(--relay-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.oauth-notes-toggle svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: var(--relay-muted);
+  transition: transform 160ms ease;
+}
+
+.oauth-notes-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.oauth-notes-card {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--relay-border) 86%, var(--relay-text));
+  border-radius: 8px;
+  background: var(--relay-surface);
+}
+
+.oauth-notes-toggle[aria-expanded="true"] {
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.oauth-waiting .account-login-notes {
+  padding: 12px;
+  border: 0;
+  background: transparent;
+}
+
+.account-login-notes {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--relay-border) 86%, var(--relay-text));
+  border-radius: 8px;
+  background: var(--relay-surface);
+}
+
+.account-login-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.account-login-fields .relay-field:nth-child(n + 3) {
+  grid-column: 1 / -1;
+}
+
+.account-login-dialog .account-login-notes {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.account-login-notes .relay-field input {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.account-login-code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--relay-subtle) 55%, var(--relay-surface));
+}
+
+.account-login-code span,
+.account-login-code small {
+  color: var(--relay-muted);
+}
+
+.account-login-code small {
+  min-width: 2.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-login-code strong {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 18px;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-login-code .account-login-copy {
+  margin-left: auto;
+  min-height: 32px;
+  padding-inline: 10px;
+}
+
+.relay-dialog.oauth-sign-in-dialog > footer,
+.relay-dialog.account-login-dialog > footer {
+  min-height: 0;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--relay-subtle) 40%, var(--relay-surface));
+}
+
+.oauth-sign-in-dialog .relay-dialog-body,
+.account-login-dialog .relay-dialog-body {
+  padding: 16px;
+}
+
+@media (max-width: 560px) {
+  .account-login-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .account-login-code {
+    flex-wrap: wrap;
+  }
+
+  .account-login-code .account-login-copy {
+    margin-left: 0;
+  }
+}
+
+.relay-icon-button[aria-pressed="true"] {
+  color: var(--relay-text);
 }
 
 .relay-action-menu button {

@@ -64,3 +64,21 @@ export async function runRelayOperation({
     if (isCurrent()) settle();
   }
 }
+
+/**
+ * Keep the value returned by work. `ok` is still the operation result, so a
+ * later refresh failure leaves the value in place. `value` stays undefined
+ * until work returns; a returned null stays null.
+ */
+export async function captureOperationResult<T>(
+  run: (work: () => Promise<unknown>) => Promise<boolean>,
+  work: () => Promise<T>,
+): Promise<{ ok: boolean; value: T | undefined }> {
+  let value: T | undefined;
+  let captured = false;
+  const ok = await run(async () => {
+    value = await work();
+    captured = true;
+  });
+  return { ok, value: captured ? value : undefined };
+}

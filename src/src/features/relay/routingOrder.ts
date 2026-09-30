@@ -1,7 +1,5 @@
 import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/types";
-
-const subscriptionPlanPriority = ["enterprise", "business", "pro-20x", "pro-5x", "pro", "plus", "go", "edu", "free", "unknown"];
-const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
+import { modelIdKey } from "./modelGroups";
 
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   const positions = new Map<string, number>();
@@ -79,7 +77,7 @@ function aggregateModelRetries(candidates: CandidateRuntimeSnapshot[]) {
   for (const candidate of candidates) {
     for (const retry of candidate.modelRetries ?? []) {
       if (!retry.model || !Number.isFinite(retry.retryAtMs)) continue;
-      const key = retry.model.toLowerCase();
+      const key = modelIdKey(retry.model);
       const current = retries.get(key);
       if (!current || retry.retryAtMs < current.retryAtMs) {
         retries.set(key, { model: retry.model, retryAtMs: retry.retryAtMs });
@@ -221,7 +219,7 @@ export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>
   for (const candidate of candidates) {
     for (const activeModel of candidate.activeModels ?? []) {
       if (!activeModel.model || activeModel.requestCount <= 0) continue;
-      const key = activeModel.model.toLowerCase();
+      const key = modelIdKey(activeModel.model);
       const current = counts.get(key);
       if (current) current.requestCount += activeModel.requestCount;
       else counts.set(key, { model: activeModel.model, requestCount: activeModel.requestCount });
@@ -230,40 +228,4 @@ export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>
   return [...counts.values()].sort((left, right) =>
     right.requestCount - left.requestCount || left.model.localeCompare(right.model),
   );
-}
-
-export function compareSubscriptionPlanPriority(left: { id: string; label: string }, right: { id: string; label: string }) {
-  const leftRank = subscriptionPlanPriority.indexOf(left.id);
-  const rightRank = subscriptionPlanPriority.indexOf(right.id);
-  return (leftRank < 0 ? subscriptionPlanPriority.length : leftRank) - (rightRank < 0 ? subscriptionPlanPriority.length : rightRank) || left.label.localeCompare(right.label);
-}
-
-export function formatAccountPlan(planType: string | null, unknown: string) {
-  const value = planType?.trim();
-  if (!value) return unknown;
-  const key = value.toLocaleLowerCase().replace(/[\s_-]/g, "");
-  if (key.includes("team") || key.includes("business")) return "Business";
-  if (key.includes("enterprise")) return "Enterprise";
-  if (key === "prolite") return "Pro 5x";
-  if (key === "promax") return "Pro 20x";
-  if (key === "pro") return "Pro";
-  if (key.includes("plus")) return "Plus";
-  if (key === "free") return "Free";
-  if (key === "go") return "Go";
-  if (key === "edu" || key.includes("education")) return "Edu";
-  return value;
-}
-
-export function accountPlanOption(planType: string | null, unknown: string) {
-  const label = formatAccountPlan(planType, unknown);
-  return {
-    id: label.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unknown",
-    label,
-  };
-}
-
-export function compareAccountPlans(left: { id: string; label: string }, right: { id: string; label: string }) {
-  const leftRank = accountPlanOrder.indexOf(left.id);
-  const rightRank = accountPlanOrder.indexOf(right.id);
-  return (leftRank < 0 ? accountPlanOrder.length : leftRank) - (rightRank < 0 ? accountPlanOrder.length : rightRank) || left.label.localeCompare(right.label);
 }

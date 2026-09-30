@@ -878,8 +878,8 @@
 }
 
 .source-price-input:focus-within {
-  border-color: var(--price-field-focus);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--price-field-focus) 18%, transparent);
+  border-color: var(--relay-border-strong);
+  box-shadow: none;
 }
 
 .source-price-currency {
@@ -1118,6 +1118,14 @@
   line-height: 1.35;
 }
 
+.setup-oauth-pending-copy small {
+  display: block;
+  margin-top: 6px;
+  color: var(--relay-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .setup-oauth-pending .form-note {
   width: 100%;
   margin: 0;
@@ -1145,9 +1153,16 @@
   border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-text);
+  font: inherit;
   font-size: 13px;
   font-weight: 500;
   text-decoration: none;
+  cursor: pointer;
+}
+
+.setup-oauth-reopen:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .setup-oauth-reopen:hover {

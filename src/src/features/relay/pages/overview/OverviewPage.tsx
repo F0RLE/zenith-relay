@@ -29,8 +29,10 @@ export function OverviewPage() {
   const [analyticsError, setAnalyticsError] = useState(false);
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const now = new Date();
-  const calendarDay = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
-  const windows = useMemo(() => chartWindows(range, locale), [range, locale, calendarDay]);
+  const windowRevision = range === "today"
+    ? Math.floor(now.getTime() / HOUR_MS)
+    : `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  const windows = useMemo(() => chartWindows(range, locale), [range, locale, windowRevision]);
   const usageAvailable = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const runtimeReady = runtime !== null;
   const windowStartMs = windows[0]?.startMs ?? 0;
@@ -147,13 +149,66 @@ export function OverviewPage() {
   const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
 
-  const primary = mode === "local" ? <><Button variant={running ? "secondary" : "primary"} busy={busy === "gateway"} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button><Button variant={running ? "primary" : "secondary"} busy={busy === "chatgpt-launch" || busy === "opencode-connect" || busy === "opencode-launch"} icon={<Play aria-hidden />} disabled={!running} title={!running ? t("gateway.start") : undefined} onClick={() => setApplicationDialog(true)}>{t("overview.launchApplication")}</Button></> : <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>{runtime ? t("overview.openServer") : t("remote.connect")}</Button>;
+  const primary = mode === "local" ? <>
+    <Button
+      variant={running ? "secondary" : "primary"}
+      busy={busy === "gateway"}
+      icon={running ? <Square aria-hidden /> : <Play aria-hidden />}
+      onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}
+    >
+      {running ? t("gateway.stop") : t("gateway.start")}
+    </Button>
+    <Button
+      variant={running ? "primary" : "secondary"}
+      busy={busy === "chatgpt-launch" || busy === "opencode-connect" || busy === "opencode-launch"}
+      icon={<Play aria-hidden />}
+      disabled={!running}
+      title={!running ? t("gateway.start") : undefined}
+      onClick={() => setApplicationDialog(true)}
+    >
+      {t("overview.launchApplication")}
+    </Button>
+  </> : (
+    <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>
+      {runtime ? t("overview.openServer") : t("remote.connect")}
+    </Button>
+  );
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
-    {!running && !runtime ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
-       <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} scope={analyticsScopeSelection} setScope={setAnalyticsScope} scopeOptions={analyticsScopeOptions} />
+    {!running && !runtime ? (
+      <EmptyState
+        title={t("overview.emptyTitle")}
+        description={t("overview.emptyDescription")}
+        action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>}
+      />
+    ) : <>
+      <div className="metric-band overview-metrics">
+        <div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div>
+        <div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div>
+        <div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div>
+        <div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div>
+      </div>
+      <AnalyticsPanel
+        range={range}
+        setRange={setRange}
+        windows={windows}
+        analytics={analytics}
+        loading={analyticsLoading}
+        error={analyticsError}
+        scope={analyticsScopeSelection}
+        setScope={setAnalyticsScope}
+        scopeOptions={analyticsScopeOptions}
+      />
     </>}
-    {applicationDialog ? <ApplicationPickerDialog title={t("overview.applicationPickerTitle")} showLaunchToggle={false} onClose={() => setApplicationDialog(false)} onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched"); }} onOpenCode={() => void connectOpenCode(false)} /> : null}
+    {applicationDialog ? (
+      <ApplicationPickerDialog
+        title={t("overview.applicationPickerTitle")}
+        showLaunchToggle={false}
+        onClose={() => setApplicationDialog(false)}
+        onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched"); }}
+        onOpenCode={() => void connectOpenCode(false)}
+      />
+    ) : null}
   </section>;
 }
 function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean> }) {
@@ -174,13 +229,50 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
     await readSourceStats(source.id, true);
   };
   const sourceRefreshBusy = busy === "source-data-refresh";
-  const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={stats?.loading || sourceRefreshBusy} disabled={!source || sourceRefreshBusy} onClick={() => void refreshSourceData()}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
+  const actions = (
+    <>
+      <Button
+        variant="secondary"
+        icon={<RefreshCw aria-hidden />}
+        busy={stats?.loading || sourceRefreshBusy}
+        disabled={!source || sourceRefreshBusy}
+        onClick={() => void refreshSourceData()}
+      >
+        {t("common.refresh")}
+      </Button>
+      <Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button>
+    </>
+  );
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
-    {!source ? <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>} /> : <div className="direct-api-overview">
-      <div className="direct-api-toolbar"><div><strong>{source.name}</strong><code>{source.baseUrl}</code></div><OptionMenu className="direct-api-source-menu" label={t("overview.selectedSource")} value={source.id} onChange={select} options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))} /></div>
+    {!source ? (
+      <EmptyState
+        title={t("sources.emptyTitle")}
+        description={t("sources.emptyDescription")}
+        action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>}
+      />
+    ) : <div className="direct-api-overview">
+      <div className="direct-api-toolbar">
+        <div><strong>{source.name}</strong><code>{source.baseUrl}</code></div>
+        <OptionMenu
+          className="direct-api-source-menu"
+          label={t("overview.selectedSource")}
+          value={source.id}
+          onChange={select}
+          options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))}
+        />
+      </div>
       <SourceStatsPanel source={source} {...(stats ? { state: stats } : {})} overview />
-      <section className="direct-api-models"><header><div><h2>{t("overview.availableModels")}</h2><p>{t("overview.availableModelsHint")}</p></div><strong>{source.models.length}</strong></header><ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul></section>
+      <section className="direct-api-models">
+        <header>
+          <div>
+            <h2>{t("overview.availableModels")}</h2>
+            <p>{t("overview.availableModelsHint")}</p>
+          </div>
+          <strong>{source.models.length}</strong>
+        </header>
+        <ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul>
+      </section>
     </div>}
   </section>;
 }

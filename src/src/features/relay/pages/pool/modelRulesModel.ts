@@ -1,4 +1,6 @@
-import type { ModelSummary } from "../../api/types";
+import type { DefaultServiceTier, ModelSummary } from "../../api/types";
+import { modelIdKey } from "../../modelGroups";
+import { normalizeReasoningEffort } from "../../poolFormatting";
 
 export type ModelRuleGroup = {
   id: string;
@@ -73,7 +75,7 @@ export function completeModelDisplayOrder(
   const order: string[] = [];
   const add = (model: ModelSummary) => {
     const id = model.id.trim();
-    const key = id.toLowerCase();
+    const key = modelIdKey(id);
     if (!id || included.has(key)) return;
     included.add(key);
     order.push(id);
@@ -90,12 +92,22 @@ export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSup
   const levels = declaredLevels;
   const seen = new Set<string>();
   return levels
-    .map((level) => level.trim().toLowerCase())
+    .map((level) => normalizeReasoningEffort(level))
     .filter((level) => Boolean(level) && !seen.has(level) && seen.add(level));
 }
 
 /** Keep selected values in provider order and remove stale policy values. */
 export function normalizeReasoningSelection(supported: readonly string[], selected: readonly string[]) {
-  const selectedSet = new Set(selected.map((level) => level.trim().toLowerCase()));
+  const selectedSet = new Set(selected.map((level) => normalizeReasoningEffort(level)));
   return supported.filter((level) => selectedSet.has(level));
+}
+
+const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies readonly DefaultServiceTier[];
+
+/** Speed choices for one model. A configurable family always keeps all three modes. */
+export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "speedTiers">): DefaultServiceTier[] {
+  const declared = new Set(model.speedTiers ?? []);
+  const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
+  if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
+  return ordered.length ? [...ordered] : ["standard"];
 }

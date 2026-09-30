@@ -38,8 +38,8 @@ export function SourceStatsPanel({ source, state, overview = false }: { source: 
         <dd data-muted={muted ? "true" : undefined}>{values.map((value, index) => <span key={index}>{value}</span>)}</dd>
       </div>)}
     </dl>
-    {stale ? <div className="source-stats-caption" data-warning="true" data-relay-tooltip={t(`providerStats.status.${error}`)} role="status">
-      {stale ? <span><CircleAlert aria-hidden />{t("providerStats.stale")}</span> : null}
+    {overview && stale ? <div className="source-stats-caption" data-warning="true" data-relay-tooltip={t(`providerStats.status.${error}`)} role="status">
+      <span><CircleAlert aria-hidden />{t("providerStats.stale")}</span>
     </div> : null}
   </div>;
 }

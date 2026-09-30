@@ -66,19 +66,82 @@ export function ChatGptRecoveryTab() {
     name: snapshot.name,
     detail: displayPath(snapshot.profileDir),
     createdAt: snapshotDate(snapshot.createdAtMs),
-    contents: <StatusIcon status={snapshot.configAvailable && snapshot.authAvailable ? "ready" : "info"} label={snapshot.configAvailable && snapshot.authAvailable ? t("profiles.snapshotComplete") : t("profiles.snapshotPartial")} />,
-    actions: <><Button variant="secondary" icon={<RotateCcw aria-hidden />} aria-label={t("profiles.restoreSnapshot", { name: snapshot.name })} disabled={Boolean(busy)} onClick={() => setRestoreTarget(snapshot)}>{t("profiles.restoreAction")}</Button><IconButton className="danger" label={t("profiles.deleteSnapshot", { name: snapshot.name })} icon={<Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => setDeleteTarget(snapshot)} /></>,
+    contents: (
+      <StatusIcon
+        status={snapshot.configAvailable && snapshot.authAvailable ? "ready" : "info"}
+        label={snapshot.configAvailable && snapshot.authAvailable ? t("profiles.snapshotComplete") : t("profiles.snapshotPartial")}
+      />
+    ),
+    actions: (
+      <>
+        <Button
+          variant="secondary"
+          icon={<RotateCcw aria-hidden />}
+          aria-label={t("profiles.restoreSnapshot", { name: snapshot.name })}
+          disabled={Boolean(busy)}
+          onClick={() => setRestoreTarget(snapshot)}
+        >
+          {t("profiles.restoreAction")}
+        </Button>
+        <IconButton
+          className="danger"
+          label={t("profiles.deleteSnapshot", { name: snapshot.name })}
+          icon={<Trash2 aria-hidden />}
+          disabled={Boolean(busy)}
+          onClick={() => setDeleteTarget(snapshot)}
+        />
+      </>
+    ),
   }));
 
-  const notice = loadFailed ? <div className="profile-recovery-warning" role="alert"><CircleAlert aria-hidden /><span>{t("profiles.loadFailed")}</span><Button variant="secondary" onClick={loadSnapshots}>{t("common.retry")}</Button></div> : null;
+  const notice = loadFailed ? (
+    <div className="profile-recovery-warning" role="alert">
+      <CircleAlert aria-hidden />
+      <span>{t("profiles.loadFailed")}</span>
+      <Button variant="secondary" onClick={loadSnapshots}>{t("common.retry")}</Button>
+    </div>
+  ) : null;
   return <><RecoverySurface isEmpty={!snapshots.length} notice={notice} composer={
     <form className="profile-snapshot-create" onSubmit={(event) => { event.preventDefault(); void createSnapshot(); }}>
-      <label className="relay-field"><span>{t("profiles.snapshotName")}</span><input value={snapshotName} maxLength={80} onChange={(event) => setSnapshotName(event.target.value)} placeholder={t("profiles.snapshotNamePlaceholder")} /></label>
-      <Button type="submit" variant="primary" icon={<Camera aria-hidden />} busy={busy === "profile-snapshot-create"} disabled={!snapshotName.trim() || Boolean(busy)}>{t("profiles.createSnapshot")}</Button>
+      <label className="relay-field">
+        <span>{t("profiles.snapshotName")}</span>
+        <input
+          value={snapshotName}
+          maxLength={80}
+          onChange={(event) => setSnapshotName(event.target.value)}
+          placeholder={t("profiles.snapshotNamePlaceholder")}
+        />
+      </label>
+      <Button
+        type="submit"
+        variant="primary"
+        icon={<Camera aria-hidden />}
+        busy={busy === "profile-snapshot-create"}
+        disabled={!snapshotName.trim() || Boolean(busy)}
+      >
+        {t("profiles.createSnapshot")}
+      </Button>
     </form>
   }>
     {rows.length ? <RecoverySnapshotTable rows={rows} /> : loadFailed ? null : <RecoveryEmptyState title={t("profiles.noSnapshots")} />}
   </RecoverySurface>
-  {restoreTarget ? <RecoveryConfirmationDialog title={t("profiles.snapshotRestoreTitle")} confirmation={t("profiles.snapshotRestoreConfirm", { name: restoreTarget.name })} hint={t("profiles.snapshotFullRestoreHint")} busy={busy === "profile-snapshot-restore"} onCancel={() => setRestoreTarget(null)} onConfirm={() => void restoreSnapshot()} /> : null}
-  {deleteTarget ? <RecoveryConfirmationDialog title={t("profiles.snapshotDeleteTitle")} confirmation={t("profiles.snapshotDeleteConfirm", { name: deleteTarget.name })} busy={busy === "profile-snapshot-delete"} onCancel={() => setDeleteTarget(null)} onConfirm={() => void deleteSnapshot()} /> : null}</>;
+  {restoreTarget ? (
+    <RecoveryConfirmationDialog
+      title={t("profiles.snapshotRestoreTitle")}
+      confirmation={t("profiles.snapshotRestoreConfirm", { name: restoreTarget.name })}
+      hint={t("profiles.snapshotFullRestoreHint")}
+      busy={busy === "profile-snapshot-restore"}
+      onCancel={() => setRestoreTarget(null)}
+      onConfirm={() => void restoreSnapshot()}
+    />
+  ) : null}
+  {deleteTarget ? (
+    <RecoveryConfirmationDialog
+      title={t("profiles.snapshotDeleteTitle")}
+      confirmation={t("profiles.snapshotDeleteConfirm", { name: deleteTarget.name })}
+      busy={busy === "profile-snapshot-delete"}
+      onCancel={() => setDeleteTarget(null)}
+      onConfirm={() => void deleteSnapshot()}
+    />
+  ) : null}</>;
 }

@@ -49,7 +49,7 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   await expect(page.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
   await expect(page.locator(".setup-connect-options")).toHaveCount(0);
   await expect(page.locator(".setup-oauth-pending")).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open in browser" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open sign-in window" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
   await expect(page.locator("#splash-screen")).toHaveCount(0);

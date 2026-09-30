@@ -2,7 +2,8 @@ import type { TFunction } from "i18next";
 import { automationDefaultNames } from "../../../../i18n/automationNames";
 import type { AccountSummary, RuntimeSnapshot, WakeTask } from "../../api/types";
 import { defaultWakeInput } from "../../api/commands";
-import { orderModelIdsBySnapshot, uniqueModelIds } from "../../modelGroups";
+import { memberModelIsEnabled } from "../../components/poolMemberEditorModel";
+import { modelIdKey, orderModelIdsBySnapshot, uniqueModelIds } from "../../modelGroups";
 
 export type AutomationSelectorKind = WakeTask["accountSelector"]["kind"];
 export type AutomationTriggerKind = WakeTask["trigger"]["kind"];
@@ -52,13 +53,12 @@ export function automationTargetModels(
   selectorKind: AutomationSelectorKind,
 ) {
   const modelSets = accounts.map((account) => account.models.filter((model) =>
-    (account.allowedModels.length === 0 || account.allowedModels.some((allowed) => allowed.toLowerCase() === model.toLowerCase()))
-    && !account.excludedModels.some((excluded) => excluded.toLowerCase() === model.toLowerCase()),
+    memberModelIsEnabled(account.allowedModels, account.excludedModels, model),
   ));
   if (selectorKind !== "account_ids") return modelSets.flat();
   if (modelSets.length <= 1) return modelSets.flat();
   return modelSets[0]!.filter((model) => modelSets.slice(1).every((set) =>
-    set.some((candidate) => candidate.toLowerCase() === model.toLowerCase()),
+    set.some((candidate) => modelIdKey(candidate) === modelIdKey(model)),
   ));
 }
 
@@ -69,7 +69,7 @@ export function availableAutomationModels(
 ) {
   const targetModels = automationTargetModels(targetAccounts, selectorKind);
   return automationPoolModels(gateway).filter((model) =>
-    targetModels.some((candidate) => candidate.toLowerCase() === model.toLowerCase()),
+    targetModels.some((candidate) => modelIdKey(candidate) === modelIdKey(model)),
   );
 }
 
@@ -84,7 +84,7 @@ export function automationAccountSelectionValid(
 }
 
 export function resolveAutomationModel(availableModels: readonly string[], requestedModel: string) {
-  return availableModels.find((model) => model.toLowerCase() === requestedModel.trim().toLowerCase())
+  return availableModels.find((model) => modelIdKey(model) === modelIdKey(requestedModel))
     ?? availableModels[0]
     ?? "";
 }

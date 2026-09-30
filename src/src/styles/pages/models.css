@@ -143,12 +143,6 @@
   color: var(--relay-text);
 }
 
-.model-group-toggle:focus-visible,
-.model-rule-drag-handle:focus-visible {
-  outline: 2px solid var(--relay-accent);
-  outline-offset: 1px;
-}
-
 .model-group-toggle svg,
 .model-rule-drag-handle svg {
   width: 15px;
@@ -498,8 +492,6 @@
 
 .model-reasoning-options button:focus-visible {
   outline: 0;
-  border-color: var(--relay-focus);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-focus) 22%, transparent);
 }
 
 .model-reasoning-options button.selected {
@@ -623,8 +615,7 @@
 }
 
 .model-price-input:focus-within {
-  border-color: var(--relay-focus);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-focus) 22%, transparent);
+  border-color: var(--relay-border-strong);
 }
 
 .model-price-input:has(input[aria-invalid="true"]) {

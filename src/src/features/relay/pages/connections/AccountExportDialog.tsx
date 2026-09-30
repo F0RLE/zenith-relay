@@ -65,10 +65,28 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
     }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded");
     if (ok) onClose();
   };
-  return <Dialog className="account-export-dialog" title={t("accounts.exportTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button><Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button></>}>
+  return <Dialog
+    className="account-export-dialog"
+    title={t("accounts.exportTitle")}
+    onClose={onClose}
+    footer={
+      <>
+        <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+        <Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
+        <Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
+      </>
+    }
+  >
     <div className="relay-form account-export-form">
       <div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: accountIds.length })}</strong></div>
-      <div className="account-export-formats" data-count={formats.length} role="radiogroup" aria-label={t("accounts.exportFormat")}>{formats.map((option) => <button type="button" role="radio" data-value={option.value} aria-checked={format === option.value} key={option.value} onClick={() => setFormat(option.value)}><span>{option.label}</span>{format === option.value ? <Check aria-hidden /> : null}</button>)}</div>
+      <div className="account-export-formats" data-count={formats.length} role="radiogroup" aria-label={t("accounts.exportFormat")}>
+        {formats.map((option) => (
+          <button type="button" role="radio" data-value={option.value} aria-checked={format === option.value} key={option.value} onClick={() => setFormat(option.value)}>
+            <span>{option.label}</span>
+            {format === option.value ? <Check aria-hidden /> : null}
+          </button>
+        ))}
+      </div>
       <p className="account-export-description">{t(`accounts.exportFormats.${selectedFormat.value}`)}</p>
       {format === "zenith" ? <div className="relay-field account-export-description-field">
         <div className="account-export-description-toolbar">

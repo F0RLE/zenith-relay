@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FeedbackError } from "../src/features/relay/state/feedback";
-import { runRelayOperation } from "../src/features/relay/state/relayOperationModel";
+import { captureOperationResult, runRelayOperation } from "../src/features/relay/state/relayOperationModel";
 
 const resolvedError = (cause: unknown) => ({
   key: "errors.general",
@@ -109,5 +109,37 @@ describe("relay operation policy", () => {
     });
     expect(result).toBeFalse();
     expect(feedback).toEqual([{ kind: "error", key: "errors.general", message: "Error: refresh failed" }]);
+  });
+
+  test("keeps a returned value when the operation fails after work", async () => {
+    const saved = await captureOperationResult(async (work) => {
+      await work();
+      return true;
+    }, async () => "saved");
+    expect(saved).toEqual({ ok: true, value: "saved" });
+
+    const empty = await captureOperationResult(async (work) => {
+      await work();
+      return true;
+    }, async () => null);
+    expect(empty).toEqual({ ok: true, value: null });
+
+    const kept = await captureOperationResult(async (work) => {
+      await work();
+      return false;
+    }, async () => "saved");
+    expect(kept).toEqual({ ok: false, value: "saved" });
+
+    const missed = await captureOperationResult(async (work) => {
+      try {
+        await work();
+      } catch {
+        return false;
+      }
+      return true;
+    }, async () => {
+      throw new Error("parse");
+    });
+    expect(missed).toEqual({ ok: false, value: undefined });
   });
 });

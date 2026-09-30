@@ -92,6 +92,7 @@ describe("model metadata presentation", () => {
       summaries,
     )).toEqual(["NEW", "old", "history", "removed"]);
     expect(uniqueModelIds([" First ", "first", "Second"])).toEqual([" First ", "Second"]);
+    expect(orderModelIdsBySnapshot([" New "], summaries)).toEqual([" New "]);
   });
 
   test("sorts models outside the current snapshot by stable ID when requested", () => {

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { relayCommands } from "../api/commands";
+import { forgetAccountLoginDraft, mergeAccountLoginDraft, takeAccountLoginDraft } from "../accountLoginDraft";
 import type { OAuthCompletion, OAuthFlow, OAuthFlowEvent } from "../api/types";
 import { useRelayState } from "../state/RelayStateProvider";
+import { captureOperationResult } from "../state/relayOperationModel";
 
 export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | Promise<void>) {
   const { perform } = useRelayState();
@@ -29,17 +31,38 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
   const finish = useCallback(async (loginId: string) => {
     if (completingRef.current) return false;
     completingRef.current = true;
-    const completed: { current: OAuthCompletion | null } = { current: null };
     try {
-      const ok = await perform("oauth-complete", async () => {
-        completed.current = await relayCommands.completeOAuth(loginId);
-      }, "feedback.accountAdded");
-      if (ok && completed.current) {
+      const captured = await captureOperationResult(
+        (work) => perform("oauth-complete", work, "feedback.accountAdded"),
+        async () => {
+          const completed = await relayCommands.completeOAuth(loginId);
+          const draft = takeAccountLoginDraft(loginId);
+          const accountId = completed.account.id;
+          if (draft && accountId && (draft.email || draft.phone || draft.password || draft.totpSecret)) {
+            try {
+              const current = await relayCommands.revealLocalAccountLogin(accountId);
+              await relayCommands.updateAccountLogin({
+                accountId,
+                ...mergeAccountLoginDraft({
+                  email: current.email ?? "",
+                  phone: current.phone ?? "",
+                  password: current.password ?? "",
+                  totpSecret: current.totpSecret ?? "",
+                }, draft),
+              });
+            } catch {
+              // The account is already stored. Notes remain editable on the card.
+            }
+          }
+          return completed;
+        },
+      );
+      if (captured.ok && captured.value) {
         flowRef.current = null;
         setFlow(null);
-        await onCompleteRef.current?.(completed.current);
+        await onCompleteRef.current?.(captured.value);
       }
-      return ok;
+      return captured.ok;
     } catch {
       // A callback or late renderer failure must not leave the sign-in lock
       // held or become an unhandled promise from the native event listener.
@@ -60,23 +83,25 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     if (event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
   };
 
-  const start = useCallback(async (openBrowser = true, accountId?: string) => {
+  const start = useCallback(async (openBrowser = true, accountId?: string, proxyId?: string) => {
     if (startingRef.current) return false;
     startingRef.current = true;
-    const result: { current: OAuthFlow | null } = { current: null };
-    let ok = false;
+    let captured: { ok: boolean; value: OAuthFlow | undefined } = { ok: false, value: undefined };
     try {
-      ok = await perform("oauth-start", async () => {
-        await ensureListener();
-        result.current = await relayCommands.startOAuth(openBrowser, accountId);
-      });
+      captured = await captureOperationResult(
+        (work) => perform("oauth-start", work),
+        async () => {
+          await ensureListener();
+          return relayCommands.startOAuth(openBrowser, accountId, proxyId);
+        },
+      );
     } catch {
-      ok = false;
+      captured = { ok: false, value: undefined };
     } finally {
       startingRef.current = false;
     }
-    const started = result.current;
-    if (!ok || !started) return false;
+    const started = captured.value;
+    if (!captured.ok || !started) return false;
     const earlyEvent = latestEventRef.current;
     const next = earlyEvent?.loginId === started.loginId
       ? { ...started, status: earlyEvent.status }
@@ -92,6 +117,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     flowRef.current = null;
     setFlow(null);
     if (current) {
+      forgetAccountLoginDraft(current.loginId);
       try {
         await perform("oauth-cancel", () => relayCommands.cancelOAuth(current.loginId));
       } catch {

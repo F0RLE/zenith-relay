@@ -21,10 +21,43 @@ export function UpdateDialog({ update, installing, progress, installError, onIns
   const percent = progress?.total ? Math.min(100, Math.round(progress.downloaded / progress.total * 100)) : null;
   const date = update.date ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "long" }).format(new Date(update.date)) : null;
   const notes = prepareReleaseNotes(update.body, i18n.language, update.version);
-  return <Dialog className="update-dialog" title={t("updates.title", { version: update.version })} onClose={onClose} footer={<div className="update-actions"><Button variant="secondary" disabled={installing} onClick={onSkip}>{t("updates.skipVersion", { version: update.version })}</Button><Button variant="primary" icon={<Download aria-hidden />} busy={installing} onClick={onInstall}>{t("updates.install")}</Button></div>}>
-    <div className="update-release"><span className="update-release-icon"><Download aria-hidden /></span><div><strong>{t("updates.versionChange", { current: update.currentVersion, next: update.version })}</strong>{date ? <small>{date}</small> : null}</div></div>
-    <section className="update-notes"><h3>{t("updates.changelog")}</h3><MarkdownPreview content={notes || t("updates.noChangelog")} /></section>
-    {installing ? <div className="update-progress" role="status"><div><strong>{t("updates.downloading")}</strong><span>{percent === null ? t("updates.preparing") : `${percent}%`}</span></div><progress max={100} value={percent ?? undefined} /></div> : null}
+  return (
+    <Dialog
+      className="update-dialog"
+      title={t("updates.title", { version: update.version })}
+      onClose={onClose}
+      footer={(
+        <div className="update-actions">
+          <Button variant="secondary" disabled={installing} onClick={onSkip}>
+            {t("updates.skipVersion", { version: update.version })}
+          </Button>
+          <Button variant="primary" icon={<Download aria-hidden />} busy={installing} onClick={onInstall}>
+            {t("updates.install")}
+          </Button>
+        </div>
+      )}
+    >
+    <div className="update-release">
+      <span className="update-release-icon"><Download aria-hidden /></span>
+      <div>
+        <strong>{t("updates.versionChange", { current: update.currentVersion, next: update.version })}</strong>
+        {date ? <small>{date}</small> : null}
+      </div>
+    </div>
+    <section className="update-notes">
+      <h3>{t("updates.changelog")}</h3>
+      <MarkdownPreview content={notes || t("updates.noChangelog")} />
+    </section>
+    {installing ? (
+      <div className="update-progress" role="status">
+        <div>
+          <strong>{t("updates.downloading")}</strong>
+          <span>{percent === null ? t("updates.preparing") : `${percent}%`}</span>
+        </div>
+        <progress max={100} value={percent ?? undefined} />
+      </div>
+    ) : null}
     {installError ? <p className="warning-box" role="alert">{t(installError === "write" ? "updates.portableWriteFailed" : "updates.installFailed")}</p> : null}
-  </Dialog>;
+    </Dialog>
+  );
 }

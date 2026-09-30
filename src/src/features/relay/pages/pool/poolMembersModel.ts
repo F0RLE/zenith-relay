@@ -10,6 +10,7 @@ import {
   runtimeCandidateForMember,
 } from "../../routingOrder";
 import { comparePoolMembers, type PoolMember } from "../../poolHelpers";
+import { modelIdKey } from "../../modelGroups";
 
 export type PoolMemberStatusCounts = {
   rotation: number;
@@ -213,8 +214,8 @@ export function memberCanRoute(member: PoolMember, visibleModelIds?: readonly st
   if (member.kind === "source" && !member.secretAvailable) return false;
   if (member.kind === "account" && (!member.secretAvailable || !member.proxyAvailable)) return false;
   if (visibleModelIds == null) return true;
-  const visible = new Set(visibleModelIds.map((model) => model.toLowerCase()));
-  return member.models.some((model) => visible.has(model.toLowerCase()));
+  const visible = new Set(visibleModelIds.map((model) => modelIdKey(model)));
+  return member.models.some((model) => visible.has(modelIdKey(model)));
 }
 
 /** Missing route telemetry is not a failure of the configured members.
