@@ -1,4 +1,3 @@
-use crate::files::atomic_write;
 use crate::local_pool::{
     accounts::{
         credentials::CredentialStore,
@@ -13,11 +12,12 @@ use crate::local_pool::{
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tauri::{AppHandle, State};
-use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use zenith_relay_core::{
-    accounts::AccountExportDocument, DefaultServiceTier, ErrorOrigin, ObservedServiceTier,
-};
+use zenith_relay_core::{DefaultServiceTier, ErrorOrigin, ObservedServiceTier};
+
+mod export;
+pub(crate) use export::write_account_export;
+use export::{invalid_export_row, support_bundle, write_export};
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
@@ -38,48 +38,48 @@ pub enum RelayFolder {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageExportRow {
-    time: String,
-    success: bool,
-    model: Option<String>,
+    pub(super) time: String,
+    pub(super) success: bool,
+    pub(super) model: Option<String>,
     #[serde(default)]
-    requested_reasoning_effort: Option<String>,
+    pub(super) requested_reasoning_effort: Option<String>,
     #[serde(default)]
-    effective_reasoning_effort: Option<String>,
-    connection: String,
-    latency_ms: u64,
-    ttft_ms: Option<u64>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    cache_write_input_tokens: Option<u64>,
+    pub(super) effective_reasoning_effort: Option<String>,
+    pub(super) connection: String,
+    pub(super) latency_ms: u64,
+    pub(super) ttft_ms: Option<u64>,
+    pub(super) input_tokens: Option<u64>,
+    pub(super) cached_input_tokens: Option<u64>,
+    pub(super) cache_write_input_tokens: Option<u64>,
     #[serde(default)]
-    cache_write_ttl: Option<zenith_relay_core::CacheWriteTtl>,
-    reasoning_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    tokens: Option<u64>,
-    request_id: Option<String>,
-    http_status: Option<u16>,
-    error_category: Option<String>,
+    pub(super) cache_write_ttl: Option<zenith_relay_core::CacheWriteTtl>,
+    pub(super) reasoning_tokens: Option<u64>,
+    pub(super) output_tokens: Option<u64>,
+    pub(super) tokens: Option<u64>,
+    pub(super) request_id: Option<String>,
+    pub(super) http_status: Option<u16>,
+    pub(super) error_category: Option<String>,
     #[serde(default)]
-    error_origin: Option<ErrorOrigin>,
-    service_tier: Option<DefaultServiceTier>,
-    applied_service_tier: Option<ObservedServiceTier>,
+    pub(super) error_origin: Option<ErrorOrigin>,
+    pub(super) service_tier: Option<DefaultServiceTier>,
+    pub(super) applied_service_tier: Option<ObservedServiceTier>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SupportBundle {
-    generated_at: String,
-    app_version: &'static str,
-    platform: &'static str,
-    mode: SupportMode,
-    schema_version: Option<u32>,
-    gateway_running: bool,
-    source_count: usize,
-    account_count: usize,
-    key_count: usize,
-    automation_count: usize,
-    usage_count: usize,
-    warning_count: usize,
+pub(super) struct SupportBundle {
+    pub(super) generated_at: String,
+    pub(super) app_version: &'static str,
+    pub(super) platform: &'static str,
+    pub(super) mode: SupportMode,
+    pub(super) schema_version: Option<u32>,
+    pub(super) gateway_running: bool,
+    pub(super) source_count: usize,
+    pub(super) account_count: usize,
+    pub(super) key_count: usize,
+    pub(super) automation_count: usize,
+    pub(super) usage_count: usize,
+    pub(super) warning_count: usize,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -93,15 +93,15 @@ pub enum SupportMode {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SupportContext {
-    mode: SupportMode,
-    schema_version: Option<u32>,
-    gateway_running: bool,
-    source_count: usize,
-    account_count: usize,
-    key_count: usize,
-    automation_count: usize,
-    usage_count: usize,
-    warning_count: usize,
+    pub(super) mode: SupportMode,
+    pub(super) schema_version: Option<u32>,
+    pub(super) gateway_running: bool,
+    pub(super) source_count: usize,
+    pub(super) account_count: usize,
+    pub(super) key_count: usize,
+    pub(super) automation_count: usize,
+    pub(super) usage_count: usize,
+    pub(super) warning_count: usize,
 }
 
 #[derive(Serialize)]
@@ -236,115 +236,6 @@ pub fn preview_support_bundle(context: SupportContext) -> SupportBundlePreview {
             "raw_headers",
         ],
     }
-}
-
-fn support_bundle(context: SupportContext) -> SupportBundle {
-    SupportBundle {
-        generated_at: chrono::Utc::now().to_rfc3339(),
-        app_version: env!("CARGO_PKG_VERSION"),
-        platform: crate::platform::platform_name(),
-        mode: context.mode,
-        schema_version: context.schema_version,
-        gateway_running: context.gateway_running,
-        source_count: context.source_count,
-        account_count: context.account_count,
-        key_count: context.key_count,
-        automation_count: context.automation_count,
-        usage_count: context.usage_count,
-        warning_count: context.warning_count,
-    }
-}
-
-fn write_export(
-    prefix: &str,
-    value: &impl Serialize,
-    app: &AppHandle,
-) -> Result<Option<String>, CommandError> {
-    let filename = format!(
-        "{prefix}-{}.json",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
-    );
-    let Some(path) = app
-        .dialog()
-        .file()
-        .add_filter("JSON", &["json"])
-        .set_file_name(filename)
-        .blocking_save_file()
-    else {
-        return Ok(None);
-    };
-    let path = path.into_path().map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
-    })?;
-    let content = serde_json::to_string_pretty(value).map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::InvalidState,
-            format!("failed to serialize export: {error}"),
-        )
-    })?;
-    atomic_write(&path, &format!("{content}\n")).map_err(io_error)?;
-    Ok(Some(path.to_string_lossy().into_owned()))
-}
-
-pub(crate) fn write_account_export(
-    document: &AccountExportDocument,
-    app: &AppHandle,
-) -> Result<Option<String>, CommandError> {
-    document.validate().map_err(LocalPoolError::invalid_state)?;
-    let filename = format!(
-        "{}-{}-{}.json",
-        if document.account_count == 1 {
-            "account"
-        } else {
-            "accounts"
-        },
-        document.format.slug(),
-        chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
-    );
-    let Some(path) = app
-        .dialog()
-        .file()
-        .add_filter("JSON", &["json"])
-        .set_file_name(filename)
-        .blocking_save_file()
-    else {
-        return Ok(None);
-    };
-    let path = path.into_path().map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
-    })?;
-    atomic_write(&path, &document.content).map_err(io_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
-    }
-    Ok(Some(path.to_string_lossy().into_owned()))
-}
-
-fn invalid_export_row(row: &UsageExportRow) -> bool {
-    [&row.time, &row.connection]
-        .into_iter()
-        .any(|value| invalid_text(value))
-        || [
-            row.model.as_deref(),
-            row.request_id.as_deref(),
-            row.error_category.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(invalid_text)
-        || [
-            row.requested_reasoning_effort.as_deref(),
-            row.effective_reasoning_effort.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| zenith_relay_core::normalize_reasoning_effort(value).is_none())
-}
-
-fn invalid_text(value: &str) -> bool {
-    value.len() > MAX_EXPORT_TEXT || value.chars().any(char::is_control)
 }
 
 fn remove_transient_dir(path: impl AsRef<Path>, failed: &mut bool) {

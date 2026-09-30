@@ -21,7 +21,7 @@ pub(crate) struct AccountRefreshFence {
 impl AccountRefreshFence {
     pub(crate) fn identity(&self) -> zenith_relay_core::scheduler::refresh::RefreshIdentity {
         zenith_relay_core::scheduler::refresh::RefreshIdentity::new(
-            format!("account:{}", self.account_id),
+            zenith_relay_core::scheduler::account_member_key(&self.account_id),
             self.revision,
             self.configuration_revision,
         )

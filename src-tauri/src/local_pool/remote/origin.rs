@@ -1,6 +1,6 @@
 use std::fmt;
 use url::Url;
-use zenith_relay_core::is_loopback_url;
+use zenith_relay_core::{is_http_endpoint, is_loopback_url, url_has_userinfo};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedOrigin {
@@ -32,10 +32,10 @@ impl std::error::Error for OriginError {}
 impl PinnedOrigin {
     pub fn parse(value: &str, allow_insecure_http: bool) -> Result<Self, OriginError> {
         let mut base = Url::parse(value.trim()).map_err(|_| OriginError::Invalid)?;
-        if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
+        if !is_http_endpoint(&base) {
             return Err(OriginError::Invalid);
         }
-        if !base.username().is_empty() || base.password().is_some() {
+        if url_has_userinfo(&base) {
             return Err(OriginError::CredentialsNotAllowed);
         }
         if !matches!(base.path(), "" | "/") || base.query().is_some() || base.fragment().is_some() {

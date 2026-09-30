@@ -1,539 +1,48 @@
-use super::{
-    io_error_at, parse_config, read_optional_bytes, root_model_catalog_json, snapshot_text,
-    CONFIG_FILE, MODELS_CACHE_FILE,
-};
-use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use serde_json::{json, Value};
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::Path,
-    process::Command,
-};
+use super::MODELS_CACHE_FILE;
+use crate::local_pool::error::{LocalPoolError, Result};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
+use std::{collections::HashSet, fs, path::Path};
 use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::{
-    apply_codex_ultra_from_official_model, codex_catalog_entry_is_compatible,
-    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+    codex_catalog_entry_is_compatible, codex_model_display_name, codex_model_is_picker_eligible,
+    decode_codex_model_alias, normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
+    CODEX_RELAY_CATALOG_HASH,
 };
 
 const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
-const MAX_BUNDLED_CODEX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
-fn bundled_codex_ultra_models() -> HashMap<String, Value> {
-    // Read the installed Codex's offline catalog at refresh time, including
-    // when the CLI has been updated since Relay started.
-    let mut command = Command::new("codex");
-    command.args(["debug", "models", "--bundled"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let Ok(output) = command.output() else {
-        return HashMap::new();
-    };
-    if !output.status.success() || output.stdout.len() > MAX_BUNDLED_CODEX_CATALOG_BYTES {
-        return HashMap::new();
-    }
-    serde_json::from_slice::<Value>(&output.stdout)
-        .map(|catalog| official_codex_ultra_rows(&catalog))
-        .unwrap_or_default()
-}
+mod installed;
 
-fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Value> {
-    catalog
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let slug = entry.get("slug")?.as_str()?;
-            let has_ultra = entry
-                .get("supported_reasoning_levels")
-                .and_then(Value::as_array)?
-                .iter()
-                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"));
-            if !has_ultra || !zenith_relay_core::is_valid_model_id(slug) {
-                return None;
-            }
-            let mut ultra = json!({
-                "slug": slug,
-                "supported_reasoning_levels": [{"effort": "ultra"}]
-            });
-            for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
-                if let Some(value) = entry.get(field).and_then(Value::as_str) {
-                    ultra[field] = json!(value);
-                }
-            }
-            Some((slug.to_ascii_lowercase(), ultra))
-        })
-        .collect()
-}
+use installed::add_installed_codex_ultra;
+pub(super) use installed::bundled_codex_ultra_models;
+#[cfg(test)]
+use installed::{
+    codex_cli_file_name, newest_installed_codex_executable, official_codex_ultra_rows,
+    read_cockpit_codex_catalog, ultra_rows_from_catalogs,
+};
+#[cfg(test)]
+use std::time::SystemTime;
 
-fn add_installed_codex_ultra(entry: &mut Value, model: &str, bundled: &HashMap<String, Value>) {
-    if let Some(official) = bundled.get(&model.to_ascii_lowercase()) {
-        apply_codex_ultra_from_official_model(entry, official, model);
-    }
-}
+mod direct;
 
-pub(super) fn direct_source_model_catalog_with_manifest(
-    codex_home: &Path,
-    source_models: &[String],
-    source_manifest: Option<&Value>,
-) -> Result<Option<String>> {
-    let user_catalog_path = configured_model_catalog_path(codex_home)?;
-    let template = collect_native_catalog_template(codex_home, user_catalog_path.as_deref(), None)?;
-    // A catalog override is optional in Codex. Relay should prefer a verified
-    // native row when one is present, but must not make profile attachment
-    // depend on a cache that it deliberately invalidates after catalog changes.
-    let template = template.unwrap_or_default();
-    // `model_provider` points to this selected source. Native Codex rows are
-    // useful only as a schema template here; advertising them would send
-    // their requests to this source and produce a false model picker entry.
-    let selected_models = source_models
-        .iter()
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
-        .collect::<Vec<_>>();
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    for (index, model) in selected_models.into_iter().enumerate() {
-        let normalized = model.to_ascii_lowercase();
-        if !seen.insert(normalized) {
-            continue;
-        }
-        let entry = direct_source_catalog_entry(
-            &template,
-            source_manifest.and_then(|manifest| source_catalog_entry(manifest, model)),
-            model,
-            DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
-        );
-        if codex_catalog_entry_is_compatible(&entry) {
-            models.push(entry);
-        }
-    }
-    if models.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(normalize_model_catalog_values(models)?))
-}
+#[cfg(test)]
+pub(in crate::local_pool::profiles::codex) use direct::direct_source_model_catalog_with_manifest;
+use direct::{cached_native_catalog_models, catalog_entry_is_picker_eligible, model_slug};
+pub(in crate::local_pool::profiles::codex) use direct::{
+    direct_source_model_catalog_with_capabilities, is_native_catalog_entry,
+};
 
-pub(super) fn direct_source_model_catalog_with_capabilities(
-    codex_home: &Path,
-    source_models: &[String],
-    metadata: &ModelMetadataCatalog,
-) -> Result<Option<String>> {
-    let catalog = direct_source_model_catalog_with_manifest(codex_home, source_models, None)?;
-    let Some(catalog) = catalog else {
-        return Ok(None);
-    };
-    let mut value: Value = serde_json::from_str(&catalog)
-        .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
-    let bundled = bundled_codex_ultra_models();
-    if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
-        for model in models {
-            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
-                continue;
-            };
-            let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
-            model["display_name"] = Value::String(metadata.codex_display_name(&decoded));
-            metadata.apply_codex_capabilities(&decoded, model);
-            add_installed_codex_ultra(model, &decoded, &bundled);
-        }
-    }
-    Ok(Some(
-        serde_json::to_string(&value).map_err(LocalPoolError::invalid_state)?,
-    ))
-}
+mod managed;
 
-fn is_direct_source_model(model: &str) -> bool {
-    !model.is_empty()
-        && model.len() <= 256
-        && !model.chars().any(char::is_control)
-        && !model.to_ascii_lowercase().starts_with("zenith/")
-}
-
-pub(super) fn is_native_catalog_entry(entry: &Value) -> bool {
-    entry
-        .get("slug")
-        .and_then(Value::as_str)
-        .is_some_and(|slug| {
-            !slug.to_ascii_lowercase().starts_with("zenith/")
-                && entry
-                    .get("comp_hash")
-                    .and_then(Value::as_str)
-                    .is_none_or(|hash| hash != CODEX_RELAY_CATALOG_HASH)
-        })
-}
-
-fn cached_native_catalog_models(codex_home: &Path) -> Vec<Value> {
-    let Ok(content) = fs::read_to_string(codex_home.join(MODELS_CACHE_FILE)) else {
-        return Vec::new();
-    };
-    let Ok(cache) = serde_json::from_str::<Value>(&content) else {
-        return Vec::new();
-    };
-    cache
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|entry| is_native_catalog_entry(entry))
-        .filter(|entry| codex_catalog_entry_is_compatible(entry))
-        .cloned()
-        .collect()
-}
-
-fn model_slug(entry: &Value) -> Option<&str> {
-    entry.get("slug").and_then(Value::as_str)
-}
-
-fn catalog_entry_is_picker_eligible(entry: &Value) -> bool {
-    model_slug(entry).is_some_and(|slug| {
-        let model = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
-        codex_model_is_picker_eligible(&model)
-    })
-}
-
-fn direct_source_catalog_entry(
-    template: &serde_json::Map<String, Value>,
-    source_entry: Option<&serde_json::Map<String, Value>>,
-    model: &str,
-    priority: u64,
-) -> Value {
-    let mut entry = source_entry
-        .and_then(|source_entry| {
-            normalize_upstream_codex_catalog_entry(source_entry, model, priority, None)
-        })
-        .unwrap_or_else(|| routed_codex_catalog_entry(Some(template), model, priority, None));
-    entry["slug"] = Value::String(model.to_string());
-    entry["display_name"] = Value::String(codex_model_display_name(model));
-    entry["description"] = Value::String("Available through this API connection.".into());
-    entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
-    entry
-}
-
-fn source_catalog_entry<'a>(
-    manifest: &'a Value,
-    model: &str,
-) -> Option<&'a serde_json::Map<String, Value>> {
-    manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-        .find(|entry| {
-            entry
-                .get("slug")
-                .and_then(Value::as_str)
-                .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
-        })
-        .or_else(|| {
-            manifest
-                .get("data")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-                .find(|entry| {
-                    entry
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id.eq_ignore_ascii_case(model))
-                })
-        })
-}
-
-fn collect_native_catalog_template(
-    codex_home: &Path,
-    user_catalog_path: Option<&str>,
-    managed_catalog: Option<&[u8]>,
-) -> Result<Option<serde_json::Map<String, Value>>> {
-    let mut candidates = Vec::new();
-    if let Some(path) = user_catalog_path {
-        candidates.extend(read_catalog_file_models(codex_home, path)?);
-    }
-    candidates.extend(cached_native_catalog_models(codex_home));
-    let managed_models = match managed_catalog {
-        Some(content) => read_catalog_values(content, false)?,
-        None => Vec::new(),
-    };
-    // Attaching Relay invalidates Codex's live cache after writing a verified
-    // catalog. On a later refresh, the current managed catalog is therefore
-    // the only remaining compatible schema template. It is never returned as
-    // a native model: routed_codex_catalog_entry resets capability fields for
-    // a plain upstream /v1/models row before it is advertised again.
-    let managed_template = managed_models
-        .iter()
-        .filter(|entry| {
-            codex_catalog_entry_is_compatible(entry) && catalog_entry_is_picker_eligible(entry)
-        })
-        .find_map(Value::as_object)
-        .cloned();
-    candidates.extend(managed_models);
-
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    for candidate in candidates {
-        if !is_native_catalog_entry(&candidate) || !codex_catalog_entry_is_compatible(&candidate) {
-            continue;
-        }
-        let Some(slug) = model_slug(&candidate) else {
-            continue;
-        };
-        if seen.insert(slug.to_ascii_lowercase()) {
-            models.push(candidate);
-        }
-    }
-    let picker_template = |entry: &&Value| {
-        catalog_entry_is_picker_eligible(entry)
-            && entry.get("supported_in_api") != Some(&Value::Bool(false))
-    };
-    // Prefer an actual native entry over a namespaced user provider row. The
-    // latter remains a useful schema fallback when it is the only catalog
-    // available, but must not override native client capabilities by default.
-    let template = models
-        .iter()
-        .filter(|entry| picker_template(entry))
-        .filter(|entry| model_slug(entry).is_some_and(|slug| !slug.contains('/')))
-        .find_map(Value::as_object)
-        .cloned()
-        .or_else(|| {
-            models
-                .iter()
-                .filter(|entry| picker_template(entry))
-                .find_map(Value::as_object)
-                .cloned()
-        })
-        .or(managed_template);
-    Ok(template)
-}
-
-fn configured_model_catalog_path(codex_home: &Path) -> Result<Option<String>> {
-    let config_path = codex_home.join(CONFIG_FILE);
-    let config = read_optional_bytes(&config_path)?;
-    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-    Ok(root_model_catalog_json(&document))
-}
-
-fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<Vec<Value>> {
-    let configured_path = Path::new(configured_path);
-    let path = if configured_path.is_absolute() {
-        configured_path.to_path_buf()
-    } else {
-        codex_home.join(configured_path)
-    };
-    let content = fs::read(&path).map_err(|error| io_error_at(&path, error))?;
-    read_catalog_values(&content, false)
-}
-
-pub(super) fn read_catalog_values(content: &[u8], require_compatible: bool) -> Result<Vec<Value>> {
-    if content.len() > MAX_MODEL_CATALOG_BYTES {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT model catalog exceeds 512 KiB",
-        ));
-    }
-    let value: Value = serde_json::from_slice(content).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT model catalog is invalid")
-    })?;
-    let models = value
-        .get("models")
-        .and_then(Value::as_array)
-        .filter(|models| !models.is_empty() && models.len() <= 4_096)
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "ChatGPT model catalog has no usable models",
-            )
-        })?;
-    let mut output = Vec::new();
-    for model in models {
-        if require_compatible && !codex_catalog_entry_is_compatible(model) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "ChatGPT model catalog contains incompatible model entries",
-            ));
-        }
-        if !require_compatible || codex_catalog_entry_is_compatible(model) {
-            output.push(model.clone());
-        }
-    }
-    Ok(output)
-}
-
-fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
-    if models.is_empty() || models.len() > 4_096 {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT model catalog has no usable models",
-        ));
-    }
-    let mut seen = HashSet::new();
-    let mut models = models
-        .into_iter()
-        .filter(codex_catalog_entry_is_compatible)
-        .filter(|model| {
-            model_slug(model).is_some_and(|slug| seen.insert(slug.to_ascii_lowercase()))
-        })
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT model catalog has no compatible models",
-        ));
-    }
-    normalize_codex_catalog_priorities(&mut models);
-    serde_json::to_string_pretty(&json!({ "models": models }))
-        .map(|content| format!("{content}\n"))
-        .map_err(LocalPoolError::invalid_state)
-}
-
-pub(super) fn build_managed_model_catalog(
-    codex_home: &Path,
-    user_catalog_path: Option<&str>,
-    current_managed_catalog: Option<&[u8]>,
-    relay_catalog_json: &str,
-) -> Result<String> {
-    let bundled = bundled_codex_ultra_models();
-    build_managed_model_catalog_with_bundled(
-        codex_home,
-        user_catalog_path,
-        current_managed_catalog,
-        relay_catalog_json,
-        &bundled,
-    )
-}
-
-fn build_managed_model_catalog_with_bundled(
-    codex_home: &Path,
-    user_catalog_path: Option<&str>,
-    current_managed_catalog: Option<&[u8]>,
-    relay_catalog_json: &str,
-    bundled: &HashMap<String, Value>,
-) -> Result<String> {
-    let template =
-        collect_native_catalog_template(codex_home, user_catalog_path, current_managed_catalog)?;
-    let template = template.unwrap_or_default();
-    let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
-    // The managed provider is the Relay endpoint, so the catalog must contain
-    // only models that its live pool exposes. Native/user catalog rows remain
-    // untouched in their original profile and only supply a compatible template.
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    let mut accepted = 0usize;
-    for (index, relay_model) in relay_models.iter().enumerate() {
-        let Some(slug) = model_slug(relay_model) else {
-            continue;
-        };
-        // Direct-source catalogs keep the provider's bare slug for Codex, so
-        // the alias prefix alone cannot distinguish them from native rows.
-        // The Relay catalog marker is the ownership boundary here.
-        let relay_managed = slug.to_ascii_lowercase().starts_with("zenith/")
-            || relay_model
-                .get("comp_hash")
-                .and_then(Value::as_str)
-                .is_some_and(|hash| hash == CODEX_RELAY_CATALOG_HASH);
-        let model = if slug.to_ascii_lowercase().starts_with("zenith/") {
-            let Some(model) = decode_codex_model_alias(slug) else {
-                continue;
-            };
-            model
-        } else {
-            slug.to_string()
-        };
-        if !codex_model_is_picker_eligible(&model) {
-            continue;
-        }
-        accepted += 1;
-        let context_window = relay_model
-            .get("context_window")
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0);
-        let priority = relay_model
-            .get("priority")
-            .and_then(Value::as_i64)
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64);
-        // A Relay-owned row may have come from a real upstream Codex catalog.
-        // Preserve its strictly validated capability data (including arbitrary
-        // reasoning levels) instead of inheriting anything from the native
-        // template. Bare rows without the Relay marker are native rows.
-        let mut entry = relay_model
-            .as_object()
-            .and_then(|upstream| {
-                if codex_catalog_entry_is_compatible(relay_model) {
-                    // The gateway already projected models.dev capabilities.
-                    // Re-normalizing would reintroduce legacy context defaults
-                    // and discard output modalities on an unknown model.
-                    Some(relay_model.clone())
-                } else if relay_managed {
-                    normalize_upstream_codex_catalog_entry(
-                        upstream,
-                        &model,
-                        priority,
-                        context_window,
-                    )
-                } else {
-                    normalize_native_codex_catalog_entry(upstream, &model, priority, context_window)
-                }
-            })
-            .unwrap_or_else(|| {
-                if relay_managed {
-                    routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
-                } else {
-                    // A malformed native row must not fall back to Relay's
-                    // routed context policy. Codex owns native context, so a
-                    // missing field stays missing until the native catalog is
-                    // available again.
-                    let mut fallback =
-                        routed_codex_catalog_entry(Some(&template), &model, priority, None);
-                    if let Some(object) = fallback.as_object_mut() {
-                        for key in [
-                            "context_window",
-                            "max_context_window",
-                            "auto_compact_token_limit",
-                            "effective_context_window_percent",
-                        ] {
-                            object.remove(key);
-                        }
-                        object.insert("slug".into(), Value::String(slug.to_string()));
-                    }
-                    fallback
-                }
-            });
-        if !slug.to_ascii_lowercase().starts_with("zenith/") {
-            entry["slug"] = Value::String(slug.to_string());
-        }
-        entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
-        if let Some(display_name) = relay_model.get("display_name").and_then(Value::as_str) {
-            entry["display_name"] = Value::String(display_name.to_string());
-        }
-        if let Some(description) = relay_model.get("description").and_then(Value::as_str) {
-            entry["description"] = Value::String(description.to_string());
-        }
-        if relay_managed {
-            add_installed_codex_ultra(&mut entry, &model, bundled);
-        }
-        if let Some(slug) = model_slug(&entry) {
-            if seen.insert(slug.to_ascii_lowercase()) {
-                models.push(entry);
-            }
-        }
-    }
-    if accepted == 0 {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "pool has no compatible text models",
-        ));
-    }
-    normalize_model_catalog_values(models)
-}
+#[cfg(test)]
+pub(super) use managed::build_managed_model_catalog_with_bundled;
+pub(super) use managed::{build_managed_model_catalog, read_catalog_values};
+use managed::{
+    collect_native_catalog_template, configured_model_catalog_path, normalize_model_catalog_values,
+};
 
 #[cfg(test)]
 mod ultra_tests {
@@ -587,5 +96,118 @@ mod ultra_tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn managed_catalog_adds_gpt_6_sol_ultra_without_a_child_effort() {
+        let official = official_codex_ultra_rows(&json!({"models": [{
+            "slug": "gpt-6-sol",
+            "supported_reasoning_levels": [{"effort": "ultra"}],
+            "multi_agent_version": "v2",
+            "base_instructions": "not a Relay instruction"
+        }]}));
+        let slug = zenith_relay_core::codex_model_alias("gpt-6-sol");
+        let mut relay = routed_codex_catalog_entry(None, "gpt-6-sol", 1_000, None);
+        relay["slug"] = json!(slug);
+        relay["supported_reasoning_levels"] = json!([
+            {"effort": "high", "description": "high"},
+            {"effort": "max", "description": "max"}
+        ]);
+        let mut grok = routed_codex_catalog_entry(None, "grok-4.7", 1_001, None);
+        grok["supported_reasoning_levels"] = json!([
+            {"effort": "high", "description": "high"},
+            {"effort": "max", "description": "max"}
+        ]);
+        let home =
+            std::env::temp_dir().join(format!("relay-codex-ultra-sol-{}", std::process::id()));
+        let managed = build_managed_model_catalog_with_bundled(
+            &home,
+            None,
+            None,
+            &json!({"models": [relay, grok]}).to_string(),
+            &official,
+        )
+        .unwrap();
+        let managed: Value = serde_json::from_str(&managed).unwrap();
+        let sol = &managed["models"][0];
+        assert_eq!(sol["supported_reasoning_levels"][2]["effort"], "ultra");
+        assert_eq!(
+            sol["supported_reasoning_levels"][2]["description"],
+            "Ultra (agents)"
+        );
+        assert_eq!(sol["multi_agent_version"], "v2");
+        assert!(sol.get("multi_agent_reasoning_effort").is_none());
+        assert_ne!(sol["base_instructions"], "not a Relay instruction");
+        assert!(managed["models"][1]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|level| level["effort"] != "ultra"));
+    }
+
+    #[test]
+    fn cli_catalog_wins_and_a_failed_cli_can_use_the_cockpit_file() {
+        let cli = json!({"models": [{"slug": "gpt-6-sol", "supported_reasoning_levels": [
+            {"effort": "max"}
+        ]}]});
+        let cockpit = json!({"models": [{
+            "slug": "gpt-6-sol",
+            "supported_reasoning_levels": [{"effort": "ultra"}],
+            "multi_agent_version": "v2"
+        }]});
+        assert!(ultra_rows_from_catalogs(Some(&cli), Some(&cockpit)).is_empty());
+        let rows = ultra_rows_from_catalogs(None, Some(&cockpit));
+        assert_eq!(rows["gpt-6-sol"]["multi_agent_version"], "v2");
+        assert!(rows["gpt-6-sol"].get("base_instructions").is_none());
+
+        let root = std::env::temp_dir().join(format!(
+            "relay-codex-bin-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let older = root.join("older");
+        let newer = root.join("newer");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        let older_cli = older.join(codex_cli_file_name());
+        let newer_cli = newer.join(codex_cli_file_name());
+        fs::write(&older_cli, b"old").unwrap();
+        fs::write(&newer_cli, b"new").unwrap();
+        fs::write(root.join(codex_cli_file_name()), b"not a version directory").unwrap();
+        fs::write(newer.join("codex.cmd"), b"ignore").unwrap();
+        let now = SystemTime::now();
+        fs::File::options()
+            .write(true)
+            .open(&older_cli)
+            .unwrap()
+            .set_modified(now - std::time::Duration::from_secs(120))
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&newer_cli)
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
+        assert_eq!(
+            newest_installed_codex_executable(&root).as_deref(),
+            Some(newer_cli.as_path())
+        );
+
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("cockpit-model-catalog.json"),
+            serde_json::to_vec(&cockpit).unwrap(),
+        )
+        .unwrap();
+        let from_file = read_cockpit_codex_catalog(&home).unwrap();
+        assert_eq!(
+            official_codex_ultra_rows(&from_file)["gpt-6-sol"]["multi_agent_version"],
+            "v2"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

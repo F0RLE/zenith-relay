@@ -1,0 +1,107 @@
+use super::super::error::{CredentialError, CredentialErrorCode};
+use super::super::wire::{CredentialWire, CREDENTIAL_VERSION, MAX_SECRET_JSON_BYTES};
+use super::StoredCodexCredentials;
+use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
+
+impl StoredCodexCredentials {
+    pub(in crate::local_pool::accounts::credentials) fn to_secret_json(
+        &self,
+    ) -> Result<String, CredentialError> {
+        let wire = CredentialWire::from(self);
+        let value = serde_json::to_string(&wire).map_err(|_| {
+            CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "failed to encode stored ChatGPT credentials",
+            )
+        })?;
+        if value.len() > MAX_SECRET_JSON_BYTES {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "stored ChatGPT credentials exceed the size limit",
+            ));
+        }
+        Ok(value)
+    }
+
+    pub(in crate::local_pool::accounts::credentials) fn from_secret_json(
+        value: &str,
+    ) -> Result<Self, CredentialError> {
+        if value.is_empty() || value.len() > MAX_SECRET_JSON_BYTES {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "stored ChatGPT credentials are invalid",
+            ));
+        }
+        let wire: CredentialWire = serde_json::from_str(value).map_err(|_| {
+            CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "stored ChatGPT credentials are invalid",
+            )
+        })?;
+        if wire.version != CREDENTIAL_VERSION {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidVersion,
+                "stored ChatGPT credential version is unsupported",
+            ));
+        }
+        let agent_identity = wire
+            .agent_identity
+            .map(|agent| match agent.task_id {
+                Some(task_id) => {
+                    AgentIdentityCredential::new(agent.private_key, agent.runtime_id, task_id)
+                }
+                None => AgentIdentityCredential::unregistered(agent.private_key, agent.runtime_id),
+            })
+            .transpose()
+            .map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored Agent Identity credential is invalid",
+                )
+            })?;
+        let credentials = if wire.access_token.is_empty() {
+            Self::new_agent_identity(
+                &wire.local_account_id,
+                agent_identity.ok_or_else(|| {
+                    CredentialError::new(
+                        CredentialErrorCode::InvalidSecret,
+                        "stored ChatGPT credential has no authorization method",
+                    )
+                })?,
+                wire.issued_at_ms,
+                wire.generation,
+                wire.email,
+                wire.provider_account_id,
+                wire.provider_user_id,
+                wire.organization_id,
+                wire.plan_type,
+                wire.account_is_fedramp,
+            )?
+        } else {
+            let credentials = Self::new(
+                &wire.local_account_id,
+                wire.access_token,
+                wire.refresh_token,
+                wire.id_token,
+                wire.expires_at_ms,
+                wire.issued_at_ms,
+                wire.generation,
+                wire.email,
+                wire.provider_account_id,
+                wire.provider_user_id,
+                wire.organization_id,
+                wire.plan_type,
+                wire.account_is_fedramp,
+            )?;
+            match agent_identity {
+                Some(agent_identity) => credentials.with_agent_identity(agent_identity),
+                None => credentials,
+            }
+        };
+        credentials
+            .with_proxy_route(wire.proxy_url, wire.bypass_common_proxy)
+            .map(|credentials| {
+                credentials.apply_stored_login_material(wire.phone, wire.password, wire.totp_secret)
+            })
+    }
+}

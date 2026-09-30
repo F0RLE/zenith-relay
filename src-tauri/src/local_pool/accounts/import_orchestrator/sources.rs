@@ -1,19 +1,24 @@
-use super::{ImportItemError, ItemResult, DEFAULT_OPENAI_SOURCE_URL};
-use crate::local_pool::commands::sync_records_or_rollback;
-use crate::local_pool::models::{LocalGatewayKeyRecord, ProviderSourceRecord};
+mod identity;
+mod persist;
+mod record;
+
+#[cfg(test)]
+pub(crate) use identity::source_identity_key;
+pub(crate) use identity::{
+    find_existing_source, imported_source_base_url, imported_source_wire_api,
+};
+pub(crate) use persist::persist_imported_source;
+pub(crate) use record::imported_source_record;
+
+use super::{ImportItemError, ItemResult};
+use crate::local_pool::models::ProviderSourceRecord;
 use crate::local_pool::state::DesktopState;
-use crate::local_pool::store::secret_store;
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::accounts::ParsedImportItem;
 use zenith_relay_core::error_codes;
-use zenith_relay_core::{
-    discover_source_models_and_protocol_bindings, ApiModelPriceOverride, ProviderSource,
-    SourceProtocolBinding, WireApi,
-};
+use zenith_relay_core::{discover_source_models_and_protocol_bindings, ProviderSource};
 
 pub(crate) async fn import_source_item(
     state: &DesktopState,
@@ -64,6 +69,10 @@ pub(crate) async fn import_source_item(
         ImportItemError::new(error_codes::SOURCE_INVALID, "imported source is invalid")
     })?;
     let discover_models = discover_models || runtime_source.models.is_empty();
+    let mut protocol_config = existing
+        .as_ref()
+        .map(|source| source.protocol_config.clone())
+        .unwrap_or_default();
     let (detected_model_prices, protocol_bindings) = if discover_models {
         let discovery = discover_source_models_and_protocol_bindings(&runtime_source, &[])
             .await
@@ -73,11 +82,16 @@ pub(crate) async fn import_source_item(
                     "source model discovery failed",
                 )
             })?;
-        runtime_source.models = discovery.models;
-        if let Some(base_url) = discovery.resolved_base_url {
-            runtime_source.base_url = base_url;
-        }
-        (discovery.detected_model_prices, discovery.protocol_bindings)
+        let mut protocol_bindings = Vec::new();
+        let mut detected_model_prices = BTreeMap::new();
+        discovery.apply_catalog(
+            &mut runtime_source.base_url,
+            &mut runtime_source.models,
+            &mut protocol_bindings,
+            &mut protocol_config,
+            &mut detected_model_prices,
+        );
+        (detected_model_prices, protocol_bindings)
     } else if !runtime_source.models.is_empty() {
         (
             existing
@@ -100,6 +114,7 @@ pub(crate) async fn import_source_item(
         runtime_source,
         secret_ref,
         existing.as_ref(),
+        protocol_config,
         protocol_bindings,
         detected_model_prices,
         discover_models.then(|| Utc::now().to_rfc3339()),
@@ -114,287 +129,4 @@ pub(crate) async fn import_source_item(
     persist_imported_source(state, &record, &api_key, existing.as_ref()).await?;
     crate::diagnostics::breadcrumb("source-import", "item_completed", &[]);
     Ok(record)
-}
-
-pub(crate) fn imported_source_record(
-    item: &ParsedImportItem,
-    runtime_source: ProviderSource,
-    secret_ref: String,
-    existing: Option<&ProviderSourceRecord>,
-    protocol_bindings: Vec<SourceProtocolBinding>,
-    detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
-    tested_at: Option<String>,
-) -> ProviderSourceRecord {
-    let tested = tested_at.is_some();
-    let mut record = ProviderSourceRecord {
-        id: runtime_source.id,
-        name: runtime_source.name,
-        enabled: existing.as_ref().is_none_or(|source| source.enabled),
-        in_pool: existing.as_ref().is_some_and(|source| source.in_pool),
-        draining: existing.as_ref().is_some_and(|source| source.draining),
-        base_url: runtime_source.base_url,
-        secret_ref,
-        pricing_provider: existing
-            .as_ref()
-            .and_then(|source| source.pricing_provider.clone()),
-        official_provider_family: existing
-            .as_ref()
-            .and_then(|source| source.official_provider_family.clone()),
-        wire_api: runtime_source.wire_api,
-        protocol_config: existing
-            .map_or_else(Default::default, |source| source.protocol_config.clone()),
-        protocol_bindings,
-        models: runtime_source.models,
-        allowed_models: existing
-            .as_ref()
-            .map(|source| source.allowed_models.clone())
-            .unwrap_or_default(),
-        excluded_models: existing
-            .as_ref()
-            .map(|source| source.excluded_models.clone())
-            .unwrap_or_default(),
-        priority: existing
-            .as_ref()
-            .map(|source| source.priority)
-            .or(item.priority)
-            .unwrap_or_default(),
-        weight: existing.as_ref().map_or(1, |source| source.weight),
-        recovery_delay_seconds: existing
-            .as_ref()
-            .map_or(0, |source| source.recovery_delay_seconds),
-        model_price_overrides: existing
-            .as_ref()
-            .map(|source| source.model_price_overrides.clone())
-            .unwrap_or_default(),
-        detected_model_prices,
-        last_used_at: existing
-            .as_ref()
-            .and_then(|source| source.last_used_at.clone()),
-        last_test_at: tested_at.or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|source| source.last_test_at.clone())
-        }),
-        last_test_status: tested.then(|| "ok".to_string()).or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|source| source.last_test_status.clone())
-        }),
-        last_error: if tested {
-            None
-        } else {
-            existing
-                .as_ref()
-                .and_then(|source| source.last_error.clone())
-        },
-    };
-    record.normalize();
-    record
-}
-
-pub(crate) fn imported_source_base_url(item: &ParsedImportItem) -> ItemResult<String> {
-    if item.base_url_supplied && item.base_url.is_none() {
-        return Err(ImportItemError::new(
-            error_codes::SOURCE_BASE_URL_INVALID,
-            "source base URL is invalid",
-        ));
-    }
-    canonical_source_base_url(
-        item.base_url
-            .as_deref()
-            .unwrap_or(DEFAULT_OPENAI_SOURCE_URL),
-    )
-}
-
-pub(crate) fn imported_source_wire_api(
-    item: &ParsedImportItem,
-    existing: Option<&ProviderSourceRecord>,
-) -> ItemResult<WireApi> {
-    if item.protocol_supplied && item.protocol.is_none() {
-        return Err(ImportItemError::new(
-            error_codes::SOURCE_PROTOCOL_INVALID,
-            "source protocol is invalid",
-        ));
-    }
-    match item.protocol.as_deref() {
-        Some("responses") => Ok(WireApi::Responses),
-        Some("chat_completions") => Ok(WireApi::ChatCompletions),
-        None => Ok(existing.map_or(WireApi::Responses, |source| source.wire_api)),
-        _ => Err(ImportItemError::new(
-            error_codes::SOURCE_PROTOCOL_INVALID,
-            "source protocol is invalid",
-        )),
-    }
-}
-
-pub(crate) fn canonical_source_base_url(value: &str) -> ItemResult<String> {
-    let mut url = Url::parse(value.trim()).map_err(|_| {
-        ImportItemError::new(
-            error_codes::SOURCE_BASE_URL_INVALID,
-            "source base URL is invalid",
-        )
-    })?;
-    let normalized_path = url.path().trim_end_matches('/').to_string();
-    url.set_path(if normalized_path.is_empty() {
-        "/"
-    } else {
-        &normalized_path
-    });
-    Ok(url.to_string().trim_end_matches('/').to_string())
-}
-
-pub(crate) fn source_identity_key(base_url: &str, api_key: &str) -> ItemResult<String> {
-    let base_url = canonical_source_base_url(base_url)?;
-    let secret_hash = hex::encode(Sha256::digest(api_key.as_bytes()));
-    Ok(hex::encode(Sha256::digest(
-        format!("source\0{base_url}\0{secret_hash}").as_bytes(),
-    )))
-}
-
-pub(crate) fn find_existing_source(
-    state: &DesktopState,
-    base_url: &str,
-    api_key: &str,
-) -> ItemResult<Option<ProviderSourceRecord>> {
-    let target = source_identity_key(base_url, api_key)?;
-    let sources = state
-        .store()
-        .map_err(|_| {
-            ImportItemError::new(
-                error_codes::SOURCE_STORE_FAILED,
-                "source store is unavailable",
-            )
-        })?
-        .sources()
-        .to_vec();
-    let mut matching = Vec::new();
-    for source in sources {
-        let Some(secret) = secret_store::load(&source.secret_ref).map_err(|_| {
-            ImportItemError::new(
-                error_codes::SOURCE_SECRET_STORE_FAILED,
-                "source secret store is unavailable",
-            )
-        })?
-        else {
-            continue;
-        };
-        if source_identity_key(&source.base_url, &secret)? == target {
-            matching.push(source);
-        }
-    }
-    match matching.len() {
-        0 => Ok(None),
-        1 => Ok(matching.pop()),
-        _ => Err(ImportItemError::recovery(
-            "multiple local sources have the same credential identity",
-        )),
-    }
-}
-
-pub(crate) async fn persist_imported_source(
-    state: &DesktopState,
-    record: &ProviderSourceRecord,
-    api_key: &str,
-    existing: Option<&ProviderSourceRecord>,
-) -> ItemResult<()> {
-    crate::diagnostics::breadcrumb(
-        "source-import",
-        "persist_started",
-        &[("in_pool", record.in_pool.to_string())],
-    );
-    let (old_sources, old_keys) = current_source_records(state)?;
-    let old_secret = existing
-        .map(|source| {
-            secret_store::load(&source.secret_ref).map_err(|_| {
-                ImportItemError::new(
-                    error_codes::SOURCE_SECRET_STORE_FAILED,
-                    "source secret store is unavailable",
-                )
-            })
-        })
-        .transpose()?
-        .flatten();
-    state
-        .store()
-        .and_then(|mut store| store.invalidate_source_refresh(&record.id))
-        .map_err(|_| {
-            ImportItemError::new(
-                error_codes::SOURCE_STORE_FAILED,
-                "source revision could not be saved",
-            )
-        })?;
-    secret_store::save(&record.secret_ref, api_key).map_err(|_| {
-        ImportItemError::new(
-            error_codes::SOURCE_SECRET_STORE_FAILED,
-            "failed to save source credentials",
-        )
-    })?;
-    if state
-        .store()
-        .map_err(|_| {
-            ImportItemError::new(
-                error_codes::SOURCE_STORE_FAILED,
-                "source store is unavailable",
-            )
-        })?
-        .upsert_source(record.clone())
-        .is_err()
-    {
-        restore_source_secret(&record.secret_ref, old_secret.as_deref())?;
-        return Err(ImportItemError::new(
-            error_codes::SOURCE_STORE_FAILED,
-            "failed to save source record",
-        ));
-    }
-    let runtime_sync_required = record.in_pool || existing.is_some_and(|source| source.in_pool);
-    if runtime_sync_required {
-        crate::diagnostics::breadcrumb("source-import", "runtime_sync_started", &[]);
-        if sync_records_or_rollback(state, old_sources, old_keys)
-            .await
-            .is_err()
-        {
-            let store = state.store().map_err(|_| {
-                ImportItemError::new(
-                    error_codes::SOURCE_STORE_FAILED,
-                    "source store is unavailable",
-                )
-            })?;
-            let rolled_back = match existing {
-                Some(previous) => store.source(&record.id) == Some(previous),
-                None => store.source(&record.id).is_none(),
-            };
-            drop(store);
-            if rolled_back {
-                restore_source_secret(&record.secret_ref, old_secret.as_deref())?;
-            }
-            return Err(ImportItemError::new(
-                error_codes::GATEWAY_SYNC_FAILED,
-                "failed to apply source to the local gateway",
-            ));
-        }
-        crate::diagnostics::breadcrumb("source-import", "runtime_sync_completed", &[]);
-    } else {
-        crate::diagnostics::breadcrumb("source-import", "runtime_sync_skipped", &[]);
-    }
-    Ok(())
-}
-
-pub(crate) fn current_source_records(
-    state: &DesktopState,
-) -> ItemResult<(Vec<ProviderSourceRecord>, Vec<LocalGatewayKeyRecord>)> {
-    let store = state.store().map_err(|_| {
-        ImportItemError::new(
-            error_codes::SOURCE_STORE_FAILED,
-            "source store is unavailable",
-        )
-    })?;
-    Ok((store.sources().to_vec(), store.keys().to_vec()))
-}
-
-pub(crate) fn restore_source_secret(secret_ref: &str, previous: Option<&str>) -> ItemResult<()> {
-    match previous {
-        Some(secret) => secret_store::save(secret_ref, secret),
-        None => secret_store::delete(secret_ref),
-    }
-    .map_err(|_| ImportItemError::recovery("failed to restore previous source credentials"))
 }

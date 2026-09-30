@@ -6,167 +6,8 @@ use super::{
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::atomic::Ordering;
 
-#[derive(Clone, Default)]
-struct UsageAggregate {
-    candidate_kind: String,
-    candidate_id: String,
-    model: String,
-    input_tokens: i64,
-    input_samples: i64,
-    cached_input_tokens: i64,
-    cached_input_samples: i64,
-    cache_write_input_tokens: i64,
-    cache_write_input_samples: i64,
-    cache_write_5m_tokens: i64,
-    cache_write_1h_tokens: i64,
-    unknown_cache_write_tokens: i64,
-    output_tokens: i64,
-    output_samples: i64,
-    total_tokens: i64,
-    total_samples: i64,
-}
-
-impl UsageAggregate {
-    fn from_event(event: &UsageEvent) -> Self {
-        let cache_write_ttl = event
-            .cache_write_ttl
-            .as_deref()
-            .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls);
-        Self::from_values(
-            if event.account_id.is_some() {
-                "account"
-            } else {
-                "source"
-            },
-            event
-                .account_id
-                .as_deref()
-                .unwrap_or(event.source_id.as_str()),
-            event
-                .resolved_model
-                .as_deref()
-                .or(event.requested_model.as_deref())
-                .unwrap_or_default(),
-            event.input_tokens,
-            event.cached_input_tokens,
-            event.cache_write_input_tokens,
-            cache_write_ttl.as_deref(),
-            event.output_tokens,
-            event.total_tokens,
-        )
-    }
-
-    fn from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Self> {
-        let candidate_kind: String = row.get(offset)?;
-        let candidate_id: String = row.get(offset + 1)?;
-        let model: String = row.get(offset + 2)?;
-        let input_tokens: Option<i64> = row.get(offset + 3)?;
-        let cached_input_tokens: Option<i64> = row.get(offset + 4)?;
-        let cache_write_input_tokens: Option<i64> = row.get(offset + 5)?;
-        let cache_write_ttl: Option<String> = row.get(offset + 6)?;
-        let output_tokens: Option<i64> = row.get(offset + 7)?;
-        let total_tokens: Option<i64> = row.get(offset + 8)?;
-        Ok(Self::from_values(
-            &candidate_kind,
-            &candidate_id,
-            &model,
-            input_tokens.map(|value| value.max(0) as u64),
-            cached_input_tokens.map(|value| value.max(0) as u64),
-            cache_write_input_tokens.map(|value| value.max(0) as u64),
-            cache_write_ttl.as_deref(),
-            output_tokens.map(|value| value.max(0) as u64),
-            total_tokens.map(|value| value.max(0) as u64),
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn from_values(
-        candidate_kind: &str,
-        candidate_id: &str,
-        model: &str,
-        input_tokens: Option<u64>,
-        cached_input_tokens: Option<u64>,
-        cache_write_input_tokens: Option<u64>,
-        cache_write_ttl: Option<&str>,
-        output_tokens: Option<u64>,
-        total_tokens: Option<u64>,
-    ) -> Self {
-        let mut aggregate = Self {
-            candidate_kind: candidate_kind.to_string(),
-            candidate_id: candidate_id.to_string(),
-            model: model.to_string(),
-            input_tokens: input_tokens.map(sql_u64).unwrap_or_default(),
-            input_samples: i64::from(input_tokens.is_some()),
-            cached_input_tokens: cached_input_tokens.map(sql_u64).unwrap_or_default(),
-            cached_input_samples: i64::from(cached_input_tokens.is_some()),
-            cache_write_input_tokens: cache_write_input_tokens.map(sql_u64).unwrap_or_default(),
-            cache_write_input_samples: i64::from(cache_write_input_tokens.is_some()),
-            output_tokens: output_tokens.map(sql_u64).unwrap_or_default(),
-            output_samples: i64::from(output_tokens.is_some()),
-            total_tokens: total_tokens.map(sql_u64).unwrap_or_default(),
-            total_samples: i64::from(total_tokens.is_some()),
-            ..Self::default()
-        };
-        let cache_write_tokens = cache_write_input_tokens.map(sql_u64).unwrap_or_default();
-        match cache_write_ttl {
-            Some("5m") => aggregate.cache_write_5m_tokens = cache_write_tokens,
-            Some("1h") => aggregate.cache_write_1h_tokens = cache_write_tokens,
-            _ => aggregate.unknown_cache_write_tokens = cache_write_tokens,
-        }
-        aggregate
-    }
-}
-
-fn apply_aggregate_delta(
-    transaction: &Transaction<'_>,
-    aggregate: &UsageAggregate,
-    multiplier: i64,
-) -> Result<()> {
-    transaction
-        .execute(
-            "INSERT INTO usage_candidate_rollups(
-                candidate_kind, candidate_id, model,
-                input_tokens, input_samples, cached_input_tokens, cached_input_samples,
-                cache_write_input_tokens, cache_write_input_samples,
-                cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
-                output_tokens, output_samples, total_tokens, total_samples
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-             ON CONFLICT(candidate_kind, candidate_id, model) DO UPDATE SET
-                input_tokens = input_tokens + excluded.input_tokens,
-                input_samples = input_samples + excluded.input_samples,
-                cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
-                cached_input_samples = cached_input_samples + excluded.cached_input_samples,
-                cache_write_input_tokens = cache_write_input_tokens + excluded.cache_write_input_tokens,
-                cache_write_input_samples = cache_write_input_samples + excluded.cache_write_input_samples,
-                cache_write_5m_tokens = cache_write_5m_tokens + excluded.cache_write_5m_tokens,
-                cache_write_1h_tokens = cache_write_1h_tokens + excluded.cache_write_1h_tokens,
-                unknown_cache_write_tokens = unknown_cache_write_tokens + excluded.unknown_cache_write_tokens,
-                output_tokens = output_tokens + excluded.output_tokens,
-                output_samples = output_samples + excluded.output_samples,
-                total_tokens = total_tokens + excluded.total_tokens,
-                total_samples = total_samples + excluded.total_samples",
-            params![
-                &aggregate.candidate_kind,
-                &aggregate.candidate_id,
-                &aggregate.model,
-                aggregate.input_tokens * multiplier,
-                aggregate.input_samples * multiplier,
-                aggregate.cached_input_tokens * multiplier,
-                aggregate.cached_input_samples * multiplier,
-                aggregate.cache_write_input_tokens * multiplier,
-                aggregate.cache_write_input_samples * multiplier,
-                aggregate.cache_write_5m_tokens * multiplier,
-                aggregate.cache_write_1h_tokens * multiplier,
-                aggregate.unknown_cache_write_tokens * multiplier,
-                aggregate.output_tokens * multiplier,
-                aggregate.output_samples * multiplier,
-                aggregate.total_tokens * multiplier,
-                aggregate.total_samples * multiplier,
-            ],
-        )
-        .map_err(db_error)?;
-    Ok(())
-}
+mod aggregate;
+use aggregate::{apply_aggregate_delta, UsageAggregate};
 
 impl TelemetryDb {
     pub fn record(&self, event: &UsageEvent) -> Result<()> {
@@ -225,58 +66,10 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let previous = transaction
-            .query_row(
-                "SELECT attempt,
-                    usage_aggregate_recorded,
-                    CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
-                    COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
-                    input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
-                    output_tokens, total_tokens, success, latency_ms, ttft_ms, generation_ms,
-                    reasoning_tokens
-                 FROM request_logs WHERE request_id = ?1",
-                [event.request_id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, bool>(1)?,
-                        UsageAggregate::from_row(row, 2)?,
-                        UsageTotalsSample {
-                            success: row.get(11)?,
-                            latency_ms: row.get::<_, i64>(12)?.max(0) as u64,
-                            ttft_ms: row
-                                .get::<_, Option<i64>>(13)?
-                                .map(|value| value.max(0) as u64),
-                            generation_ms: row
-                                .get::<_, Option<i64>>(14)?
-                                .map(|value| value.max(0) as u64),
-                            reasoning_tokens: row
-                                .get::<_, Option<i64>>(15)?
-                                .map(|value| value.max(0) as u64),
-                            input_tokens: row
-                                .get::<_, Option<i64>>(5)?
-                                .map(|value| value.max(0) as u64),
-                            cached_input_tokens: row
-                                .get::<_, Option<i64>>(6)?
-                                .map(|value| value.max(0) as u64),
-                            cache_write_input_tokens: row
-                                .get::<_, Option<i64>>(7)?
-                                .map(|value| value.max(0) as u64),
-                            output_tokens: row
-                                .get::<_, Option<i64>>(9)?
-                                .map(|value| value.max(0) as u64),
-                            total_tokens: row
-                                .get::<_, Option<i64>>(10)?
-                                .map(|value| value.max(0) as u64),
-                        },
-                    ))
-                },
-            )
-            .optional()
-            .map_err(db_error)?;
+        let previous = previous_usage_log(&transaction, &event.request_id)?;
         let accepted = previous
             .as_ref()
-            .is_none_or(|(attempt, _, _, _)| i64::from(event.attempt) >= *attempt);
+            .is_none_or(|previous| i64::from(event.attempt) >= previous.attempt);
         let changed = accepted
             && transaction
                 .execute(
@@ -362,11 +155,8 @@ impl TelemetryDb {
             .map_err(db_error)?
             > 0;
         if changed {
-            if let Some((_, _was_aggregated, previous, _)) = previous
-                .as_ref()
-                .filter(|(_, aggregated, _, _)| *aggregated)
-            {
-                apply_aggregate_delta(&transaction, previous, -1)?;
+            if let Some(previous) = previous.as_ref().filter(|previous| previous.aggregated) {
+                apply_aggregate_delta(&transaction, &previous.aggregate, -1)?;
             }
             apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
         }
@@ -386,7 +176,7 @@ impl TelemetryDb {
         } else if changed {
             let previous_totals = previous
                 .as_ref()
-                .map(|(_, _, _, sample)| usage_totals_from_sample(*sample));
+                .map(|previous| usage_totals_from_sample(previous.totals));
             self.update_cached_usage_totals(previous_totals, usage_totals_from_event(event))?;
         }
         drop(connection);
@@ -416,4 +206,56 @@ impl TelemetryDb {
             *cached = None;
         }
     }
+}
+
+struct PreviousUsageLog {
+    attempt: i64,
+    aggregated: bool,
+    aggregate: UsageAggregate,
+    totals: UsageTotalsSample,
+}
+
+fn previous_usage_log(
+    transaction: &Transaction<'_>,
+    request_id: &str,
+) -> Result<Option<PreviousUsageLog>> {
+    transaction
+        .query_row(
+            "SELECT attempt,
+                usage_aggregate_recorded,
+                CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
+                COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
+                input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
+                output_tokens, total_tokens, success, latency_ms, ttft_ms, generation_ms,
+                reasoning_tokens
+             FROM request_logs WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                Ok(PreviousUsageLog {
+                    attempt: row.get(0)?,
+                    aggregated: row.get(1)?,
+                    aggregate: UsageAggregate::from_row(row, 2)?,
+                    totals: UsageTotalsSample {
+                        success: row.get(11)?,
+                        latency_ms: non_negative_i64(row.get(12)?),
+                        ttft_ms: row.get::<_, Option<i64>>(13)?.map(non_negative_i64),
+                        generation_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_i64),
+                        reasoning_tokens: row.get::<_, Option<i64>>(15)?.map(non_negative_i64),
+                        input_tokens: row.get::<_, Option<i64>>(5)?.map(non_negative_i64),
+                        cached_input_tokens: row.get::<_, Option<i64>>(6)?.map(non_negative_i64),
+                        cache_write_input_tokens: row
+                            .get::<_, Option<i64>>(7)?
+                            .map(non_negative_i64),
+                        output_tokens: row.get::<_, Option<i64>>(9)?.map(non_negative_i64),
+                        total_tokens: row.get::<_, Option<i64>>(10)?.map(non_negative_i64),
+                    },
+                })
+            },
+        )
+        .optional()
+        .map_err(db_error)
+}
+
+fn non_negative_i64(value: i64) -> u64 {
+    value.max(0) as u64
 }

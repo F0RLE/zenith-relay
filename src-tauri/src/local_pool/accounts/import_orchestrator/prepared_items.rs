@@ -33,6 +33,9 @@ pub(super) fn parsed_item_value(
     insert_optional_string(&mut value, "base_url", item.base_url.as_deref());
     insert_optional_string(&mut value, "protocol", item.protocol.as_deref());
     insert_optional_string(&mut value, "email", item.email());
+    insert_optional_string(&mut value, "phone", item.phone());
+    insert_optional_string(&mut value, "password", item.password());
+    insert_optional_string(&mut value, "2fa", item.totp_secret());
     if let Some(priority) = item.priority {
         value.insert("priority".into(), priority.into());
     }
@@ -105,7 +108,7 @@ fn insert_optional_string(
     key: &str,
     value: Option<&str>,
 ) {
-    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+    if let Some(value) = zenith_relay_core::omit_blank(value) {
         object.insert(key.into(), serde_json::Value::String(value.to_string()));
     }
 }

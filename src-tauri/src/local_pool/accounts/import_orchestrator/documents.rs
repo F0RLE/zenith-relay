@@ -97,7 +97,7 @@ pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<Stri
 pub(in crate::local_pool::accounts) fn normalize_import_input(
     input: StartAccountImportInput,
 ) -> CommandResult<(String, Option<String>)> {
-    let content = input.content.filter(|value| !value.trim().is_empty());
+    let content = zenith_relay_core::omit_blank(input.content);
     if !input.documents.is_empty() {
         if content.is_some() || input.source_file.is_some() {
             return Err(LocalPoolError::new(

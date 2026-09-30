@@ -28,7 +28,11 @@ impl SourceRefreshFence {
     }
 
     pub fn identity(&self) -> RefreshIdentity {
-        RefreshIdentity::new(format!("source:{}", self.source_id), self.revision, 0)
+        RefreshIdentity::new(
+            zenith_relay_core::scheduler::source_member_key(&self.source_id),
+            self.revision,
+            0,
+        )
     }
 }
 impl SourceRefreshRevisions {

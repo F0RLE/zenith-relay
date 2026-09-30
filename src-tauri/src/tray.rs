@@ -10,7 +10,7 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::local_pool::{commands::gateway, DesktopState};
+use crate::local_pool::{commands::gateway::lifecycle as gateway, DesktopState};
 use crate::platform::ui_text;
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";

@@ -1,14 +1,13 @@
 use super::quota_refresh::ConfirmAccountImportResponse;
 use crate::local_pool::accounts::credentials::CredentialStore;
-use crate::local_pool::accounts::import_session::{ImportSession, ImportSessionStore};
+use crate::local_pool::accounts::import_session::ImportSessionStore;
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::error::CommandError;
 use crate::local_pool::state::DesktopState;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Instant;
 use tauri::{AppHandle, State};
-use zenith_relay_core::accounts::{ImportAuthMode, ImportPreview, MAX_IMPORT_ITEMS};
+use zenith_relay_core::accounts::{ImportAuthMode, MAX_IMPORT_ITEMS};
 
 mod account_import;
 mod account_lookup;
@@ -28,7 +27,7 @@ mod refresh_state;
 mod sources;
 
 pub(crate) use account_import::stage_returned_remote_account;
-use account_import::{hinted_import_proxy, import_account_item};
+use account_import::{hinted_import_proxy, import_account_item, AccountImportOptions};
 pub(in crate::local_pool::accounts) use account_lookup::{
     existing_identity_index, find_existing_account,
 };
@@ -102,86 +101,15 @@ fn record_import_command_result<T>(
     }
 }
 
-pub(super) const MAX_ACCOUNT_LABEL_BYTES: usize = 128;
-
-pub(super) const MAX_MODELS: usize = 4_096;
-
-pub(super) const DEFAULT_OPENAI_SOURCE_URL: &str = "https://api.openai.com/v1";
-
-pub(super) const MAX_ACCOUNT_PROFILE_RESPONSE_BYTES: usize = 256 * 1024;
-
-pub(super) const ACCOUNT_IMPORT_PROGRESS_EVENT: &str = "relay-account-import-progress";
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PrepareAccountImportInput {
-    pub(super) session_id: String,
-    #[serde(default)]
-    pub(super) probe_quota: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConfirmAccountImportInput {
-    pub(super) session_id: String,
-    pub(super) selected_item_ids: Vec<String>,
-    #[serde(default)]
-    pub(super) add_to_pool: bool,
-    #[serde(default = "default_true")]
-    pub(super) discover_models: bool,
-    #[serde(default)]
-    pub(super) probe_quota: bool,
-    #[serde(default)]
-    pub(super) models: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportSessionResponse {
-    pub session_id: String,
-    pub created_at_ms: u64,
-    pub prepared: bool,
-    pub preview: ImportPreview,
-}
-
-impl From<ImportSession> for ImportSessionResponse {
-    fn from(session: ImportSession) -> Self {
-        Self {
-            session_id: session.session_id,
-            created_at_ms: session.created_at_ms,
-            prepared: session.prepared,
-            preview: session.preview,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportItemStatus {
-    Succeeded,
-    Failed,
-}
-
-#[derive(Clone)]
-pub(super) struct ImportRowContext {
-    pub(super) label: String,
-    pub(super) auth_mode: ImportAuthMode,
-    pub(super) selectable: bool,
-    pub(super) plan: Option<String>,
-    pub(super) subscription_active_until_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct AccountImportProgressEvent {
-    pub(super) session_id: String,
-    pub(super) completed: usize,
-    pub(super) total: usize,
-    pub(super) succeeded: usize,
-    pub(super) failed: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) current_label: Option<String>,
-}
+mod types;
+pub(super) use types::{
+    AccountImportProgressEvent, ImportRowContext, ACCOUNT_IMPORT_PROGRESS_EVENT,
+    DEFAULT_OPENAI_SOURCE_URL, MAX_ACCOUNT_LABEL_BYTES, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES,
+    MAX_MODELS,
+};
+pub use types::{
+    ConfirmAccountImportInput, ImportItemStatus, ImportSessionResponse, PrepareAccountImportInput,
+};
 
 #[tauri::command]
 pub async fn start_local_account_import(
@@ -461,8 +389,4 @@ async fn confirm_local_account_import_impl(
         model_refresh_account_ids,
     );
     Ok(response)
-}
-
-pub(super) fn default_true() -> bool {
-    true
 }

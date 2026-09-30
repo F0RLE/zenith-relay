@@ -1,5 +1,4 @@
 use chrono::{TimeZone, Utc};
-use sha2::{Digest, Sha256};
 
 pub(in crate::local_pool::accounts) fn masked_account_identity(value: &str) -> String {
     let suffix = value
@@ -48,19 +47,17 @@ pub(in crate::local_pool::accounts) fn provider_identity_key(
     provider_user_id: Option<&str>,
     email: Option<&str>,
 ) -> String {
-    let account = provider_account_id.trim().to_ascii_lowercase();
-    let user = provider_user_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    let email = email
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    let identity = match (email, user) {
-        (Some(email), _) => format!("account:{account}:email:{email}"),
-        (None, Some(user)) => format!("account:{account}:user:{user}"),
-        (None, None) => format!("account:{account}"),
-    };
-    hex::encode(Sha256::digest(format!("account:{identity}").as_bytes()))
+    zenith_relay_core::accounts::chatgpt_token_identity_key(
+        Some(provider_account_id),
+        nonempty(provider_user_id),
+        nonempty(email),
+    )
+    .expect("provider account id produces an import identity")
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    match value.map(str::trim) {
+        Some(value) if !value.is_empty() => Some(value),
+        _ => None,
+    }
 }

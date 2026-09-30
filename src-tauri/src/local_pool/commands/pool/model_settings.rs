@@ -1,0 +1,164 @@
+use super::model_policy::{configured_pool_model_ids, model_policy_error};
+use super::CommandResult;
+use crate::local_pool::{
+    error::{ErrorCode, LocalPoolError},
+    models::LocalPoolSnapshot,
+    state::DesktopState,
+};
+use serde::Deserialize;
+use tauri::State;
+use zenith_relay_core::{
+    protocol::complete_model_display_order, ApiModelPriceOverride, DefaultServiceTier,
+};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelEnabledInput {
+    model_id: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelPriceInput {
+    model_id: String,
+    input_micro_usd_per_million: Option<u64>,
+    cached_input_micro_usd_per_million: Option<u64>,
+    cache_write_5m_micro_usd_per_million: Option<u64>,
+    cache_write_1h_micro_usd_per_million: Option<u64>,
+    output_micro_usd_per_million: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelServiceTierInput {
+    model_id: String,
+    service_tier: DefaultServiceTier,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelDisplayOrderInput {
+    model_ids: Vec<String>,
+}
+
+pub(super) async fn set_local_model_enabled(
+    input: SetModelEnabledInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let canonical = super::canonical_pool_model(&state, &input.model_id)?;
+    let mut gateway = state.store()?.gateway().clone();
+    let previous = gateway.hidden_models.clone();
+    gateway
+        .hidden_models
+        .retain(|model| !model.eq_ignore_ascii_case(&canonical));
+    if !input.enabled {
+        gateway.hidden_models.push(canonical);
+    }
+    if gateway.hidden_models == previous {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    let hidden = gateway.hidden_models.clone();
+    state.store()?.replace_gateway(gateway)?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_hidden_models(hidden);
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+pub(super) async fn set_local_model_price(
+    input: SetModelPriceInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let price = ApiModelPriceOverride::from_optional_fields(
+        input.input_micro_usd_per_million,
+        input.cached_input_micro_usd_per_million,
+        input.cache_write_5m_micro_usd_per_million,
+        input.cache_write_1h_micro_usd_per_million,
+        input.output_micro_usd_per_million,
+    )
+    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    let _mutation = state.setup_guard().await;
+    let canonical = super::canonical_pool_model(&state, &input.model_id)?;
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    let key = zenith_relay_core::model_id_key(&canonical);
+    if let Some(price) = price {
+        gateway.model_price_overrides.insert(key, price);
+    } else {
+        gateway.model_price_overrides.remove(&key);
+    }
+    if gateway != old_gateway {
+        let mut store = state.store()?;
+        store.replace_gateway(gateway)?;
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+pub(super) async fn set_local_model_service_tier(
+    input: SetModelServiceTierInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let canonical = super::canonical_pool_model(&state, &input.model_id)?;
+    let runtime = state.gateway.runtime().await;
+    if input.service_tier != DefaultServiceTier::Standard
+        && !state
+            .model_metadata_catalog()
+            .service_tiers_for(&canonical)
+            .contains(&input.service_tier)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "requested service tier is not available under the Relay model-family policy",
+        )
+        .into());
+    }
+    let snapshot = state.snapshot().await?;
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    let key = zenith_relay_core::model_id_key(&canonical);
+    gateway
+        .model_service_tier_overrides
+        .insert(key, input.service_tier);
+    if gateway == old_gateway {
+        return Ok(snapshot);
+    }
+    state.store()?.replace_gateway(gateway.clone())?;
+    if let Some(runtime) = runtime {
+        if let Err(error) =
+            runtime.set_model_service_tier_overrides(gateway.model_service_tier_overrides)
+        {
+            state.store()?.replace_gateway(old_gateway)?;
+            return Err(LocalPoolError::invalid_state(error).into());
+        }
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+pub(super) async fn set_local_model_display_order(
+    input: SetModelDisplayOrderInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let snapshot = state.snapshot().await?;
+    let inputs = state.runtime_inputs().await?;
+    let old_gateway = state.store()?.gateway().clone();
+    let order = complete_model_display_order(
+        configured_pool_model_ids(&inputs.sources, &inputs.accounts),
+        &input.model_ids,
+        &old_gateway.model_display_order,
+    )
+    .map_err(model_policy_error)?;
+    let mut gateway = old_gateway.clone();
+    gateway.model_display_order = order;
+    if gateway == old_gateway {
+        return Ok(snapshot);
+    }
+    state.store()?.replace_gateway(gateway.clone())?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_model_display_order(gateway.model_display_order);
+    }
+    state.snapshot().await.map_err(Into::into)
+}

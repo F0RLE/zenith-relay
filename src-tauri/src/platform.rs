@@ -172,7 +172,7 @@ fn webview_data_dir_from_root(root: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn ensure_real_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_real_directory(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
         Ok(_) => Err(format!(

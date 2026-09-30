@@ -5,28 +5,25 @@
 mod automations;
 pub(crate) mod sources;
 
+mod account;
+pub(crate) use account::request;
+pub(super) use account::reset_due_delay;
+pub(in crate::local_pool) use account::{request_authorization, request_authorization_now};
+
 use super::{
-    accounts::{
-        quota_refresh::{
-            prepare_account_request_authorization, read_account_models_once,
-            read_account_quota_once, AccountQuotaOutcome, AccountQuotaRefreshResponse,
-            PreparedAccountAuthorization,
-        },
-        refresh_observations::AccountRefreshScope,
-    },
+    accounts::quota_refresh::{AccountQuotaRefreshResponse, PreparedAccountAuthorization},
     commands::current_time_ms,
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
     state::DesktopState,
-    store::AccountRefreshFence,
 };
 use std::{
     collections::BTreeSet,
     sync::{atomic::Ordering, Arc},
 };
-use zenith_relay_core::scheduler::refresh::{
-    service::{RefreshRegistration, RefreshResult, RefreshWaitError},
-    RefreshJob, RefreshKind, RefreshOutcome,
+use zenith_relay_core::scheduler::{
+    account_member_key,
+    refresh::{service::RefreshWaitError, RefreshKind},
 };
 
 #[derive(Clone, Debug)]
@@ -73,7 +70,7 @@ impl DesktopState {
                     break;
                 };
                 let state = DesktopState { owner };
-                if let Err(error) = reconcile(&state).await {
+                if let Err(error) = account::reconcile(&state).await {
                     crate::diagnostics::record_error(
                         "refresh",
                         Some("reconcile_failed"),
@@ -100,7 +97,7 @@ impl DesktopState {
     ) -> Result<bool> {
         let store = self.store()?;
         let Some(account) = store.account(account_id) else {
-            return Ok(self.refresh.remove_member(&format!("account:{account_id}")));
+            return Ok(self.refresh.remove_member(&account_member_key(account_id)));
         };
         let eligible = automatic_eligible(account);
         if eligible {
@@ -116,7 +113,7 @@ impl DesktopState {
     }
 
     pub(crate) fn remove_account_refresh(&self, account_id: &str) -> bool {
-        self.refresh.remove_member(&format!("account:{account_id}"))
+        self.refresh.remove_member(&account_member_key(account_id))
     }
 
     pub(crate) fn quota_refresh_in_flight(&self, account_id: &str) -> Result<bool> {
@@ -131,251 +128,6 @@ impl DesktopState {
     }
 }
 
-async fn reconcile(state: &DesktopState) -> Result<()> {
-    let _mutation = state.setup_guard().await;
-    let activity = active_members(state).await;
-    let store = state.store()?;
-    let mut current = BTreeSet::new();
-    for account in store
-        .accounts()
-        .iter()
-        .filter(|account| account.remote_location.is_none())
-    {
-        let (_, fence) = store.account_refresh_scope(&account.account.id)?;
-        current.insert(fence.identity());
-        for kind in [RefreshKind::Auth, RefreshKind::Quota, RefreshKind::Models] {
-            register(state, account, fence.clone(), kind, true, &activity)?;
-        }
-    }
-    sources::reconcile(state, &store, &activity, &mut current)?;
-    state
-        .refresh
-        .retain(|identity, _| current.contains(identity));
-    Ok(())
-}
-
-pub(crate) async fn request(
-    state: &DesktopState,
-    account_id: &str,
-    kind: RefreshKind,
-) -> RefreshReadResult {
-    let fence = {
-        let _mutation = state.setup_guard().await;
-        let activity = active_members(state).await;
-        let store = state.store()?;
-        let (account, fence) = store.account_refresh_scope(account_id)?;
-        if account.remote_location.is_some() {
-            return Err(LocalPoolError::new(
-                ErrorCode::Conflict,
-                "account is managed by a remote server",
-            ));
-        }
-        if kind != RefreshKind::Auth {
-            register(
-                state,
-                &account,
-                fence.clone(),
-                RefreshKind::Auth,
-                false,
-                &activity,
-            )?;
-        }
-        register(state, &account, fence.clone(), kind, false, &activity)?;
-        fence
-    };
-    state
-        .refresh
-        .request(&fence.identity(), kind)
-        .await
-        .map_err(wait_error)?
-        .as_ref()
-        .clone()
-}
-
-fn register(
-    state: &DesktopState,
-    account: &LocalAccountRecord,
-    fence: AccountRefreshFence,
-    kind: RefreshKind,
-    due_now: bool,
-    activity: &BTreeSet<String>,
-) -> Result<()> {
-    let registration = RefreshRegistration {
-        identity: fence.identity(),
-        kind,
-        origin: "https://chatgpt.com".into(),
-        active: recently_used(account.account.last_used_at_ms)
-            || activity.contains(&format!("account:{}", account.account.id)),
-        automatic: kind != RefreshKind::Auth
-            && state.refresh_started.load(Ordering::Acquire)
-            && state.background_session_active()
-            && automatic_eligible(account),
-        due_now,
-    };
-    let weak = Arc::downgrade(&state.owner);
-    state
-        .refresh
-        .register(registration, move |job| {
-            let (weak, fence) = (weak.clone(), fence.clone());
-            Box::pin(async move {
-                let Some(owner) = weak.upgrade() else {
-                    return RefreshResult {
-                        value: Err(wait_error(RefreshWaitError::Stopped)),
-                        outcome: RefreshOutcome::NoProgress,
-                    };
-                };
-                let state = DesktopState { owner };
-                let value = if job.kind == RefreshKind::Auth {
-                    prepare_authorization(&state, &fence)
-                        .await
-                        .map(|prepared| RefreshRead::Authorization(Box::new(prepared)))
-                } else {
-                    execute(&state, &fence, &job).await
-                };
-                let outcome = match &value {
-                    Ok(RefreshRead::Authorization(_)) => RefreshOutcome::Success,
-                    Ok(RefreshRead::Quota(response))
-                        if !matches!(response.quota, AccountQuotaOutcome::Failed { .. }) =>
-                    {
-                        RefreshOutcome::Success
-                    }
-                    Ok(RefreshRead::Models { succeeded: true }) => RefreshOutcome::Success,
-                    _ if job.kind == RefreshKind::Auth => RefreshOutcome::NoProgress,
-                    _ => {
-                        RefreshOutcome::FailedRetryAt(state.refresh.now_ms().saturating_add(60_000))
-                    }
-                };
-                if let Err(error) = &value {
-                    crate::diagnostics::record_error(
-                        "account-refresh",
-                        Some("refresh_failed"),
-                        &error.message,
-                        &[(
-                            "account",
-                            crate::diagnostics::hash_identifier(&fence.account_id),
-                        )],
-                    );
-                }
-                RefreshResult { value, outcome }
-            })
-        })
-        .map_err(wait_error)
-}
-
-async fn prepare_authorization(
-    state: &DesktopState,
-    fence: &AccountRefreshFence,
-) -> Result<PreparedAccountAuthorization> {
-    let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-    if scope.fence != *fence || scope.before.remote_location.is_some() {
-        return Err(wait_error(RefreshWaitError::Stale));
-    }
-    let prepared = prepare_account_request_authorization(state, &fence.account_id).await?;
-    scope.validate(state)?;
-    Ok(prepared)
-}
-
-pub(in crate::local_pool) async fn request_authorization(
-    state: &DesktopState,
-    fence: &AccountRefreshFence,
-) -> Result<PreparedAccountAuthorization> {
-    let result = state
-        .refresh
-        .request(&fence.identity(), RefreshKind::Auth)
-        .await
-        .map_err(wait_error)?;
-    match result.as_ref() {
-        Ok(RefreshRead::Authorization(prepared)) => Ok((**prepared).clone()),
-        Ok(_) => Err(LocalPoolError::invalid_state(
-            "unexpected authorization result",
-        )),
-        Err(error) => Err(error.clone()),
-    }
-}
-
-/// A reset-credit command may run without an account refresh job. Register
-/// only its Auth prerequisite, and retain the caller's original ownership fence.
-pub(in crate::local_pool) async fn request_authorization_now(
-    state: &DesktopState,
-    fence: &AccountRefreshFence,
-) -> Result<PreparedAccountAuthorization> {
-    state.store()?.ensure_account_refresh_current(fence)?;
-    let prepared = match request(state, &fence.account_id, RefreshKind::Auth).await? {
-        RefreshRead::Authorization(prepared) => *prepared,
-        _ => {
-            return Err(LocalPoolError::invalid_state(
-                "unexpected authorization result",
-            ))
-        }
-    };
-    state.store()?.ensure_account_refresh_current(fence)?;
-    Ok(prepared)
-}
-
-async fn execute(
-    state: &DesktopState,
-    fence: &AccountRefreshFence,
-    job: &RefreshJob,
-) -> RefreshReadResult {
-    let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-    if scope.fence != *fence
-        || scope.before.remote_location.is_some()
-        || (!job.manual
-            && (!automatic_eligible(&scope.before) || !state.background_session_active()))
-    {
-        return Err(wait_error(RefreshWaitError::Stale));
-    }
-    state.refresh.set_active(
-        &job.identity,
-        recently_used(scope.before.account.last_used_at_ms)
-            || active_members(state).await.contains(&fence.account_id),
-    );
-    let read = match job.kind {
-        RefreshKind::Quota => {
-            let mut response = read_account_quota_once(state, &scope, job.manual).await?;
-            {
-                let _mutation = state.setup_guard().await;
-                scope.validate(state)?;
-                automations::evaluate_updated_transitions(state, &response)?;
-            }
-            // Reset verification stays inside this job. Enqueuing the same key
-            // here would wait on itself, and followers must not settle twice.
-            if automations::evaluate_weekly_exhaustions(state, &response, fence).await? {
-                let next_scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-                if next_scope.fence != *fence {
-                    return Err(wait_error(RefreshWaitError::Stale));
-                }
-                response = read_account_quota_once(state, &next_scope, false).await?;
-            }
-            if let Some(delay) = reset_due_delay(&response, current_time_ms()) {
-                state
-                    .refresh
-                    .schedule_after(&job.identity, RefreshKind::Quota, delay);
-            }
-            RefreshRead::Quota(Box::new(response))
-        }
-        RefreshKind::Models => RefreshRead::Models {
-            succeeded: read_account_models_once(state, &scope).await?,
-        },
-        _ => {
-            return Err(LocalPoolError::invalid_state(
-                "unsupported account refresh kind",
-            ))
-        }
-    };
-    let activity = active_members(state).await;
-    let store = state.store()?;
-    store.ensure_account_refresh_current(fence)?;
-    if let Some(account) = store.account(&fence.account_id) {
-        state.refresh.set_active(
-            &job.identity,
-            recently_used(account.account.last_used_at_ms)
-                || activity.contains(&format!("account:{}", fence.account_id)),
-        );
-    }
-    Ok(read)
-}
-
 fn automatic_eligible(account: &LocalAccountRecord) -> bool {
     account.remote_location.is_none() && account.account.is_automatic_quota_monitoring_eligible()
 }
@@ -385,24 +137,17 @@ async fn active_members(state: &DesktopState) -> BTreeSet<String> {
         .gateway
         .runtime()
         .await
-        .map(|runtime| runtime.active_member_keys(current_time_ms(), 10 * 60_000))
+        .map(|runtime| {
+            runtime.active_member_keys(
+                current_time_ms(),
+                zenith_relay_core::scheduler::refresh::RECENT_ACTIVITY_WINDOW_MS,
+            )
+        })
         .unwrap_or_default()
 }
 
 fn recently_used(at: Option<u64>) -> bool {
-    let now = current_time_ms();
-    at.is_some_and(|at| at <= now && now.saturating_sub(at) < 10 * 60_000)
-}
-
-pub(super) fn reset_due_delay(response: &AccountQuotaRefreshResponse, now_ms: u64) -> Option<u64> {
-    if !matches!(response.quota, AccountQuotaOutcome::Updated { .. }) {
-        return None;
-    }
-    zenith_relay_core::scheduler::refresh::quota_reset_delay(
-        &response.account.account.id,
-        &response.account.account.quota,
-        now_ms,
-    )
+    zenith_relay_core::scheduler::refresh::recently_active(at, current_time_ms())
 }
 
 fn wait_error(error: RefreshWaitError) -> LocalPoolError {

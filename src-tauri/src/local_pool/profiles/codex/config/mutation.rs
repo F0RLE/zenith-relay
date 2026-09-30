@@ -1,0 +1,244 @@
+use super::super::*;
+use super::document::{desktop_bool, root_model_reasoning_effort};
+
+pub(in crate::local_pool::profiles::codex) fn attach_config(
+    document: &mut DocumentMut,
+    base_url: &str,
+    local_key: &str,
+    model_catalog_path: Option<&str>,
+    previous_model_catalog: Option<&str>,
+    model_reasoning_effort: Option<&str>,
+    supports_websockets: bool,
+) {
+    // Codex reads the active effort from its root config, while the managed
+    // catalog supplies the model-specific list of valid levels. Keep both in
+    // sync when Relay activates a profile.
+    remove_unsupported_reasoning_efforts(document);
+    restore_root_string(document, "model_reasoning_effort", model_reasoning_effort);
+    document["model_provider"] = value(PROVIDER_ID);
+    restore_root_string(
+        document,
+        "model_catalog_json",
+        model_catalog_path.or(previous_model_catalog),
+    );
+    if document
+        .get("model_providers")
+        .and_then(Item::as_table)
+        .is_none()
+    {
+        document["model_providers"] = Item::Table(Table::new());
+    }
+    document["model_providers"][PROVIDER_ID] = Item::Table(Table::new());
+    let provider = &mut document["model_providers"][PROVIDER_ID];
+    provider["name"] = value("Zenith Relay Local");
+    provider["base_url"] = value(base_url);
+    provider["wire_api"] = value("responses");
+    provider["requires_openai_auth"] = value(true);
+    provider["experimental_bearer_token"] = value(local_key);
+    provider["supports_websockets"] = value(supports_websockets);
+    // Ultra is an orchestration mode. Codex hides it in the model slider
+    // until this desktop switch is on; an absent key means off.
+    enable_show_ultra_picker(document);
+}
+
+pub(in crate::local_pool::profiles::codex) fn enable_show_ultra_picker(document: &mut DocumentMut) {
+    if desktop_bool(document, DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY) == Some(true) {
+        return;
+    }
+    if document.get("desktop").is_some()
+        && document
+            .get("desktop")
+            .and_then(Item::as_table_like)
+            .is_none()
+    {
+        return;
+    }
+    if document.get("desktop").is_none() {
+        document["desktop"] = Item::Table(Table::new());
+    }
+    document["desktop"][DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY] = value(true);
+}
+
+fn restore_show_ultra_picker(document: &mut DocumentMut, previous: Option<bool>) {
+    if document.get("desktop").is_some()
+        && document
+            .get("desktop")
+            .and_then(Item::as_table_like)
+            .is_none()
+    {
+        return;
+    }
+    match previous {
+        Some(enabled) => {
+            if document.get("desktop").is_none() {
+                document["desktop"] = Item::Table(Table::new());
+            }
+            document["desktop"][DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY] = value(enabled);
+        }
+        None => {
+            let removed_last = {
+                let Some(desktop) = document
+                    .get_mut("desktop")
+                    .and_then(Item::as_table_like_mut)
+                else {
+                    return;
+                };
+                desktop.remove(DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY);
+                desktop.is_empty()
+            };
+            if removed_last {
+                document.remove("desktop");
+            }
+        }
+    }
+}
+
+fn remove_unsupported_reasoning_efforts(document: &mut DocumentMut) {
+    let Some(desktop) = document
+        .get_mut("desktop")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    let Some(efforts) = desktop
+        .get_mut("enabled-reasoning-efforts")
+        .and_then(Item::as_array_mut)
+    else {
+        return;
+    };
+    efforts.retain(|effort| effort.as_str() != Some("persistent"));
+}
+
+pub(in crate::local_pool::profiles::codex) fn set_managed_websockets(
+    document: &mut DocumentMut,
+    provider_id: &str,
+    enabled: bool,
+) -> bool {
+    let Some(provider) = document
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(provider_id))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    provider.insert("supports_websockets", value(enabled));
+    true
+}
+
+pub(in crate::local_pool::profiles::codex) fn restore_config(
+    document: &mut DocumentMut,
+    managed_provider_id: &str,
+    previous_model_provider: Option<&str>,
+    previous_model_catalog: Option<&str>,
+) {
+    remove_managed_provider(document, managed_provider_id);
+    restore_root_string(document, "model_provider", previous_model_provider);
+    restore_root_string(document, "model_catalog_json", previous_model_catalog);
+}
+
+pub(in crate::local_pool::profiles::codex) fn restore_local_config(
+    document: &mut DocumentMut,
+    backup: &ProfileBackup,
+    previous_model_catalog: Option<&str>,
+    current_model_reasoning_effort: Option<&str>,
+) {
+    restore_config(
+        document,
+        &backup.managed_provider_id,
+        backup.previous_model_provider.as_deref(),
+        previous_model_catalog,
+    );
+    if backup.managed_model_reasoning_effort_cleared {
+        let managed_effort_is_unchanged =
+            current_model_reasoning_effort == backup.managed_model_reasoning_effort.as_deref();
+        restore_root_string(
+            document,
+            "model_reasoning_effort",
+            if managed_effort_is_unchanged {
+                backup.previous_model_reasoning_effort.as_deref()
+            } else {
+                current_model_reasoning_effort.or(backup.previous_model_reasoning_effort.as_deref())
+            },
+        );
+    }
+    // A projection restores this switch itself and keeps a newer user value.
+    // Older backups have no projection, so put the recorded value back here.
+    if backup.projection_secret_ref.is_none() && backup.managed_show_ultra_picker {
+        restore_show_ultra_picker(document, backup.previous_show_ultra_picker);
+    }
+}
+
+pub(in crate::local_pool::profiles::codex) fn reasoning_effort_for_attach(
+    document: &DocumentMut,
+    catalog_json: Option<&str>,
+) -> Option<String> {
+    let current = root_model_reasoning_effort(document);
+    let Some(selected_model) = document.get("model").and_then(Item::as_str) else {
+        return current;
+    };
+    let Some(catalog_json) = catalog_json else {
+        return current;
+    };
+    let Ok(catalog) = serde_json::from_str::<Value>(catalog_json) else {
+        return current;
+    };
+    let model = catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models.iter().find(|model| {
+                model
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .is_some_and(|slug| slug.eq_ignore_ascii_case(selected_model))
+            })
+        });
+    let Some(model) = model else {
+        return current;
+    };
+    let supported_levels = model
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)?;
+    let supports = |effort: &str| {
+        supported_levels.iter().any(|level| {
+            level
+                .get("effort")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
+        })
+    };
+    if let Some(current) = current.filter(|effort| supports(effort)) {
+        return Some(current);
+    }
+    model
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .filter(|effort| supports(effort))
+        .map(ToOwned::to_owned)
+}
+
+pub(in crate::local_pool::profiles::codex) fn restore_root_string(
+    document: &mut DocumentMut,
+    key: &str,
+    previous: Option<&str>,
+) {
+    match previous {
+        Some(previous) => document[key] = value(previous),
+        None => {
+            document.remove(key);
+        }
+    }
+}
+
+pub(in crate::local_pool::profiles::codex) fn remove_managed_provider(
+    document: &mut DocumentMut,
+    provider_id: &str,
+) {
+    if let Some(model_providers) = document["model_providers"].as_table_mut() {
+        model_providers.remove(provider_id);
+        if model_providers.is_empty() {
+            document.remove("model_providers");
+        }
+    }
+}

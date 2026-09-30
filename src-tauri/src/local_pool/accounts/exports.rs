@@ -87,6 +87,12 @@ pub fn normalize_account_ids(account_ids: Vec<String>) -> Result<Vec<String>, Co
     Ok(normalized)
 }
 
+pub fn normalize_one_account_id(account_id: String) -> Result<String, CommandError> {
+    Ok(normalize_account_ids(vec![account_id])?
+        .pop()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::InvalidState, "account id is required"))?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +132,9 @@ mod tests {
         AccountExportCredential {
             label: "Synthetic account".into(),
             email: Some("synthetic@example.test".into()),
+            phone: None,
+            password: None,
+            totp_secret: None,
             access_token: "synthetic-round-trip-access".into(),
             refresh_token: Some("synthetic-round-trip-refresh".into()),
             id_token: Some("synthetic.round-trip.id".into()),

@@ -7,7 +7,7 @@ use zenith_relay_core::accounts::{
     AccountAuthMode, AccountHealthState, ImportAuthMode, ParsedImportItem,
 };
 use zenith_relay_core::error_codes;
-use zenith_relay_core::is_valid_model_id;
+use zenith_relay_core::{normalize_bounded_model_ids, ModelIdListError};
 
 pub(in crate::local_pool::accounts) fn ensure_account_import_item(
     item: &ParsedImportItem,
@@ -108,30 +108,15 @@ pub(in crate::local_pool::accounts) fn validate_label(label: &str) -> LocalResul
 pub(in crate::local_pool::accounts) fn normalize_models(
     models: Vec<String>,
 ) -> LocalResult<Vec<String>> {
-    if models.len() > MAX_MODELS {
-        return Err(LocalPoolError::new(
+    normalize_bounded_model_ids(models, MAX_MODELS).map_err(|error| {
+        LocalPoolError::new(
             ErrorCode::InvalidState,
-            "model list exceeds the supported limit",
-        ));
-    }
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if !is_valid_model_id(model) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "model name is invalid",
-            ));
-        }
-        if seen.insert(model.to_string()) {
-            normalized.push(model.to_string());
-        }
-    }
-    Ok(normalized)
+            match error {
+                ModelIdListError::TooLarge => "model list exceeds the supported limit",
+                ModelIdListError::InvalidId => "model name is invalid",
+            },
+        )
+    })
 }
 
 pub(in crate::local_pool::accounts) fn normalize_selected_item_ids(

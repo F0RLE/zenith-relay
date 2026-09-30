@@ -4,7 +4,9 @@ use crate::local_pool::{
     state::DesktopState,
 };
 use std::collections::BTreeSet;
-use zenith_relay_core::protocol::{canonical_pool_model_id, ModelPolicyError};
+use zenith_relay_core::protocol::{
+    canonical_pool_model_id, configured_source_model_ids, ModelPolicyError,
+};
 
 /// Resolve a user-facing model id to the canonical casing used by the pool.
 /// Sources are preferred because they carry the protocol-specific model map;
@@ -28,14 +30,7 @@ pub(super) fn configured_pool_model_ids<'a>(
     let source_models = sources
         .iter()
         .filter(|source| source.in_pool)
-        .flat_map(|source| {
-            source.models.iter().chain(
-                source
-                    .protocol_bindings
-                    .iter()
-                    .flat_map(|binding| &binding.model_ids),
-            )
-        });
+        .flat_map(|source| configured_source_model_ids(&source.models, &source.protocol_bindings));
     let account_models = accounts
         .iter()
         .filter(|account| account.account.in_pool)

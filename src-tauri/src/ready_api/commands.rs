@@ -88,7 +88,7 @@ pub(super) fn parse_model_ids(body: &[u8]) -> Result<Vec<String>, String> {
                 && !id.chars().any(char::is_whitespace)
         })
         .take(2_048)
-        .filter(|id| seen.insert(id.to_ascii_lowercase()))
+        .filter(|id| seen.insert(zenith_relay_core::model_id_key(id)))
         .collect::<Vec<_>>();
     if models.is_empty() {
         Err("Models response contains no usable models.".to_string())

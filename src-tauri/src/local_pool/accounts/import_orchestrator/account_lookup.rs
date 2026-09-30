@@ -60,49 +60,14 @@ pub(in crate::local_pool::accounts) fn find_existing_account(
         .accounts()
         .to_vec();
     let target = records::identity_hash(provider_account_id, provider_user_id, email);
-    let direct = accounts
-        .iter()
-        .filter(|account| {
-            account.account.source_id == records::CODEX_SOURCE_ID
-                && account.account.identity.identity_hash == target
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if direct.len() > 1 {
-        return Err(ImportItemError::recovery(
-            "multiple local accounts have the same ChatGPT identity",
-        ));
-    }
-    if let Some(account) = direct.into_iter().next() {
-        return Ok(Some(account));
-    }
-    let mut matching = Vec::new();
-    for account in accounts {
-        if account.account.source_id != records::CODEX_SOURCE_ID {
-            continue;
-        }
-        let Some(credentials) = credential_store
-            .load(&account.account.id)
-            .map_err(credential_item_error)?
-        else {
-            continue;
-        };
-        let Some(account_id) = credentials.provider_account_id() else {
-            continue;
-        };
-        if records::identity_hash(
-            account_id,
-            credentials.provider_user_id(),
-            credentials.email(),
-        ) == target
-        {
-            matching.push(account);
-        }
-    }
-    if matching.len() > 1 {
-        return Err(ImportItemError::recovery(
-            "multiple local accounts have the same ChatGPT identity",
-        ));
-    }
-    Ok(matching.pop())
+    records::find_codex_account(
+        &accounts,
+        &target,
+        |account| {
+            records::codex_credentials_match(credential_store, account, &target)
+                .map_err(credential_item_error)
+        },
+        || ImportItemError::recovery("multiple local accounts have the same ChatGPT identity"),
+    )
+    .map(|account| account.cloned())
 }

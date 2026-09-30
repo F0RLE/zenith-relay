@@ -186,7 +186,8 @@ async fn desktop_membership_batch_keeps_the_live_runtime_and_rejects_missing_mem
 async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
     let pool = ReviewPool::new().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let affected = super::gateway::accounts_without_explicit_proxy(&pool.state, false).unwrap();
+    let affected =
+        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap();
     assert_eq!(affected, pool.ids);
 
     let second = credentials.require(&pool.ids[1]).unwrap();
@@ -196,22 +197,22 @@ async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
         .unwrap();
     credentials.save(&explicit).unwrap();
     assert_eq!(
-        super::gateway::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
         [pool.ids[0].clone()]
     );
     assert_eq!(
-        super::gateway::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
+        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
         [pool.ids[0].clone()]
     );
 
     let bypassed = second.with_proxy_route(None, true).unwrap();
     credentials.save(&bypassed).unwrap();
     assert_eq!(
-        super::gateway::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
         [pool.ids[0].clone()]
     );
     assert_eq!(
-        super::gateway::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
+        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
         pool.ids
     );
     pool.close().await;

@@ -70,7 +70,7 @@ pub(super) fn attach_account_locked(
         backup.previous_openai_base_url = root_openai_base_url(&document);
     }
     if created_backup {
-        if let Some(previous_auth) = original_auth.filter(|value| !value.trim().is_empty()) {
+        if let Some(previous_auth) = zenith_relay_core::omit_blank(original_auth) {
             let secret_ref = account_backup_secret_ref(&profile_dir);
             secrets.save(&secret_ref, previous_auth)?;
             backup.previous_auth_secret_ref = Some(secret_ref);

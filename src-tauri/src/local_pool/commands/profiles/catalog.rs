@@ -12,7 +12,7 @@ use crate::{
 use std::{future::Future, time::Duration};
 use url::Url;
 use zenith_relay_core::{
-    providers::chatgpt::configured_codex_client_version, SourceAdapter, WireApi,
+    providers::chatgpt::configured_codex_client_version, url_has_userinfo, SourceAdapter, WireApi,
 };
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
@@ -294,8 +294,7 @@ fn is_zenith_api_base_url(base_url: &str) -> bool {
         && url.path().trim_end_matches('/') == "/v1"
         && url.query().is_none()
         && url.fragment().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
+        && !url_has_userinfo(&url)
 }
 
 #[cfg(test)]
