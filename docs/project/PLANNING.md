@@ -144,13 +144,14 @@ participant metadata prefetch runs during management polling or catalog export.
 Native Codex cards retain account-owned transport controls and instructions;
 model labels and semantic capabilities use the same resolver as API sources.
 Codex Ultra is a client-side orchestration mode, not an upstream reasoning
-effort. The desktop projection reads the installed Codex's bundled model
-catalog offline; an exact model card may expose Ultra only when the pool can
-route Max and any specified subagent effort. A matching native ChatGPT account
-card can also provide this evidence to the gateway catalog. Provider model
-names, a Messages-to-Responses bridge, and a generic Max declaration do not
-by themselves enable Ultra. Other reasoning levels remain reference and route
-constrained; Codex's own toggle still controls whether Ultra is visible.
+effort. The desktop reads the installed Codex bundled model catalog offline
+and supplies those exact cards to both the managed file and the live gateway
+catalog. An exact model card may expose Ultra only when the pool can route
+Max and any specified subagent effort. A matching native ChatGPT account card
+can also provide this evidence. Provider model names, a Messages-to-Responses
+bridge, and a generic Max declaration do not by themselves enable Ultra.
+Other reasoning levels remain reference and route constrained; Codex's own
+toggle still controls whether Ultra is visible.
 
 Missing reference fields use Relay's common text/image, text-output, function
 tool and structured-output baseline. Explicit reference exclusions remain in
@@ -203,7 +204,7 @@ missing from inventory without moving discovered models. `gateway.modelCatalog`
 provides advisory company/family metadata for the complete member inventory and
 saved rules/prices, so excluded models keep their group. It never grants routes;
 older snapshots fall back to metadata on operational model rows. Member editors open on
-model selection, with source prices and secondary settings on separate tabs.
+model selection, with source prices and secondary settings on separate tabs. A later model missing from an exact saved allow/deny snapshot stays enabled unless it was explicitly excluded; editors persist only exclusions, and a `*` rule still limits the set.
 Model Rules are operational; source prices remain in the source/member editor.
 
 ## API source statistics
@@ -709,11 +710,11 @@ request no longer includes their catalog. A declared tool excluded by
 `tool_choice` is rejected as a choice error, not as a missing tool. Encrypted
 `agent_message` content is rejected before dispatch. The upstream returns
 completed JSON, so requested SSE is buffered and emitted only after completion.
-Images and explicit nonstandard service tiers are incompatible with this route;
+Images and explicit nonstandard service tiers are incompatible with this route. `auto`, `default`, and `standard` are ordinary tiers and are omitted from the upstream body. Structured `text.format` is rejected rather than dropped. Developer instructions follow the v0.2.8 adapter: examples are generated only for tools allowed in the request and match the declared function or custom shape, including the two JSON layers of a function payload. A second developer message repeats the transport reminder and tells each custom tool to keep its input raw. The one malformed-relay retry hint is appended after that prepared input, before a compaction trigger.
 opaque `previous_response_id` continuation is rejected before dispatch rather
 than silently removed. Completed and incomplete buffered responses retain
 their respective terminal status in JSON and synthesized SSE.
-This route does not publish native Codex Fast/Ultrafast metadata. Relay does
+The Codex picker still offers the model's normal Fast and Ultrafast choices. A non-standard speed uses the account's normal Responses endpoint instead of this route. Relay does
 not claim incremental streaming or provider acceptance without a live request.
 
 The adapter registry supports four native contracts and twelve conversions:
@@ -841,12 +842,15 @@ actual upstream cache contract without borrowing another protocol's semantics.
 Explicit 5m/1h prices in a source catalog remain visible in source pricing
 regardless of the catalog endpoint; an untagged cache-write price does not
 establish a TTL. Displaying a price does not establish route capability.
-Usage history shows cache-read and cache-write counters separately. An exact
-provider-reported cache-write window is shown as reported; when usage omits the
-window, the UI marks it as unreported. Model documentation is separate from
-usage evidence: GPT-5.6 and later have an OpenAI-documented minimum `30m` after
-the latest write or reuse, shown only as a note. Relay cannot calculate a live
-remaining time or exact expiry without cache identity and reuse events.
+Usage history shows cache-read and cache-write counters separately. When either
+counter is present, request details add an approximate remaining lifetime beside
+the cache-read count, or beside the cache-write count when there is no read.
+An exact provider-reported cache-write window is used. When usage omits the
+window, GPT-5.6 and later fall back to the documented OpenAI minimum of 30
+minutes after that request's latest write or read, and other models stay
+unreported. The estimate uses only that request's cache touch. It is not a
+provider cache identity, a live expiry, or proof that a later request will hit
+the cache.
 
 LiteLLM is the external reference price catalog. Cached startup is nonblocking;
 conditional refresh runs at startup and then the cache TTL (currently 24 hours)

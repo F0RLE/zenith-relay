@@ -104,7 +104,8 @@ Use **Refresh balance** on a pool card or **Refresh** in the selected API's
 overview to request fresh data. **No balance API** means Relay could not find
 a supported way to read statistics; **Stats access denied** means access
 to those statistics was refused. Model requests may still work in either
-case. A failed refresh retains the last amount with **Not refreshed**.
+case. A failed refresh keeps the last amount. The selected API overview marks
+it **Not refreshed**; a pool card keeps the amount without that label.
 Reopening the page may display the last value from this running session without
 contacting the provider. Use **Refresh balance** to request a new reading.
 The warning identifies a stale or failed reading, not a fresh balance; restarting
@@ -128,9 +129,31 @@ is not included in these estimates.
 
 ### Accounts and quota
 
-In local mode, add an account by signing in through the browser or importing
-your own file. **Connections** also manages proxies. A saved account does not
-have to participate in the pool.
+In local mode, add an account through Relay's sign-in window or by importing
+your own file. The sign-in button opens that window instead of the system
+browser. When the account already has a proxy, both the sign-in page and the
+token exchange use it. The common proxy is used only when the account has none
+and does not bypass it. **Connections** also manages proxies. A saved account
+does not have to participate in the pool.
+The lock inside **Open sign-in window**, on its right side, appears only for a new
+sign-in, not when signing in again. It starts that sign-in through a saved
+proxy. Left-click opens the list, and right-click repeats the previous choice.
+If there is no previous choice, or that proxy has been removed, the list opens
+again. Relay does not pick a random proxy, because a ChatGPT session is tied
+to the exit address. The same proxy is used for the sign-in window, the token
+exchange, and the new account. This sign-in needs an HTTP proxy.
+
+If a ChatGPT session in the window is still active, sign-in finishes by itself.
+Otherwise finish it in that window: email, password, and 2FA notes are not
+filled in. The sign-in link can be copied and opened separately. The window
+cannot use an `https://` proxy; sign-in needs an HTTP proxy.
+An invalid login token does not block import when the file already contains an
+account id. Relay saves the record, and you can sign in after importing it.
+
+If the import includes an email, phone, password, or 2FA secret, Relay stores
+them with that account's credentials. The sign-in window shows these notes
+under the two actions, and the account card can open the same notes. You can
+edit them or type your own. A 2FA secret also shows the current code.
 
 **Refresh** checks the provider's account state and quota. It does not add
 quota or reset its window. The provider defines the window length, remaining
@@ -369,6 +392,8 @@ the OpenAI group does not replace the shared reference and Relay rules for other
 In **Pool member policy → Models**, a switch allows the model for that
 specific account or API. It is permission, not a quota indicator. Search and
 expandable groups help locate models.
+A model that was not in the saved exact list turns on by itself. Only a model
+that was explicitly switched off stays off. A `*` rule still limits the set.
 
 The pool's **Model Rules** tab enables or disables a model for the whole pool.
 It also controls model and group order, available reasoning modes, and
@@ -420,10 +445,13 @@ fields price cache creation; they do not enable request caching or prove that
 the source accepts a cache-control option.
 
 Request details show cache reads and writes from the provider's usage response.
-Relay shows a write lifetime only when that response reports one; otherwise it
-marks the lifetime as unreported. Model documentation is a separate note. For
-GPT-5.6 and later, OpenAI documents a 30-minute minimum after the latest write
-or reuse, but usage does not provide a live remaining-time countdown.
+When either counter is present, an approximate remaining time appears in
+parentheses beside the cache read, or beside the cache write when there is no
+read. A lifetime reported by the provider is used as given. If the response
+omits it, GPT-5.6 and later use OpenAI's documented 30-minute minimum after
+that request's latest cache write or read. Other models stay marked as an
+unreported window. This is an estimate from that request, not a live provider
+expiry and not proof that the next request will read the cache.
 
 An account's **Settings** includes **Drain** and **Purchase
 cost, USD**. The first stops new assignments; the second is only for the
@@ -487,6 +515,12 @@ are translated into the calling format. If the application requests a stream,
 SSE events arrive after the provider completes the response, without
 incremental output during generation. Images and explicitly requested fast
 speeds cannot use this transport; they need another compatible route.
+Ordinary speed labels `auto`, `default`, and `standard` are accepted and are
+not sent upstream. A structured `text.format` (`json_object` or `json_schema`)
+is rejected before generation instead of being ignored. Tool instructions
+include an example only for a tool this request allows, using that tool's
+declared type: function arguments stay a JSON object inside the outer JSON
+string, and only a custom tool receives raw text.
 Continuation by `previous_response_id` is also unsupported: Relay rejects it
 explicitly rather than losing context. Send complete history without this
 field or use another route.

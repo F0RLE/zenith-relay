@@ -6,15 +6,39 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
-## [1.1.3] - 2026-09-27
+## [1.1.3] - 2026-09-30
 
 <!-- relay-notes:en -->
 
 Zenith Relay 1.1.3 keeps a ChatGPT account available after a generic provider
-403, restores Excel tool history, shows a reported cache lifetime in usage, and
+403, restores Excel tool history, shows an approximate cache lifetime beside usage tokens, and
 uses the same compact controls across the launcher.
 
 ### Changed
+
+- ChatGPT sign-in opens in a Relay window instead of the system browser. The
+  account proxy is used for that window and for the token exchange. A live
+  ChatGPT session finishes sign-in by itself; otherwise it is finished in the
+  window. Saved login notes are not filled in. The lock inside the new-sign-in
+  button chooses a saved HTTP proxy for that first login; it does not pick one
+  at random.
+
+- Excel / Basis Points tool instructions follow adapter v0.2.8. Examples use
+  only tools allowed in the current request and match their declared type and
+  schema, including the two JSON layers for function arguments. A separate
+  developer reminder repeats the transport rule and keeps custom-tool input
+  raw. The one-shot retry hint is appended after the prepared input, before a
+  compaction trigger. Structured `text.format` is rejected instead of being
+  dropped. Ordinary `service_tier` values `auto`, `default`, and `standard`
+  stay on this route; Fast still does not. Image upload from the upstream
+  plugin is not copied.
+
+- An image stream that ends incomplete, failed, or without a real completion
+  is reported as a failure instead of a finished image.
+
+- A failed provider-balance refresh keeps the last amount. The selected API
+  overview marks it **Not refreshed**. A pool card keeps the amount without
+  that label; the reason stays in diagnostics.
 
 - The API tool optimization switch now says that schemas open on demand for a
   normal Responses route, while Excel and other routes still send the full list.
@@ -223,9 +247,12 @@ uses the same compact controls across the launcher.
   cannot use an old desktop account/source route while its membership, endpoint,
   proxy, login or permissions are being replaced; already started work may finish.
 
-- Usage details show cache lifetimes only when the provider reports them and
-  mark missing values clearly. OpenAI's documented minimum for GPT-5.6 and later
-  appears separately from usage data; Relay does not estimate a live expiry.
+- Usage details put an approximate cache lifetime in parentheses beside the
+  cache-read count, or beside the cache-write count when there is no read.
+  A window reported by the provider is used as given. GPT-5.6 and later fall
+  back to OpenAI's documented 30-minute minimum when the response omits one.
+  Other missing windows stay marked unreported. The note is estimated from that
+  request's latest cache write or read; it is not a live provider expiry.
 
 - Catalog ordering now keeps model families from the same numbered generation
   together and uses stable family IDs for their order. A later release date
@@ -616,9 +643,33 @@ uses the same compact controls across the launcher.
 
 <!-- relay-notes:ru -->
 
-Zenith Relay 1.1.3 оставляет аккаунт ChatGPT доступным после общего отказа провайдера 403, восстанавливает историю инструментов Excel, показывает сообщённый срок записи кэша в использовании и применяет те же компактные переключатели по всему приложению.
+Zenith Relay 1.1.3 оставляет аккаунт ChatGPT доступным после общего отказа провайдера 403, восстанавливает историю инструментов Excel, показывает примерный срок кэша рядом с токенами использования и применяет те же компактные переключатели по всему приложению.
 
 ### Изменения
+
+- Вход в ChatGPT открывается в окне Relay, а не в системном браузере. Прокси
+  аккаунта используется и для этого окна, и для обмена токена. Действующая
+  сессия завершает вход сама; иначе вход заканчивается в окне. Сохранённые
+  заметки входа сами не подставляются. Замок внутри кнопки нового входа
+  выбирает сохранённый HTTP-прокси для первого входа и не подставляет
+  случайный.
+
+- Инструкции инструментов Excel / Basis Points следуют адаптеру v0.2.8.
+  Примеры используют только инструменты текущего запроса и совпадают с их
+  типом и схемой, включая два слоя JSON для аргументов функции. Отдельное
+  напоминание разработчика повторяет правило транспорта и оставляет ввод
+  custom-инструмента как есть. Подсказка одноразового повтора добавляется
+  после подготовленного ввода, до триггера сжатия. Структурный `text.format`
+  отклоняется, а не отбрасывается. Обычные значения `service_tier` `auto`,
+  `default` и `standard` остаются на этом маршруте; Fast по-прежнему нет.
+  Загрузка изображений из внешнего плагина не копируется.
+
+- Поток изображения, который закончился неполным, с ошибкой или без реального
+  завершения, записывается как ошибка, а не как готовое изображение.
+
+- Неудачное обновление баланса провайдера сохраняет последнюю сумму. Обзор
+  выбранного API помечает её **Не обновлено**. Карточка пула оставляет сумму
+  без этой пометки; причина остаётся в диагностике.
 
 - Переключатель оптимизации инструментов теперь поясняет, что схемы открываются по запросу на обычном маршруте Responses, а Excel и остальные маршруты по-прежнему отправляют полный список.
 
@@ -684,7 +735,7 @@ Zenith Relay 1.1.3 оставляет аккаунт ChatGPT доступным 
 
 - Выбор в автоматическом режиме использует нормализованную локальную загрузку. Физический участник делит ёмкость между псевдонимами протоколов. Повторы используют один бюджет запроса через транспорты и исправления. Неопределённый результат провайдера не повторяется молча. Обязательная пауза провайдера устанавливается до того, как слот станет доступен другому запросу. У API-источников сервера больше нет второй, отдельно отсчитываемой блокировки шторма вне ротации пула. Ожидающая отправка не может использовать старый маршрут аккаунта или источника приложения, пока меняются его участие, адрес, прокси, вход или разрешения. Уже начатая работа может завершиться.
 
-- Сведения об использовании показывают срок кэша только если его сообщил провайдер, а отсутствующее значение явно помечено. Документированный минимум OpenAI для GPT-5.6 и новее показывается отдельно от данных использования. Relay не оценивает живой остаток срока.
+- В сведениях об использовании примерный срок кэша стоит в скобках рядом с чтением кэша, а если чтения нет — рядом с записью. Окно, которое сообщил провайдер, используется как есть. Для GPT-5.6 и новее при отсутствии окна берётся документированный минимум OpenAI в 30 минут. Остальные пропуски помечаются как несообщённый срок. Оценка считается от последней записи или чтения кэша в этом запросе и не является живым сроком у провайдера.
 
 - Порядок каталога держит семейства одной номерной линейки вместе и использует устойчивые идентификаторы семейств. Более поздняя дата выпуска сама по себе больше не поднимает GPT-6 Sol выше GPT-6 Astra.
 
@@ -1238,7 +1289,8 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...release/1.1.3
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.2
 [1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1
 [1.1.0]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.0

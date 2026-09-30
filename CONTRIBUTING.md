@@ -204,12 +204,12 @@ For a release UI or layout change, run the focused Playwright suites as well:
 
 ~~~powershell
 cd src
-bunx playwright test tests/e2e/visual-matrix.spec.ts
-bunx playwright test tests/e2e/operations.spec.ts
+bunx playwright test tests/e2e/visual-matrix
+bunx playwright test tests/e2e/operations
 bun run screenshots
 ~~~
 
-The visual matrix is the responsive/appearance gate; the operations suite is
+The visual matrix is the responsive/appearance gate. The operations folder is
 the interaction and state-transition gate. The screenshots command regenerates
 only the committed `docs/screenshots` assets.
 
