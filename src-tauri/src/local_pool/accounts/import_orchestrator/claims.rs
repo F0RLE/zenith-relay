@@ -1,6 +1,6 @@
-use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 use zenith_relay_core::accounts::decode_unverified_jwt_payload;
+use zenith_relay_core::omit_blank;
 
 #[derive(Default, Deserialize)]
 pub(super) struct ImportedJwtClaims {
@@ -45,6 +45,10 @@ pub(in crate::local_pool::accounts) struct ImportedIdentity {
     pub(in crate::local_pool::accounts) subscription_active_until_ms: Option<u64>,
     pub(in crate::local_pool::accounts) provider_user_id: Option<String>,
     pub(in crate::local_pool::accounts) provider_account_id: Option<String>,
+    /// Account ids found in the import document's JWTs. JWTs are unsigned
+    /// hints; the importer must reconcile every hint with an authenticated
+    /// account-check response before persisting credentials.
+    pub(in crate::local_pool::accounts) account_id_hints: Vec<String>,
     pub(in crate::local_pool::accounts) account_is_fedramp: bool,
     pub(in crate::local_pool::accounts) access_expires_at_ms: Option<u64>,
 }
@@ -59,6 +63,20 @@ pub(in crate::local_pool::accounts) fn imported_identity(
     let access_auth = access_claims
         .as_ref()
         .and_then(|claims| claims.auth.as_ref());
+    let mut account_id_hints = Vec::new();
+    for auth in [access_auth, id_auth].into_iter().flatten() {
+        for value in [&auth.chatgpt_account_id, &auth.account_id]
+            .into_iter()
+            .filter_map(|value| omit_blank(value.clone()))
+        {
+            if !account_id_hints
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&value))
+            {
+                account_id_hints.push(value);
+            }
+        }
+    }
     ImportedIdentity {
         email: claim_email(id_claims.as_ref()).or_else(|| claim_email(access_claims.as_ref())),
         plan_type: auth_string(id_auth, |auth| &auth.chatgpt_plan_type)
@@ -75,10 +93,8 @@ pub(in crate::local_pool::accounts) fn imported_identity(
             .or_else(|| auth_string(id_auth, |auth| &auth.user_id))
             .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_user_id))
             .or_else(|| auth_string(access_auth, |auth| &auth.user_id)),
-        provider_account_id: auth_string(access_auth, |auth| &auth.chatgpt_account_id)
-            .or_else(|| auth_string(access_auth, |auth| &auth.account_id))
-            .or_else(|| auth_string(id_auth, |auth| &auth.chatgpt_account_id))
-            .or_else(|| auth_string(id_auth, |auth| &auth.account_id)),
+        provider_account_id: account_id_hints.first().cloned(),
+        account_id_hints,
         account_is_fedramp: id_auth
             .or(access_auth)
             .is_some_and(|auth| auth.chatgpt_account_is_fedramp),
@@ -89,39 +105,11 @@ pub(in crate::local_pool::accounts) fn imported_identity(
 }
 
 pub(super) fn parse_subscription_timestamp_value_ms(value: &serde_json::Value) -> Option<u64> {
-    match value {
-        serde_json::Value::Number(value) => value.as_u64().and_then(normalize_epoch_timestamp_ms),
-        serde_json::Value::String(value) => parse_subscription_timestamp_ms(value),
-        _ => None,
-    }
+    zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms(value)
 }
 
 pub(in crate::local_pool::accounts) fn parse_subscription_timestamp_ms(value: &str) -> Option<u64> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > 64 {
-        return None;
-    }
-    if value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return value
-            .parse::<u64>()
-            .ok()
-            .and_then(normalize_epoch_timestamp_ms);
-    }
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
-}
-
-pub(super) fn normalize_epoch_timestamp_ms(value: u64) -> Option<u64> {
-    let value = if value < 100_000_000_000 {
-        value.checked_mul(1_000)?
-    } else {
-        value
-    };
-    i64::try_from(value)
-        .ok()
-        .and_then(|value| Utc.timestamp_millis_opt(value).single())
-        .map(|_| value)
+    zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_text(value)
 }
 
 pub(super) fn decode_imported_jwt(token: &str) -> Option<ImportedJwtClaims> {
@@ -130,11 +118,11 @@ pub(super) fn decode_imported_jwt(token: &str) -> Option<ImportedJwtClaims> {
 
 pub(super) fn claim_email(claims: Option<&ImportedJwtClaims>) -> Option<String> {
     claims.and_then(|claims| {
-        nonempty(claims.email.clone()).or_else(|| {
+        omit_blank(claims.email.clone()).or_else(|| {
             claims
                 .profile
                 .as_ref()
-                .and_then(|profile| nonempty(profile.email.clone()))
+                .and_then(|profile| omit_blank(profile.email.clone()))
         })
     })
 }
@@ -143,9 +131,5 @@ pub(super) fn auth_string(
     auth: Option<&ImportedAuthClaims>,
     select: impl for<'a> Fn(&'a ImportedAuthClaims) -> &'a Option<String>,
 ) -> Option<String> {
-    auth.and_then(|auth| nonempty(select(auth).clone()))
-}
-
-pub(super) fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
+    auth.and_then(|auth| omit_blank(select(auth).clone()))
 }

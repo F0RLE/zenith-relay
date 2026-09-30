@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import { createInstance } from "i18next";
+import { en } from "../src/i18n/locales/en";
+import { ru } from "../src/i18n/locales/ru";
 import type { AccountSummary, RuntimeSnapshot, WakeTask } from "../src/features/relay/api/types";
 import {
   automationAccountSelectionValid,
+  automationDisplayName,
   automationFormValid,
+  automationType,
   availableAutomationModels,
   buildAutomationSubmission,
+  customAutomationName,
+  defaultAutomationName,
   eligibleAutomationAccounts,
   resolveAutomationModel,
   selectedAutomationAccounts,
@@ -40,11 +47,28 @@ const gateway: RuntimeSnapshot["gateway"] = {
   candidateCount: 1,
   visibleModelIds: ["gpt-5.4", "gpt-5.4-mini"],
   maxRetryCandidates: 3,
-  routingStrategy: "adaptive",
+
   defaultServiceTier: "standard",
 };
 
 describe("automation model", () => {
+  test.each(["en", "ru"] as const)("resolves persisted default names by action in %s", async (language) => {
+    const i18n = createInstance();
+    await i18n.init({ lng: language, resources: { en: { translation: en }, ru: { translation: ru } } });
+    for (const name of [en.automations.defaultName, ru.automations.defaultName, en.automations.weeklyDefaultName, ru.automations.weeklyDefaultName]) {
+      const primary = automationDisplayName({ name, trigger: { kind: "quota_full" } }, i18n.t);
+      const weekly = automationDisplayName({ name, trigger: { kind: "weekly" } }, i18n.t);
+      expect(primary).toBe(defaultAutomationName("quota_full", i18n.t));
+      expect(weekly).toBe(defaultAutomationName("weekly", i18n.t));
+      expect(primary).not.toBe(weekly);
+      expect(customAutomationName(name)).toBeNull();
+    }
+    const customName = `${ru.automations.defaultName} — рабочие аккаунты`;
+    expect(automationDisplayName({ name: customName, trigger: { kind: "weekly" } }, i18n.t)).toBe(customName);
+    expect(customAutomationName(undefined)).toBeNull();
+    expect(customAutomationName("")).toBe("");
+  });
+
   test("limits accounts and intersects model entitlements", () => {
     const first = account("one", { models: ["gpt-5.4", "gpt-5.4-mini"] });
     const second = account("two", { models: ["gpt-5.4"] });
@@ -61,15 +85,16 @@ describe("automation model", () => {
     expect(automationAccountSelectionValid("account_ids", pool, ["one"], pool)).toBe(true);
     expect(automationAccountSelectionValid("account_ids", pool, ["missing"], [])).toBe(false);
     expect(resolveAutomationModel(["gpt-5.4"], "removed")).toBe("gpt-5.4");
-    expect(automationFormValid(" Name ", true, false, "gpt-5.4")).toBe(true);
-    expect(automationFormValid("", true, true, "")).toBe(false);
+    expect(automationFormValid(" Name ", true, true, "gpt-5.4")).toBe(true);
+    expect(automationFormValid("", true, false, "")).toBe(false);
+    expect(automationFormValid("Countdown", true, automationType("quota_full").requiresModel, "")).toBe(false);
+    expect(automationFormValid("Weekly", true, automationType("weekly").requiresModel, "")).toBe(true);
   });
 
   test("builds weekly reset payloads with automatic secondary execution", () => {
     const submission = buildAutomationSubmission({
       task: null,
       name: "Weekly reset",
-      executionPolicy: "require_confirmation",
       triggerKind: "weekly",
       selectorKind: "account_ids",
       accountIds: ["one"],
@@ -87,7 +112,7 @@ describe("automation model", () => {
     expect(submission.remoteInput).toMatchObject({ id: "", createdAtMs: 123, updatedAtMs: 123, fallbackSchedule: null });
   });
 
-  test("preserves an existing task identity and retry settings on update", () => {
+  test("normalizes a legacy manual task and preserves identity and retry settings", () => {
     const task: WakeTask = {
       id: "task-1",
       name: "Old",
@@ -96,15 +121,15 @@ describe("automation model", () => {
       windowKinds: ["primary"],
       modelPolicy: { kind: "lightest_supported" },
       trigger: { kind: "quota_full" },
-      executionPolicy: "automatic",
+      executionPolicy: "require_confirmation",
       jitterSeconds: 4,
       maxAttemptsPerCycle: 3,
       createdAtMs: 1,
       updatedAtMs: 2,
     };
-    const submission = buildAutomationSubmission({ task, name: "New", executionPolicy: "automatic", triggerKind: "quota_full", selectorKind: "all_eligible", accountIds: [], selectedModel: "gpt-5.4", nowMs: 5 });
+    const submission = buildAutomationSubmission({ task, name: "New", triggerKind: "quota_full", selectorKind: "all_eligible", accountIds: [], selectedModel: "gpt-5.4", nowMs: 5 });
     expect(submission.operationId).toBe("automation-update-task-1");
-    expect(submission.base).toMatchObject({ name: "New", enabled: false, jitterSeconds: 4, maxAttemptsPerCycle: 3 });
+    expect(submission.base).toMatchObject({ name: "New", enabled: false, executionPolicy: "automatic", jitterSeconds: 4, maxAttemptsPerCycle: 3 });
     expect(submission.remoteInput).toMatchObject({ id: "task-1", createdAtMs: 1, updatedAtMs: 5 });
   });
 });

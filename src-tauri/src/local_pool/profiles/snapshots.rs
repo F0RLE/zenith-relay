@@ -1,25 +1,28 @@
 use super::codex::{self, UserProfileSnapshot};
 use crate::{
     files::atomic_write,
-    local_pool::{
-        error::{ErrorCode, LocalPoolError, Result},
-        store::secret_store,
-    },
+    local_pool::error::{ErrorCode, LocalPoolError, Result},
 };
-use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use serde::Serialize;
+use std::{fs, path::Path};
 use uuid::Uuid;
 use zenith_relay_core::unix_time_ms as now_ms;
 
-const SNAPSHOT_VERSION: u32 = 1;
-const PAYLOAD_VERSION: u32 = 1;
-const SNAPSHOT_DIR: &str = "snapshots";
-const MAX_NAME_CHARS: usize = 80;
-const MAX_METADATA_BYTES: u64 = 16 * 1024;
-const MAX_PROFILE_FILE_BYTES: usize = 1024 * 1024;
+pub(super) const SNAPSHOT_VERSION: u32 = 1;
+pub(super) const PAYLOAD_VERSION: u32 = 1;
+mod io;
+
+use io::SnapshotSecrets;
+
+mod record;
+use record::{
+    load_payload, normalize_name, read_record, summary, validate_profile_content, validate_record,
+    SnapshotPayload, SnapshotRecord,
+};
+
+pub(super) const MAX_NAME_CHARS: usize = 80;
+pub(super) const MAX_METADATA_BYTES: u64 = 16 * 1024;
+pub(super) const MAX_PROFILE_FILE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,35 +43,12 @@ pub struct ProfileSnapshotList {
     pub invalid_count: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SnapshotRecord {
-    version: u32,
-    id: String,
-    name: String,
-    profile_dir: String,
-    created_at_ms: u64,
-    config_available: bool,
-    auth_available: bool,
-    #[serde(default)]
-    is_original: bool,
-    payload_secret_ref: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SnapshotPayload {
-    version: u32,
-    config: Option<String>,
-    auth: Option<String>,
-}
-
 pub fn list(backup_root: &Path) -> Result<ProfileSnapshotList> {
-    list_with(backup_root, &OsSnapshotSecrets)
+    list_with(backup_root, &io::OsSnapshotSecrets)
 }
 
 fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<ProfileSnapshotList> {
-    let root = snapshot_root(backup_root);
+    let root = io::snapshot_root(backup_root);
     if !root.exists() {
         return Ok(ProfileSnapshotList {
             snapshots: Vec::new(),
@@ -77,9 +57,9 @@ fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<Profi
     }
     let mut snapshots = Vec::new();
     let mut invalid_count = 0;
-    for entry in fs::read_dir(&root).map_err(io_error)? {
-        let entry = entry.map_err(io_error)?;
-        if !entry.file_type().map_err(io_error)?.is_file()
+    for entry in fs::read_dir(&root).map_err(io::io_error)? {
+        let entry = entry.map_err(io::io_error)?;
+        if !entry.file_type().map_err(io::io_error)?.is_file()
             || entry.path().extension().and_then(|value| value.to_str()) != Some("json")
         {
             continue;
@@ -121,15 +101,15 @@ fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<Profi
 }
 
 pub fn create(codex_home: &Path, backup_root: &Path, name: &str) -> Result<ProfileSnapshotSummary> {
-    create_with(codex_home, backup_root, name, false, &OsSnapshotSecrets)
+    create_with(codex_home, backup_root, name, false, &io::OsSnapshotSecrets)
 }
 
 pub fn restore_full(codex_home: &Path, backup_root: &Path, id: &str) -> Result<()> {
-    restore_full_with(codex_home, backup_root, id, &OsSnapshotSecrets)
+    restore_full_with(codex_home, backup_root, id, &io::OsSnapshotSecrets)
 }
 
 pub fn delete(backup_root: &Path, id: &str) -> Result<()> {
-    delete_with(backup_root, id, &OsSnapshotSecrets)
+    delete_with(backup_root, id, &io::OsSnapshotSecrets)
 }
 
 fn create_with(
@@ -140,12 +120,12 @@ fn create_with(
     secrets: &impl SnapshotSecrets,
 ) -> Result<ProfileSnapshotSummary> {
     let name = normalize_name(name)?;
-    fs::create_dir_all(codex_home).map_err(io_error)?;
-    let profile_dir = fs::canonicalize(codex_home).map_err(io_error)?;
+    fs::create_dir_all(codex_home).map_err(io::io_error)?;
+    let profile_dir = fs::canonicalize(codex_home).map_err(io::io_error)?;
     let snapshot = codex::snapshot_user_profile(&profile_dir, backup_root)?;
     validate_profile_content(&snapshot)?;
     let id = Uuid::new_v4().to_string();
-    let payload_secret_ref = payload_secret_ref(&id);
+    let payload_secret_ref = io::payload_secret_ref(&id);
     let config_available = snapshot.config.is_some();
     let auth_available = snapshot.auth.is_some();
     let payload = serde_json::to_string(&SnapshotPayload {
@@ -153,7 +133,7 @@ fn create_with(
         config: snapshot.config,
         auth: snapshot.auth,
     })
-    .map_err(invalid_data)?;
+    .map_err(io::invalid_data)?;
     secrets.save(&payload_secret_ref, &payload)?;
 
     let record = SnapshotRecord {
@@ -167,10 +147,11 @@ fn create_with(
         is_original,
         payload_secret_ref: payload_secret_ref.clone(),
     };
-    let metadata = serde_json::to_string_pretty(&record).map_err(invalid_data)?;
-    let path = metadata_path(backup_root, &id)?;
-    if let Err(error) = atomic_write(&path, &format!("{metadata}\n")).map_err(io_error_message) {
-        return Err(with_cleanup(error, secrets.delete(&payload_secret_ref)));
+    let metadata = serde_json::to_string_pretty(&record).map_err(io::invalid_data)?;
+    let path = io::metadata_path(backup_root, &id)?;
+    if let Err(error) = atomic_write(&path, &format!("{metadata}\n")).map_err(io::io_error_message)
+    {
+        return Err(io::with_cleanup(error, secrets.delete(&payload_secret_ref)));
     }
     Ok(summary(&record))
 }
@@ -181,14 +162,14 @@ fn restore_full_with(
     id: &str,
     secrets: &impl SnapshotSecrets,
 ) -> Result<()> {
-    let path = metadata_path(backup_root, id)?;
+    let path = io::metadata_path(backup_root, id)?;
     let record = read_record(&path)?;
     validate_record(&record, id)?;
     // A profile directory may have been removed while the snapshot was kept.
     // Recreate it before canonicalizing so a valid snapshot can repair the
     // profile instead of failing with an I/O error on a missing path.
-    fs::create_dir_all(codex_home).map_err(io_error)?;
-    let profile_dir = fs::canonicalize(codex_home).map_err(io_error)?;
+    fs::create_dir_all(codex_home).map_err(io::io_error)?;
+    let profile_dir = fs::canonicalize(codex_home).map_err(io::io_error)?;
     if codex::portable_path_value(&record.profile_dir) != codex::portable_path_string(&profile_dir)
     {
         return Err(LocalPoolError::new(
@@ -205,222 +186,25 @@ fn restore_full_with(
 }
 
 fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> Result<()> {
-    let path = metadata_path(backup_root, id)?;
-    let bytes = read_bounded(&path, MAX_METADATA_BYTES)?;
+    let path = io::metadata_path(backup_root, id)?;
+    let bytes = io::read_bounded(&path, MAX_METADATA_BYTES)?;
     let content = std::str::from_utf8(&bytes).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "ChatGPT snapshot metadata is not UTF-8",
         )
     })?;
-    let record: SnapshotRecord = serde_json::from_str(content).map_err(invalid_data)?;
+    let record: SnapshotRecord = serde_json::from_str(content).map_err(io::invalid_data)?;
     validate_record(&record, id)?;
-    if fs::read(&path).map_err(io_error)? != bytes {
-        return Err(snapshot_changed());
+    if fs::read(&path).map_err(io::io_error)? != bytes {
+        return Err(io::snapshot_changed());
     }
-    fs::remove_file(&path).map_err(io_error)?;
+    fs::remove_file(&path).map_err(io::io_error)?;
     if let Err(error) = secrets.delete(&record.payload_secret_ref) {
-        let rollback = atomic_write(&path, content).map_err(io_error_message);
-        return Err(with_cleanup(error, rollback));
+        let rollback = atomic_write(&path, content).map_err(io::io_error_message);
+        return Err(io::with_cleanup(error, rollback));
     }
     Ok(())
-}
-
-fn load_payload(
-    record: &SnapshotRecord,
-    secrets: &impl SnapshotSecrets,
-) -> Result<SnapshotPayload> {
-    let content = secrets.load(&record.payload_secret_ref)?.ok_or_else(|| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT snapshot payload is missing",
-        )
-    })?;
-    let payload: SnapshotPayload = serde_json::from_str(&content).map_err(invalid_data)?;
-    if payload.version != PAYLOAD_VERSION {
-        return Err(LocalPoolError::new(
-            ErrorCode::UnsupportedSchema,
-            "ChatGPT snapshot payload uses an unsupported version",
-        ));
-    }
-    validate_profile_content(&UserProfileSnapshot {
-        config: payload.config.clone(),
-        auth: payload.auth.clone(),
-    })?;
-    Ok(payload)
-}
-
-fn read_record(path: &Path) -> Result<SnapshotRecord> {
-    let bytes = read_bounded(path, MAX_METADATA_BYTES)?;
-    let content = std::str::from_utf8(&bytes).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT snapshot metadata is not UTF-8",
-        )
-    })?;
-    serde_json::from_str(content).map_err(invalid_data)
-}
-
-fn validate_record(record: &SnapshotRecord, expected_id: &str) -> Result<()> {
-    let id = parse_id(&record.id)?;
-    if record.version != SNAPSHOT_VERSION
-        || id != expected_id
-        || record.name != normalize_name(&record.name)?
-        || record.profile_dir.trim().is_empty()
-        || !Path::new(&record.profile_dir).is_absolute()
-        || record.profile_dir.chars().any(char::is_control)
-        || record.created_at_ms == 0
-        || record.payload_secret_ref != payload_secret_ref(&id)
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT snapshot metadata is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_profile_content(snapshot: &UserProfileSnapshot) -> Result<()> {
-    if snapshot
-        .config
-        .as_ref()
-        .is_some_and(|value| value.len() > MAX_PROFILE_FILE_BYTES)
-        || snapshot
-            .auth
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_PROFILE_FILE_BYTES)
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT profile snapshot is too large",
-        ));
-    }
-    Ok(())
-}
-
-fn normalize_name(value: &str) -> Result<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.chars().count() > MAX_NAME_CHARS
-        || value.chars().any(char::is_control)
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT snapshot name is invalid",
-        ));
-    }
-    Ok(value.to_string())
-}
-
-fn summary(record: &SnapshotRecord) -> ProfileSnapshotSummary {
-    ProfileSnapshotSummary {
-        id: record.id.clone(),
-        name: record.name.clone(),
-        profile_dir: codex::portable_path_value(&record.profile_dir),
-        created_at_ms: record.created_at_ms,
-        config_available: record.config_available,
-        auth_available: record.auth_available,
-        is_original: record.is_original,
-    }
-}
-
-fn snapshot_root(backup_root: &Path) -> PathBuf {
-    backup_root.join(SNAPSHOT_DIR)
-}
-
-fn metadata_path(backup_root: &Path, id: &str) -> Result<PathBuf> {
-    let id = parse_id(id)?;
-    Ok(snapshot_root(backup_root).join(format!("{id}.json")))
-}
-
-fn parse_id(id: &str) -> Result<String> {
-    let parsed = Uuid::parse_str(id.trim()).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT snapshot ID is invalid")
-    })?;
-    let normalized = parsed.to_string();
-    if normalized != id {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT snapshot ID is invalid",
-        ));
-    }
-    Ok(normalized)
-}
-
-fn payload_secret_ref(id: &str) -> String {
-    format!("profile:snapshot:{id}:payload")
-}
-
-fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT snapshot metadata is invalid",
-        ));
-    }
-    fs::read(path).map_err(io_error)
-}
-
-fn invalid_data(error: impl std::fmt::Display) -> LocalPoolError {
-    let _ = error;
-    LocalPoolError::new(
-        ErrorCode::RecoveryRequired,
-        "ChatGPT snapshot data is invalid",
-    )
-}
-
-fn io_error(error: std::io::Error) -> LocalPoolError {
-    LocalPoolError::new(
-        ErrorCode::Io,
-        format!("ChatGPT snapshot I/O failed: {error}"),
-    )
-}
-
-fn io_error_message(error: String) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error)
-}
-
-fn snapshot_changed() -> LocalPoolError {
-    LocalPoolError::new(
-        ErrorCode::ProfileRestoreBlocked,
-        "ChatGPT snapshot changed while Relay was updating it",
-    )
-}
-
-fn with_cleanup(error: LocalPoolError, cleanup: Result<()>) -> LocalPoolError {
-    match cleanup {
-        Ok(()) => error,
-        Err(cleanup) => LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!(
-                "{}; snapshot cleanup failed: {}",
-                error.message, cleanup.message
-            ),
-        ),
-    }
-}
-
-trait SnapshotSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()>;
-    fn load(&self, secret_ref: &str) -> Result<Option<String>>;
-    fn delete(&self, secret_ref: &str) -> Result<()>;
-}
-
-struct OsSnapshotSecrets;
-
-impl SnapshotSecrets for OsSnapshotSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
-        secret_store::save(secret_ref, value)
-    }
-
-    fn load(&self, secret_ref: &str) -> Result<Option<String>> {
-        secret_store::load(secret_ref)
-    }
-
-    fn delete(&self, secret_ref: &str) -> Result<()> {
-        secret_store::delete(secret_ref)
-    }
 }
 
 #[cfg(test)]
@@ -462,7 +246,7 @@ mod tests {
         let secrets = MemorySecrets::default();
 
         let first = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
-        let metadata = fs::read_to_string(metadata_path(&backups, &first.id).unwrap()).unwrap();
+        let metadata = fs::read_to_string(io::metadata_path(&backups, &first.id).unwrap()).unwrap();
         assert!(!metadata.contains("original-secret"));
         assert!(!metadata.contains("auth-secret"));
 
@@ -550,7 +334,9 @@ mod tests {
         let snapshot = create_with(&profile, &backups, "Missing", false, &secrets).unwrap();
         let valid = create_with(&profile, &backups, "Valid", false, &secrets).unwrap();
 
-        secrets.delete(&payload_secret_ref(&snapshot.id)).unwrap();
+        secrets
+            .delete(&io::payload_secret_ref(&snapshot.id))
+            .unwrap();
         let list = list_with(&backups, &secrets).unwrap();
 
         assert_eq!(list.invalid_count, 1);

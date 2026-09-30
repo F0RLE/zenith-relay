@@ -1,8 +1,8 @@
 use super::{
     existing_identity_index, import_account_item, import_session_error, import_source_item,
     normalize_models, normalize_selected_item_ids, parse_subscription_timestamp_ms,
-    AccountImportProgressEvent, ConfirmAccountImportInput, ImportItemError, ImportItemStatus,
-    ImportRowContext, ACCOUNT_IMPORT_PROGRESS_EVENT,
+    AccountImportOptions, AccountImportProgressEvent, ConfirmAccountImportInput, ImportItemError,
+    ImportItemStatus, ImportRowContext, ACCOUNT_IMPORT_PROGRESS_EVENT,
 };
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::import_session::ImportSessionStore;
@@ -12,7 +12,8 @@ use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
 use crate::local_pool::state::DesktopState;
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter};
-use zenith_relay_core::accounts::{ImportAuthMode, ImportQuotaStatus};
+use zenith_relay_core::accounts::{ImportAuthMode, ImportQuotaStatus, ParsedImportItem};
+use zenith_relay_core::error_codes;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -22,6 +23,7 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
     app: Option<&AppHandle>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
     let selected_item_ids = normalize_selected_item_ids(input.selected_item_ids)?;
+    let session_hash = crate::diagnostics::hash_identifier(&input.session_id);
     let configured_models = normalize_models(input.models.clone())?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(state, &credentials)?;
@@ -32,6 +34,14 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
         .map_err(import_session_error)?;
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "session_resolved",
+        &[
+            ("session", session_hash.clone()),
+            ("selected_count", selected_item_ids.len().to_string()),
+        ],
+    );
     let selected = selected_item_ids
         .iter()
         .map(String::as_str)
@@ -86,7 +96,27 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
     let mut failed = 0usize;
     emit_account_import_progress(app, &input.session_id, 0, total, succeeded, failed, None);
 
+    let mut batch = ConfirmImport {
+        state,
+        credentials: &credentials,
+        items: &mut items,
+        add_to_pool: input.add_to_pool,
+        discover_models: input.discover_models,
+        probe_quota,
+        configured_models: &configured_models,
+    };
     for (completed, item_id) in selected_item_ids.into_iter().enumerate() {
+        let item_hash = crate::diagnostics::hash_identifier(&item_id);
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "item_started",
+            &[
+                ("session", session_hash.clone()),
+                ("item", item_hash.clone()),
+                ("index", completed.to_string()),
+                ("total", total.to_string()),
+            ],
+        );
         let label = row_context
             .get(&item_id)
             .map(|context| context.label.clone())
@@ -100,61 +130,37 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
             failed,
             Some(label),
         );
-        let result = match row_context.get(&item_id) {
-            None => ImportItemResult::failure(
-                item_id,
-                ImportItemError::new("item_not_found", "import item was not found"),
-            ),
-            Some(context) if !context.selectable => ImportItemResult::failure(
-                item_id,
-                ImportItemError::new("item_not_selectable", "import item cannot be selected"),
-            ),
-            Some(context) => match items.remove(&item_id) {
-                None => ImportItemResult::failure(
-                    item_id,
-                    ImportItemError::new(
-                        "item_not_selectable",
-                        "import item has no usable credentials",
-                    ),
-                ),
-                Some(item) if context.auth_mode == ImportAuthMode::ApiKey => {
-                    match import_source_item(
-                        state,
-                        item,
-                        input.add_to_pool,
-                        input.discover_models,
-                        &configured_models,
-                    )
-                    .await
-                    {
-                        Ok(source) => ImportItemResult::source_success(item_id, source),
-                        Err(error) => ImportItemResult::failure(item_id, error),
-                    }
-                }
-                Some(item) => match import_account_item(
-                    state,
-                    &credentials,
-                    item,
-                    context,
-                    input.add_to_pool,
-                    input.discover_models,
-                    probe_quota,
-                    &configured_models,
-                )
-                .await
-                {
-                    Ok((account, quota)) => {
-                        ImportItemResult::account_success(item_id, account, quota)
-                    }
-                    Err(error) => ImportItemResult::failure(item_id, error),
-                },
-            },
-        };
+        let context = row_context.get(&item_id);
+        let result = import_confirmed_item(&mut batch, item_id, context).await;
         match result.status {
             ImportItemStatus::Succeeded => succeeded += 1,
-            ImportItemStatus::Failed => failed += 1,
+            ImportItemStatus::Failed => {
+                failed += 1;
+                if let Some(error) = result.error.as_ref() {
+                    crate::diagnostics::record_error(
+                        "account-import",
+                        Some(&error.code),
+                        &error.message,
+                        &[
+                            ("session", session_hash.clone()),
+                            ("item", item_hash.clone()),
+                            ("index", completed.to_string()),
+                        ],
+                    );
+                }
+            }
         }
         results.push(result);
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "item_finished",
+            &[
+                ("session", session_hash.clone()),
+                ("item", item_hash),
+                ("completed", (completed + 1).to_string()),
+                ("failed", failed.to_string()),
+            ],
+        );
         emit_account_import_progress(
             app,
             &input.session_id,
@@ -170,11 +176,89 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         sessions
             .complete(&input.session_id)
             .map_err(import_session_error)?;
+        crate::diagnostics::breadcrumb(
+            "account-import",
+            "session_completed",
+            &[("session", session_hash.clone())],
+        );
     }
     Ok(ConfirmAccountImportResponse {
         session_id: input.session_id,
         results,
     })
+}
+
+struct ConfirmImport<'a> {
+    state: &'a DesktopState,
+    credentials: &'a CredentialStore<NativeSecretBackend>,
+    items: &'a mut HashMap<String, ParsedImportItem>,
+    add_to_pool: bool,
+    discover_models: bool,
+    probe_quota: bool,
+    configured_models: &'a [String],
+}
+
+async fn import_confirmed_item(
+    batch: &mut ConfirmImport<'_>,
+    item_id: String,
+    context: Option<&ImportRowContext>,
+) -> ImportItemResult {
+    let Some(context) = context else {
+        return ImportItemResult::failure(
+            item_id,
+            ImportItemError::new(error_codes::ITEM_NOT_FOUND, "import item was not found"),
+        );
+    };
+    if !context.selectable {
+        return ImportItemResult::failure(
+            item_id,
+            ImportItemError::new(
+                error_codes::ITEM_NOT_SELECTABLE,
+                "import item cannot be selected",
+            ),
+        );
+    }
+    let Some(item) = batch.items.remove(&item_id) else {
+        return ImportItemResult::failure(
+            item_id,
+            ImportItemError::new(
+                error_codes::ITEM_NOT_SELECTABLE,
+                "import item has no usable credentials",
+            ),
+        );
+    };
+    if context.auth_mode == ImportAuthMode::ApiKey {
+        return match import_source_item(
+            batch.state,
+            item,
+            batch.add_to_pool,
+            batch.discover_models,
+            batch.configured_models,
+        )
+        .await
+        {
+            Ok(source) => ImportItemResult::source_success(item_id, source),
+            Err(error) => ImportItemResult::failure(item_id, error),
+        };
+    }
+    match import_account_item(
+        batch.state,
+        batch.credentials,
+        item,
+        context,
+        AccountImportOptions {
+            add_to_pool: batch.add_to_pool,
+            discover_models: batch.discover_models,
+            probe_quota: batch.probe_quota,
+            configured_models: batch.configured_models,
+        },
+        batch.state.account_check_url(),
+    )
+    .await
+    {
+        Ok((account, quota)) => ImportItemResult::account_success(item_id, account, quota),
+        Err(error) => ImportItemResult::failure(item_id, error),
+    }
 }
 
 fn emit_account_import_progress(

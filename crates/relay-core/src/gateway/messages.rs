@@ -71,7 +71,7 @@ mod tests {
         let response = native_messages_error_response(api_error(
             StatusCode::TOO_MANY_REQUESTS,
             "all eligible sources are cooling down",
-            "all_sources_cooling_down",
+            crate::error_codes::ALL_SOURCES_COOLING_DOWN,
         ))
         .await;
 

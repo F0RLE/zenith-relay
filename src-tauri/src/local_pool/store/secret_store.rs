@@ -15,7 +15,7 @@ use std::{
 const SECRET_PREFIX: &str = "local-pool:";
 const HASHED_SECRET_PREFIX: &str = "lp:";
 const VAULT_KEY_USER: &str = "local-vault-master-key-v1";
-const LEGACY_MIGRATION_MARKER: &str = ".legacy-keyring-migrated-v1";
+const KEYRING_MIGRATION_MARKER: &str = "keyring-v1.complete";
 
 struct ConfiguredVault {
     root: PathBuf,
@@ -25,12 +25,13 @@ struct ConfiguredVault {
 static VAULT: OnceLock<ConfiguredVault> = OnceLock::new();
 static INITIALIZE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-pub fn initialize(root: &Path) -> Result<()> {
+pub fn initialize(vault_root: &Path, migration_root: &Path) -> Result<()> {
     let _guard = INITIALIZE_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "secret vault lock is unavailable"))?;
-    let root = canonical_root(root)?;
+    let root = canonical_root(vault_root)?;
+    let migration_root = canonical_root(migration_root)?;
     if let Some(configured) = VAULT.get() {
         return if configured.root == root {
             Ok(())
@@ -49,7 +50,7 @@ pub fn initialize(root: &Path) -> Result<()> {
             format!("failed to open encrypted secret vault: {message}"),
         )
     })?;
-    migrate_legacy_keyring_once(&root, &vault);
+    migrate_legacy_keyring_once(&migration_root, &vault)?;
     VAULT
         .set(ConfiguredVault { root, vault })
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "failed to initialize secret vault"))
@@ -93,25 +94,45 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
     Ok(Some(value))
 }
 
-fn migrate_legacy_keyring_once(root: &Path, vault: &Vault) {
-    let marker = root.join(LEGACY_MIGRATION_MARKER);
-    if marker.exists() {
-        return;
+fn migrate_legacy_keyring_once(migration_root: &Path, vault: &Vault) -> Result<()> {
+    let marker = migration_root.join(KEYRING_MIGRATION_MARKER);
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => return Ok(()),
+        Ok(_) => {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("keyring migration marker is unsafe: {}", marker.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(LocalPoolError::new(
+                ErrorCode::Io,
+                format!("failed to inspect keyring migration marker: {error}"),
+            ))
+        }
     }
     let Ok(secret_refs) = vault.secret_refs() else {
-        return;
+        return Ok(());
     };
     let mut complete = true;
     for secret_ref in secret_refs {
         complete &= delete_keyring_secret(&secret_ref).is_ok();
     }
     if !complete {
-        return;
+        return Ok(());
     }
-    let _ = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(marker);
+        .open(marker)
+        .map(|_| ())
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::Io,
+                format!("failed to save keyring migration marker: {error}"),
+            )
+        })
 }
 
 pub fn delete(secret_ref: &str) -> Result<()> {

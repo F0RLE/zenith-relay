@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     fs::{self, OpenOptions},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::Duration,
 };
@@ -16,6 +16,7 @@ pub(super) use zenith_relay_core::unix_time_ms;
 
 pub struct Store {
     connection: Mutex<Connection>,
+    pub(super) refresh_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl Store {
@@ -60,13 +61,15 @@ impl Store {
             }
         }
         validate_migration_ledger(&connection)?;
-        drop(migration_lock);
         connection
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .map_err(db_error)?;
         let store = Self {
             connection: Mutex::new(connection),
+            refresh_changed: tokio::sync::watch::channel(0).0,
         };
+        store.upgrade_rotation_policy()?;
+        drop(migration_lock);
         let _ = store.server_id()?;
         Ok(store)
     }
@@ -96,6 +99,7 @@ impl Store {
                 params![key, value],
             )
             .map_err(db_error)?;
+        self.notify_refresh_changed();
         Ok(())
     }
 
@@ -123,6 +127,7 @@ impl Store {
         self.lock()?
             .execute(&sql, params![id, to_json(value)?, secret_ref])
             .map_err(db_error)?;
+        self.notify_refresh_changed();
         Ok(())
     }
 
@@ -151,6 +156,18 @@ impl Store {
             .lock()
             .map_err(|_| "SQLite lock poisoned".to_string())
     }
+
+    pub fn backup_to(&self, destination: &Path) -> Result<(), String> {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        if destination.exists() {
+            return Err("backup database destination already exists".to_string());
+        }
+        self.lock()?
+            .backup(rusqlite::MAIN_DB, destination, None)
+            .map_err(db_error)
+    }
 }
 
 pub(super) fn to_json(value: &impl Serialize) -> Result<String, String> {
@@ -171,4 +188,17 @@ pub(super) fn db_error(error: rusqlite::Error) -> String {
 
 pub(super) fn io_error(error: std::io::Error) -> String {
     format!("store I/O failed: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::optional_u64;
+
+    #[test]
+    fn null_and_negative_measurements_stay_absent() {
+        assert_eq!(optional_u64(None), None);
+        assert_eq!(optional_u64(Some(-1)), None);
+        assert_eq!(optional_u64(Some(0)), Some(0));
+        assert_eq!(optional_u64(Some(12)), Some(12));
+    }
 }

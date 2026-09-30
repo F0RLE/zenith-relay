@@ -27,12 +27,12 @@ function Invoke-Jscpd {
   )
 
   Write-Host "Checking $Format clones introduced after $BaseRef"
-  & bunx --bun jscpd@5.1.1 @Paths `
+  & bunx --bun jscpd@5.3.1 @Paths `
     --format $Format `
     --min-tokens 100 `
     --min-lines 10 `
     --skip-comments `
-    --ignore "**/tests/**,**/tests.rs,**/*_test.rs,**/node_modules/**,**/.build/**,**/protocol/management.rs,**/protocol/management/account.rs,**/app/account_runtime.rs,**/store/usage.rs,**/store/usage/**,**/local_pool/commands/runtime.rs,**/local_pool/commands/automations.rs,**/local_pool/state.rs,**/local_pool/store/mod.rs,**/store/migrations.rs,**/usage_writer.rs" `
+    --ignore "**/tests/**,**/tests.rs,**/*_test.rs,**/node_modules/**,**/.build/**,**/protocol/management.rs,**/protocol/management/account.rs,**/app/account_runtime.rs,**/store/usage.rs,**/store/usage/**,**/local_pool/commands/runtime.rs,**/local_pool/commands/automations.rs,**/local_pool/state.rs,**/local_pool/store.rs,**/store/migrations.rs,**/usage_writer.rs" `
     --baseline-from-ref $BaseRef `
     --fail-on-new-clones 0 `
     --reporters console `

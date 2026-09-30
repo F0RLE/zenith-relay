@@ -9,7 +9,9 @@ use std::sync::Arc;
 use zenith_relay_core::automations::{
     AccountSelector, WakeCoordinator, WakeExecutionPolicy, WakeHistory, WakeModelPolicy, WakeTask,
 };
+use zenith_relay_core::error_codes;
 use zenith_relay_core::quota::QuotaWindowKind;
+use zenith_relay_core::ModelRules;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -59,7 +61,9 @@ pub async fn update_wake_task(
         .map_err(store_error)?
         .into_iter()
         .find(|value| value.id == id)
-        .ok_or_else(|| ManagementError::not_found("wake_task_not_found", "wake task not found"))?;
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::WAKE_TASK_NOT_FOUND, "wake task not found")
+        })?;
     task.id = id;
     task.created_at_ms = current.created_at_ms;
     task.updated_at_ms = now_ms();
@@ -93,7 +97,7 @@ pub async fn delete_wake_task(
         .map_err(store_error)?
     {
         return Err(ManagementError::not_found(
-            "wake_task_not_found",
+            error_codes::WAKE_TASK_NOT_FOUND,
             "wake task not found",
         ));
     }
@@ -118,7 +122,9 @@ pub async fn test_wake_task(
         .map_err(store_error)?
         .into_iter()
         .find(|value| value.id == id)
-        .ok_or_else(|| ManagementError::not_found("wake_task_not_found", "wake task not found"))?;
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::WAKE_TASK_NOT_FOUND, "wake task not found")
+        })?;
     let accounts = state.store.accounts().map_err(store_error)?;
     validate_remote_task(&task, &accounts)?;
     let mut selected = selected_accounts(&task, &accounts)?;
@@ -151,13 +157,13 @@ fn validate_remote_task(
 ) -> Result<(), ManagementError> {
     if matches!(&task.account_selector, AccountSelector::Tags(_)) {
         return Err(ManagementError::validation(
-            "wake_tags_unsupported",
+            error_codes::WAKE_TAGS_UNSUPPORTED,
             "tag-based wake tasks are not supported on the server",
         ));
     }
     if task.execution_policy != WakeExecutionPolicy::Automatic {
         return Err(ManagementError::validation(
-            "wake_confirmation_unsupported",
+            error_codes::WAKE_CONFIRMATION_UNSUPPORTED,
             "manual wake confirmation is not supported on the server",
         ));
     }
@@ -179,7 +185,7 @@ fn validate_remote_task(
     };
     if !valid {
         return Err(ManagementError::validation(
-            "wake_model_unavailable",
+            error_codes::WAKE_MODEL_UNAVAILABLE,
             "wake model is unavailable for the selected accounts",
         ));
     }
@@ -200,7 +206,7 @@ fn selected_accounts<'a>(
                     .find(|account| account.id == *account_id)
                     .ok_or_else(|| {
                         ManagementError::validation(
-                            "wake_account_missing",
+                            error_codes::WAKE_ACCOUNT_MISSING,
                             "wake task references an unknown account",
                         )
                     })
@@ -217,15 +223,8 @@ fn account_supports_model(account: &ServerAccountRecord, model: &str) -> bool {
         .effective_models()
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(model))
-        && (account.allowed_models.is_empty()
-            || account
-                .allowed_models
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(model)))
-        && !account
-            .excluded_models
-            .iter()
-            .any(|excluded| excluded.eq_ignore_ascii_case(model))
+        && ModelRules::from_allow_deny(&account.allowed_models, &account.excluded_models)
+            .allows(model)
 }
 
 pub async fn wake_history(

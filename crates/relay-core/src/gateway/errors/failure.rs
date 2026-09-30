@@ -1,33 +1,115 @@
 use super::*;
+use crate::error_codes;
+use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
+
+mod response;
+
+#[cfg(test)]
+pub(super) use response::responses_call_id_is_missing;
+pub(super) use response::responses_call_id_is_missing_text;
+pub(crate) use response::{
+    previous_response_not_found, previous_response_not_found_value,
+    previous_response_requires_websocket, prompt_cache_write_rejected,
+    recoverable_response_affinity_miss, recoverable_response_model_switch,
+    responses_custom_tool_item_id_requires_ctc_prefix,
+    responses_function_call_output_has_invalid_call_id,
+    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+    responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
+    responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
+    zenith_gateway_invalid_request, zenith_gateway_invalid_request_value,
+};
 
 impl AttemptFailure {
+    /// Explicit provider rejections and connection failures have different
+    /// health effects from authentication, allowance and local preparation.
+    pub(crate) fn settle_rotation_rejection(
+        &self,
+        runtime: &GatewayRuntime,
+        lease: &crate::runtime::CandidateLease,
+        cooldown: Option<CooldownRequest<'_>>,
+        now_ms: u64,
+    ) {
+        let health = if !lease.has_dispatched()
+            || matches!(
+                self.category,
+                error_codes::ACCOUNT_REFRESH
+                    | error_codes::ACCOUNT_TOKEN_PERSISTENCE
+                    | error_codes::ACCOUNT_AUTH
+            ) {
+            HealthObservation::LocalError
+        } else if matches!(
+            self.category,
+            error_codes::UPSTREAM_SERVER_ERROR
+                | error_codes::UPSTREAM_BAD_GATEWAY
+                | error_codes::UPSTREAM_UNAVAILABLE
+                | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+                | error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_TRANSPORT_CONNECT
+        ) {
+            HealthObservation::CountableTransient {
+                provider_not_before_ms: cooldown.map(|request| request.retry_at_ms).or_else(|| {
+                    self.cooldown_hint
+                        .retry_after_ms
+                        .map(|delay| now_ms.saturating_add(delay))
+                }),
+            }
+        } else if self.execution.certainty
+            == crate::scheduler::rotation::ExecutionCertainty::Unknown
+        {
+            HealthObservation::Unknown
+        } else {
+            HealthObservation::ClientError
+        };
+        runtime.settle_rotation_failure(
+            lease,
+            AttemptObservation {
+                execution: self.execution,
+                health,
+            },
+            cooldown,
+            now_ms,
+        );
+    }
+
     pub(crate) fn authorized_request(error: AuthorizedRequestError) -> Self {
         match error {
             AuthorizedRequestError::Prepare(error) => Self::prepare(error),
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
             AuthorizedRequestError::NotReplayable => Self::body(),
+            AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
         }
     }
 
     pub(crate) fn transport(error: &reqwest::Error) -> Self {
         let (category, message) = if error.is_timeout() {
-            ("upstream_transport_timeout", "upstream request timed out")
+            (
+                error_codes::UPSTREAM_TRANSPORT_TIMEOUT,
+                "upstream request timed out",
+            )
         } else if error.is_connect() {
             (
-                "upstream_transport_connect",
+                error_codes::UPSTREAM_TRANSPORT_CONNECT,
                 "upstream connection could not be established",
             )
         } else if error.is_body() {
             (
-                "upstream_transport_body",
+                error_codes::UPSTREAM_TRANSPORT_BODY,
                 "upstream request or response body failed",
             )
         } else if error.is_request() {
-            ("upstream_transport_request", "upstream request failed")
+            (
+                error_codes::UPSTREAM_TRANSPORT_REQUEST,
+                "upstream request failed",
+            )
         } else {
-            ("upstream_transport", "upstream transport failed")
+            (error_codes::UPSTREAM_TRANSPORT, "upstream transport failed")
         };
         Self {
+            execution: if error.is_connect() {
+                ExecutionObservation::not_sent()
+            } else {
+                ExecutionObservation::unknown()
+            },
             status: StatusCode::BAD_GATEWAY,
             category,
             message,
@@ -37,8 +119,9 @@ impl AttemptFailure {
 
     pub(crate) fn body() -> Self {
         Self {
+            execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
-            category: "upstream_error",
+            category: error_codes::UPSTREAM_ERROR,
             message: "upstream response failed",
             cooldown_hint: RateLimitBodyHint::default(),
         }
@@ -46,8 +129,9 @@ impl AttemptFailure {
 
     pub(crate) fn invalid_request() -> Self {
         Self {
+            execution: ExecutionObservation::not_sent(),
             status: StatusCode::BAD_REQUEST,
-            category: "invalid_request",
+            category: error_codes::INVALID_REQUEST,
             message: "request cannot be translated for an eligible source",
             cooldown_hint: RateLimitBodyHint::default(),
         }
@@ -56,6 +140,7 @@ impl AttemptFailure {
     pub(crate) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
         let classification = classify_upstream_error(status, body);
         Self {
+            execution: rejection_execution(status, classification.category),
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
@@ -69,6 +154,7 @@ impl AttemptFailure {
         cooldown_hint: RateLimitBodyHint,
     ) -> Self {
         Self {
+            execution: rejection_execution(status, category),
             status: canonical_upstream_status(status, category),
             category,
             message: upstream_failure_message(category),
@@ -78,19 +164,38 @@ impl AttemptFailure {
 
     pub(crate) fn stream(category: &'static str) -> Self {
         Self {
+            execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
             category,
-            message: "upstream stream failed before the first event",
+            message: "upstream stream failed before client output",
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
     pub(crate) fn no_candidate() -> Self {
         Self {
+            execution: ExecutionObservation::not_sent(),
             status: StatusCode::SERVICE_UNAVAILABLE,
-            category: "no_eligible_source",
+            category: error_codes::NO_ELIGIBLE_SOURCE,
             message: "no eligible source is available for this model",
             cooldown_hint: RateLimitBodyHint::default(),
+        }
+    }
+
+    /// A closed retry window is an upstream availability failure.
+    /// An open window keeps the last rejection, or reports that nothing was eligible.
+    pub(crate) fn after_exhausted_attempts(
+        retry_window_expired: bool,
+        last_failure: Option<Self>,
+    ) -> Self {
+        if retry_window_expired {
+            Self::classified_with_hint(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error_codes::UPSTREAM_UNAVAILABLE,
+                Default::default(),
+            )
+        } else {
+            last_failure.unwrap_or_else(Self::no_candidate)
         }
     }
 
@@ -98,21 +203,24 @@ impl AttemptFailure {
         match error {
             ExecutorPrepareError::Authentication | ExecutorPrepareError::InvalidCredential => {
                 Self {
+                    execution: ExecutionObservation::not_sent(),
                     status: StatusCode::UNAUTHORIZED,
-                    category: "account_auth",
+                    category: error_codes::ACCOUNT_AUTH,
                     message: "account authorization is unavailable",
                     cooldown_hint: RateLimitBodyHint::default(),
                 }
             }
             ExecutorPrepareError::Persistence => Self {
+                execution: ExecutionObservation::not_sent(),
                 status: StatusCode::SERVICE_UNAVAILABLE,
-                category: "account_token_persistence",
+                category: error_codes::ACCOUNT_TOKEN_PERSISTENCE,
                 message: "refreshed account authorization could not be persisted",
                 cooldown_hint: RateLimitBodyHint::default(),
             },
             ExecutorPrepareError::Transient => Self {
+                execution: ExecutionObservation::not_sent(),
                 status: StatusCode::BAD_GATEWAY,
-                category: "account_refresh",
+                category: error_codes::ACCOUNT_REFRESH,
                 message: "account authorization refresh failed",
                 cooldown_hint: RateLimitBodyHint::default(),
             },
@@ -120,230 +228,41 @@ impl AttemptFailure {
     }
 }
 
-pub(crate) fn retryable_status(status: StatusCode, has_previous_response_id: bool) -> bool {
-    matches!(
-        status,
-        StatusCode::UNAUTHORIZED
-            | StatusCode::PAYMENT_REQUIRED
-            | StatusCode::FORBIDDEN
-            | StatusCode::REQUEST_TIMEOUT
-            | StatusCode::CONFLICT
-            | StatusCode::TOO_MANY_REQUESTS
-    ) || status.is_server_error()
-        || (status == StatusCode::NOT_FOUND && !has_previous_response_id)
-}
-
-pub(crate) fn retryable_failure(
-    status: StatusCode,
-    category: &str,
-    has_previous_response_id: bool,
-) -> bool {
-    if !failure_category_requires_cooldown(category) {
-        return false;
+/// HTTP status alone does not prove that a non-idempotent operation was
+/// rejected before execution. Only admission failures can authorize replay;
+/// an unclassified terminal event, timeout or generic 5xx remains uncertain.
+fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservation {
+    if matches!(
+        category,
+        error_codes::UPSTREAM_TERMINAL
+            | error_codes::UPSTREAM_REQUEST_TIMEOUT
+            | error_codes::UPSTREAM_CONFLICT
+            | error_codes::UPSTREAM_TRANSPORT
+            | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+    ) {
+        return ExecutionObservation::unknown();
     }
-    if category == "upstream_candidate_rejected" {
-        // A new request may safely try another source. Responses continuations
-        // are bound to their creator, so retrying an unclassified rejection
-        // elsewhere can corrupt its upstream conversation state.
-        return !has_previous_response_id;
-    }
-    retryable_status(status, has_previous_response_id)
+    if status.is_client_error()
         || matches!(
             category,
-            "upstream_unauthorized"
-                | "upstream_account_disabled"
-                | "upstream_usage_not_included"
-                | "upstream_quota_exhausted"
-                | "upstream_region_unsupported"
-                | "upstream_model_not_found"
-                | "upstream_model_unsupported"
-                | "upstream_model_capacity"
-                | "upstream_candidate_rejected"
-                | "upstream_websocket_connection_limit"
-                | "upstream_rate_limited"
-                | "upstream_refresh_token_reused"
-                | "upstream_request_timeout"
-                | "upstream_overloaded"
-                | "upstream_edge_challenge"
-                | "upstream_server_error"
-                | "upstream_bad_gateway"
-                | "upstream_unavailable"
-                | "upstream_gateway_timeout"
+            error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_MODEL_CAPACITY
+                | error_codes::UPSTREAM_RATE_LIMITED
+                | error_codes::UPSTREAM_QUOTA_EXHAUSTED
+                | error_codes::UPSTREAM_WEBSOCKET_CONNECTION_LIMIT
+                | error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+                | error_codes::UPSTREAM_CANDIDATE_REJECTED
         )
-}
-
-pub(crate) fn failure_category_requires_cooldown(category: &str) -> bool {
-    !matches!(
-        category,
-        "client_cancelled"
-            | "response_affinity_miss"
-            | "response_incomplete"
-            | "upstream_cancelled"
-            | "upstream_previous_response_not_found"
-            | "upstream_tool_call_mismatch"
-            | "upstream_context_too_large"
-            | "upstream_encrypted_content_invalid"
-            | "upstream_instructions_required"
-            | "upstream_content_policy"
-            | "upstream_payload_too_large"
-            | "upstream_unsupported_request"
-            | "upstream_websocket_unsupported"
-            | "upstream_invalid_request"
-    )
-}
-
-pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
-    matches!(
-        category,
-        "upstream_tool_call_mismatch"
-            | "upstream_context_too_large"
-            | "upstream_encrypted_content_invalid"
-            | "upstream_instructions_required"
-            | "upstream_content_policy"
-            | "upstream_payload_too_large"
-            | "upstream_unsupported_request"
-            | "upstream_websocket_unsupported"
-            | "upstream_invalid_request"
-    )
-}
-
-pub(crate) fn recoverable_response_affinity_miss(
-    status: StatusCode,
-    has_previous_response_id: bool,
-    _response_affinity_hit: bool,
-    previous_response_not_found: bool,
-) -> bool {
-    has_previous_response_id
-        && previous_response_not_found
-        && matches!(
-            status,
-            StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::CONFLICT
-        )
-}
-
-pub(crate) fn retry_candidate_limit(
-    max_retry_candidates: usize,
-    owner_recovery_confirmed: bool,
-) -> usize {
-    if owner_recovery_confirmed {
-        MAX_RESPONSE_OWNER_CANDIDATES
+    {
+        ExecutionObservation::not_sent()
     } else {
-        max_retry_candidates
+        ExecutionObservation::unknown()
     }
 }
 
-pub(crate) fn previous_response_not_found(payload: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(payload)
-        .ok()
-        .is_some_and(|value| previous_response_not_found_value(&value))
-}
+mod policy;
 
-pub(crate) fn previous_response_requires_websocket(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
-        return false;
-    };
-    let text = serde_json::to_string(&value)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    text.contains("previous_response_id") && text.contains("websocket")
-}
-
-pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
-        return false;
-    };
-    let text = upstream_error_text(&value);
-    text_has_any(
-        &text,
-        &[
-            "invalid call_id for function_call_output",
-            "invalid call id for function_call_output",
-            "invalid_call_id_for_function_call_output",
-            "invalid_function_call_output_call_id",
-        ],
-    )
-}
-
-/// Zenith Gateway intentionally hides provider-specific 400 details. A
-/// Responses continuation with tool output can use the local replay state to
-/// recover the preceding tool call when this exact public envelope is returned.
-/// Do not match arbitrary 400 responses: those may be genuine client errors.
-pub(crate) fn zenith_gateway_invalid_request(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
-        return false;
-    };
-    zenith_gateway_invalid_request_value(&value)
-}
-
-pub(crate) fn zenith_gateway_invalid_request_value(value: &Value) -> bool {
-    const MESSAGE: &str =
-        "Zenith AI request is invalid. Check the model, messages, tools, and parameters.";
-
-    [
-        "/error/message",
-        "/response/error/message",
-        "/body/error/message",
-        "/message",
-        "/response/message",
-        "/body/message",
-    ]
-    .into_iter()
-    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
-    .any(|message| message.trim().eq_ignore_ascii_case(MESSAGE))
-}
-
-/// Strict Responses endpoints use a separate `fc_` namespace for
-/// `function_call.id`; the matching `call_id` is unchanged. This is only a
-/// recovery signal — the request repair itself still verifies that it has a
-/// call-prefixed function item before retrying.
-pub(crate) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
-    text.contains("input") && text.contains("expected an id that begins with 'fc'")
-}
-
-/// Strict Responses endpoints use `ctc_` for `custom_tool_call.id`.
-pub(crate) fn responses_custom_tool_item_id_requires_ctc_prefix(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
-    text.contains("input")
-        && text.contains(".id")
-        && (text.contains("expected an id that begins with 'ctc'")
-            || text.contains("expected an id that begins with 'ctc_'")
-            || text.contains("expected an id that starts with 'ctc'"))
-}
-
-/// Strict Responses endpoints require server-owned `msg_` item identifiers on
-/// message inputs. This only identifies the precise upstream validation error;
-/// the repair still verifies the foreign `item_` identifier before retrying.
-pub(crate) fn responses_message_item_id_requires_msg_prefix(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
-    text.contains("input[")
-        && text.contains(".id")
-        && text.contains("expected an id that begins with 'msg'")
-}
-
-pub(crate) fn previous_response_not_found_value(value: &Value) -> bool {
-    [value.pointer("/error/code"), value.pointer("/error/type")]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|value| {
-            value
-                .trim()
-                .eq_ignore_ascii_case("previous_response_not_found")
-                || value
-                    .trim()
-                    .eq_ignore_ascii_case("response_continuation_unavailable")
-        })
-        || [value.pointer("/error/message"), value.get("message")]
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .any(previous_response_not_found_message)
-}
-
-fn previous_response_not_found_message(message: &str) -> bool {
-    let message = message.trim().trim_end_matches('.').to_ascii_lowercase();
-    message == "previous response not found"
-        || (message.starts_with("previous response with id ") && message.ends_with(" not found"))
-        || message.starts_with("no response found for previous_response_id ")
-}
+pub(crate) use policy::{
+    failure_category_affects_account_state, failure_category_is_request_terminal,
+    failure_category_requires_cooldown, retryable_failure, retryable_status,
+};

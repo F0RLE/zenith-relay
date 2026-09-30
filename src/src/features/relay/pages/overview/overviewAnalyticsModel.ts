@@ -1,5 +1,4 @@
 import type { LocalUsage, RemoteUsage, UsageBucket, UsageTotals } from "../../api/types";
-import { formatUsd as formatCurrencyUsd } from "../../currencyFormatting";
 import {
   emptyUsageTotals,
   totalsFromUsageSamples,
@@ -16,10 +15,13 @@ export const HOUR_MS = 60 * 60 * 1_000;
 export const DAY_MS = 24 * HOUR_MS;
 
 export function chartWindows(range: Range, locale: string, now = new Date()): WindowBucket[] {
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const count = range === "today" ? 24 : range === "week" ? 7 : 30;
   const bucketMs = range === "today" ? HOUR_MS : DAY_MS;
-  const startMs = today.getTime() - (range === "today" ? 0 : (count - 1) * DAY_MS);
+  // Today is the rolling last 24 hours through the current hour, not the
+  // calendar day that starts at midnight. Week and month stay day-sized.
+  const startMs = range === "today"
+    ? new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours()).getTime() - (count - 1) * HOUR_MS
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - (count - 1) * DAY_MS;
   const hour = new Intl.DateTimeFormat(locale, { hour: "2-digit", hourCycle: "h23" });
   const weekday = new Intl.DateTimeFormat(locale, { weekday: "short" });
   const day = new Intl.DateTimeFormat(locale, { day: "numeric" });
@@ -112,15 +114,4 @@ export function lineSegments(values: Array<number | null>, max: number) {
   });
   if (current) segments.push(current);
   return segments;
-}
-
-export function formatApiEquivalent(value: number | null, locale: string) {
-  return value == null ? "—" : `≈${formatUsd(value, locale)}`;
-}
-
-export function formatUsd(value: number, locale: string) {
-  return formatCurrencyUsd(value, locale, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: value < 0.01 ? 6 : value < 1 ? 4 : 2,
-  });
 }

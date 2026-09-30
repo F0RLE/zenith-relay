@@ -1,5 +1,10 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+mod chunks;
+
+use chunks::{
+    chunk_user, decode_manifest, delete_manifest_chunks, delete_manifest_chunks_result,
+    encode_manifest, sha256_hex, split_secret, SecretManifest, CHUNK_UTF16_UNITS, MANIFEST_PREFIX,
+    MANIFEST_VERSION, MAX_CHUNKS,
+};
 use std::{
     sync::{Mutex, MutexGuard, OnceLock},
     thread,
@@ -16,20 +21,8 @@ const KEYRING_SERVICE: &str = "Zenith Relay";
 const LEGACY_KEYRING_SERVICE: &str = "Zenith Codex";
 const KEYRING_USER: &str = "api-key";
 const PREVIOUS_AUTH_USER: &str = "previous-codex-auth-json";
-const CHUNK_UTF16_UNITS: usize = 1024;
-const MAX_CHUNKS: usize = 4096;
-const MANIFEST_PREFIX: &str = "__zenith_relay_secret_manifest__:";
-const MANIFEST_VERSION: u8 = 1;
 const READBACK_ATTEMPTS: usize = 3;
 const READBACK_DELAY: Duration = Duration::from_millis(20);
-
-#[derive(Debug, Deserialize, Serialize)]
-struct SecretManifest {
-    version: u8,
-    generation: String,
-    count: usize,
-    sha256: String,
-}
 
 pub fn save_app_key(api_key: &str) -> Result<(), String> {
     save_named_secret(KEYRING_USER, api_key)
@@ -41,10 +34,6 @@ pub fn load_saved_app_key() -> Option<String> {
 
 pub fn delete_saved_app_key() -> Result<(), String> {
     delete_named_secret_result(KEYRING_USER)
-}
-
-pub fn save_previous_codex_auth(content: &str) -> Result<(), String> {
-    save_named_secret(PREVIOUS_AUTH_USER, content)
 }
 
 pub fn load_previous_codex_auth() -> Option<String> {
@@ -95,8 +84,9 @@ fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
 }
 
 #[cfg(not(test))]
-fn keyring_entry_for_service(service: &str, user: &str) -> keyring::Entry {
-    keyring::Entry::new(service, user).expect("valid keyring service and user")
+fn keyring_entry_for_service(service: &str, user: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(service, user)
+        .map_err(|error| format!("Не удалось открыть хранилище секретов ОС: {error}"))
 }
 
 fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String> {
@@ -221,7 +211,7 @@ fn delete_secret_from_service(service: &str, user: &str) -> Result<(), String> {
 
 #[cfg(not(test))]
 fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
-    keyring_entry_for_service(service, user)
+    keyring_entry_for_service(service, user)?
         .set_password(value)
         .map_err(|err| format!("Не удалось сохранить секрет в хранилище ОС: {err}"))
 }
@@ -234,7 +224,7 @@ fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
 
 #[cfg(not(test))]
 fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, String> {
-    match keyring_entry_for_service(service, user).get_password() {
+    match keyring_entry_for_service(service, user)?.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!(
@@ -252,7 +242,7 @@ fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, St
 
 #[cfg(not(test))]
 fn delete_from_service(service: &str, user: &str) -> Result<(), String> {
-    match keyring_entry_for_service(service, user).delete_credential() {
+    match keyring_entry_for_service(service, user)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(format!(
             "Не удалось удалить секрет из хранилища ОС: {error}"
@@ -273,86 +263,6 @@ fn test_keyring() -> Result<MutexGuard<'static, TestKeyring>, String> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| "test keyring lock is unavailable".to_string())
-}
-
-fn split_secret(value: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    let mut units = 0;
-    for character in value.chars() {
-        let character_units = character.len_utf16();
-        if units + character_units > CHUNK_UTF16_UNITS && !chunk.is_empty() {
-            chunks.push(std::mem::take(&mut chunk));
-            units = 0;
-        }
-        chunk.push(character);
-        units += character_units;
-    }
-    if !chunk.is_empty() {
-        chunks.push(chunk);
-    }
-    chunks
-}
-
-fn encode_manifest(manifest: &SecretManifest) -> Result<String, String> {
-    let json = serde_json::to_string(manifest)
-        .map_err(|_| "Не удалось подготовить манифест защищённого секрета".to_string())?;
-    Ok(format!("{MANIFEST_PREFIX}{json}"))
-}
-
-fn decode_manifest(value: &str) -> Result<SecretManifest, String> {
-    let json = value
-        .strip_prefix(MANIFEST_PREFIX)
-        .ok_or_else(|| "Некорректный манифест защищённого секрета".to_string())?;
-    let manifest: SecretManifest = serde_json::from_str(json)
-        .map_err(|_| "Некорректный манифест защищённого секрета".to_string())?;
-    let valid_generation = manifest.generation.len() == 32
-        && manifest
-            .generation
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit());
-    let valid_hash =
-        manifest.sha256.len() == 64 && manifest.sha256.bytes().all(|byte| byte.is_ascii_hexdigit());
-    if manifest.version != MANIFEST_VERSION
-        || manifest.count == 0
-        || manifest.count > MAX_CHUNKS
-        || !valid_generation
-        || !valid_hash
-    {
-        return Err("Некорректный манифест защищённого секрета".to_string());
-    }
-    Ok(manifest)
-}
-
-fn chunk_user(user: &str, generation: &str, index: usize) -> String {
-    format!("{user}:chunk:{generation}:{index}")
-}
-
-fn delete_manifest_chunks(service: &str, user: &str, manifest: &SecretManifest) {
-    let _ = delete_manifest_chunks_result(service, user, manifest);
-}
-
-fn delete_manifest_chunks_result(
-    service: &str,
-    user: &str,
-    manifest: &SecretManifest,
-) -> Result<(), String> {
-    let mut first_error = None;
-    for index in 0..manifest.count {
-        if let Err(error) =
-            delete_from_service(service, &chunk_user(user, &manifest.generation, index))
-        {
-            first_error.get_or_insert(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
-fn sha256_hex(value: &[u8]) -> String {
-    Sha256::digest(value)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 #[cfg(test)]

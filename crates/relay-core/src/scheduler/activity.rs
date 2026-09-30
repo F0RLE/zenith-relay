@@ -16,11 +16,6 @@ pub(super) struct SchedulerActivity {
 }
 
 impl SchedulerActivity {
-    pub(super) fn clear_dispatches(&mut self) {
-        self.text_dispatches.clear();
-        self.image_dispatches.clear();
-    }
-
     pub(super) fn remove_candidate(&mut self, candidate_id: &str) {
         self.text_in_flight.remove(candidate_id);
         self.image_in_flight.remove(candidate_id);
@@ -37,19 +32,21 @@ impl SchedulerActivity {
             .or_default();
         *in_flight = in_flight.saturating_add(1);
 
+        let request_count = self
+            .active_models
+            .entry((candidate_id.to_string(), lane))
+            .or_default()
+            .entry(crate::model_id_key(model))
+            .or_default();
+        *request_count = request_count.saturating_add(1);
+    }
+
+    pub(super) fn record_dispatch(&mut self, candidate_id: &str, lane: InFlightLane) {
         let dispatches = self
             .dispatch_map_mut(lane)
             .entry(candidate_id.to_string())
             .or_default();
         *dispatches = dispatches.saturating_add(1);
-
-        let request_count = self
-            .active_models
-            .entry((candidate_id.to_string(), lane))
-            .or_default()
-            .entry(model.to_ascii_lowercase())
-            .or_default();
-        *request_count = request_count.saturating_add(1);
     }
 
     pub(super) fn release(
@@ -123,7 +120,7 @@ impl SchedulerActivity {
     ) {
         let lane_key = (candidate_id.to_string(), lane);
         let model_key = model
-            .map(str::to_ascii_lowercase)
+            .map(crate::model_id_key)
             .or_else(|| self.active_models.get(&lane_key)?.keys().next().cloned());
         let Some(model_key) = model_key else {
             return;
@@ -254,15 +251,14 @@ mod tests {
     }
 
     #[test]
-    fn clears_rotation_accounting_without_releasing_active_requests() {
+    fn reservations_and_metadata_reads_do_not_count_as_dispatches() {
         let mut activity = SchedulerActivity::default();
         activity.reserve("candidate", "gpt-5", InFlightLane::Text);
         activity.reserve("candidate", "gpt-image-2", InFlightLane::Image);
-
-        activity.clear_dispatches();
-
         assert_eq!(activity.dispatch_count("candidate", InFlightLane::Text), 0);
         assert_eq!(activity.dispatch_count("candidate", InFlightLane::Image), 0);
+        activity.record_dispatch("candidate", InFlightLane::Text);
+        assert_eq!(activity.dispatch_count("candidate", InFlightLane::Text), 1);
         assert_eq!(activity.active_request_count("candidate"), 2);
     }
 }

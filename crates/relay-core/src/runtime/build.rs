@@ -1,22 +1,34 @@
-use super::images::select_image_main_model_with_catalog;
 use super::{
     all_native_wire_apis, client_wire_apis_to_native, model_rules, normalize_client_wire_api,
-    normalize_prefix, normalized_responses_url, normalized_set, require_runtime_value,
-    source_candidate_id, ChatGptAccountExecutor, GatewayRuntimeOptions, PassiveQuotaState,
-    RuntimeHttpClients, RuntimeKey, RuntimeSource, SourceCandidateBinding, IMAGE_API_MODEL,
+    normalize_prefix, normalized_set, source_candidate_id, ChatGptAccountExecutor,
+    GatewayRuntimeOptions, PassiveQuotaState, RuntimeHttpClients, RuntimeKey, RuntimeSource,
+    SourceCandidateBinding,
 };
-use crate::pricing::PricingCatalog;
+use super::{
+    normalize_image_base_model, runtime_now_ms, CodexTurnStateStore, GatewayRuntime,
+    LocalGatewayKey, NativeResponsesReplayStore, ProviderSource, RuntimeControl, RuntimeLocalKey,
+    SourceModelMetadataState, UsageCallback, NEXT_ACTIVITY_RUNTIME_ID,
+};
+use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::{CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth};
+use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::{
-    normalize_subscription_plan_order, runtime_source_protocol_bindings, CandidateHealth,
-    CandidateKind, CandidateQuota, CandidateScope, Error, ModelRegistry, ModelRules, PoolScheduler,
-    Result, RuntimeCandidate, RuntimeMixedLocalKey, SourceConnector, WireApi,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, ModelRegistry,
+    ModelRules, PoolScheduler, Result, RuntimeCandidate, RuntimeMixedLocalKey, SourceConnector,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+mod accounts;
+mod keys;
+mod sources;
+use keys::build_keys;
+use sources::build_sources;
 #[derive(Clone, Copy)]
 pub(super) enum ReachabilityRequirement {
     RequireReachable,
@@ -48,14 +60,16 @@ pub(super) struct KeyRuntimeParts {
 }
 
 pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Result<()> {
-    if !(1..=8).contains(&options.max_retry_candidates) {
+    if let Some(policy) = &options.pool_routing {
+        policy
+            .validate_activation()
+            .map_err(|message| Error::Validation(message.into()))?;
+    }
+    if !u8::try_from(options.max_retry_candidates)
+        .is_ok_and(crate::protocol::max_retry_candidates_in_range)
+    {
         return Err(Error::Validation(
             "max retry candidates must be between 1 and 8".to_string(),
-        ));
-    }
-    if !(1..=8).contains(&options.cooldown_after_failures) {
-        return Err(Error::Validation(
-            "cooldown after failures must be between 1 and 8".to_string(),
         ));
     }
     Ok(())
@@ -63,292 +77,8 @@ pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Resul
 
 pub(super) fn configure_scheduler(options: &GatewayRuntimeOptions) -> Result<PoolScheduler> {
     let mut scheduler = PoolScheduler::new();
-    scheduler.set_cooldown_policy(
-        options.cooldown_after_failures,
-        options.keep_last_candidate_available,
-    );
-    scheduler.set_routing_strategy(options.routing_strategy);
-    let subscription_plan_order =
-        normalize_subscription_plan_order(options.subscription_plan_order.clone())
-            .map_err(|message| Error::Validation(message.to_string()))?;
-    scheduler.set_subscription_plan_order(&subscription_plan_order);
     scheduler.set_quota_stale_after_ms(options.quota_stale_after_ms);
-    scheduler.set_provider_storm_breaker_enabled(options.provider_storm_breaker);
     Ok(scheduler)
-}
-
-pub(super) fn build_sources(
-    sources: Vec<RuntimeSource>,
-    registry: &mut ModelRegistry,
-    scheduler: &mut PoolScheduler,
-) -> Result<SourceRuntimeParts> {
-    let mut executors = BTreeMap::new();
-    let mut candidate_bindings = BTreeMap::new();
-    let mut recovery_delays_ms = BTreeMap::new();
-    for source in sources {
-        source.source.validate()?;
-        if source.weight == 0 {
-            return Err(Error::Validation(
-                "source weight must be at least one".to_string(),
-            ));
-        }
-        if source.recovery_delay_seconds > 24 * 60 * 60 {
-            return Err(Error::Validation(
-                "source recovery delay must not exceed 24 hours".to_string(),
-            ));
-        }
-        if executors.contains_key(&source.source.id) {
-            return Err(Error::Validation("source ids must be unique".to_string()));
-        }
-        let bindings = runtime_source_protocol_bindings(
-            source.protocol_bindings.clone(),
-            source.source.wire_api,
-            &source.source.models,
-        )?;
-        let source_id = source.source.id.clone();
-        let connector = SourceConnector::new(&source.source, &bindings)?;
-        let rules = model_rules(&source.allowed_models, &source.excluded_models);
-        for binding in &bindings {
-            let models = normalized_set(binding.model_ids.iter());
-            if models.is_empty() {
-                continue;
-            }
-            let candidate_id = source_candidate_id(&source_id, binding, bindings.len());
-            if candidate_bindings.contains_key(&candidate_id) {
-                return Err(Error::Validation(
-                    "source protocol candidate ids must be unique".to_string(),
-                ));
-            }
-            let candidate = RuntimeCandidate {
-                id: candidate_id.clone(),
-                kind: CandidateKind::ApiSource,
-                source_id: source_id.clone(),
-                account_id: None,
-                protocol: binding.wire_api,
-                enabled: source.enabled,
-                draining: source.draining,
-                priority: source.priority,
-                weight: source.weight,
-                models: models.clone(),
-                model_rules: rules.clone(),
-                health: CandidateHealth::Healthy,
-                quota: CandidateQuota::Unknown,
-                quota_updated_at_ms: None,
-                quota_reset_at_ms: None,
-                cooldowns: BTreeMap::new(),
-                last_used_at: source.last_used_at_ms,
-                consecutive_failures: 0,
-                secret_available: true,
-            };
-            registry.replace(candidate_id.clone(), binding.model_ids.iter());
-            scheduler.upsert(candidate);
-            if source.recovery_delay_seconds > 0 {
-                recovery_delays_ms.insert(
-                    candidate_id.clone(),
-                    source.recovery_delay_seconds.saturating_mul(1_000),
-                );
-            }
-            candidate_bindings.insert(
-                candidate_id,
-                SourceCandidateBinding {
-                    source_id: source_id.clone(),
-                    binding_key: binding.key(),
-                    wire_api: binding.wire_api,
-                    adapter: binding.adapter,
-                    reasoning_mode: binding.reasoning_mode,
-                    cache_write_ttl: binding.cache_write_ttl,
-                },
-            );
-        }
-        executors.insert(source_id, connector);
-    }
-    Ok(SourceRuntimeParts {
-        executors,
-        candidate_bindings,
-        recovery_delays_ms,
-    })
-}
-
-pub(super) fn build_accounts(
-    accounts: Vec<RuntimeChatGptAccount>,
-    account_auth: Option<&RuntimeChatGptAuth>,
-    image_base_model: Option<&str>,
-    image_pricing_catalog: Option<&PricingCatalog>,
-    sources: &SourceRuntimeParts,
-    registry: &mut ModelRegistry,
-    scheduler: &mut PoolScheduler,
-) -> Result<AccountRuntimeParts> {
-    if !accounts.is_empty() && account_auth.is_none() {
-        return Err(Error::Validation(
-            "OAuth accounts require token authority adapters".to_string(),
-        ));
-    }
-    let mut executors = BTreeMap::new();
-    let mut passive_quotas = BTreeMap::new();
-    let mut team_members = BTreeMap::<String, BTreeSet<String>>::new();
-    for account in accounts {
-        require_runtime_value("account candidate id", &account.id)?;
-        require_runtime_value("account source id", &account.source_id)?;
-        require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
-        if account.weight == 0 {
-            return Err(Error::Validation(
-                "account weight must be at least one".to_string(),
-            ));
-        }
-        if sources.executors.contains_key(&account.id)
-            || sources.candidate_bindings.contains_key(&account.id)
-            || executors.contains_key(&account.id)
-        {
-            return Err(Error::Validation(
-                "runtime candidate ids must be unique".to_string(),
-            ));
-        }
-        let responses_url = normalized_responses_url(&account.responses_url)?;
-        passive_quotas.insert(
-            account.id.clone(),
-            PassiveQuotaState {
-                last_persist_hint_ms: account.quota_snapshot.updated_at_ms.unwrap_or_default(),
-                snapshot: account.quota_snapshot.clone(),
-                dirty: false,
-                force_persist: false,
-            },
-        );
-        // OAuth identities must not share an HTTP/2 connection pool. A connection-level
-        // failure for one account would otherwise abort concurrent streams on other accounts.
-        let clients = RuntimeHttpClients::new(account.proxy.as_ref())?;
-        let identity = CodexIdentityEnvelope::standard(&account.chatgpt_account_id)
-            .map_err(|message| Error::Validation(message.to_string()))?;
-        let mut published_models = account.models.clone();
-        let models = normalized_set(account.models.iter());
-        let image_main_model =
-            select_image_main_model_with_catalog(&models, image_base_model, image_pricing_catalog);
-        let mut candidate_models = models.clone();
-        if image_main_model.is_some() {
-            candidate_models.insert(IMAGE_API_MODEL.to_string());
-            published_models.push(IMAGE_API_MODEL.to_string());
-        }
-        let candidate = RuntimeCandidate {
-            id: account.id.clone(),
-            kind: CandidateKind::OAuthAccount,
-            source_id: account.source_id.clone(),
-            account_id: Some(account.id.clone()),
-            protocol: WireApi::Responses,
-            enabled: account.enabled,
-            draining: account.draining,
-            priority: account.priority,
-            weight: account.weight,
-            models: candidate_models,
-            model_rules: model_rules(&account.allowed_models, &account.excluded_models),
-            health: account.health,
-            quota: account.quota,
-            quota_updated_at_ms: account.quota_updated_at_ms,
-            quota_reset_at_ms: account.quota_snapshot.limiting_reset_at_ms(),
-            cooldowns: BTreeMap::new(),
-            last_used_at: account.last_used_at_ms,
-            consecutive_failures: 0,
-            secret_available: true,
-        };
-        let auth = account_auth.ok_or_else(|| {
-            Error::Validation("OAuth accounts require token authority adapters".to_string())
-        })?;
-        registry.replace(candidate.id.clone(), published_models.iter());
-        let candidate_id = candidate.id.clone();
-        scheduler.upsert(candidate);
-        team_members
-            .entry(account.chatgpt_account_id.trim().to_ascii_lowercase())
-            .or_default()
-            .insert(candidate_id.clone());
-        scheduler
-            .set_candidate_subscription_expiry(&candidate_id, account.subscription_expires_at_ms);
-        scheduler.set_candidate_subscription_plan(
-            &candidate_id,
-            account.subscription_plan_type.as_deref(),
-        );
-        executors.insert(
-            account.id.clone(),
-            ChatGptAccountExecutor {
-                id: account.id,
-                source_id: account.source_id,
-                identity,
-                responses_url,
-                configured_models: models,
-                image_main_model,
-                token_authority: auth.token_authority.clone(),
-                refresh_adapter: auth.refresh_adapter.clone(),
-                persistence_adapter: auth.persistence_adapter.clone(),
-                refresh_skew_ms: auth.refresh_skew_ms,
-                clients,
-                active: AtomicBool::new(true),
-                agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
-                agent_task_lock: tokio::sync::Mutex::new(()),
-            },
-        );
-    }
-    Ok(AccountRuntimeParts {
-        executors,
-        passive_quotas,
-        team_members,
-    })
-}
-
-pub(super) fn build_keys(
-    keys: Vec<RuntimeMixedLocalKey>,
-    hidden_models: &BTreeSet<String>,
-) -> Result<KeyRuntimeParts> {
-    let mut runtime_keys = Vec::new();
-    let mut configured_rules = Vec::new();
-    let mut key_ids = HashSet::new();
-    for key in keys {
-        key.key.validate()?;
-        if !key_ids.insert(key.key.id.clone()) {
-            return Err(Error::Validation(
-                "gateway credential ids must be unique".to_string(),
-            ));
-        }
-        let scope = CandidateScope {
-            source_ids: key.source_ids.map(|ids| normalized_set(ids.iter())),
-            account_ids: key.account_ids.map(|ids| normalized_set(ids.iter())),
-            model_rules: ModelRules::default(),
-        };
-        let base_model_rules = ModelRules {
-            allowed: normalized_set(key.allowed_models.iter()),
-            excluded: normalized_set(key.excluded_models.iter()),
-        };
-        let mut model_rules = base_model_rules.clone();
-        model_rules.excluded.extend(hidden_models.iter().cloned());
-        let client_wire_apis = key.wire_apis.map(|values| {
-            values
-                .into_iter()
-                .map(normalize_client_wire_api)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-        });
-        if client_wire_apis.as_ref().is_some_and(Vec::is_empty) {
-            return Err(Error::Validation(
-                "gateway credential protocol scope must not be empty".to_string(),
-            ));
-        }
-        configured_rules.push(ConfiguredKeyRule {
-            enabled: key.enabled,
-            scope: scope.clone(),
-            model_rules: base_model_rules,
-            client_wire_apis: client_wire_apis.clone(),
-        });
-        runtime_keys.push(RuntimeKey {
-            id: key.key.id,
-            enabled: key.enabled,
-            secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
-            scope: Arc::new(RwLock::new(scope)),
-            model_rules,
-            model_prefix: normalize_prefix(key.model_prefix),
-            client_wire_apis,
-        });
-    }
-    Ok(KeyRuntimeParts {
-        runtime_keys,
-        configured_rules,
-    })
 }
 
 pub(super) fn validate_reachability(
@@ -393,4 +123,219 @@ pub(super) fn validate_reachability(
         ));
     }
     Ok(())
+}
+
+impl GatewayRuntime {
+    pub fn new(
+        source: ProviderSource,
+        local_key: LocalGatewayKey,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::from_pool(
+            vec![RuntimeSource::unrestricted(source)],
+            vec![RuntimeLocalKey::unrestricted(local_key)],
+            GatewayRuntimeOptions::default(),
+            usage,
+        )
+    }
+
+    pub fn from_pool(
+        sources: Vec<RuntimeSource>,
+        keys: Vec<RuntimeLocalKey>,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(
+            sources,
+            Vec::new(),
+            keys.into_iter().map(Into::into).collect(),
+            None,
+            ReachabilityRequirement::RequireReachable,
+            options,
+            usage,
+        )
+    }
+
+    pub fn from_mixed_pool(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeChatGptAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: RuntimeChatGptAuth,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(
+            sources,
+            accounts,
+            keys,
+            Some(account_auth),
+            ReachabilityRequirement::RequireReachable,
+            options,
+            usage,
+        )
+    }
+
+    /// Builds a locally managed gateway while its persisted configuration is
+    /// temporarily unroutable.
+    ///
+    /// Desktop source and pool mutations can validly remove the final
+    /// candidate. In that state the gateway must keep authenticating its
+    /// gateway credentials and return an empty catalog instead of preventing the
+    /// mutation from committing. Authentication, catalog visibility, and
+    /// per-request candidate selection remain unchanged; callers validating a
+    /// new configuration must use [`Self::from_mixed_pool`] instead.
+    pub fn from_mixed_pool_allow_unroutable(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeChatGptAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: RuntimeChatGptAuth,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(
+            sources,
+            accounts,
+            keys,
+            Some(account_auth),
+            ReachabilityRequirement::AllowUnroutable,
+            options,
+            usage,
+        )
+    }
+
+    pub(super) fn build(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeChatGptAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: Option<RuntimeChatGptAuth>,
+        reachability_requirement: ReachabilityRequirement,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        validate_runtime_options(&options)?;
+        let tool_policy = options
+            .tool_policy
+            .clone()
+            .normalized()
+            .map_err(|message| Error::Validation(message.to_string()))?;
+        let model_reasoning_allowed_levels = normalize_model_reasoning_allowed_levels(
+            options.model_reasoning_allowed_levels.clone(),
+        )
+        .map_err(|message| Error::Validation(message.to_string()))?;
+
+        let clients = RuntimeHttpClients::new(None)?;
+        let discovery_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        let mut scheduler = configure_scheduler(&options)?;
+        let mut registry = ModelRegistry::default();
+        let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
+        let image_pricing_catalog = options.image_pricing_catalog.as_deref();
+        let source_parts = build_sources(sources, &mut registry, &mut scheduler)?;
+        let account_parts = accounts::build_accounts(
+            accounts,
+            account_auth.as_ref(),
+            image_base_model.as_deref(),
+            image_pricing_catalog,
+            &source_parts,
+            &mut registry,
+            &mut scheduler,
+        )?;
+        let hidden_models = options
+            .hidden_models
+            .iter()
+            .map(|model| crate::model_id_key(model))
+            .filter(|model| !model.is_empty())
+            .collect();
+        // All callers use pool rotation. Older settings migrate once to the
+        // same explicit policy used by desktop and server.
+        let policy = options
+            .pool_routing
+            .clone()
+            .unwrap_or_else(|| scheduler.migrated_pool_routing());
+        scheduler.set_pool_routing(policy)?;
+        let key_parts = build_keys(keys)?;
+        validate_reachability(
+            reachability_requirement,
+            &source_parts,
+            &account_parts,
+            &key_parts,
+            &scheduler,
+        )?;
+
+        let affinity_store = options.response_affinity_store.clone();
+        if let Some(store) = affinity_store.as_ref() {
+            let now_ms = runtime_now_ms();
+            if let Ok(bindings) = store.load(now_ms) {
+                for binding in bindings {
+                    let restored = if binding.key.starts_with("cache:")
+                        || binding.key.starts_with("session:")
+                    {
+                        scheduler.restore_prompt_affinity(
+                            binding.key.clone(),
+                            &binding.candidate_id,
+                            binding.expires_at_ms,
+                            now_ms,
+                        )
+                    } else {
+                        scheduler.restore_response_affinity(
+                            binding.key.clone(),
+                            &binding.candidate_id,
+                            binding.expires_at_ms,
+                            now_ms,
+                        )
+                    };
+                    if !restored {
+                        let _ = store.delete(&binding.key);
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            tool_policy: RwLock::new(tool_policy),
+            clients,
+            discovery_client,
+            sources: source_parts.executors,
+            source_candidate_bindings: source_parts.candidate_bindings,
+            source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
+            chatgpt_accounts: account_parts.executors,
+            chatgpt_team_members: account_parts.team_members,
+            chatgpt_team_breaker_recent: Mutex::new(BTreeMap::new()),
+            keys: key_parts.runtime_keys,
+            hidden_models: Arc::new(RwLock::new(hidden_models)),
+            scheduler: Arc::new(Mutex::new(scheduler)),
+            candidate_availability: Arc::new(tokio::sync::Notify::new()),
+            admission: Mutex::default(),
+            admission_changed: tokio::sync::Notify::new(),
+            registry: Mutex::new(registry),
+            image_base_model,
+            image_pricing_catalog: options.image_pricing_catalog.clone(),
+            codex_responses_lite_models: Mutex::new(BTreeSet::new()),
+            official_codex_ultra: Mutex::new(BTreeMap::new()),
+            websocket_http_only: Mutex::new(BTreeMap::new()),
+            model_metadata: SourceModelMetadataState::default(),
+            model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
+            model_service_tier_overrides: Mutex::new(BTreeMap::new()),
+            model_display_order: Mutex::new(Vec::new()),
+            model_metadata_catalog: options.model_metadata_catalog.clone(),
+            passive_quotas: Mutex::new(account_parts.passive_quotas),
+            messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
+            native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
+            codex_turn_state_store: CodexTurnStateStore::default(),
+            control: RuntimeControl::default(),
+            max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),
+            quota_stale_after_ms: options.quota_stale_after_ms,
+            default_service_tier_value: AtomicU8::new(options.default_service_tier.atomic_value()),
+            response_affinity_store: affinity_store,
+            activity_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+            activity_runtime_id: NEXT_ACTIVITY_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+            activity_revision: Arc::new(AtomicU64::new(0)),
+            chatgpt_team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+            usage,
+        })
+    }
 }

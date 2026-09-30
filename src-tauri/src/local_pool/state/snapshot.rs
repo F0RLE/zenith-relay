@@ -18,6 +18,11 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::atomic::Ordering,
 };
+use zenith_relay_core::error_codes;
+use zenith_relay_core::{
+    protocol::{AccountRefreshState, RefreshStatus, SourceRefreshState},
+    scheduler::refresh::RefreshKind,
+};
 
 pub(super) trait SecretLookup {
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
@@ -39,12 +44,22 @@ pub(crate) struct LocalRuntimeInputs {
     pub warnings: Vec<String>,
     pub running: bool,
     pub source_api_keys: BTreeMap<String, Option<String>>,
+    pub source_refresh: BTreeMap<String, SourceRefreshSnapshot>,
+    pub account_refresh: BTreeMap<String, AccountRefreshState>,
     pub account_credentials: HashMap<String, Option<StoredCodexCredentials>>,
+}
+
+pub(crate) struct SourceRefreshSnapshot {
+    pub revision: u64,
+    pub stats: Option<zenith_relay_core::SourceProviderStats>,
+    pub state: SourceRefreshState,
 }
 
 struct SnapshotBase {
     gateway: GatewaySettings,
     sources: Vec<ProviderSourceRecord>,
+    source_refresh: BTreeMap<String, SourceRefreshSnapshot>,
+    account_refresh: BTreeMap<String, AccountRefreshState>,
     accounts: Vec<LocalAccountRecord>,
     automations: AutomationRecords,
     warnings: Vec<String>,
@@ -63,6 +78,8 @@ impl DesktopState {
         let SnapshotBase {
             gateway,
             sources,
+            source_refresh: _,
+            account_refresh: _,
             accounts,
             automations,
             mut warnings,
@@ -70,12 +87,15 @@ impl DesktopState {
         } = self.snapshot_base().await?;
         for source in &sources {
             if secrets.load(&source.secret_ref)?.is_none() {
-                warnings.push(warning_code("source_secret_missing", &source.id));
+                warnings.push(warning_code(error_codes::SOURCE_SECRET_MISSING, &source.id));
             }
         }
         for account in &accounts {
             if !account_secret_available(account, secrets)? {
-                warnings.push(warning_code("account_secret_missing", &account.account.id));
+                warnings.push(warning_code(
+                    error_codes::ACCOUNT_SECRET_MISSING,
+                    &account.account.id,
+                ));
             }
         }
         Ok(LocalPoolSnapshot {
@@ -99,6 +119,8 @@ impl DesktopState {
         let SnapshotBase {
             gateway,
             sources,
+            source_refresh,
+            account_refresh,
             accounts,
             automations,
             mut warnings,
@@ -128,7 +150,7 @@ impl DesktopState {
                 .and_then(Option::as_ref)
                 .is_none()
             {
-                warnings.push(warning_code("source_secret_missing", &source.id));
+                warnings.push(warning_code(error_codes::SOURCE_SECRET_MISSING, &source.id));
             }
         }
         for account in &accounts {
@@ -137,7 +159,10 @@ impl DesktopState {
                 .and_then(Option::as_ref)
                 .is_none()
             {
-                warnings.push(warning_code("account_secret_missing", &account.account.id));
+                warnings.push(warning_code(
+                    error_codes::ACCOUNT_SECRET_MISSING,
+                    &account.account.id,
+                ));
             }
         }
         Ok(LocalRuntimeInputs {
@@ -148,27 +173,84 @@ impl DesktopState {
             warnings,
             running,
             source_api_keys,
+            source_refresh,
+            account_refresh,
             account_credentials,
         })
     }
 
     async fn snapshot_base(&self) -> Result<SnapshotBase> {
         let running = self.gateway.address().await.is_some();
-        let (gateway, sources, accounts, automations) = {
+        let (gateway, sources, source_refresh, accounts, account_refresh, automations) = {
             let store = self.store()?;
+            let source_refresh = store
+                .sources()
+                .iter()
+                .map(|source| {
+                    let (_, fence) = store.source_refresh_scope(&source.id)?;
+                    let stats = crate::local_pool::refresh::sources::cached_stats(
+                        self,
+                        &fence,
+                        &source.base_url,
+                    );
+                    Ok((
+                        source.id.clone(),
+                        SourceRefreshSnapshot {
+                            revision: fence.revision(),
+                            stats,
+                            state: SourceRefreshState {
+                                models: RefreshStatus::from_evidence(
+                                    self.refresh
+                                        .freshness(&fence.identity(), RefreshKind::Models),
+                                    !source.models.is_empty(),
+                                ),
+                                balance: RefreshStatus::from_evidence(
+                                    self.refresh
+                                        .freshness(&fence.identity(), RefreshKind::Balance),
+                                    false,
+                                ),
+                            },
+                        },
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            let account_refresh = store
+                .accounts()
+                .iter()
+                .map(|record| {
+                    let (_, fence) = store.account_refresh_scope(&record.account.id)?;
+                    Ok((
+                        record.account.id.clone(),
+                        AccountRefreshState {
+                            models: RefreshStatus::from_evidence(
+                                self.refresh
+                                    .freshness(&fence.identity(), RefreshKind::Models),
+                                !record.effective_models().is_empty(),
+                            ),
+                            quota: RefreshStatus::from_evidence(
+                                self.refresh
+                                    .freshness(&fence.identity(), RefreshKind::Quota),
+                                record.account.quota.updated_at_ms.is_some(),
+                            ),
+                        },
+                    ))
+                })
+                .collect::<Result<_>>()?;
             (
                 store.gateway().clone(),
                 store.sources().to_vec(),
+                source_refresh,
                 store.accounts().to_vec(),
+                account_refresh,
                 store.automations().clone(),
             )
         };
         let mut warnings = Vec::new();
         if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("usage_persistence_failed".to_string());
+            warnings.push(error_codes::USAGE_PERSISTENCE_FAILED.to_string());
         }
         if self.failed_affinity_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("response_affinity_persistence_failed".to_string());
+            warnings.push(error_codes::RESPONSE_AFFINITY_PERSISTENCE_FAILED.to_string());
         }
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());
@@ -179,7 +261,9 @@ impl DesktopState {
         Ok(SnapshotBase {
             gateway,
             sources,
+            source_refresh,
             accounts,
+            account_refresh,
             automations,
             warnings,
             running,

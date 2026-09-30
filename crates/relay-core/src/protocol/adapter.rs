@@ -3,6 +3,9 @@
 //! Keeping these boundaries explicit prevents the gateway from acquiring
 //! provider-specific behavior.
 
+#[cfg(test)]
+mod codex_controls;
+mod compaction;
 mod contracts;
 mod gemini;
 mod messages;
@@ -10,7 +13,12 @@ mod store;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod translation;
 
+pub(crate) use compaction::{
+    ensure_compaction_trigger, is_compaction_checkpoint_type, prepare_bridged_compaction,
+    wrap_compaction_response_bytes, BridgedCompaction,
+};
 pub(crate) use contracts::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids,
@@ -20,6 +28,7 @@ pub use contracts::{
     MessagesBridgeResponse, MessagesBridgeState, MessagesReasoningMode, NativeResponsesReplayState,
     PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
+pub(crate) use gemini::gemini_incomplete;
 pub use gemini::{GeminiBridgeRequest, GeminiBridgeResponse};
 pub use messages::{
     bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,

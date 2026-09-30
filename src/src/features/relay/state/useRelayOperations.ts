@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { relayCommands } from "../api/commands";
 import { sanitizeFeedbackError } from "./feedback";
 import {
   runRelayOperation,
@@ -34,7 +35,25 @@ export function useRelayOperations() {
       refresh,
       isCurrent: () => revision === operationRevision.current,
       ...(successKey !== undefined ? { successKey } : {}),
-      ...(options !== undefined ? { options } : {}),
+      options: {
+        ...options,
+        onError: (error, key) => {
+          // A caller-provided feedback hook is UI code.  It must not be able
+          // to turn an already handled command failure into an unhandled
+          // rejection (or prevent the diagnostic record from being written).
+          try {
+            options?.onError?.(error, key);
+          } catch {
+            // Keep the operation failure isolated from optional UI callbacks.
+          }
+          void relayCommands.recordFrontendDiagnostic({
+            source: "relay-operation",
+            operation: id,
+            code: error.code,
+            message: error.message,
+          }).catch(() => undefined);
+        },
+      },
       resolveError: (cause) => {
         const code = typeof cause === "object" && cause && "code" in cause
           ? String(cause.code)

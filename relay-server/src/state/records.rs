@@ -1,0 +1,309 @@
+use reqwest::header::HeaderValue;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use zenith_relay_core::{
+    accounts::{AccountAuthState, AccountHealthState, TokenSet},
+    providers::chatgpt::AgentIdentityCredential,
+    quota::{QuotaSnapshot, Subscription},
+    ApiModelPriceOverride, PoolAccess, PoolParticipant, RuntimeCandidatePolicy,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceCatalogEvidence,
+    SourceCatalogRecord, SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution,
+    SourceTransportIdentity, SourceTransportRecord, WireApi,
+};
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerProxyRecord {
+    pub id: String,
+    pub endpoint: String,
+    pub secret_ref: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRecord {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub in_pool: bool,
+    pub draining: bool,
+    pub base_url: String,
+    pub secret_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub official_provider_family: Option<String>,
+    pub wire_api: WireApi,
+    #[serde(default)]
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
+    #[serde(default)]
+    pub protocol_config: SourceProtocolConfig,
+    pub models: Vec<String>,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub priority: i32,
+    pub weight: u32,
+    #[serde(default)]
+    pub recovery_delay_seconds: u64,
+    #[serde(default)]
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(default)]
+    pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
+    pub last_error_code: Option<String>,
+}
+
+impl SourceRecord {
+    pub fn effective_protocol_bindings(&self) -> Result<Vec<SourceProtocolBinding>, String> {
+        SourceProtocolResolution::resolved_protocol_bindings(self)
+    }
+
+    pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
+        SourceProtocolResolution::resolved_models(self, Some(wire_api))
+    }
+
+    pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
+        SourceProtocolResolution::resolved_supports_wire_api(self, wire_api)
+    }
+
+    pub fn supports_any_wire_api(&self) -> Result<bool, String> {
+        SourceProtocolResolution::resolved_supports_any(self)
+    }
+
+    pub fn models_with_cache_write_pricing(&self) -> std::collections::BTreeSet<String> {
+        zenith_relay_core::cache_write_model_ids(
+            self.effective_protocol_bindings().unwrap_or_default(),
+        )
+    }
+}
+
+impl SourceProtocolResolution for SourceRecord {
+    fn protocol_base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn protocol_models(&self) -> &[String] {
+        &self.models
+    }
+
+    fn stored_protocol_bindings(&self) -> &[SourceProtocolBinding] {
+        &self.protocol_bindings
+    }
+
+    fn protocol_fallback(&self) -> WireApi {
+        self.wire_api
+    }
+
+    fn source_protocol_config(&self) -> &SourceProtocolConfig {
+        &self.protocol_config
+    }
+}
+
+impl RuntimeSourcePolicyRecord for SourceRecord {
+    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate {
+        RuntimeSourcePolicyUpdate {
+            source_id: self.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: self.enabled,
+                draining: self.draining,
+                priority: self.priority,
+                weight: self.weight,
+                allowed_models: self.allowed_models.clone(),
+                excluded_models: self.excluded_models.clone(),
+            },
+            recovery_delay_seconds: self.recovery_delay_seconds,
+        }
+    }
+}
+
+impl SourceTransportRecord for SourceRecord {
+    fn transport_identity(&self) -> SourceTransportIdentity<'_> {
+        SourceTransportIdentity {
+            id: &self.id,
+            base_url: &self.base_url,
+            secret_ref: &self.secret_ref,
+            wire_api: self.wire_api,
+            protocol_bindings: &self.protocol_bindings,
+            protocol_config: &self.protocol_config,
+            models: &self.models,
+        }
+    }
+}
+
+impl SourceCatalogRecord for SourceRecord {
+    fn catalog_evidence(&self) -> SourceCatalogEvidence<'_> {
+        SourceCatalogEvidence {
+            base_url: &self.base_url,
+            models: &self.models,
+            protocol_bindings: &self.protocol_bindings,
+            protocol_config: &self.protocol_config,
+            detected_model_prices: &self.detected_model_prices,
+        }
+    }
+}
+
+impl PoolParticipant for SourceRecord {
+    fn pool_access(&self) -> PoolAccess<'_> {
+        PoolAccess {
+            enabled: self.enabled,
+            in_pool: self.in_pool,
+            draining: self.draining,
+            allowed_models: &self.allowed_models,
+            excluded_models: &self.excluded_models,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerAccountRecord {
+    pub id: String,
+    pub label: String,
+    pub identity_hint: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub in_pool: bool,
+    pub draining: bool,
+    pub source_id: String,
+    pub secret_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_family: Option<String>,
+    pub auth_state: AccountAuthState,
+    pub health: AccountHealthState,
+    pub models: Vec<String>,
+    /// Last successful upstream discovery. The imported/configured `models`
+    /// list is the stable baseline and is never replaced by a refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_models: Option<Vec<String>>,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub priority: i32,
+    pub weight: u32,
+    pub subscription: Subscription,
+    pub quota: QuotaSnapshot,
+    #[serde(default)]
+    pub purchase_cost_micro_usd: Option<u64>,
+    pub cooldowns: BTreeMap<String, u64>,
+    pub consecutive_failures: u32,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    pub last_used_at_ms: Option<u64>,
+    pub last_error_code: Option<String>,
+    #[serde(default)]
+    pub proxy_id: Option<String>,
+    #[serde(default)]
+    pub bypass_common_proxy: bool,
+}
+
+impl ServerAccountRecord {
+    pub fn effective_models(&self) -> &[String] {
+        self.discovered_models.as_deref().unwrap_or(&self.models)
+    }
+}
+
+impl PoolParticipant for ServerAccountRecord {
+    fn pool_access(&self) -> PoolAccess<'_> {
+        PoolAccess {
+            enabled: self.enabled,
+            in_pool: self.in_pool,
+            draining: self.draining,
+            allowed_models: &self.allowed_models,
+            excluded_models: &self.excluded_models,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayKeyRecord {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub system: bool,
+    pub secret_ref: String,
+    pub created_at_ms: u64,
+    pub last_used_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCredential {
+    #[serde(default)]
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    pub expires_at_ms: Option<u64>,
+    pub issued_at_ms: u64,
+    pub generation: u64,
+    pub chatgpt_account_id: String,
+    pub responses_url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub agent_private_key: Option<String>,
+    #[serde(default)]
+    pub agent_runtime_id: Option<String>,
+    #[serde(default)]
+    pub agent_task_id: Option<String>,
+}
+
+impl AccountCredential {
+    pub fn agent_identity(&self) -> Result<Option<AgentIdentityCredential>, String> {
+        match (
+            self.agent_private_key.as_ref(),
+            self.agent_runtime_id.as_ref(),
+            self.agent_task_id.as_ref(),
+        ) {
+            (None, None, None) => Ok(None),
+            (Some(private_key), Some(runtime_id), task_id) => match task_id {
+                Some(task_id) => AgentIdentityCredential::new(
+                    private_key.clone(),
+                    runtime_id.clone(),
+                    task_id.clone(),
+                ),
+                None => {
+                    AgentIdentityCredential::unregistered(private_key.clone(), runtime_id.clone())
+                }
+            }
+            .map(Some)
+            .map_err(|error| error.to_string()),
+            _ => Err("stored Agent Identity credential is incomplete".to_string()),
+        }
+    }
+
+    pub fn is_agent_identity(&self) -> bool {
+        self.agent_private_key.is_some()
+            || self.agent_runtime_id.is_some()
+            || self.agent_task_id.is_some()
+    }
+
+    pub fn has_oauth(&self) -> bool {
+        !self.access_token.trim().is_empty()
+    }
+
+    pub fn authorization(&self, now_ms: u64) -> Result<HeaderValue, String> {
+        if let Some(agent) = self.agent_identity()? {
+            return agent
+                .authorization(now_ms)
+                .map_err(|error| error.to_string());
+        }
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.access_token))
+            .map_err(|_| "stored account access token is invalid".to_string())?;
+        authorization.set_sensitive(true);
+        Ok(authorization)
+    }
+
+    pub fn tokens(&self) -> Result<TokenSet, String> {
+        TokenSet::new(
+            self.access_token.clone(),
+            self.refresh_token.clone(),
+            self.id_token.clone(),
+            self.expires_at_ms,
+            self.issued_at_ms,
+            self.generation,
+        )
+        .map_err(str::to_string)
+    }
+}

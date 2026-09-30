@@ -22,6 +22,12 @@ export function isReasonableTokenSpeed(outputTokens: number, durationMs: number)
   return outputTokens > 0 && durationMs > 0 && outputTokens * 1_000 / durationMs <= MAX_REASONABLE_TOKEN_SPEED;
 }
 
+/** Throughput already aggregated from observed output and duration. */
+export function observedTokensPerSecond(outputTokens: number, durationMs: number): number | null {
+  if (outputTokens <= 0 || durationMs <= 0) return null;
+  return outputTokens * 1_000 / durationMs;
+}
+
 export function measureTokenSpeed(sample: TokenSpeedSample): TokenSpeedMeasurement | null {
   if (!sample.success || sample.outputTokens == null || sample.outputTokens < 0) return null;
   if (!sample.durationMs || sample.durationMs <= 0) return null;
@@ -33,7 +39,7 @@ export function measureTokenSpeed(sample: TokenSpeedSample): TokenSpeedMeasureme
 
 export function tokenSpeed(sample: TokenSpeedSample) {
   const measured = measureTokenSpeed(sample);
-  return measured ? measured.outputTokens * 1_000 / measured.durationMs : null;
+  return measured ? observedTokensPerSecond(measured.outputTokens, measured.durationMs) : null;
 }
 
 export function averageTokenSpeed(samples: TokenSpeedSample[]) {
@@ -45,7 +51,7 @@ export function averageTokenSpeed(samples: TokenSpeedSample[]) {
     }
     return result;
   }, { outputTokens: 0, durationMs: 0 });
-  return totals.durationMs ? totals.outputTokens * 1_000 / totals.durationMs : null;
+  return observedTokensPerSecond(totals.outputTokens, totals.durationMs);
 }
 
 export function latestLocalAccountSpeeds(events: LocalUsage[]) {

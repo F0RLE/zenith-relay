@@ -1,3 +1,4 @@
+use crate::error_codes;
 use crate::{
     account_candidate_health,
     accounts::{AccountAuthState, AccountHealthState},
@@ -5,6 +6,34 @@ use crate::{
     CandidateHealth, CandidateQuota,
 };
 use serde::{Deserialize, Serialize};
+
+pub fn pool_routing_summary(
+    saved: Option<&crate::PoolRoutingPolicy>,
+    sources: &[super::SourceSummary],
+    accounts: &[super::AccountSummary],
+) -> crate::PoolRoutingPolicy {
+    let members = sources
+        .iter()
+        .filter(|m| m.in_pool)
+        .map(|m| {
+            (
+                crate::PoolMemberKind::Source,
+                m.id.clone(),
+                m.priority,
+                m.weight,
+            )
+        })
+        .chain(accounts.iter().filter(|m| m.in_pool).map(|m| {
+            (
+                crate::PoolMemberKind::Account,
+                m.id.clone(),
+                m.priority,
+                m.weight,
+            )
+        }))
+        .collect();
+    crate::resolve_pool_routing(saved, members)
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +140,44 @@ pub enum OperationalStatus {
     Disabled,
 }
 
+impl OperationalStatus {
+    /// Runtime availability can narrow rotation eligibility, but cannot erase
+    /// a persisted disable, quota wait, or configuration failure.
+    pub fn with_runtime_available(self, available: Option<bool>) -> Self {
+        if self == Self::Rotation && available == Some(false) {
+            Self::Unavailable
+        } else {
+            self
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn live_availability_only_narrows_rotation_status() {
+    for status in [
+        OperationalStatus::Disabled,
+        OperationalStatus::QuotaWait,
+        OperationalStatus::Unavailable,
+    ] {
+        for available in [None, Some(false), Some(true)] {
+            assert_eq!(status.with_runtime_available(available), status);
+        }
+    }
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(Some(false)),
+        OperationalStatus::Unavailable
+    );
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(None),
+        OperationalStatus::Rotation
+    );
+    assert_eq!(
+        OperationalStatus::Rotation.with_runtime_available(Some(true)),
+        OperationalStatus::Rotation
+    );
+}
+
 pub fn operational_status(
     enabled: bool,
     quota_wait: bool,
@@ -187,7 +254,7 @@ fn account_routing_block_reason(
         return Some(AccountRoutingBlockReason::AuthError);
     }
     match input.last_error_code {
-        Some("checkpoint" | "upstream_account_verification_required") => {
+        Some("checkpoint" | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED) => {
             return Some(AccountRoutingBlockReason::Checkpoint)
         }
         Some("captcha") => return Some(AccountRoutingBlockReason::Captcha),

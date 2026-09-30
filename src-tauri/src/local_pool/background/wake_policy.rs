@@ -3,9 +3,10 @@ use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::{
     automations::{model_lightness_rank, WakeAdapterPolicy, WakeModel},
     quota::QuotaAdapterCapabilities,
+    ModelRules,
 };
 
-pub(super) fn codex_wake_policy(
+pub(in crate::local_pool) fn codex_wake_policy(
     account: &LocalAccountRecord,
     capabilities: &QuotaAdapterCapabilities,
 ) -> WakeAdapterPolicy {
@@ -29,13 +30,5 @@ pub(super) fn codex_wake_policy(
 }
 
 fn model_allowed(account: &LocalAccountRecord, model: &str) -> bool {
-    (account.allowed_models.is_empty()
-        || account
-            .allowed_models
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(model)))
-        && !account
-            .excluded_models
-            .iter()
-            .any(|excluded| excluded.eq_ignore_ascii_case(model))
+    ModelRules::from_allow_deny(&account.allowed_models, &account.excluded_models).allows(model)
 }

@@ -34,6 +34,20 @@ const account = (id: string, overrides: Partial<AccountSummary> = {}): AccountSu
 });
 
 describe("account table model", () => {
+  test("groups availability consistently with Pool without overriding order inside each group", () => {
+    const accounts = [
+      account("error", { operationalStatus: "unavailable" }),
+      account("quota", { operationalStatus: "quotaWait" }),
+      account("disabled", { operationalStatus: "disabled", enabled: false }),
+      account("ready-z"),
+      account("ready-a"),
+    ];
+    const order = new Map(accounts.map((item, index) => [item.id, index]));
+    for (const group of [false, true]) {
+      expect(filterAndSortAccounts(accounts, "", "all", "all", group, order, "Unknown").map((item) => item.id)).toEqual(["ready-z", "ready-a", "quota", "error", "disabled"]);
+    }
+  });
+
   test("derives counts and plan options from the complete account list", () => {
     const accounts = [account("one"), account("two", { enabled: false, inPool: false, subscription: { planType: "business", activeUntilMs: null, status: "active", updatedAtMs: null } })];
     expect(accountCounts(accounts)).toEqual({ errorCount: 0, inPoolCount: 1, disabledCount: 1 });

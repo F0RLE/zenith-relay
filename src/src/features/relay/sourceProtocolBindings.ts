@@ -6,6 +6,7 @@ import type {
   SourceSummary,
   SourceWireApi,
 } from "./api/types";
+import { modelIdKey } from "./modelGroups";
 
 export const sourceWireApis = [
   "responses",
@@ -25,10 +26,17 @@ function normalizedCacheWriteTtl(value: SourceProtocolBinding): CacheWriteTtl {
 }
 
 export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter {
-  return (binding.adapter === "responses_to_messages" || binding.adapter === "responses_to_gemini")
-    && binding.wireApi === "responses"
-    ? binding.adapter
-    : "native";
+  return binding.adapter && sourceWireApis.some((upstream) => adapterBetween(binding.wireApi, upstream) === binding.adapter)
+    ? binding.adapter : "native";
+}
+
+export function adapterBetween(client: SourceWireApi, upstream: SourceWireApi): SourceAdapter {
+  return client === upstream ? "native" : `${client}_to_${upstream}` as SourceAdapter;
+}
+
+export function upstreamWireApi(binding: SourceProtocolBinding): SourceWireApi {
+  const adapter = normalizedAdapter(binding);
+  return sourceWireApis.find((upstream) => adapterBetween(binding.wireApi, upstream) === adapter) ?? binding.wireApi;
 }
 
 export function normalizedReasoningMode(
@@ -36,20 +44,18 @@ export function normalizedReasoningMode(
   adapter = normalizedAdapter(_binding),
 ): MessagesReasoningMode {
   // Reasoning is selected by the client and constrained in Pool -> Model
-  // Rules. The source editor only chooses the wire adapter; a Messages bridge
-  // always uses the current upstream translation path for the requested
-  // effort. Keep accepting the legacy field on read, but do not expose it as
-  // a source-level policy.
-  return adapter === "responses_to_messages" ? "adaptive" : "disabled";
+  // Rules. Keep accepting the legacy field on read; Relay derives the adapter
+  // and uses the current upstream translation path for the requested effort.
+  return adapter === "native" ? "disabled" : "adaptive";
 }
 
 export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
   const knownModels = new Map(
-    availableModels.map((model) => [model.toLowerCase(), model] as const),
+    availableModels.map((model) => [modelIdKey(model), model] as const),
   );
   const seen = new Set<string>();
   return modelIds.flatMap((model) => {
-    const normalized = model.trim().toLowerCase();
+    const normalized = modelIdKey(model);
     const known = knownModels.get(normalized);
     if (!known || seen.has(normalized)) return [];
     seen.add(normalized);
@@ -80,16 +86,14 @@ export function normalizedBindings(
   });
 }
 
-type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">;
+type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" | "models" | "protocolConfig" | "resolvedProtocolBindings">;
 
-/**
- * Legacy source records keep a single `wireApi`. Treat them as one virtual
- * binding in the UI so an edit never has to guess a protocol from a provider
- * name or silently widen the source's surface.
- */
+/** Prefer routes computed by Rust. Older snapshots fall back to their stored
+ * bindings or single wire protocol until the server publishes a projection. */
 export function effectiveSourceProtocolBindings(
   source: ProtocolBindingSource,
 ): SourceProtocolBinding[] {
+  if (source.resolvedProtocolBindings) return normalizedBindings(source.resolvedProtocolBindings, source.models);
   const configured = source.protocolBindings?.length
     ? normalizedBindings(source.protocolBindings, source.models)
     : [];
@@ -108,8 +112,7 @@ function sourceBindingModels(
     : source.models;
 }
 
-/** Returns only explicitly configured routes. A bridge changes the request
- * contract and must therefore be assigned explicitly by the operator. */
+/** Returns the routes computed by Rust, with a legacy snapshot fallback. */
 export function runtimeSourceProtocolBindings(
   source: ProtocolBindingSource,
 ): SourceProtocolBinding[] {
@@ -117,9 +120,8 @@ export function runtimeSourceProtocolBindings(
 }
 
 /**
- * Mirrors the runtime's source capability calculation for one client
- * protocol. A sole empty binding retains the legacy source-wide catalog;
- * empty bindings in a multi-route source remain intentionally unconfirmed.
+ * Mirrors the runtime's resolved source routes for one client protocol. A
+ * sole empty legacy binding retains the source-wide catalog.
  */
 export function sourceModelsForWireApi(
   source: ProtocolBindingSource,
@@ -130,7 +132,26 @@ export function sourceModelsForWireApi(
   return bindings.flatMap((binding) => {
     if (binding.wireApi !== wireApi) return [];
     return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = model.toLowerCase();
+      const normalized = modelIdKey(model);
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+  });
+}
+
+/**
+ * Cache writes are an upstream Messages capability. Include both native
+ * Messages routes and Responses routes translated by the Messages adapter.
+ */
+export function sourceModelsWithCacheWritePricing(source: ProtocolBindingSource) {
+  const bindings = runtimeSourceProtocolBindings(source);
+  const seen = new Set<string>();
+  return bindings.flatMap((binding) => {
+    const messagesUpstream = upstreamWireApi(binding) === "messages";
+    if (!messagesUpstream) return [];
+    return sourceBindingModels(source, bindings, binding).filter((model) => {
+      const normalized = modelIdKey(model);
       if (seen.has(normalized)) return false;
       seen.add(normalized);
       return true;
@@ -145,20 +166,20 @@ export function sourceSupportsWireApi(
   return sourceModelsForWireApi(source, wireApi).length > 0;
 }
 
-export function sourceSupportsAnyWireApi(source: ProtocolBindingSource) {
-  return sourceWireApis.some((wireApi) => sourceSupportsWireApi(source, wireApi));
-}
-
 /**
  * A direct ChatGPT profile bypasses Relay entirely. It can use a real
  * Responses endpoint, but it cannot execute a Relay-owned bridge.
  */
-export function sourceSupportsNativeResponses(source: ProtocolBindingSource) {
+export function sourceSupportsNativeProtocol(source: ProtocolBindingSource, protocol?: SourceWireApi) {
   const bindings = effectiveSourceProtocolBindings(source);
   return bindings.some(
     (binding) =>
-      binding.wireApi === "responses"
+      (protocol === undefined || binding.wireApi === protocol)
       && normalizedAdapter(binding) === "native"
       && sourceBindingModels(source, bindings, binding).length > 0,
   );
+}
+
+export function sourceSupportsNativeResponses(source: ProtocolBindingSource) {
+  return sourceSupportsNativeProtocol(source, "responses");
 }

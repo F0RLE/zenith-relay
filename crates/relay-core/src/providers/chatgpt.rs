@@ -1,0 +1,121 @@
+mod agent_identity;
+mod codex_identity;
+mod codex_release;
+mod models;
+mod passive_quota;
+mod quota_subscription;
+mod quota_usage;
+mod runtime;
+mod token_errors;
+
+use futures_util::StreamExt;
+use reqwest::header::{HeaderValue, InvalidHeaderValue};
+
+pub use agent_identity::{
+    is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
+};
+pub use codex_identity::{
+    configure_codex_client_version, configured_codex_client_version, valid_codex_client_version,
+    CodexIdentityEnvelope, CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_STABLE_FALLBACK_VERSION,
+};
+pub use codex_release::{
+    refresh_codex_client_release, CodexRelease, CodexReleaseError, CODEX_RELEASES_API_URL,
+    CODEX_RELEASE_REFRESH_INTERVAL,
+};
+pub use models::{
+    CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode, CODEX_MODELS_ENDPOINT,
+};
+pub use passive_quota::merge_codex_quota_headers;
+pub use quota_subscription::{
+    account_ids_from_check_response, merge_subscription_metadata, merge_subscription_metadata_at,
+    parse_subscription_timestamp_ms, parse_subscription_timestamp_text,
+    resolve_account_check_account_id, subscription_refresh_due,
+    unverified_chatgpt_account_id_hints, AccountCheckIdentityError, CodexSubscriptionClient,
+    CodexSubscriptionMetadata, CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT,
+    SUBSCRIPTION_REFRESH_INTERVAL_MS,
+};
+pub use quota_usage::{
+    is_agent_identity_task_invalid_failure, parse_codex_usage, CodexQuotaClient,
+    QuotaRefreshOutcome, CODEX_QUOTA_ENDPOINT,
+};
+pub use runtime::{RuntimeChatGptAccount, RuntimeChatGptAuth};
+pub use token_errors::{token_refresh_failure_kind, token_refresh_provider_error_code};
+
+pub const CODEX_MODELS_CLIENT_VERSION: &str = CODEX_CLIENT_VERSION;
+
+/// Official Responses endpoint used by the Excel/Basis Points route. It is a
+/// fixed provider route; user supplied API sources never use it.
+pub const BASIS_POINTS_RESPONSES_URL: &str = "https://bps.openai.com/basispoints/api/responses";
+
+const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
+
+pub(super) fn valid_access_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ACCESS_TOKEN_BYTES
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+/// Creates a sensitive bearer header without exposing the token in logs.
+pub fn bearer_authorization(access_token: &str) -> Result<HeaderValue, InvalidHeaderValue> {
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {access_token}"))?;
+    authorization.set_sensitive(true);
+    Ok(authorization)
+}
+
+/// Keeps one trimmed account id. Later hints that differ only by case are the same id.
+pub fn push_account_id_hint(hints: &mut Vec<String>, value: String) {
+    let value = value.trim();
+    if !value.is_empty()
+        && !hints
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(value))
+    {
+        hints.push(value.to_string());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ResponseBodyError {
+    Transport,
+    TooLarge,
+}
+
+pub(super) async fn collect_response_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, ResponseBodyError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ResponseBodyError::Transport)?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(ResponseBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_tokens_are_bounded_and_header_safe() {
+        assert!(valid_access_token("token"));
+        assert!(!valid_access_token(""));
+        assert!(!valid_access_token("token\nvalue"));
+        assert!(!valid_access_token(&"x".repeat(MAX_ACCESS_TOKEN_BYTES + 1)));
+    }
+
+    #[test]
+    fn bearer_authorization_is_sensitive_and_rejects_invalid_header_values() {
+        let authorization = bearer_authorization("synthetic-access-token").unwrap();
+        assert_eq!(
+            authorization.to_str().unwrap(),
+            "Bearer synthetic-access-token"
+        );
+        assert!(authorization.is_sensitive());
+        assert!(bearer_authorization("invalid\nvalue").is_err());
+    }
+}

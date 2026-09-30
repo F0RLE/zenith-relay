@@ -44,12 +44,12 @@ impl PricingCatalog {
     }
 
     fn exact_entry(&self, model: &str, provider: Option<&str>) -> Option<&CatalogEntry> {
-        let model = normalize(model);
-        if let Some(provider) = provider.map(normalize) {
+        let model = super::normalize(model);
+        if let Some(provider) = provider.map(super::normalize) {
             // Callers may pass either the public bare id or a provider-qualified
             // id. Build the qualified lookup from the unqualified component so
             // both forms address the same LiteLLM record.
-            let qualified = format!("{provider}/{}", unqualified(&model));
+            let qualified = format!("{provider}/{}", super::unqualified(&model));
             if let Some(entry) = self.unique.get(&qualified) {
                 if entry.provider.as_deref() == Some(provider.as_str()) {
                     return Some(entry);
@@ -60,7 +60,7 @@ impl PricingCatalog {
                     return Some(entry);
                 }
             }
-            if let Some(entry) = self.unique.get(&unqualified(&model)) {
+            if let Some(entry) = self.unique.get(&super::unqualified(&model)) {
                 if entry.provider.as_deref() == Some(provider.as_str()) {
                     return Some(entry);
                 }
@@ -75,15 +75,15 @@ impl PricingCatalog {
     fn canonical_entry(&self, model: &str, family: &str) -> Option<&CatalogEntry> {
         // Canonical matching intentionally ignores the input namespace. The
         // declared family below is the authority for which namespace is safe.
-        let model = unqualified(model);
-        let family = normalize(family);
+        let model = super::unqualified(model);
+        let family = super::normalize(family);
         let candidates = self
             .entries
             .values()
             .filter(|entry| {
                 entry.provider.as_deref() == Some(family.as_str())
-                    && unqualified(&entry.model_id) == model
-                    && !self.conflicts.contains(&normalize(&entry.model_id))
+                    && super::unqualified(&entry.model_id) == model
+                    && !self.conflicts.contains(&super::normalize(&entry.model_id))
             })
             .collect::<Vec<_>>();
         let first = candidates.first().copied()?;
@@ -108,14 +108,4 @@ impl PricingCatalog {
     pub(crate) fn metadata(&self) -> (Option<String>, Option<u64>, bool) {
         (self.revision.clone(), self.fetched_at_ms, self.stale)
     }
-}
-
-fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn unqualified(value: &str) -> String {
-    value
-        .rsplit_once('/')
-        .map_or_else(|| normalize(value), |(_, model)| normalize(model))
 }

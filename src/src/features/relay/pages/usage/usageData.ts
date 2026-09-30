@@ -1,5 +1,5 @@
 import type {
-  CacheWriteTtl,
+  DocumentedCacheRetentionMinimum,
   DefaultServiceTier,
   ErrorOrigin,
   LocalUsage,
@@ -8,10 +8,12 @@ import type {
   RemoteUsage,
   RoutingDiagnostics,
   ToolUseDiagnostics,
+  UpstreamErrorDetails,
   UsageTotals,
 } from "../../api/types";
 import type { TokenSpeedSample } from "../../usageSpeed";
 import { totalsFromUsageSamples, type UsageTotalsSample } from "../../usageTotals";
+import { documentedCacheRetentionMinimum } from "./cacheLifetime";
 
 export type CodexRequestOrigin =
   | "activity_summary"
@@ -26,6 +28,8 @@ export type UsageRow = {
   time: string;
   success: boolean;
   model: string | null;
+  requestedModel: string | null;
+  routedModel: string | null;
   requestedReasoningEffort: ReasoningEffort | null;
   effectiveReasoningEffort: ReasoningEffort | null;
   connection: string;
@@ -38,7 +42,9 @@ export type UsageRow = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens: number | null;
-  cacheWriteTtl: Exclude<CacheWriteTtl, "provider"> | null;
+  cacheWriteTtl: string | null;
+  documentedCacheRetentionMinimum: DocumentedCacheRetentionMinimum | null;
+  clientContextId: string | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;
@@ -46,6 +52,7 @@ export type UsageRow = {
   httpStatus: number | null;
   errorCategory: string | null;
   errorOrigin: ErrorOrigin | null;
+  upstreamError?: UpstreamErrorDetails | null;
   toolUse: ToolUseDiagnostics | null;
   routing: RoutingDiagnostics | null;
   accountId: string | null;
@@ -103,6 +110,8 @@ function usageRowFromEvent(
     time,
     success: event.success,
     model: event.resolvedModel ?? event.requestedModel,
+    requestedModel: event.requestedModel,
+    routedModel: event.resolvedModel,
     requestedReasoningEffort: event.requestedReasoningEffort ?? null,
     effectiveReasoningEffort: event.effectiveReasoningEffort ?? null,
     connection,
@@ -116,6 +125,19 @@ function usageRowFromEvent(
     cachedInputTokens: event.cachedInputTokens,
     cacheWriteInputTokens: event.cacheWriteInputTokens ?? null,
     cacheWriteTtl: event.cacheWriteTtl ?? null,
+    documentedCacheRetentionMinimum:
+      documentedCacheRetentionMinimum(
+        event.resolvedModel,
+        event.cachedInputTokens,
+        event.cacheWriteInputTokens,
+        event.cacheWriteTtl,
+      )
+      ?? documentedCacheRetentionMinimum(
+        event.requestedModel,
+        event.cachedInputTokens,
+        event.cacheWriteInputTokens,
+        event.cacheWriteTtl,
+      ),
     reasoningTokens: event.reasoningTokens,
     outputTokens: event.outputTokens,
     tokens: event.totalTokens,
@@ -123,6 +145,7 @@ function usageRowFromEvent(
     httpStatus: event.httpStatus,
     errorCategory: event.errorCategory,
     errorOrigin: event.errorOrigin ?? null,
+    upstreamError: event.success ? null : event.upstreamError ?? null,
     toolUse: event.toolUse ?? null,
     routing: event.routing ?? null,
     accountId,
@@ -130,6 +153,7 @@ function usageRowFromEvent(
     candidateKey,
     apiEquivalent: event.apiEquivalent ?? null,
     requestOrigin,
+    clientContextId: "clientContextId" in event ? event.clientContextId ?? null : null,
   };
 }
 
@@ -203,3 +227,4 @@ export function usageSpeedSample(row: UsageRow): TokenSpeedSample {
     durationMs: row.generationMs,
   };
 }
+

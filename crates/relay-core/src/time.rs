@@ -1,5 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Parses an RFC3339 timestamp into Unix milliseconds.
+/// Blank, invalid, and pre-epoch values are absent rather than zero.
+pub fn unix_time_ms_from_rfc3339(value: &str) -> Option<u64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value.trim()).ok()?;
+    u64::try_from(parsed.timestamp_millis()).ok()
+}
+
 /// Converts a system timestamp to Unix milliseconds, clamped to the public
 /// `u64` boundary.
 pub fn unix_time_ms_at(time: SystemTime) -> u64 {
@@ -24,5 +31,15 @@ mod tests {
         assert_eq!(unix_time_ms_at(UNIX_EPOCH), 0);
         assert_eq!(unix_time_ms_at(UNIX_EPOCH + Duration::from_millis(42)), 42);
         assert_eq!(unix_time_ms_at(UNIX_EPOCH - Duration::from_millis(1)), 0);
+    }
+
+    #[test]
+    fn rfc3339_timestamp_uses_unix_milliseconds() {
+        assert_eq!(
+            unix_time_ms_from_rfc3339(" 1970-01-01T00:00:00.001Z "),
+            Some(1)
+        );
+        assert_eq!(unix_time_ms_from_rfc3339("not-a-date"), None);
+        assert_eq!(unix_time_ms_from_rfc3339("1969-12-31T23:59:59Z"), None);
     }
 }

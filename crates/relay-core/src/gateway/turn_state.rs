@@ -1,4 +1,4 @@
-use crate::GatewayRuntime;
+use crate::runtime::CodexTurnStateScope;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Response};
 use reqwest::header::HeaderMap as UpstreamHeaderMap;
@@ -14,78 +14,48 @@ const SESSION_HEADERS: &[&str] = &[
     "thread-id",
 ];
 
-fn client_session_id(headers: &HeaderMap) -> Option<String> {
+fn client_session_id(headers: &HeaderMap) -> Option<&str> {
     SESSION_HEADERS.iter().find_map(|name| {
         let value = headers.get(*name)?.to_str().ok()?.trim();
         (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
-            .then(|| value.to_string())
+            .then_some(value)
     })
 }
 
-pub(super) fn guard_account_request(
-    runtime: &GatewayRuntime,
-    local_key_id: &str,
-    headers: &mut HeaderMap,
-    account_id: &str,
-    now_ms: u64,
-) {
-    if !headers.contains_key(CODEX_TURN_STATE_HEADER) {
-        return;
-    }
-    let Some(session_id) = client_session_id(headers) else {
-        headers.remove(CODEX_TURN_STATE_HEADER);
-        return;
-    };
-    if !runtime.codex_turn_state_owned_by_account(local_key_id, &session_id, account_id, now_ms) {
-        headers.remove(CODEX_TURN_STATE_HEADER);
-    }
+pub(super) fn request_scope<'a>(
+    local_key_id: &'a str,
+    headers: &'a HeaderMap,
+    account_id: Option<&'a str>,
+    model: &'a str,
+) -> Option<CodexTurnStateScope<'a>> {
+    Some(CodexTurnStateScope {
+        local_key_id,
+        session_id: client_session_id(headers)?,
+        account_id: account_id?,
+        model,
+    })
 }
 
 pub(super) fn relay_account_response_header(
-    runtime: &GatewayRuntime,
-    local_key_id: &str,
     client_headers: &HeaderMap,
-    account_id: &str,
     upstream_headers: &UpstreamHeaderMap,
     response: &mut Response<Body>,
-    now_ms: u64,
 ) {
     let Some(state) = upstream_headers.get(CODEX_TURN_STATE_HEADER) else {
         return;
     };
-    let Some(session_id) = client_session_id(client_headers) else {
+    let Some(_) = client_session_id(client_headers) else {
         return;
     };
     let Ok(state) = HeaderValue::from_bytes(state.as_bytes()) else {
         return;
     };
-    if state.as_bytes().is_empty() {
+    if state.as_bytes().is_empty() || state.as_bytes().len() > 8192 {
         return;
     }
     response
         .headers_mut()
         .insert(HeaderName::from_static(CODEX_TURN_STATE_HEADER), state);
-    runtime.note_codex_turn_state(local_key_id, &session_id, account_id, now_ms);
-}
-
-pub(super) fn note_account_response_header(
-    runtime: &GatewayRuntime,
-    local_key_id: &str,
-    client_headers: &HeaderMap,
-    account_id: &str,
-    upstream_headers: &UpstreamHeaderMap,
-    now_ms: u64,
-) {
-    let Some(state) = upstream_headers.get(CODEX_TURN_STATE_HEADER) else {
-        return;
-    };
-    if state.as_bytes().is_empty() {
-        return;
-    }
-    let Some(session_id) = client_session_id(client_headers) else {
-        return;
-    };
-    runtime.note_codex_turn_state(local_key_id, &session_id, account_id, now_ms);
 }
 
 #[cfg(test)]
@@ -104,10 +74,7 @@ mod tests {
             "x-codex-parent-thread-id",
             HeaderValue::from_static("thread-7"),
         );
-        assert_eq!(
-            client_session_id(&headers).as_deref(),
-            Some("codex-session-9")
-        );
+        assert_eq!(client_session_id(&headers), Some("codex-session-9"));
     }
 
     #[test]

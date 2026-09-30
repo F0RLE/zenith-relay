@@ -1,0 +1,9 @@
+# Branch protection/rulesets must require code-owner review to enforce this file.
+# Review ownership does not itself transfer anyone's copyright.
+/.github/CODEOWNERS @F0RLE
+/.github/PULL_REQUEST_TEMPLATE.md @F0RLE
+/.github/workflows/pr-metadata.yml @F0RLE
+/.github/tools/pr-metadata.* @F0RLE
+/CONTRIBUTING.md @F0RLE
+/CONTRIBUTOR_LICENSE_AGREEMENT.md @F0RLE
+/LICENSE @F0RLE

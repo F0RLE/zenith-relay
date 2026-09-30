@@ -6,6 +6,7 @@ pub enum Error {
     UnsupportedWireApi,
     UpstreamBodyTooLarge,
     Upstream(reqwest::Error),
+    ManagementHttpUnavailable,
     UpstreamStatus(u16),
     InvalidUpstreamResponse(&'static str),
 }
@@ -21,6 +22,9 @@ impl fmt::Display for Error {
                 formatter.write_str("upstream response body is too large")
             }
             Self::Upstream(_) => formatter.write_str("upstream request failed"),
+            Self::ManagementHttpUnavailable => {
+                formatter.write_str("management HTTP request could not be admitted or sent")
+            }
             Self::UpstreamStatus(status) => {
                 write!(formatter, "upstream model discovery failed (HTTP {status})")
             }

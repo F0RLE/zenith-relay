@@ -3,6 +3,7 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 struct Binding {
     candidate_id: String,
+    revision: u64,
     ttl_ms: u64,
     expires_at: u64,
     last_touched_at: u64,
@@ -11,6 +12,7 @@ struct Binding {
 #[derive(Clone, Debug)]
 pub struct AffinityCache {
     bindings: HashMap<String, Binding>,
+    next_revision: u64,
     max_entries: usize,
     ttl_ms: u64,
 }
@@ -19,16 +21,21 @@ impl AffinityCache {
     pub fn new(max_entries: usize, ttl_ms: u64) -> Self {
         Self {
             bindings: HashMap::new(),
+            next_revision: 0,
             max_entries,
             ttl_ms,
         }
     }
 
     pub fn get(&mut self, key: &str, now_ms: u64) -> Option<&str> {
+        self.get_with_revision(key, now_ms).map(|(owner, _)| owner)
+    }
+
+    pub fn get_with_revision(&mut self, key: &str, now_ms: u64) -> Option<(&str, u64)> {
         self.prune(now_ms);
         self.bindings
             .get(key)
-            .map(|binding| binding.candidate_id.as_str())
+            .map(|binding| (binding.candidate_id.as_str(), binding.revision))
     }
 
     pub fn refresh(&mut self, key: &str, now_ms: u64) -> bool {
@@ -77,19 +84,12 @@ impl AffinityCache {
         if self.max_entries == 0 || ttl_ms == 0 {
             return;
         }
-        self.prune(now_ms);
-        let key = key.into();
-        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
-            self.evict_oldest();
-        }
-        self.bindings.insert(
-            key,
-            Binding {
-                candidate_id: candidate_id.into(),
-                ttl_ms,
-                expires_at: now_ms.saturating_add(ttl_ms),
-                last_touched_at: now_ms,
-            },
+        self.insert_binding(
+            key.into(),
+            candidate_id.into(),
+            ttl_ms,
+            now_ms.saturating_add(ttl_ms),
+            now_ms,
         );
     }
 
@@ -103,19 +103,12 @@ impl AffinityCache {
         if self.max_entries == 0 || expires_at <= now_ms {
             return;
         }
-        self.prune(now_ms);
-        let key = key.into();
-        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
-            self.evict_oldest();
-        }
-        self.bindings.insert(
-            key,
-            Binding {
-                candidate_id: candidate_id.into(),
-                ttl_ms: self.ttl_ms,
-                expires_at,
-                last_touched_at: now_ms,
-            },
+        self.insert_binding(
+            key.into(),
+            candidate_id.into(),
+            self.ttl_ms,
+            expires_at,
+            now_ms,
         );
     }
 
@@ -150,6 +143,34 @@ impl AffinityCache {
     fn prune(&mut self, now_ms: u64) {
         self.bindings
             .retain(|_, binding| binding.expires_at > now_ms);
+    }
+
+    fn insert_binding(
+        &mut self,
+        key: String,
+        candidate_id: String,
+        ttl_ms: u64,
+        expires_at: u64,
+        now_ms: u64,
+    ) {
+        self.prune(now_ms);
+        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
+            self.evict_oldest();
+        }
+        self.next_revision = self
+            .next_revision
+            .checked_add(1)
+            .expect("affinity revision exhausted");
+        self.bindings.insert(
+            key,
+            Binding {
+                candidate_id,
+                revision: self.next_revision,
+                ttl_ms,
+                expires_at,
+                last_touched_at: now_ms,
+            },
+        );
     }
 
     fn evict_oldest(&mut self) {
@@ -199,5 +220,18 @@ mod tests {
         assert!(restored.refresh("response", 24));
         assert_eq!(restored.get("response", 33), Some("a"));
         assert_eq!(restored.get("response", 34), None);
+    }
+
+    #[test]
+    fn rebinding_same_owner_changes_revision_but_refresh_does_not() {
+        let mut cache = AffinityCache::new(1, 100);
+        cache.bind("response", "a", 10);
+        let (_, first) = cache.get_with_revision("response", 10).unwrap();
+        assert!(cache.refresh("response", 11));
+        assert_eq!(cache.get_with_revision("response", 11), Some(("a", first)));
+        assert!(cache.invalidate("response"));
+        cache.bind("response", "a", 12);
+        let (_, second) = cache.get_with_revision("response", 12).unwrap();
+        assert!(second > first);
     }
 }

@@ -1,28 +1,24 @@
 use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
-    is_valid_model_id, normalize_image_base_model, normalize_model_ids,
+    normalize_bounded_model_ids, normalize_image_base_model, normalize_model_ids,
     normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, normalize_subscription_plan_order,
-    protocol::ConfigurationPresetSettings,
+    normalize_model_service_tier_overrides, protocol::ConfigurationPresetSettings,
+    ModelIdListError, MAX_MODEL_LIST_LEN,
 };
-
-const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
-const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 
 pub(super) fn validate_configuration_settings(
     settings: &ConfigurationPresetSettings,
 ) -> Result<(), String> {
     validate_quota_request_timeout(settings.quota.request_timeout_seconds)?;
-    validate_routing_policy(
-        settings.routing.max_retry_candidates,
-        settings.routing.cooldown_after_failures,
-    )?;
-    if normalize_subscription_plan_order(settings.routing.subscription_plan_order.clone())
-        .map_err(str::to_string)?
-        != settings.routing.subscription_plan_order
-        || normalize_image_base_model(settings.routing.image_base_model.clone())
-            .map_err(|error| error.to_string())?
-            != settings.routing.image_base_model
+    validate_routing_policy(settings.routing.max_retry_candidates)?;
+    if let Some(policy) = &settings.routing.tool_policy {
+        if &policy.clone().normalized().map_err(str::to_string)? != policy {
+            return Err("tool policy is not normalized".to_string());
+        }
+    }
+    if normalize_image_base_model(settings.routing.image_base_model.clone())
+        .map_err(|error| error.to_string())?
+        != settings.routing.image_base_model
         || normalize_validated_model_ids(settings.hidden_models.clone())? != settings.hidden_models
         || normalize_model_price_overrides(settings.model_price_overrides.clone())?
             != settings.model_price_overrides
@@ -42,7 +38,7 @@ pub(super) fn validate_configuration_settings(
         if rule.id.is_empty()
             || !ids.insert(("source", rule.id.as_str()))
             || rule.weight == 0
-            || rule.recovery_delay_seconds > 24 * 60 * 60
+            || rule.recovery_delay_seconds > zenith_relay_core::MAX_SOURCE_RECOVERY_DELAY_SECONDS
             || rule.name.is_empty()
             || rule.name.len() > 256
             || rule.name.chars().any(char::is_control)
@@ -73,51 +69,31 @@ pub(super) fn validate_configuration_settings(
 }
 
 pub(super) fn validate_quota_request_timeout(request_timeout_seconds: u64) -> Result<(), String> {
-    if !(MIN_QUOTA_REQUEST_TIMEOUT_SECONDS..=MAX_QUOTA_REQUEST_TIMEOUT_SECONDS)
-        .contains(&request_timeout_seconds)
-    {
+    if !zenith_relay_core::protocol::quota_request_timeout_in_range(request_timeout_seconds) {
         return Err("quota request timeout is invalid".to_string());
     }
     Ok(())
 }
 
-pub(super) fn validate_routing_policy(
-    max_retry_candidates: u8,
-    cooldown_after_failures: u8,
-) -> Result<(), String> {
-    if !(1..=8).contains(&max_retry_candidates) {
+pub(super) fn validate_routing_policy(max_retry_candidates: u8) -> Result<(), String> {
+    if !zenith_relay_core::protocol::max_retry_candidates_in_range(max_retry_candidates) {
         return Err("max retry candidates is invalid".to_string());
-    }
-    if !(1..=8).contains(&cooldown_after_failures) {
-        return Err("cooldown after failures is invalid".to_string());
     }
     Ok(())
 }
 
 pub(super) fn normalize_validated_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
-    if models.len() > 4_096 {
-        return Err("model list exceeds the supported limit".to_string());
-    }
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
+    normalize_bounded_model_ids(models, MAX_MODEL_LIST_LEN).map_err(|error| {
+        match error {
+            ModelIdListError::TooLarge => "model list exceeds the supported limit",
+            ModelIdListError::InvalidId => "model id is invalid",
         }
-        if !is_valid_model_id(model) {
-            return Err("model id is invalid".to_string());
-        }
-        if seen.insert(model.to_ascii_lowercase()) {
-            normalized.push(model.to_string());
-        }
-    }
-    Ok(normalized)
+        .to_string()
+    })
 }
 
 fn is_valid_source_base_url(base_url: &str) -> bool {
-    url::Url::parse(base_url)
-        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+    url::Url::parse(base_url).is_ok_and(|url| zenith_relay_core::is_http_endpoint(&url))
 }
 
 pub(super) fn model_reasoning_allowed_levels_from_metadata(

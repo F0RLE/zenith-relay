@@ -19,7 +19,7 @@ pub fn usd_to_micro(value: &Value, unit_scale: u128) -> Result<u64, PricingError
         .map(str::to_owned)
         .or_else(|| value.as_number().map(ToString::to_string))
         .ok_or(PricingError::InvalidAmount)?;
-    parse_decimal_to_scaled(&text, unit_scale)
+    parse_decimal_to_scaled(&text, unit_scale, false)
 }
 
 /// Converts USD/token into microUSD per million tokens.
@@ -38,10 +38,14 @@ fn parse_decimal_value(value: &Value, scale: u128) -> Result<u64, PricingError> 
         .map(str::to_owned)
         .or_else(|| value.as_number().map(ToString::to_string))
         .ok_or(PricingError::InvalidAmount)?;
-    parse_decimal_to_scaled(&text, scale)
+    parse_decimal_to_scaled(&text, scale, false)
 }
 
-fn parse_decimal_to_scaled(text: &str, scale: u128) -> Result<u64, PricingError> {
+pub(crate) fn decimal_to_scaled_allow_zero(text: &str, scale: u128) -> Result<u64, PricingError> {
+    parse_decimal_to_scaled(text, scale, true)
+}
+
+fn parse_decimal_to_scaled(text: &str, scale: u128, allow_zero: bool) -> Result<u64, PricingError> {
     let text = text.trim();
     if text.is_empty() || text.starts_with('-') || text.starts_with('+') {
         return Err(PricingError::InvalidAmount);
@@ -72,7 +76,11 @@ fn parse_decimal_to_scaled(text: &str, scale: u128) -> Result<u64, PricingError>
     digits.push_str(fractional);
     let digits = digits.trim_start_matches('0');
     if digits.is_empty() {
-        return Err(PricingError::InvalidAmount);
+        return if allow_zero {
+            Ok(0)
+        } else {
+            Err(PricingError::InvalidAmount)
+        };
     }
     // Bound untrusted provider input before parsing or exponent arithmetic.
     if digits.len() > 38 || fractional.len() > 38 {
@@ -113,7 +121,7 @@ fn parse_decimal_to_scaled(text: &str, scale: u128) -> Result<u64, PricingError>
     };
 
     let result = u64::try_from(result).map_err(|_| PricingError::Overflow)?;
-    (result > 0)
+    (result > 0 || allow_zero)
         .then_some(result)
         .ok_or(PricingError::InvalidAmount)
 }

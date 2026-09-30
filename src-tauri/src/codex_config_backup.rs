@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::{backup_paths_from_directories, BACKUP_SUFFIX, CONFIG_FILE, MAX_CONFIG_BACKUPS};
 use std::{
     fs,

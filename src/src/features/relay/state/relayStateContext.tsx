@@ -53,6 +53,8 @@ export type RelayContextValue = {
   setCodexBackgroundTasksEnabled: (enabled: boolean) => Promise<boolean>;
   codexWebsocketsEnabled: boolean;
   setCodexWebsocketsEnabled: (enabled: boolean) => Promise<boolean>;
+  routeRecoveryEnabled: boolean;
+  setRouteRecoveryEnabled: (enabled: boolean) => Promise<boolean>;
 };
 
 export type RelayUsageContextValue = {

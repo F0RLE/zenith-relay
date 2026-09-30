@@ -1,0 +1,58 @@
+mod adapter;
+mod capabilities;
+mod management;
+mod sse;
+mod version;
+
+pub use adapter::{
+    bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,
+    prepare_responses_to_messages_scoped, translate_messages_response, AdapterError,
+    AdapterRequestContext, AdapterResponse, AdapterResult, GeminiBridgeRequest,
+    GeminiBridgeResponse, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
+    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
+    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+};
+pub(crate) use adapter::{
+    ensure_compaction_trigger, gemini_incomplete, is_compaction_checkpoint_type,
+    prepare_bridged_compaction, remove_item_prefixed_message_ids,
+    repair_call_prefixed_function_item_ids, repair_custom_tool_item_ids,
+    wrap_compaction_response_bytes, BridgedCompaction,
+};
+pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
+pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
+#[cfg(test)]
+pub use management::pool_model_summaries;
+pub use management::{
+    account_candidate_enabled, account_operational_state, api_equivalent_projection_window,
+    apply_member_model_display_order, apply_model_display_order,
+    apply_model_display_order_with_catalog, apply_model_metadata, apply_model_protocol_routes,
+    apply_model_reasoning_summary, apply_model_speed_summary, apply_pool_model_configuration,
+    assign_bucket_equivalents, canonical_pool_model_id, codex_catalog_supports_websockets,
+    complete_model_display_order, configured_source_model_ids, local_gateway_client_wire_apis,
+    max_retry_candidates_in_range, member_model_catalog, merge_configuration_preset_settings,
+    merge_model_equivalents, model_has_api_source_route, model_has_native_account_route,
+    normalize_configuration_preset, operational_status, pool_candidate_count,
+    pool_model_summaries_with_pricing, pool_pricing_source_summary, pool_routing_summary,
+    pooled_source_runtime_available, quota_refresh_status, quota_request_timeout_in_range,
+    source_runtime_available, update_model_reasoning_policy, valid_generated_id,
+    validate_resolved_configuration_preset_members, AccountOperationalInput,
+    AccountOperationalState, AccountPresetRule, AccountRefreshState, AccountRoutingBlockReason,
+    AccountSummary, ApiError, ClientWireApi, ConfigurationPreset, ConfigurationPresetApplyInput,
+    ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
+    ConfigurationPresetPreview, ConfigurationPresetPreviewInput, ConfigurationPresetSettings,
+    ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelCatalogIdentity,
+    ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus, PresetQuotaPolicy,
+    PresetRoutingPolicy, ProfileKeyRotation, ProxyMode, QuotaRefreshStatus, QuotaWindowUsage,
+    RefreshStatus, RemoteAccountLocation, RevealedAccountIdentity, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourcePresetRule, SourceRefreshState, SourceSummary, UsageBucket,
+    UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals,
+    CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION, DEFAULT_MAX_RETRY_CANDIDATES,
+    DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS, MAX_MAX_RETRY_CANDIDATES,
+    MAX_QUOTA_REQUEST_TIMEOUT_SECONDS, MIN_MAX_RETRY_CANDIDATES, MIN_QUOTA_REQUEST_TIMEOUT_SECONDS,
+    PROFILE_KEY_ROTATION_SCHEMA_VERSION,
+};
+pub(crate) use sse::{
+    consume_frames as consume_sse_frames, data as sse_data, event_end as sse_event_end,
+    lines as sse_lines, take_event as take_sse_event,
+};
+pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

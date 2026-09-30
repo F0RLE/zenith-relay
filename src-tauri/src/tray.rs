@@ -10,7 +10,7 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::local_pool::{commands::gateway, DesktopState};
+use crate::local_pool::{commands::gateway::lifecycle as gateway, DesktopState};
 use crate::platform::ui_text;
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
@@ -229,14 +229,14 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
     Ok(window)
 }
 
-/// Releases the WebView renderer while preserving the native process, tray,
-/// managed state, and local gateway. Opening Relay from the tray recreates it.
+/// Releases the primary WebView when Relay moves to the tray. The native
+/// process, tray, and local pool keep running. The next open creates a new
+/// window; a failed destroy still hides the current one instead of exiting.
 pub fn close_main_window(app: &AppHandle) {
-    if let Some(state) = app.try_state::<DesktopState>() {
-        state.set_background_session_active(false);
-    }
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.destroy();
+        if window.destroy().is_err() {
+            let _ = window.hide();
+        }
     }
 }
 

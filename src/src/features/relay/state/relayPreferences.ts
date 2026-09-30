@@ -11,6 +11,7 @@ export const RELAY_STORAGE_KEYS = {
   accountValueVisible: "relay.accountValueVisible",
   legacyPoolEconomicsVisible: "relay.poolEconomicsVisible",
   launchApplicationAfterConnect: "relay.launchApplicationAfterConnect",
+  pendingAccountImportConfirmation: "relay.pendingAccountImportConfirmation",
 } as const;
 
 export function readRelayPreference(
@@ -85,6 +86,26 @@ export function writeLaunchApplicationAfterConnect(
   storage: RelayStorage | undefined = browserStorage(),
 ) {
   writeRelayPreference(RELAY_STORAGE_KEYS.launchApplicationAfterConnect, enabled ? "1" : "0", storage);
+}
+
+/**
+ * This marker deliberately contains no session, account, or credential data.
+ * It only lets the next launch report that a local import confirmation never
+ * returned to the renderer, which distinguishes an abrupt app exit from a
+ * regular per-item import failure.
+ */
+export function beginAccountImportConfirmation(storage: RelayStorage | undefined = browserStorage()) {
+  writeRelayPreference(RELAY_STORAGE_KEYS.pendingAccountImportConfirmation, "1", storage);
+}
+
+export function finishAccountImportConfirmation(storage: RelayStorage | undefined = browserStorage()) {
+  removeRelayPreference(RELAY_STORAGE_KEYS.pendingAccountImportConfirmation, storage);
+}
+
+export function consumeInterruptedAccountImportConfirmation(storage: RelayStorage | undefined = browserStorage()) {
+  const pending = readRelayPreference(RELAY_STORAGE_KEYS.pendingAccountImportConfirmation, "", storage) === "1";
+  if (pending) finishAccountImportConfirmation(storage);
+  return pending;
 }
 
 function browserStorage(): RelayStorage | undefined {

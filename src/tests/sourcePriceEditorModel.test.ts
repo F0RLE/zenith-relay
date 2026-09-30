@@ -38,7 +38,7 @@ describe("source price editor model", () => {
       excludedModels: ["CUSTOM"],
       modelPriceOverrides: { "model-x": { inputMicroUsdPerMillion: 1, outputMicroUsdPerMillion: 2 } },
       detectedModelPrices: { "MODEL-X": { inputMicroUsdPerMillion: 3, outputMicroUsdPerMillion: 4 } },
-    }))).toEqual(["MODEL-X", "GPT-5.4", "custom"]);
+    }))).toEqual(["GPT-5.4", "custom", "model-x"]);
   });
 
   test("updates and removes a draft immutably using a normalized model key", () => {

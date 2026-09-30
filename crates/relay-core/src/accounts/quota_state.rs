@@ -1,4 +1,8 @@
-use super::{provider_account_failure, AccountHealthState, ProviderAccountFailure};
+use super::{
+    clear_false_upstream_block, provider_account_failure, AccountHealthState,
+    ProviderAccountFailure,
+};
+use crate::error_codes;
 use crate::quota::{
     QuotaErrorState, QuotaNormalizationError, QuotaRefreshFailure, QuotaRefreshResult,
     QuotaSnapshot, QuotaTransition, QuotaWindowKind, Subscription,
@@ -63,8 +67,14 @@ pub fn reduce_account_quota(
                         .is_some_and(|error| error.code == code)
             });
             let auth_owned_error = previous_last_error_code.is_some_and(is_auth_owned_error);
+            let mut recovered_health = previous_health;
+            let mut recovered_code = previous_last_error_code.map(str::to_string);
+            let cleared_false_block =
+                clear_false_upstream_block(&mut recovered_health, &mut recovered_code);
             let (health, last_error_code) = if health == AccountHealthState::Blocked {
-                (health, Some("quota_forbidden".to_string()))
+                (health, Some(error_codes::QUOTA_FORBIDDEN.to_string()))
+            } else if cleared_false_block {
+                (recovered_health, recovered_code)
             } else if previous_last_error_code.is_some() && !quota_owned_error && !auth_owned_error
             {
                 (
@@ -122,7 +132,7 @@ fn is_auth_owned_error(code: &str) -> bool {
         Some(ProviderAccountFailure::Authentication)
     ) || matches!(
         code,
-        "credential_access_expiry_failed" | "upstream_unauthorized"
+        "credential_access_expiry_failed" | error_codes::UPSTREAM_UNAUTHORIZED
     ) || code.starts_with("auth_")
 }
 
@@ -323,5 +333,60 @@ mod tests {
         )
         .unwrap();
         assert!(repeated.exhaustion_transitions.is_empty());
+    }
+
+    #[test]
+    fn successful_quota_refresh_clears_only_a_false_upstream_forbidden_block() {
+        let data = || {
+            parse_codex_usage(
+                br#"{"rate_limit":{"primary_window":{"used_percent":20}}}"#,
+                20,
+            )
+            .unwrap()
+        };
+        let cleared = reduce_account_quota(
+            &QuotaSnapshot::default(),
+            &subscription(),
+            AccountHealthState::Blocked,
+            Some("upstream_forbidden"),
+            Ok(data()),
+            20,
+        )
+        .unwrap();
+        assert_eq!(cleared.health, AccountHealthState::Healthy);
+        assert_eq!(cleared.last_error_code, None);
+
+        let kept = reduce_account_quota(
+            &QuotaSnapshot::default(),
+            &subscription(),
+            AccountHealthState::Blocked,
+            Some("deactivated_workspace"),
+            Ok(data()),
+            20,
+        )
+        .unwrap();
+        assert_eq!(kept.health, AccountHealthState::Blocked);
+        assert_eq!(
+            kept.last_error_code.as_deref(),
+            Some("deactivated_workspace")
+        );
+
+        let mut denied = data();
+        denied.allowed = Some(false);
+        denied.reported_limit_reached = Some(false);
+        let replaced = reduce_account_quota(
+            &QuotaSnapshot::default(),
+            &subscription(),
+            AccountHealthState::Blocked,
+            Some("upstream_forbidden"),
+            Ok(denied),
+            20,
+        )
+        .unwrap();
+        assert_eq!(replaced.health, AccountHealthState::Blocked);
+        assert_eq!(
+            replaced.last_error_code.as_deref(),
+            Some(error_codes::QUOTA_FORBIDDEN)
+        );
     }
 }

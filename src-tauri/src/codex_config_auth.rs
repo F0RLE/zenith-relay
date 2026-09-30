@@ -3,11 +3,8 @@ use super::{
     replace_if_unchanged, rollback_file, with_cleanup, AUTH_FILE, LEGACY_PROVIDER_ID, PROVIDER_ID,
 };
 use crate::{
-    files::{escape_json_string, unquote_toml_string},
-    key_storage::{
-        delete_previous_codex_auth, load_previous_codex_auth, load_saved_app_key,
-        save_previous_codex_auth,
-    },
+    files::unquote_toml_string,
+    key_storage::{delete_previous_codex_auth, load_previous_codex_auth, load_saved_app_key},
 };
 use std::path::Path;
 
@@ -67,40 +64,7 @@ fn load_codex_auth_key() -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-pub(super) fn codex_auth_content(api_key: &str) -> String {
-    format!(
-        "{{\n  \"OPENAI_API_KEY\": \"{}\",\n  \"auth_mode\": \"apikey\"\n}}\n",
-        escape_json_string(api_key)
-    )
-}
-
-pub(super) fn save_previous_auth_if_needed(
-    config_before_enable: &str,
-    auth_before_enable: Option<&str>,
-) -> Result<bool, String> {
-    if load_previous_codex_auth().is_some() {
-        return Ok(false);
-    }
-    let Some(content) = auth_before_enable else {
-        return Ok(false);
-    };
-    if content.trim().is_empty() {
-        return Ok(false);
-    }
-    let Ok(auth) = serde_json::from_str::<serde_json::Value>(content) else {
-        return Ok(false);
-    };
-    if !previous_codex_auth_should_be_saved(
-        &auth,
-        load_saved_app_key().as_deref(),
-        config_before_enable,
-    ) {
-        return Ok(false);
-    }
-    save_previous_codex_auth(content)?;
-    Ok(true)
-}
-
+#[cfg(test)]
 pub(super) fn previous_codex_auth_should_be_saved(
     auth: &serde_json::Value,
     saved_key: Option<&str>,
@@ -115,6 +79,12 @@ pub(super) fn restore_or_remove_zenith_auth(
     saved_key: Option<&str>,
 ) -> Result<(), String> {
     let auth_path = default_codex_home().join(AUTH_FILE);
+    let owned = auth_before_reset
+        .and_then(|text| serde_json::from_str(text).ok())
+        .is_some_and(|auth| zenith_auth_is_owned(&auth, saved_key, config_before_reset));
+    if !owned {
+        return Err("The profile has a newer login; the saved login was not restored".to_string());
+    }
     if let Some(previous_auth) = load_previous_codex_auth() {
         replace_if_unchanged(&auth_path, auth_before_reset, &previous_auth)?;
         if let Err(error) = delete_previous_codex_auth() {

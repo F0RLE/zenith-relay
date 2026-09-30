@@ -1,5 +1,6 @@
 use super::DesktopState;
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
+use zenith_relay_core::error_codes;
 
 impl DesktopState {
     pub(crate) fn record_catalog_refresh_result(&self, error: Option<&LocalPoolError>) {
@@ -41,15 +42,16 @@ impl DesktopState {
 
 fn catalog_refresh_error_code(code: ErrorCode) -> &'static str {
     match code {
-        ErrorCode::Io => "io",
-        ErrorCode::Conflict => "conflict",
-        ErrorCode::GatewayUnavailable => "gateway_unavailable",
-        ErrorCode::SourceTestFailed => "source_test_failed",
-        ErrorCode::InvalidState => "invalid_state",
-        ErrorCode::NotFound => "not_found",
-        ErrorCode::ProfileRestoreBlocked => "profile_restore_blocked",
-        ErrorCode::RecoveryRequired => "recovery_required",
-        ErrorCode::SecretStoreUnavailable => "secret_store_unavailable",
-        ErrorCode::UnsupportedSchema => "unsupported_schema",
+        ErrorCode::Io => error_codes::IO,
+        ErrorCode::Conflict => error_codes::CONFLICT,
+        ErrorCode::GatewayUnavailable => error_codes::GATEWAY_UNAVAILABLE,
+        ErrorCode::SourceTestFailed => error_codes::SOURCE_TEST_FAILED,
+        ErrorCode::SourceProbeStale => error_codes::SOURCE_PROBE_STALE,
+        ErrorCode::InvalidState => error_codes::INVALID_STATE,
+        ErrorCode::NotFound => error_codes::NOT_FOUND,
+        ErrorCode::ProfileRestoreBlocked => error_codes::PROFILE_RESTORE_BLOCKED,
+        ErrorCode::RecoveryRequired => error_codes::RECOVERY_REQUIRED,
+        ErrorCode::SecretStoreUnavailable => error_codes::SECRET_STORE_UNAVAILABLE,
+        ErrorCode::UnsupportedSchema => error_codes::UNSUPPORTED_SCHEMA,
     }
 }

@@ -1,5 +1,6 @@
 import type { ApiModelPriceOverride, SourceSummary } from "../api/types";
 import { formatEditableModelPrice, parseEditableModelPrice } from "../modelPricing";
+import { modelIdKey, uniqueModelIds } from "../modelGroups";
 
 export type SourcePriceDraft = {
   input: string;
@@ -15,13 +16,15 @@ export type SourcePriceDraftField = keyof SourcePriceDraft;
 const emptyDraft = (): SourcePriceDraft => ({ input: "", output: "", cached: "", cacheWrite5m: "", cacheWrite1h: "" });
 
 export function sourcePriceModels(source: Pick<SourceSummary, "modelPriceOverrides" | "detectedModelPrices" | "allowedModels" | "excludedModels" | "models">) {
-  return [...new Map([
-    ...Object.keys(source.modelPriceOverrides ?? {}),
-    ...Object.keys(source.detectedModelPrices ?? {}),
+  // Rust projects the complete inventory in catalog/manual order. Filters and
+  // prices must not move disabled models or replace their original spelling.
+  return uniqueModelIds([
+    ...source.models,
     ...source.allowedModels,
     ...source.excludedModels,
-    ...source.models,
-  ].map((model) => [model.toLowerCase(), model])).values()];
+    ...Object.keys(source.modelPriceOverrides ?? {}),
+    ...Object.keys(source.detectedModelPrices ?? {}),
+  ]);
 }
 
 export function updateSourcePriceDraft(
@@ -30,7 +33,7 @@ export function updateSourcePriceDraft(
   field: SourcePriceDraftField,
   value: string,
 ): SourcePriceDrafts {
-  const key = model.toLowerCase();
+  const key = modelIdKey(model);
   return {
     ...drafts,
     [key]: { ...(drafts[key] ?? emptyDraft()), [field]: value },
@@ -39,12 +42,12 @@ export function updateSourcePriceDraft(
 
 export function removeSourcePriceDraft(drafts: SourcePriceDrafts, model: string): SourcePriceDrafts {
   const next = { ...drafts };
-  delete next[model.toLowerCase()];
+  delete next[modelIdKey(model)];
   return next;
 }
 
 export function sourcePriceDrafts(prices: Record<string, ApiModelPriceOverride>): SourcePriceDrafts {
-  return Object.fromEntries(Object.entries(prices).map(([model, price]) => [model.toLowerCase(), {
+  return Object.fromEntries(Object.entries(prices).map(([model, price]) => [modelIdKey(model), {
     input: formatEditableModelPrice(price.inputMicroUsdPerMillion),
     output: formatEditableModelPrice(price.outputMicroUsdPerMillion),
     cached: formatEditableModelPrice(price.cachedInputMicroUsdPerMillion),

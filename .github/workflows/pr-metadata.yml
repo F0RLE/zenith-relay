@@ -1,7 +1,8 @@
 name: Validate PR metadata
 
 on:
-  pull_request:
+  # Policy comes from the target branch, never from code proposed by the PR.
+  pull_request_target:
     types:
       - opened
       - edited
@@ -10,66 +11,55 @@ on:
       - ready_for_review
 
 permissions:
+  contents: read
   pull-requests: read
+
+concurrency:
+  group: pr-metadata-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   metadata:
+    # Preserve this status name for existing branch-protection rules.
     name: Release context
     runs-on: ubuntu-latest
     steps:
-      - name: Require release context
+      - name: Read trusted policy
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          sparse-checkout: .github
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Test policy
+        run: bun test ./.github/tools/pr-metadata.test.mjs
+      - name: Require contributor agreement and release context
         uses: actions/github-script@v9
         with:
           script: |
-            const pullRequest = context.payload.pull_request;
-            if (pullRequest.user.type === "Bot") {
-              core.info("Bot pull request: release metadata is maintained by automation.");
-              return;
-            }
-
-            const body = pullRequest.body || "";
-            const requiredHeadings = [
-              "## Summary",
-              "## User-visible changes",
-              "## Release Notes",
-              "## Validation",
-              "## Risk and rollout",
-            ];
-            const missingHeadings = requiredHeadings.filter(
-              (heading) => !body.toLowerCase().includes(heading.toLowerCase()),
+            const { validatePullRequest } = await import(
+              `${process.env.GITHUB_WORKSPACE}/.github/tools/pr-metadata.mjs`
             );
-
-            const releaseSectionMatch = body.match(
-              /## Release Notes([\s\S]*?)(?=\n##\s|$)/i,
-            );
-            const releaseSection = releaseSectionMatch?.[1] || "";
-            const releaseWorthy = /-\s*\[[xX]\]\s*Release-worthy/i.test(
-              releaseSection,
-            );
-            const noReleaseNote = /-\s*\[[xX]\]\s*No release note/i.test(
-              releaseSection,
-            );
-            const noteSectionMatch = releaseSection.match(
-              /###\s*Ready-to-publish note([\s\S]*)/i,
-            );
-            const noteText = (noteSectionMatch?.[1] || "")
-              .replace(/<!--[\s\S]*?-->/g, "")
-              .replace(/-\s*\[[ xX]\].*/g, "")
-              .replace(/[_* >#-]/g, "")
-              .trim();
-
-            const errors = [...missingHeadings];
-            if (!releaseWorthy && !noReleaseNote) {
-              errors.push("select a Release Notes checkbox");
-            }
-            if (releaseWorthy && noteText.length < 12) {
-              errors.push("write a non-empty ready-to-publish release note");
-            }
-
-            if (errors.length > 0) {
-              core.setFailed(
-                "PR metadata is incomplete: " + errors.join(", ") + ".",
-              );
+            const pullNumber = context.payload.pull_request.number;
+            // Read current metadata, not an older event's potentially stale consent.
+            const { data: pullRequest } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: pullNumber,
+            });
+            const files = pullRequest.user.type === "Bot"
+              ? await github.paginate(github.rest.pulls.listFiles, {
+                  ...context.repo,
+                  pull_number: pullNumber,
+                  per_page: 100,
+                })
+              : [];
+            const result = validatePullRequest(pullRequest, files);
+            if (result.errors.length > 0) {
+              core.setFailed("PR requirements are incomplete: " + result.errors.join("; ") + ".");
+            } else if (result.dependencyAutomation) {
+              core.info("Dependabot maintenance: review dependency licenses and any human-authored changes before merging.");
             } else {
-              core.info("PR summary, user impact, validation, risk, and release context are present.");
+              core.info("Contributor confirmation and release context are present. Maintainer review of authorship and authority is still required.");
             }

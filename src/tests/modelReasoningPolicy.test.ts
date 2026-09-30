@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   initialReasoningLevels,
-  normalizeReasoningLevel,
   toggleReasoningLevel,
 } from "../src/features/relay/pages/pool/modelReasoningPolicy";
+import { normalizeReasoningEffort } from "../src/features/relay/poolFormatting";
 
 describe("model reasoning policy", () => {
   test("normalizes detected levels but preserves an explicit empty policy", () => {
@@ -16,7 +16,7 @@ describe("model reasoning policy", () => {
     const current = ["low"];
     expect(toggleReasoningLevel(current, " HIGH ")).toEqual(["low", "high"]);
     expect(toggleReasoningLevel(current, "low")).toEqual([]);
-    expect(normalizeReasoningLevel("  X_HIGH ")).toBe("x_high");
+    expect(normalizeReasoningEffort("  X_HIGH ")).toBe("x_high");
   });
 
 });

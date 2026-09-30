@@ -8,6 +8,7 @@ use crate::local_pool::error::Result as LocalResult;
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
 use std::collections::HashMap;
+use zenith_relay_core::error_codes;
 
 pub(in crate::local_pool::accounts) fn existing_identity_index(
     state: &DesktopState,
@@ -50,53 +51,23 @@ pub(in crate::local_pool::accounts) fn find_existing_account(
 ) -> ItemResult<Option<LocalAccountRecord>> {
     let accounts = state
         .store()
-        .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::ACCOUNT_STORE_FAILED,
+                "account store is unavailable",
+            )
+        })?
         .accounts()
         .to_vec();
     let target = records::identity_hash(provider_account_id, provider_user_id, email);
-    let direct = accounts
-        .iter()
-        .filter(|account| {
-            account.account.source_id == records::CODEX_SOURCE_ID
-                && account.account.identity.identity_hash == target
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if direct.len() > 1 {
-        return Err(ImportItemError::recovery(
-            "multiple local accounts have the same ChatGPT identity",
-        ));
-    }
-    if let Some(account) = direct.into_iter().next() {
-        return Ok(Some(account));
-    }
-    let mut matching = Vec::new();
-    for account in accounts {
-        if account.account.source_id != records::CODEX_SOURCE_ID {
-            continue;
-        }
-        let Some(credentials) = credential_store
-            .load(&account.account.id)
-            .map_err(credential_item_error)?
-        else {
-            continue;
-        };
-        let Some(account_id) = credentials.provider_account_id() else {
-            continue;
-        };
-        if records::identity_hash(
-            account_id,
-            credentials.provider_user_id(),
-            credentials.email(),
-        ) == target
-        {
-            matching.push(account);
-        }
-    }
-    if matching.len() > 1 {
-        return Err(ImportItemError::recovery(
-            "multiple local accounts have the same ChatGPT identity",
-        ));
-    }
-    Ok(matching.pop())
+    records::find_codex_account(
+        &accounts,
+        &target,
+        |account| {
+            records::codex_credentials_match(credential_store, account, &target)
+                .map_err(credential_item_error)
+        },
+        || ImportItemError::recovery("multiple local accounts have the same ChatGPT identity"),
+    )
+    .map(|account| account.cloned())
 }

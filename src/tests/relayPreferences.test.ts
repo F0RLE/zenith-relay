@@ -3,6 +3,9 @@ import {
   RELAY_STORAGE_KEYS,
   readAccountValueVisibility,
   readCodexPoolOauthSelection,
+  beginAccountImportConfirmation,
+  consumeInterruptedAccountImportConfirmation,
+  finishAccountImportConfirmation,
   readLaunchApplicationAfterConnect,
   readRelayPreference,
   removeRelayPreference,
@@ -100,5 +103,18 @@ describe("relay preferences", () => {
 
     writeLaunchApplicationAfterConnect(false, storage);
     expect(readLaunchApplicationAfterConnect(storage)).toBe(false);
+  });
+
+  test("reports only an import confirmation interrupted before a response", () => {
+    const storage = fakeStorage();
+
+    expect(consumeInterruptedAccountImportConfirmation(storage)).toBe(false);
+    beginAccountImportConfirmation(storage);
+    expect(consumeInterruptedAccountImportConfirmation(storage)).toBe(true);
+    expect(consumeInterruptedAccountImportConfirmation(storage)).toBe(false);
+
+    beginAccountImportConfirmation(storage);
+    finishAccountImportConfirmation(storage);
+    expect(consumeInterruptedAccountImportConfirmation(storage)).toBe(false);
   });
 });

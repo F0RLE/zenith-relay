@@ -1,4 +1,6 @@
-import type { ModelSummary } from "../../api/types";
+import type { DefaultServiceTier, ModelSummary } from "../../api/types";
+import { modelIdKey } from "../../modelGroups";
+import { normalizeReasoningEffort } from "../../poolFormatting";
 
 export type ModelRuleGroup = {
   id: string;
@@ -12,11 +14,20 @@ export function modelSignature(models: ModelSummary[]) {
     model.id,
     model.enabled,
     model.speedSupported,
+    model.speedTiers?.join(","),
     model.speedTier,
     model.speedConfigurable,
     model.codexVisible,
     model.codexDisplayName,
-    model.catalogRank,
+    model.catalogProvider,
+    model.catalogFamily,
+    model.catalogName,
+    model.catalogReleaseDate,
+    model.catalogLastUpdated,
+    model.catalogStatus,
+    model.catalogReasoningMethod,
+    model.catalogReasoning,
+    model.catalogReasoningEffortLevels?.join(","),
     model.inputMicroUsdPerMillion,
     model.cachedInputMicroUsdPerMillion,
     model.cacheWrite5mMicroUsdPerMillion,
@@ -55,36 +66,48 @@ export function reorderModelGroups(groups: readonly ModelRuleGroup[], sourceId: 
   return blocks.flat();
 }
 
-export function formatModelDisplayName(value: string) {
-  return value
-    .replace(/\bgpt\s*/i, "GPT-")
-    .replace(/\bclaude\s*/i, "Claude ")
-    .replace(/\bgemini\s*/i, "Gemini ")
-    .replace(/\bgrok\s*/i, "Grok ")
-    .replace(/\b(o\d)\b/i, (_, token: string) => token.toUpperCase())
-    .replace(/(\d)\s+(\d)(?=\s*$)/, "$1.$2")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+/** Keep every current pool model in the persisted order. */
+export function completeModelDisplayOrder(
+  reordered: readonly ModelSummary[],
+  catalog: readonly ModelSummary[],
+) {
+  const included = new Set<string>();
+  const order: string[] = [];
+  const add = (model: ModelSummary) => {
+    const id = model.id.trim();
+    const key = modelIdKey(id);
+    if (!id || included.has(key)) return;
+    included.add(key);
+    order.push(id);
+  };
+  reordered.forEach(add);
+  catalog.forEach(add);
+  return order;
 }
-
-/** Use the provider's advertised order and discard duplicate/blank levels. */
-const MANUAL_REASONING_FALLBACK_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels" | "reasoningManualFallback">) {
   const declaredLevels = model.reasoningSupportedLevels?.length
     ? model.reasoningSupportedLevels
     : model.reasoningLevels ?? [];
-  const levels = declaredLevels.length || !model.reasoningManualFallback
-    ? declaredLevels
-    : MANUAL_REASONING_FALLBACK_LEVELS;
+  const levels = declaredLevels;
   const seen = new Set<string>();
   return levels
-    .map((level) => level.trim().toLowerCase())
+    .map((level) => normalizeReasoningEffort(level))
     .filter((level) => Boolean(level) && !seen.has(level) && seen.add(level));
 }
 
 /** Keep selected values in provider order and remove stale policy values. */
 export function normalizeReasoningSelection(supported: readonly string[], selected: readonly string[]) {
-  const selectedSet = new Set(selected.map((level) => level.trim().toLowerCase()));
+  const selectedSet = new Set(selected.map((level) => normalizeReasoningEffort(level)));
   return supported.filter((level) => selectedSet.has(level));
+}
+
+const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies readonly DefaultServiceTier[];
+
+/** Speed choices for one model. A configurable family always keeps all three modes. */
+export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "speedTiers">): DefaultServiceTier[] {
+  const declared = new Set(model.speedTiers ?? []);
+  const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
+  if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
+  return ordered.length ? [...ordered] : ["standard"];
 }

@@ -31,13 +31,17 @@ pub(super) fn replace_if_unchanged(
     expected: &Option<Vec<u8>>,
     content: &str,
 ) -> Result<()> {
+    super::switch_transaction::check_file(path, expected)?;
     if &read_optional_bytes(path)? != expected {
         return Err(profile_changed_at(path));
     }
-    atomic_write(path, content).map_err(io_error_message)
+    atomic_write(path, content).map_err(io_error_message)?;
+    super::switch_transaction::record_file(path, expected, Some(content.as_bytes().to_vec()));
+    Ok(())
 }
 
 pub(super) fn remove_if_unchanged(path: &Path, expected: &Option<Vec<u8>>) -> Result<()> {
+    super::switch_transaction::check_file(path, expected)?;
     if &read_optional_bytes(path)? != expected {
         return Err(profile_changed_at(path));
     }
@@ -45,7 +49,9 @@ pub(super) fn remove_if_unchanged(path: &Path, expected: &Option<Vec<u8>>) -> Re
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && expected.is_none() => Ok(()),
         Err(error) => Err(io_error_at(path, error)),
-    }
+    }?;
+    super::switch_transaction::record_file(path, expected, None);
+    Ok(())
 }
 
 pub(super) fn rollback_file(

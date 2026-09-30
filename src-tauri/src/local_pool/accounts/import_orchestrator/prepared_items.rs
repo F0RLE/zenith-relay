@@ -33,8 +33,26 @@ pub(super) fn parsed_item_value(
     insert_optional_string(&mut value, "base_url", item.base_url.as_deref());
     insert_optional_string(&mut value, "protocol", item.protocol.as_deref());
     insert_optional_string(&mut value, "email", item.email());
+    insert_optional_string(&mut value, "phone", item.phone());
+    insert_optional_string(&mut value, "password", item.password());
+    insert_optional_string(&mut value, "2fa", item.totp_secret());
     if let Some(priority) = item.priority {
         value.insert("priority".into(), priority.into());
+    }
+    if item.account_is_fedramp {
+        value.insert("chatgpt_account_is_fedramp".into(), true.into());
+    }
+    if !item.tags.is_empty() {
+        value.insert(
+            "tags".into(),
+            serde_json::Value::Array(
+                item.tags
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
     }
     let secrets = item.secrets();
     insert_optional_string(&mut value, "access_token", secrets.access_token());
@@ -77,6 +95,9 @@ fn apply_material(
     insert_optional_string(value, "refresh_token", material.refresh_token.as_deref());
     insert_optional_string(value, "id_token", material.id_token.as_deref());
     insert_optional_string(value, "plan_type", material.plan_type.as_deref());
+    if material.account_is_fedramp {
+        value.insert("chatgpt_account_is_fedramp".into(), true.into());
+    }
     if let Some(expires_at_ms) = material.expires_at_ms {
         value.insert("expires_at_ms".into(), expires_at_ms.into());
     }
@@ -87,7 +108,7 @@ fn insert_optional_string(
     key: &str,
     value: Option<&str>,
 ) {
-    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+    if let Some(value) = zenith_relay_core::omit_blank(value) {
         object.insert(key.into(), serde_json::Value::String(value.to_string()));
     }
 }

@@ -15,10 +15,6 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     })
 }
 
-pub fn escape_toml_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 pub fn escape_json_string(value: &str) -> String {
     value
         .replace('\\', "\\\\")

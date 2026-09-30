@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyState, PageHeader, Tabs } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { ChatGptRecoveryHeaderAction, ChatGptRecoveryTab } from "./recovery/ChatGptRecoveryTab";
-import { OpenCodeRecoveryTab } from "./recovery/OpenCodeRecoveryTab";
+import { OpenCodeRecoveryHeaderAction, OpenCodeRecoveryTab } from "./recovery/OpenCodeRecoveryTab";
 
 type RecoveryTab = "chatgpt" | "opencode";
 
@@ -18,7 +18,7 @@ type RecoveryApplication = {
 // A new integration adds one application adapter and one entry here.
 const RECOVERY_APPLICATIONS: readonly [RecoveryApplication, ...RecoveryApplication[]] = [
   { id: "chatgpt", labelKey: "profiles.tabs.chatgpt", Content: ChatGptRecoveryTab, HeaderAction: ChatGptRecoveryHeaderAction },
-  { id: "opencode", labelKey: "profiles.tabs.opencode", Content: OpenCodeRecoveryTab },
+  { id: "opencode", labelKey: "profiles.tabs.opencode", Content: OpenCodeRecoveryTab, HeaderAction: OpenCodeRecoveryHeaderAction },
 ];
 
 export function ProfilesPage() {
@@ -29,9 +29,8 @@ export function ProfilesPage() {
   const HeaderAction = application.HeaderAction;
   const Content = application.Content;
 
-  return <section className="relay-page profile-recovery-page">
-    <PageHeader title={t("nav.profiles")} subtitle={t("profiles.subtitle")} actions={mode === "local" && HeaderAction ? <HeaderAction /> : null} />
-    <Tabs value={activeTab} onChange={(value) => setActiveTab(value as RecoveryTab)} label={t("profiles.tabs.label")} items={RECOVERY_APPLICATIONS.map(({ id, labelKey }) => ({ id, label: t(labelKey) }))} />
-    {mode === "local" ? <Content /> : <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} />}
+  return <section className="relay-page relay-workspace-page profile-recovery-page">
+    <PageHeader title={t("nav.profiles")} navigation={<Tabs value={activeTab} onChange={(value) => setActiveTab(value as RecoveryTab)} label={t("profiles.tabs.label")} items={RECOVERY_APPLICATIONS.map(({ id, labelKey }) => ({ id, label: t(labelKey) }))} />} actions={mode === "local" && HeaderAction ? <HeaderAction key={application.id} /> : null} />
+    {mode === "local" ? <Content key={application.id} /> : <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} />}
   </section>;
 }

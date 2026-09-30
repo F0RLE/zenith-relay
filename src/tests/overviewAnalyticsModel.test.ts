@@ -9,7 +9,7 @@ import {
   totalsFromSamples,
   type UsageSample,
 } from "../src/features/relay/pages/overview/overviewAnalyticsModel";
-import { sourceHost } from "../src/features/relay/sourceUrl";
+import { sourceHost, sourcePort } from "../src/features/relay/sourceUrl";
 
 const sample = (overrides: Partial<UsageSample> = {}): UsageSample => ({
   createdAtMs: 1_000,
@@ -35,7 +35,8 @@ describe("overview analytics model", () => {
     const month = chartWindows("month", "en-US", now);
 
     expect(today).toHaveLength(24);
-    expect(today[0].startMs).toBe(new Date(2026, 7, 28).getTime());
+    expect(today[0].startMs).toBe(new Date(2026, 7, 27, 13).getTime());
+    expect(today[23].startMs).toBe(new Date(2026, 7, 28, 12).getTime());
     expect(today[23].endMs - today[0].startMs + 1).toBe(24 * HOUR_MS);
     expect(week).toHaveLength(7);
     expect(week[1].startMs - week[0].startMs).toBe(DAY_MS);
@@ -89,5 +90,10 @@ describe("overview analytics model", () => {
   test("uses a readable source host without rejecting manual addresses", () => {
     expect(sourceHost("https://api.example.test/v1")).toBe("api.example.test");
     expect(sourceHost("manual source")).toBe("manual source");
+  });
+
+  test("reads an explicit port without rejecting a malformed address", () => {
+    expect(sourcePort("http://127.0.0.1:4317/v1")).toBe("4317");
+    expect(sourcePort("partial gateway address")).toBe("");
   });
 });

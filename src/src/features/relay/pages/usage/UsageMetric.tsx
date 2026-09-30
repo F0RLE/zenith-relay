@@ -14,7 +14,7 @@ export function UsageMetric({ icon, label, value, detail, title, className }: {
   return <>
     <div
       ref={hasTooltip ? tooltip.anchorRef : undefined}
-      className={className}
+      className={`usage-metric${className ? ` ${className}` : ""}`}
       aria-describedby={hasTooltip ? tooltip.describedBy : undefined}
       onMouseEnter={hasTooltip ? tooltip.show : undefined}
       onMouseLeave={hasTooltip ? tooltip.hideAfterHover : undefined}

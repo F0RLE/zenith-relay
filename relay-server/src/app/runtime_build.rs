@@ -24,8 +24,15 @@ struct AccountRuntimeBuild {
 }
 
 pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
+    if !state.store.gateway_enabled()? {
+        return state.replace_runtime(None);
+    }
     let source_records = state.store.sources()?;
     let account_records = state.store.accounts()?;
+    let account_secret_refs = account_records
+        .iter()
+        .map(|record| (record.id.clone(), record.secret_ref.clone()))
+        .collect();
     let key_records = state
         .store
         .keys()?
@@ -37,8 +44,11 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
     let model_display_order = state.store.model_display_order()?;
     let routing_policy = state.store.routing_policy()?;
+    let pool_routing = resolve_pool_routing(&routing_policy, &source_records, &account_records);
+    pool_routing.validate_activation().map_err(str::to_string)?;
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
+    let chatgpt_retry_until_available = state.store.chatgpt_retry_until_available()?;
     let (mut pool_source_ids, mut pool_account_ids) =
         pool_member_ids(&source_records, &account_records);
     if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
@@ -46,12 +56,13 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     }
 
     let sources = build_sources(state, source_records)?;
+    let basis_points_enabled = routing_policy.basis_points_enabled;
     let AccountRuntimeBuild {
         accounts,
         direct_refresh_accounts,
         refresh_clients,
         agent_identities,
-    } = build_accounts(state, account_records).await?;
+    } = build_accounts(state, account_records, basis_points_enabled).await?;
     if !has_active_candidate(&sources, &accounts) {
         return state.replace_runtime(None);
     }
@@ -74,6 +85,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     });
     let persistence = Arc::new(ServerTokenPersistence {
         state: state.clone(),
+        secret_refs: account_secret_refs,
     });
     let usage = state.usage_callback()?;
     let runtime = GatewayRuntime::from_mixed_pool(
@@ -84,23 +96,21 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             token_authority: state.token_authority.clone(),
             refresh_adapter: refresh,
             persistence_adapter: persistence,
-            refresh_skew_ms: 60_000,
+            refresh_skew_ms: zenith_relay_core::accounts::TOKEN_REFRESH_SKEW_MS,
             agent_identities,
         },
         GatewayRuntimeOptions {
+            tool_policy: routing_policy.tool_policy.unwrap_or_default(),
             max_retry_candidates: usize::from(routing_policy.max_retry_candidates),
-            cooldown_after_failures: routing_policy.cooldown_after_failures,
-            keep_last_candidate_available: routing_policy.keep_last_candidate_available,
-            routing_strategy: routing_policy.routing_strategy,
-            subscription_plan_order: routing_policy.subscription_plan_order,
+            pool_routing: Some(pool_routing),
             hidden_models,
             default_service_tier: routing_policy.default_service_tier,
             quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             image_pricing_catalog: Some(state.pricing_catalog()),
+            model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
             model_reasoning_allowed_levels,
             response_affinity_store: Some(state.store.clone()),
-            provider_storm_breaker: true,
         },
         usage,
     )
@@ -111,16 +121,56 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(codex_websockets_enabled);
+    runtime.set_route_recovery_enabled(chatgpt_retry_until_available);
     let breaker_store = state.store.clone();
     runtime.set_chatgpt_team_breaker_callback(move |account_ids| {
         let _ = breaker_store.block_accounts_for_team(&account_ids);
     });
+    let refresh = state.refresh.clone();
+    runtime.set_activity_callback(move |activity| {
+        if activity.in_flight > 0 || activity.active_request_count > 0 {
+            refresh.set_member_active(&activity.member_key);
+        }
+    });
     state.replace_runtime(Some(Arc::new(runtime)))
 }
 
-/// Candidate state remains available to management, while the internal profile
-/// credential derives its request scope solely from pool membership.
-fn pool_member_ids(
+pub(super) fn resolve_pool_routing(
+    routing: &zenith_relay_core::protocol::PresetRoutingPolicy,
+    sources: &[SourceRecord],
+    accounts: &[ServerAccountRecord],
+) -> zenith_relay_core::PoolRoutingPolicy {
+    zenith_relay_core::resolve_pool_routing(
+        routing.pool_routing.as_ref(),
+        sources
+            .iter()
+            .filter(|m| m.in_pool)
+            .map(|m| {
+                (
+                    zenith_relay_core::PoolMemberKind::Source,
+                    m.id.clone(),
+                    m.priority,
+                    m.weight,
+                )
+            })
+            .chain(accounts.iter().filter(|m| m.in_pool).map(|m| {
+                (
+                    zenith_relay_core::PoolMemberKind::Account,
+                    m.id.clone(),
+                    m.priority,
+                    m.weight,
+                )
+            }))
+            .collect(),
+    )
+}
+
+/// Members that can receive pool traffic.
+///
+/// A source is included only when it is in the pool and resolves at least one
+/// client protocol. An account is included from pool membership alone.
+/// Management still lists candidates that fail this filter.
+pub(super) fn pool_member_ids(
     sources: &[SourceRecord],
     accounts: &[ServerAccountRecord],
 ) -> (Vec<String>, Vec<String>) {
@@ -154,6 +204,7 @@ fn build_sources(
 async fn build_accounts(
     state: &Arc<AppState>,
     records: Vec<ServerAccountRecord>,
+    basis_points_enabled: bool,
 ) -> Result<AccountRuntimeBuild, String> {
     let mut build = AccountRuntimeBuild {
         accounts: Vec::new(),
@@ -176,7 +227,7 @@ async fn build_accounts(
         if credential.has_oauth() {
             state
                 .token_authority
-                .register(&record.id, credential.tokens()?, record.auth_state)
+                .register_if_not_stale(&record.id, credential.tokens()?, record.auth_state)
                 .await
                 .map_err(|error| error.to_string())?;
             if proxy.is_some() {
@@ -192,6 +243,7 @@ async fn build_accounts(
             record,
             &credential,
             proxy,
+            basis_points_enabled,
             QUOTA_STALE_AFTER_MS,
         ));
     }

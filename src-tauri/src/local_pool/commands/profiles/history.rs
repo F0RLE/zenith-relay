@@ -1,6 +1,6 @@
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError},
-    profiles::{codex, repair},
+    profiles::repair,
     state::DesktopState,
 };
 
@@ -11,26 +11,25 @@ pub(crate) enum CodexHistoryProvider {
     ReadyApi,
 }
 
-/// A provider metadata rewrite is only needed when the profile crosses an
-/// adapter boundary. Switching two OAuth accounts or two Relay keys keeps the
-/// same history provider and must not rescan the whole Codex home.
+/// Decide whether the history repair pass should run before a profile change.
+///
+/// The credential kind describes the currently attached profile, but it does
+/// not describe every rollout and SQLite row already present in the Codex
+/// home. In particular, a profile can already be attached to the local Relay
+/// while a chat imported from another client still carries
+/// `codex_local_access`. Skipping the repair in that state leaves the saved
+/// chat bound to the wrong adapter and the next request never reaches Relay.
+///
+/// The repair pass is idempotent and creates no backup when all rows already
+/// match, so run it for every profile change instead of using the credential
+/// kind as a proxy for history state. This also covers the first Relay attach,
+/// where no Relay-owned profile backup exists yet.
 pub(crate) fn history_provider_changed(
-    state: &DesktopState,
-    profile_dir: &std::path::Path,
-    target: CodexHistoryProvider,
+    _state: &DesktopState,
+    _profile_dir: &std::path::Path,
+    _target: CodexHistoryProvider,
 ) -> Result<bool, String> {
-    let current = codex::credential_kind(profile_dir, &state.profile_backup_root())
-        .map_err(|error| error.message)?;
-    let same = match target {
-        CodexHistoryProvider::ChatGpt => {
-            current == Some(codex::ProfileCredentialKind::OAuthAccount)
-        }
-        CodexHistoryProvider::LocalGateway => {
-            current == Some(codex::ProfileCredentialKind::LocalGateway)
-        }
-        CodexHistoryProvider::ReadyApi => current == Some(codex::ProfileCredentialKind::ApiKey),
-    };
-    Ok(!same)
+    Ok(true)
 }
 
 pub(crate) fn synchronize_codex_history(

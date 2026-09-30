@@ -1,0 +1,256 @@
+//! Gemini responses translated back into Responses bodies.
+
+use super::{
+    custom_tool_item_id, AdapterError, AdapterResult, GeminiBridgeRequest, GeminiBridgeResponse,
+    ResponsesToolKind,
+};
+use serde_json::{json, Map, Value};
+
+pub fn translate_gemini_response(
+    request: GeminiBridgeRequest,
+    upstream: &Value,
+) -> AdapterResult<GeminiBridgeResponse> {
+    if prompt_blocked(upstream).map_err(|()| AdapterError::upstream_response_invalid())? {
+        let response_id = request.response_id.clone();
+        let mut response_body = responses_body_from_output(
+            &response_id,
+            &request.model,
+            Vec::new(),
+            upstream.get("usageMetadata"),
+        );
+        response_body["status"] = Value::String("incomplete".into());
+        response_body["incomplete_details"] = json!({"reason":"content_filter"});
+        return Ok(GeminiBridgeResponse {
+            response_body,
+            response_id,
+            continuation: request.state,
+        });
+    }
+    let candidate = first_candidate(upstream)?;
+    let incomplete_reason =
+        candidate_incomplete_reason(candidate.get("finishReason").and_then(Value::as_str))?;
+    let parts = match candidate
+        .pointer("/content/parts")
+        .and_then(Value::as_array)
+    {
+        Some(parts) => parts.as_slice(),
+        None if incomplete_reason.is_some() => &[],
+        None => return Err(AdapterError::upstream_response_invalid()),
+    };
+    let (output, _) = responses_output_from_gemini_parts(&request, parts)?;
+    if output.is_empty() && incomplete_reason.is_none() {
+        return Err(AdapterError::upstream_response_invalid());
+    }
+    let response_id = request.response_id.clone();
+    let mut response_body = responses_body_from_output(
+        &response_id,
+        &request.model,
+        output,
+        upstream.get("usageMetadata"),
+    );
+    if let Some(reason) = incomplete_reason {
+        response_body["status"] = Value::String("incomplete".to_string());
+        response_body["incomplete_details"] = json!({"reason": reason});
+    }
+    let mut continuation = request.state.clone();
+    super::request::append_message(&mut continuation, "model", parts.to_vec());
+    Ok(GeminiBridgeResponse {
+        response_body,
+        response_id,
+        continuation,
+    })
+}
+
+pub(in crate::protocol::adapter) fn candidate_incomplete_reason(
+    reason: Option<&str>,
+) -> AdapterResult<Option<&'static str>> {
+    match reason {
+        None | Some("STOP") => Ok(None),
+        Some("MAX_TOKENS") => Ok(Some("max_output_tokens")),
+        Some(
+            "SAFETY"
+            | "RECITATION"
+            | "LANGUAGE"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_RECITATION"
+            | "ESCALATION",
+        ) => Ok(Some("content_filter")),
+        _ => Err(AdapterError::upstream_response_invalid()),
+    }
+}
+
+/// Gemini can block a prompt before producing candidates. Only an explicit
+/// block reason is a filtered terminal; missing candidates alone are not.
+pub(in crate::protocol::adapter) fn prompt_blocked(value: &Value) -> Result<bool, ()> {
+    let Some(reason) = value.pointer("/promptFeedback/blockReason") else {
+        return Ok(false);
+    };
+    if !matches!(
+        reason.as_str(),
+        Some("SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY")
+    ) || value
+        .get("candidates")
+        .is_some_and(|candidates| candidates.as_array().is_none_or(|items| !items.is_empty()))
+    {
+        return Err(());
+    }
+    Ok(true)
+}
+
+/// Recognize only Gemini terminal reasons the response adapter can translate.
+/// The gateway uses this before releasing a stream with no generated output.
+pub(crate) fn gemini_incomplete(value: &Value) -> bool {
+    let Ok(blocked) = prompt_blocked(value) else {
+        return false;
+    };
+    blocked
+        || value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("finishReason"))
+            .and_then(Value::as_str)
+            .is_some_and(|reason| {
+                candidate_incomplete_reason(Some(reason)).is_ok_and(|reason| reason.is_some())
+            })
+}
+
+fn responses_body_from_output(
+    response_id: &str,
+    model: &str,
+    output: Vec<Value>,
+    usage: Option<&Value>,
+) -> Value {
+    json!({"id": response_id, "object": "response", "created_at": 0, "status": "completed",
+        "model": model, "output": output, "usage": responses_usage(usage)})
+}
+
+fn responses_usage(usage: Option<&Value>) -> Value {
+    let mut result = Map::new();
+    if let Some(input) = usage
+        .and_then(|u| u.get("promptTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        result.insert("input_tokens".to_string(), Value::from(input));
+    }
+    if let Some(output) = usage
+        .and_then(|u| u.get("candidatesTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        result.insert("output_tokens".to_string(), Value::from(output));
+    }
+    if let Some(total) = usage
+        .and_then(|u| u.get("totalTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        result.insert("total_tokens".to_string(), Value::from(total));
+    }
+    if let Some(cached) = usage
+        .and_then(|u| u.get("cachedContentTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        result.insert(
+            "input_tokens_details".to_string(),
+            json!({"cached_tokens": cached}),
+        );
+    }
+    if let Some(reasoning) = usage
+        .and_then(|u| u.get("thoughtsTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        result.insert(
+            "output_tokens_details".to_string(),
+            json!({"reasoning_tokens": reasoning}),
+        );
+    }
+    Value::Object(result)
+}
+
+fn first_candidate(upstream: &Value) -> AdapterResult<&Value> {
+    upstream
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+        .ok_or_else(AdapterError::upstream_response_invalid)
+}
+
+fn responses_output_from_gemini_parts(
+    request: &GeminiBridgeRequest,
+    parts: &[Value],
+) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
+    let mut output = Vec::new();
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut call_index = 0_usize;
+    let flush_text = |output: &mut Vec<Value>, text: &mut String| {
+        if !text.is_empty() {
+            output.push(json!({"id":format!("msg_{}_{}",request.response_id(),output.len()),"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":std::mem::take(text),"annotations":[]}]}));
+        }
+    };
+    let flush_reasoning = |output: &mut Vec<Value>, reasoning: &mut String| {
+        if !reasoning.is_empty() {
+            output.push(json!({"id":format!("reasoning_{}_{}",request.response_id(),output.len()),"type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":std::mem::take(reasoning)}]}));
+        }
+    };
+    for value in parts {
+        let part = value
+            .as_object()
+            .ok_or_else(AdapterError::upstream_response_invalid)?;
+        if let Some(value) = part.get("text").and_then(Value::as_str) {
+            if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                flush_text(&mut output, &mut text);
+                reasoning.push_str(value);
+            } else {
+                flush_reasoning(&mut output, &mut reasoning);
+                text.push_str(value);
+            }
+            continue;
+        }
+        let Some(call) = part.get("functionCall").and_then(Value::as_object) else {
+            if part.get("thoughtSignature").is_some() {
+                continue;
+            }
+            return Err(AdapterError::upstream_response_invalid());
+        };
+        flush_text(&mut output, &mut text);
+        flush_reasoning(&mut output, &mut reasoning);
+        let upstream_name = call
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| request.state.allows_tool_name(name))
+            .ok_or_else(AdapterError::upstream_response_invalid)?;
+        let target = request
+            .state
+            .client_tool(upstream_name)
+            .ok_or_else(AdapterError::upstream_response_invalid)?;
+        let call_id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("call_{}_{}", request.response_id(), call_index));
+        let args = super::json_path::function_call_args(call)
+            .map_err(|_| AdapterError::upstream_response_invalid())?;
+        let mut item = if target.kind == ResponsesToolKind::Custom {
+            let input = args
+                .get("input")
+                .and_then(Value::as_str)
+                .ok_or_else(AdapterError::upstream_response_invalid)?;
+            json!({"id":custom_tool_item_id(&call_id),"type":"custom_tool_call","status":"completed","call_id":call_id,"name":target.name,"input":input})
+        } else {
+            json!({"id":call_id,"type":"function_call","status":"completed","call_id":call_id,"name":target.name,"arguments":serde_json::to_string(&args).map_err(|_| AdapterError::upstream_response_invalid())?})
+        };
+        if let Some(namespace) = target.namespace.as_ref() {
+            item["namespace"] = Value::String(namespace.clone());
+        }
+        output.push(item);
+        call_index = call_index.saturating_add(1);
+    }
+    flush_text(&mut output, &mut text);
+    flush_reasoning(&mut output, &mut reasoning);
+    Ok((output, Vec::new()))
+}

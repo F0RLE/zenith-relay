@@ -1,8 +1,13 @@
 use super::*;
+use crate::accounts::{MAX_ACCOUNT_TAGS, MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS};
+use crate::{is_http_endpoint, url_has_userinfo};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use url::Url;
 
-pub(super) fn credential_string(
+type ImportFieldLookup<'a> = (Option<&'a Map<String, Value>>, &'a [&'a str]);
+
+pub(in crate::accounts::import) fn credential_string(
     object: &Map<String, Value>,
     credentials: &Map<String, Value>,
     tokens: Option<&Map<String, Value>>,
@@ -14,7 +19,7 @@ pub(super) fn credential_string(
         .map(str::to_string)
 }
 
-pub(super) fn credential_str<'a>(
+pub(in crate::accounts::import) fn credential_str<'a>(
     object: &'a Map<String, Value>,
     credentials: &'a Map<String, Value>,
     tokens: Option<&'a Map<String, Value>>,
@@ -26,7 +31,7 @@ pub(super) fn credential_str<'a>(
         .or_else(|| string_field(object, fields))
 }
 
-pub(super) fn credential_value<'a>(
+pub(in crate::accounts::import) fn credential_value<'a>(
     object: &'a Map<String, Value>,
     credentials: &'a Map<String, Value>,
     tokens: Option<&'a Map<String, Value>>,
@@ -38,18 +43,47 @@ pub(super) fn credential_value<'a>(
         .or_else(|| value_field(object, fields))
 }
 
-pub(super) fn string_field<'a>(object: &'a Map<String, Value>, fields: &[&str]) -> Option<&'a str> {
+pub(in crate::accounts::import) fn credential_bool(
+    object: &Map<String, Value>,
+    credentials: &Map<String, Value>,
+    fields: &[&str],
+) -> Option<bool> {
+    value_field(credentials, fields)
+        .or_else(|| value_field(object, fields))
+        .and_then(Value::as_bool)
+}
+
+pub(in crate::accounts::import) fn string_field<'a>(
+    object: &'a Map<String, Value>,
+    fields: &[&str],
+) -> Option<&'a str> {
     value_field(object, fields)?.as_str()
 }
 
-pub(super) fn value_field<'a>(
+pub(in crate::accounts::import) fn first_string_field<'a>(
+    lookups: &[ImportFieldLookup<'a>],
+) -> Option<&'a str> {
+    lookups
+        .iter()
+        .find_map(|(source, fields)| source.and_then(|object| string_field(object, fields)))
+}
+
+pub(in crate::accounts::import) fn first_value_field<'a>(
+    lookups: &[ImportFieldLookup<'a>],
+) -> Option<&'a Value> {
+    lookups
+        .iter()
+        .find_map(|(source, fields)| source.and_then(|object| value_field(object, fields)))
+}
+
+pub(in crate::accounts::import) fn value_field<'a>(
     object: &'a Map<String, Value>,
     fields: &[&str],
 ) -> Option<&'a Value> {
     fields.iter().find_map(|field| object.get(*field))
 }
 
-pub(super) fn safe_identifier(value: Option<&str>) -> Option<String> {
+pub(in crate::accounts::import) fn safe_identifier(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty()
         || value.len() > 256
@@ -63,7 +97,7 @@ pub(super) fn safe_identifier(value: Option<&str>) -> Option<String> {
     }
 }
 
-pub(super) fn safe_metadata(value: Option<&str>) -> Option<String> {
+pub(in crate::accounts::import) fn safe_metadata(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty()
         || value.len() > 64
@@ -77,7 +111,7 @@ pub(super) fn safe_metadata(value: Option<&str>) -> Option<String> {
     }
 }
 
-pub(super) fn safe_expiry(value: Option<&Value>) -> Option<String> {
+pub(in crate::accounts::import) fn safe_expiry(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::Number(value) => Some(value.to_string()),
         Value::String(value)
@@ -93,17 +127,13 @@ pub(super) fn safe_expiry(value: Option<&Value>) -> Option<String> {
     }
 }
 
-pub(super) fn safe_base_url(value: Option<&str>) -> Option<String> {
+pub(in crate::accounts::import) fn safe_base_url(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty() || value.len() > 2048 {
         return None;
     }
     let mut parsed = Url::parse(value).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
+    if !is_http_endpoint(&parsed) || url_has_userinfo(&parsed) {
         return None;
     }
     parsed.set_query(None);
@@ -111,7 +141,7 @@ pub(super) fn safe_base_url(value: Option<&str>) -> Option<String> {
     Some(parsed.to_string().trim_end_matches('/').to_string())
 }
 
-pub(super) fn safe_protocol(value: Option<&str>) -> Option<String> {
+pub(in crate::accounts::import) fn safe_protocol(value: Option<&str>) -> Option<String> {
     match value?.trim().to_ascii_lowercase().as_str() {
         "responses" => Some("responses".to_string()),
         "chat_completions" | "chat-completions" | "chat" => Some("chat_completions".to_string()),
@@ -119,21 +149,69 @@ pub(super) fn safe_protocol(value: Option<&str>) -> Option<String> {
     }
 }
 
-pub(super) fn metadata_was_rejected(
-    object: &Map<String, Value>,
+pub(in crate::accounts::import) fn metadata_was_rejected(
+    base_url_value: Option<&Value>,
     base_url: Option<&str>,
+    protocol_value: Option<&Value>,
     protocol: Option<&str>,
     plan_value: Option<&Value>,
     plan: Option<&str>,
 ) -> bool {
-    (value_field(object, &["base_url", "baseUrl", "api_base", "apiBase"]).is_some()
-        && base_url.is_none())
-        || (value_field(object, &["protocol", "wire_api", "wireApi"]).is_some()
-            && protocol.is_none())
+    (base_url_value.is_some() && base_url.is_none())
+        || (protocol_value.is_some() && protocol.is_none())
         || (plan_value.is_some() && plan.is_none())
 }
 
-pub(super) fn safe_label(value: Option<&str>) -> Option<String> {
+/// Reads optional tags from a portable account item without allowing tags to
+/// become a secret or an unbounded prepared-snapshot payload. Invalid entries
+/// are ignored while valid entries remain importable; the boolean tells the
+/// caller whether a metadata warning should be shown in the preview.
+pub(in crate::accounts::import) fn safe_import_tags(
+    value: Option<&Value>,
+    sensitive_values: &[Option<&str>],
+) -> (BTreeSet<String>, bool) {
+    let Some(value) = value else {
+        return (BTreeSet::new(), false);
+    };
+    let Some(values) = value.as_array() else {
+        return (BTreeSet::new(), true);
+    };
+
+    let mut tags = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    let mut rejected = values.len() > MAX_ACCOUNT_TAGS;
+    for raw in values.iter().take(MAX_ACCOUNT_TAGS) {
+        let Some(raw) = raw.as_str() else {
+            rejected = true;
+            continue;
+        };
+        let tag = raw.trim();
+        if tag.is_empty()
+            || tag.chars().count() > MAX_ACCOUNT_TAG_CHARS
+            || tag.chars().any(char::is_control)
+            || sensitive_values
+                .iter()
+                .flatten()
+                .filter(|sensitive| sensitive.len() >= 4)
+                .any(|sensitive| tag.contains(sensitive))
+        {
+            rejected = true;
+            continue;
+        }
+        if tags.contains(tag) {
+            continue;
+        }
+        if total_bytes.saturating_add(tag.len()) > MAX_ACCOUNT_TAG_BYTES {
+            rejected = true;
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(tag.len());
+        tags.insert(tag.to_string());
+    }
+    (tags, rejected)
+}
+
+pub(in crate::accounts::import) fn safe_label(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty() || value.chars().count() > 80 || value.chars().any(char::is_control) {
         return None;
@@ -145,7 +223,7 @@ pub(super) fn safe_label(value: Option<&str>) -> Option<String> {
     })
 }
 
-pub(super) fn redact_label_secrets<'a>(
+pub(in crate::accounts::import) fn redact_label_secrets<'a>(
     label: String,
     secrets: impl IntoIterator<Item = Option<&'a str>>,
     masked_identity: &str,
@@ -162,7 +240,7 @@ pub(super) fn redact_label_secrets<'a>(
     }
 }
 
-pub(super) fn redact_optional_metadata(
+pub(in crate::accounts::import) fn redact_optional_metadata(
     value: &mut Option<String>,
     sensitive_values: &[Option<&str>],
 ) {
@@ -177,7 +255,7 @@ pub(super) fn redact_optional_metadata(
     }
 }
 
-pub(super) fn redact_file_name(value: &str) -> String {
+pub(in crate::accounts::import) fn redact_file_name(value: &str) -> String {
     let (stem, extension) = value
         .rsplit_once('.')
         .filter(|(_, extension)| {
@@ -207,7 +285,10 @@ pub(super) fn redact_file_name(value: &str) -> String {
     extension.map_or(stem.clone(), |extension| format!("{stem}.{extension}"))
 }
 
-pub(super) fn redact_file_name_with(value: &str, sensitive_values: &[Option<&str>]) -> String {
+pub(in crate::accounts::import) fn redact_file_name_with(
+    value: &str,
+    sensitive_values: &[Option<&str>],
+) -> String {
     if sensitive_values
         .iter()
         .flatten()
@@ -228,7 +309,7 @@ pub(super) fn redact_file_name_with(value: &str, sensitive_values: &[Option<&str
     redact_file_name(value)
 }
 
-pub(super) fn mask_email(value: &str) -> String {
+pub(in crate::accounts::import) fn mask_email(value: &str) -> String {
     let value = value.trim();
     let Some((local, domain)) = value.split_once('@') else {
         return mask_identifier(value);
@@ -243,7 +324,7 @@ pub(super) fn mask_email(value: &str) -> String {
     }
 }
 
-pub(super) fn mask_identifier(value: &str) -> String {
+pub(in crate::accounts::import) fn mask_identifier(value: &str) -> String {
     let value = value.trim();
     if value.chars().count() <= 8 {
         return "****".to_string();
@@ -260,7 +341,11 @@ pub(super) fn mask_identifier(value: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
-pub(super) fn sha256_hex(seed: &str, secret: Option<&str>, scope: Option<&str>) -> String {
+pub(in crate::accounts::import) fn sha256_hex(
+    seed: &str,
+    secret: Option<&str>,
+    scope: Option<&str>,
+) -> String {
     let mut digest = Sha256::new();
     digest.update(seed.as_bytes());
     if let Some(scope) = scope {

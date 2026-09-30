@@ -59,10 +59,14 @@ pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<Stri
                 "selected import file must use the .json or .txt extension",
             ));
         }
-        let metadata = std::fs::metadata(&path).map_err(|_| {
+        // Do not follow links selected by the file picker.  Besides keeping
+        // imports bounded to the files the user actually chose, this avoids
+        // surprising reads from a changing target while the preview is being
+        // prepared.
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
             LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
         })?;
-        if !metadata.is_file() {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
                 "selected import path is not a file",
@@ -93,7 +97,7 @@ pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<Stri
 pub(in crate::local_pool::accounts) fn normalize_import_input(
     input: StartAccountImportInput,
 ) -> CommandResult<(String, Option<String>)> {
-    let content = input.content.filter(|value| !value.trim().is_empty());
+    let content = zenith_relay_core::omit_blank(input.content);
     if !input.documents.is_empty() {
         if content.is_some() || input.source_file.is_some() {
             return Err(LocalPoolError::new(
@@ -103,14 +107,10 @@ pub(in crate::local_pool::accounts) fn normalize_import_input(
             .into());
         }
         if input.documents.len() == 1 {
-            return Ok((
-                input
-                    .documents
-                    .into_iter()
-                    .next()
-                    .expect("one document exists"),
-                None,
-            ));
+            let document = input.documents.into_iter().next().ok_or_else(|| {
+                LocalPoolError::new(ErrorCode::InvalidState, "import document is missing")
+            })?;
+            return Ok((document, None));
         }
         let content = combine_import_documents(&input.documents)
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.message))?;

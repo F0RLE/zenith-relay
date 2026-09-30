@@ -4,7 +4,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeSet;
 
 pub(crate) fn is_image_model_id(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase();
+    let model = crate::model_id_key(model);
     model.starts_with("gpt-image-") || model.starts_with("dall-e-")
 }
 
@@ -69,7 +69,7 @@ pub(super) fn cheapest_image_main_model_with_catalog(
 }
 
 fn image_main_model_is_compatible(model: &str) -> bool {
-    let lower = model.trim().to_ascii_lowercase();
+    let lower = crate::model_id_key(model);
     !lower.is_empty()
         && lower != IMAGE_API_MODEL
         && [
@@ -87,7 +87,7 @@ fn image_main_model_is_compatible(model: &str) -> bool {
 
 fn image_auto_model_is_supported(model: &str) -> bool {
     // OpenAI's image-generation guide currently requires GPT-5 or newer for the Responses tool.
-    let lower = model.trim().to_ascii_lowercase();
+    let lower = crate::model_id_key(model);
     let Some(version) = lower.strip_prefix("gpt-") else {
         return false;
     };

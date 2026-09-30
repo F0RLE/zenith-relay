@@ -8,6 +8,7 @@ pub enum ErrorCode {
     Conflict,
     GatewayUnavailable,
     SourceTestFailed,
+    SourceProbeStale,
     InvalidState,
     NotFound,
     ProfileRestoreBlocked,

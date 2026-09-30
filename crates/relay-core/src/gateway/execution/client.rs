@@ -1,20 +1,33 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
+use super::super::continuation::{
+    prepare_response_continuation, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+};
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
-    candidate_protocols, chat_request_is_text_or_image_only, chat_request_uses_tools,
-    client_context_fingerprint, codex_background_request_kind, forwarded_codex_headers,
-    forwarded_messages_headers, is_managed_codex_client, request_id, ServiceTierPolicy,
-    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    candidate_protocols, chat_request_is_text_or_image_only, client_context_fingerprint,
+    codex_background_request_kind, forwarded_codex_headers, forwarded_messages_headers,
+    is_managed_codex_client, request_id, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::request::{execute_request, RequestExecution};
+use crate::error_codes;
 use crate::protocol::ClientWireApi;
+use crate::scheduler::rotation::SharedRequestBudget;
 use crate::{GatewayRuntime, WireApi};
 use axum::body::Body;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// WebSocket -> HTTP fallback carries the same identity and physical
+/// dispatch counter; a transport change is not a new client request.
+#[derive(Clone)]
+pub(in crate::gateway) struct RoutedRequestIdentity {
+    pub(in crate::gateway) request_id: String,
+    pub(in crate::gateway) budget: SharedRequestBudget,
+}
 
 pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
@@ -45,22 +58,7 @@ async fn execute_client_request_inner(
     if !valid_local_host(&headers) {
         return invalid_host();
     }
-    let key = runtime
-        .authenticate(headers.get(AUTHORIZATION))
-        .or_else(|| {
-            (wire_api == WireApi::Messages)
-                .then(|| headers.get("x-api-key"))
-                .flatten()
-                .and_then(|value| value.to_str().ok())
-                .and_then(|secret| runtime.authenticate_secret(secret))
-        })
-        .or_else(|| {
-            (wire_api == WireApi::Gemini)
-                .then(|| headers.get("x-goog-api-key"))
-                .flatten()
-                .and_then(|value| value.to_str().ok())
-                .and_then(|secret| runtime.authenticate_secret(secret))
-        });
+    let key = super::super::auth::authenticate_client(&runtime, &headers, wire_api);
     let Some(key) = key else {
         return unauthorized();
     };
@@ -73,41 +71,26 @@ async fn execute_client_request_inner(
     if !runtime.allows_client_wire_api(&key, client_wire_api) {
         return client_api_forbidden();
     }
-    let Ok(body) = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES).await else {
-        return api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            MAX_CLIENT_REQUEST_BODY_ERROR,
-            "request_too_large",
-        );
+    let mut request = match super::super::request_body::read_json_object(&headers, body).await {
+        Ok(object) => Value::Object(object),
+        Err(response) => return *response,
     };
-
-    let request: Value = match serde_json::from_slice(&body) {
-        Ok(Value::Object(request)) => Value::Object(request),
-        _ => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "request body must be a JSON object",
-                "invalid_request",
-            )
-        }
-    };
-    let service_tier_policy = if is_managed_codex_client(&headers) {
-        ServiceTierPolicy::pool_owned()
+    let tool_policy = parts
+        .extensions
+        .get::<super::super::request::RequestToolPolicy>()
+        .cloned()
+        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request));
+    let managed_codex_client = is_managed_codex_client(&headers);
+    let service_tier_policy = if managed_codex_client {
+        ServiceTierPolicy::pool_owned(&request)
     } else {
-        ServiceTierPolicy::client_owned()
+        ServiceTierPolicy::client_owned(&request)
     };
-    if wire_api == WireApi::ChatCompletions && chat_request_uses_tools(&request) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "tool use is not supported through Chat Completions; use Responses or Messages",
-            "tool_use_not_supported",
-        );
-    }
     if wire_api == WireApi::ChatCompletions && !chat_request_is_text_or_image_only(&request) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "Chat Completions supports text and image content only",
-            "chat_feature_not_supported",
+            error_codes::CHAT_FEATURE_NOT_SUPPORTED,
         );
     }
     let body_model = request
@@ -120,7 +103,7 @@ async fn execute_client_request_inner(
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "model in the path must match model in the request body",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             );
         }
     }
@@ -128,20 +111,29 @@ async fn execute_client_request_inner(
         return api_error(
             StatusCode::BAD_REQUEST,
             "model must be a non-empty string",
-            "invalid_request",
+            error_codes::INVALID_REQUEST,
         );
     };
     let background_kind = (wire_api == WireApi::Responses)
         .then(|| codex_background_request_kind(&headers, &request))
         .flatten();
-    let request_id = request_id();
+    let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
+    let (request_id, budget) = identity.map_or_else(
+        || {
+            (
+                request_id(),
+                SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),
+            )
+        },
+        |identity| (identity.request_id, identity.budget),
+    );
     let stream = match request.get("stream") {
         Some(Value::Bool(stream)) => *stream,
         Some(_) => {
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "stream must be a boolean",
-                "invalid_request",
+                error_codes::INVALID_REQUEST,
             )
         }
         None => false,
@@ -159,26 +151,49 @@ async fn execute_client_request_inner(
             return blocked_background_response(wire_api, stream, &request_id, kind);
         }
     }
-    let Some(resolved_model) = runtime.resolve_visible_model(
-        &key,
-        &requested_model,
-        candidate_protocols(wire_api),
-        now_ms(),
-    ) else {
+    let continuation = if wire_api == WireApi::Responses {
+        match prepare_response_continuation(&runtime, &key.id, &mut request, now_ms(), None) {
+            Ok(continuation) => Some(continuation),
+            Err(()) => {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+                    RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+                )
+            }
+        }
+    } else {
+        None
+    };
+
+    let resolved_model = runtime
+        .resolve_visible_model(
+            &key,
+            &requested_model,
+            candidate_protocols(wire_api),
+            now_ms(),
+        )
+        .or_else(|| {
+            runtime
+                .route_recovery_enabled()
+                .then(|| {
+                    runtime.resolve_configured_model(
+                        &key,
+                        &requested_model,
+                        candidate_protocols(wire_api),
+                    )
+                })
+                .flatten()
+        });
+    let Some(resolved_model) = resolved_model else {
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available in this managed pool",
-            "model_not_found",
+            error_codes::MODEL_NOT_FOUND,
         );
     };
     let responses_lite = (wire_api == WireApi::Responses)
         .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
-        .flatten();
-    let response_affinity_key = (wire_api == WireApi::Responses)
-        .then(|| {
-            runtime
-                .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
-        })
         .flatten();
     let client_context_id = client_context_fingerprint(&headers);
     let forwarded_headers = match wire_api {
@@ -189,7 +204,8 @@ async fn execute_client_request_inner(
         WireApi::Gemini => super::super::request::forwarded_bridge_gemini_headers(&headers),
     };
     execute_request(RequestExecution {
-        runtime,
+        tool_policy,
+        runtime: runtime.clone(),
         key,
         request,
         service_tier_policy,
@@ -199,11 +215,16 @@ async fn execute_client_request_inner(
         request_id,
         forwarded_headers,
         client_context_id,
-        response_affinity_key,
+        response_affinity_key: continuation
+            .as_ref()
+            .and_then(|continuation| continuation.response_affinity_key.clone()),
+        requires_affinity_owner: continuation
+            .is_some_and(|continuation| continuation.requires_affinity_owner),
         wire_api,
         responses_lite,
         allow_previous_response_reset: true,
         attempt_offset: 0,
+        budget,
     })
     .await
 }

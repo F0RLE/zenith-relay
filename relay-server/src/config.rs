@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{env, fmt, net::SocketAddr, path::PathBuf};
 use url::Url;
+use zenith_relay_core::url_has_userinfo;
 
 const MIN_MANAGEMENT_TOKEN_BYTES: usize = 24;
 
@@ -11,7 +12,13 @@ pub struct Config {
     pub public_base_url: Url,
     pub management_token: String,
     pub vault_key: [u8; 32],
+    /// Official authenticated account-check endpoint used to validate imported
+    /// ChatGPT account identities before a credential is persisted.
+    pub account_check_url: Url,
 }
+
+pub const DEFAULT_CODEX_ACCOUNT_CHECK_URL: &str =
+    "https://chatgpt.com/backend-api/wham/accounts/check";
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
@@ -31,12 +38,15 @@ impl Config {
         let vault_key = env::var("ZENITH_RELAY_VAULT_KEY")
             .map_err(|_| "ZENITH_RELAY_VAULT_KEY is required".to_string())?;
         let vault_key = decode_vault_key(&vault_key)?;
+        let account_check_url = Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_URL)
+            .expect("the built-in account-check URL must be valid");
         Ok(Self {
             bind,
             data_dir,
             public_base_url,
             management_token,
             vault_key,
+            account_check_url,
         })
     }
 
@@ -48,6 +58,7 @@ impl Config {
             public_base_url: Url::parse(&format!("http://{bind}")).unwrap(),
             management_token: "synthetic-management-token-value".to_string(),
             vault_key: [7; 32],
+            account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_URL).unwrap(),
         }
     }
 }
@@ -68,14 +79,10 @@ impl fmt::Debug for Config {
 fn validate_public_base_url(value: &str) -> Result<Url, String> {
     let mut url = Url::parse(value.trim())
         .map_err(|_| "ZENITH_RELAY_PUBLIC_BASE_URL is invalid".to_string())?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+    if !zenith_relay_core::is_http_endpoint(&url) {
         return Err("ZENITH_RELAY_PUBLIC_BASE_URL must use HTTP or HTTPS".to_string());
     }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
+    if url_has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
         return Err(
             "ZENITH_RELAY_PUBLIC_BASE_URL must not contain credentials, query, or fragment"
                 .to_string(),

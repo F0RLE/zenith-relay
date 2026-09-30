@@ -3,6 +3,8 @@ import type { FeedbackError } from "./feedback";
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
 export type PerformOptions = {
+  /** Finish a dependent step before refreshing, only while the operation is current. */
+  afterWork?: () => Promise<unknown>;
   /** Keep an operation error local to the surface that initiated it. */
   reportError?: boolean;
   onError?: (error: FeedbackError, key: string) => void;
@@ -42,6 +44,10 @@ export async function runRelayOperation({
   try {
     await work();
     if (!isCurrent()) return false;
+    if (options?.afterWork) {
+      await options.afterWork();
+      if (!isCurrent()) return false;
+    }
     await refresh();
     if (!isCurrent()) return false;
     if (successKey) setFeedback({ kind: "success", key: successKey });
@@ -57,4 +63,22 @@ export async function runRelayOperation({
   } finally {
     if (isCurrent()) settle();
   }
+}
+
+/**
+ * Keep the value returned by work. `ok` is still the operation result, so a
+ * later refresh failure leaves the value in place. `value` stays undefined
+ * until work returns; a returned null stays null.
+ */
+export async function captureOperationResult<T>(
+  run: (work: () => Promise<unknown>) => Promise<boolean>,
+  work: () => Promise<T>,
+): Promise<{ ok: boolean; value: T | undefined }> {
+  let value: T | undefined;
+  let captured = false;
+  const ok = await run(async () => {
+    value = await work();
+    captured = true;
+  });
+  return { ok, value: captured ? value : undefined };
 }

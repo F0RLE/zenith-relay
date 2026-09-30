@@ -13,8 +13,10 @@ pub enum Feature {
     AccountExport,
     AccountIdentityReveal,
     Sources,
+    SourceProtocols,
     Quota,
     Models,
+    ModelOrderReset,
     ModelPricing,
     Usage,
     LocalGateway,
@@ -24,10 +26,14 @@ pub enum Feature {
     Backups,
     AccountProxies,
     RuntimeRouting,
+    Rotation,
     ConfigurationPresets,
     ProfileKeyRotation,
     CodexBackgroundTasks,
     CodexWebsockets,
+    ChatgptRetryUntilAvailable,
+    RouteRecovery,
+    ToolPolicy,
     Images,
 }
 
@@ -41,8 +47,10 @@ impl Feature {
             Self::AccountExport => "account_export",
             Self::AccountIdentityReveal => "account_identity_reveal",
             Self::Sources => "sources",
+            Self::SourceProtocols => "source_protocols_v1",
             Self::Quota => "quota",
             Self::Models => "models",
+            Self::ModelOrderReset => "model_order_reset",
             Self::ModelPricing => "model_pricing",
             Self::Usage => "usage",
             Self::LocalGateway => "local_gateway",
@@ -52,10 +60,16 @@ impl Feature {
             Self::Backups => "backups",
             Self::AccountProxies => "account_proxies",
             Self::RuntimeRouting => "runtime_routing",
+            // Existing servers and desktop clients negotiate this wire token.
+            Self::Rotation => "rotation_v2",
             Self::ConfigurationPresets => "configuration_presets",
             Self::ProfileKeyRotation => "profile_key_rotation",
             Self::CodexBackgroundTasks => "codex_background_tasks",
             Self::CodexWebsockets => "codex_websockets",
+            // The wire feature name predates support for all four text protocols.
+            Self::ChatgptRetryUntilAvailable => "chatgpt_retry_until_available",
+            Self::RouteRecovery => "route_recovery_v1",
+            Self::ToolPolicy => "tool_policy_v1",
             Self::Images => "images",
         }
     }
@@ -105,8 +119,10 @@ impl Capabilities {
             Feature::AccountExport,
             Feature::AccountIdentityReveal,
             Feature::Sources,
+            Feature::SourceProtocols,
             Feature::Quota,
             Feature::Models,
+            Feature::ModelOrderReset,
             Feature::ModelPricing,
             Feature::Usage,
             Feature::LocalGateway,
@@ -116,10 +132,14 @@ impl Capabilities {
             Feature::Backups,
             Feature::AccountProxies,
             Feature::RuntimeRouting,
+            Feature::Rotation,
             Feature::ConfigurationPresets,
             Feature::ProfileKeyRotation,
             Feature::CodexBackgroundTasks,
             Feature::CodexWebsockets,
+            Feature::ChatgptRetryUntilAvailable,
+            Feature::RouteRecovery,
+            Feature::ToolPolicy,
             Feature::Images,
         ]
         .into_iter()
@@ -151,5 +171,21 @@ impl Capabilities {
 
     pub fn supports(&self, feature: Feature) -> bool {
         self.features.contains(feature.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Capabilities, Feature};
+
+    #[test]
+    fn route_recovery_has_a_distinct_capability_from_the_legacy_chatgpt_setting() {
+        let server = Capabilities::personal_server("server", "fingerprint");
+        assert!(server.supports(Feature::RouteRecovery));
+        assert!(server.supports(Feature::ChatgptRetryUntilAvailable));
+        let mut legacy = server;
+        legacy.features.remove(Feature::RouteRecovery.as_str());
+        assert!(!legacy.supports(Feature::RouteRecovery));
+        assert!(legacy.supports(Feature::ChatgptRetryUntilAvailable));
     }
 }

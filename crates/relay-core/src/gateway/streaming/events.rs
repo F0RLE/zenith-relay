@@ -1,5 +1,13 @@
 use super::*;
 
+mod output;
+
+use output::is_opaque_compaction_event;
+pub(in crate::gateway) use output::{
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    is_known_non_output_event,
+};
+
 pub(in crate::gateway) fn preserved_stream_error(value: &Value) -> Option<PreservedUpstreamError> {
     let event_type = value.get("type").and_then(Value::as_str);
     let category = upstream_event_failure_category(event_type, value)?;
@@ -40,7 +48,13 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
     );
     error.insert(
         "type".to_string(),
-        Value::String(api_error_type(preserved.status, &preserved.code).to_string()),
+        Value::String(
+            preserved
+                .error_type
+                .as_deref()
+                .unwrap_or_else(|| api_error_type(preserved.status, &preserved.code))
+                .to_string(),
+        ),
     );
     let Some(payload) = terminal.payload else {
         return bytes;
@@ -63,9 +77,15 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
 
 #[derive(Default)]
 pub(in crate::gateway) struct TerminalEvent {
+    pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(in crate::gateway) has_data: bool,
     pub(in crate::gateway) valid: bool,
     pub(in crate::gateway) has_output_delta: bool,
+    /// True only when this frame carries generated response content.  Context
+    /// compaction is intentionally excluded: it is opaque continuation state,
+    /// not a user-visible model output.
+    pub(in crate::gateway) semantic_output: bool,
+    pub(in crate::gateway) is_compaction: bool,
     pub(in crate::gateway) outcome: Option<TerminalOutcome>,
     pub(in crate::gateway) error_status: Option<StatusCode>,
     pub(in crate::gateway) error_category: Option<&'static str>,
@@ -77,6 +97,12 @@ pub(in crate::gateway) struct TerminalEvent {
     pub(in crate::gateway) response: Option<Value>,
     pub(in crate::gateway) output_item: Option<Value>,
     pub(in crate::gateway) payload: Option<Value>,
+    /// The SSE data payload for an opaque Responses compaction event.
+    ///
+    /// Compaction data is provider-owned and may be encrypted or otherwise
+    /// intentionally undecodable. Keep an owned copy so an HTTP-to-WebSocket
+    /// bridge can forward it without parsing, normalizing, or dropping it.
+    pub(in crate::gateway) raw_data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -87,17 +113,11 @@ pub(in crate::gateway) enum TerminalOutcome {
 }
 
 pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
-    let mut data = Vec::new();
-    for line in event.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(value) = line.strip_prefix(b"data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push(b'\n');
-        }
-        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
-    }
+    let data = crate::protocol::sse_data(event);
+    let event_name = crate::protocol::sse_lines(event)
+        .filter_map(|line| line.strip_prefix(b"event:"))
+        .last()
+        .and_then(|value| std::str::from_utf8(value.trim_ascii()).ok());
     if data.is_empty() {
         return TerminalEvent::default();
     }
@@ -105,7 +125,10 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         return TerminalEvent {
             has_data: true,
             valid: true,
+            upstream_error: None,
             has_output_delta: false,
+            semantic_output: false,
+            is_compaction: false,
             outcome: Some(TerminalOutcome::Success),
             error_status: None,
             error_category: None,
@@ -117,16 +140,38 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             response: None,
             output_item: None,
             payload: None,
+            raw_data: None,
         };
     }
-    let Ok(value) = serde_json::from_slice::<Value>(&data) else {
-        return TerminalEvent {
-            has_data: true,
-            ..TerminalEvent::default()
-        };
+    let value = match serde_json::from_slice::<Value>(&data) {
+        Ok(value) => value,
+        Err(error) => {
+            // Responses context compaction is an opaque provider-owned stream. A
+            // few upstream implementations send its delta as a raw/encrypted
+            // payload even though ordinary Responses events are JSON. It must be
+            // passed through unchanged; rejecting it here turns a valid ongoing
+            // compaction into the misleading 502 `stream_invalid` error.
+            if event_name.is_some_and(is_opaque_compaction_event) {
+                return TerminalEvent {
+                    has_data: true,
+                    valid: true,
+                    is_compaction: true,
+                    raw_data: Some(data),
+                    ..TerminalEvent::default()
+                };
+            }
+            return TerminalEvent {
+                has_data: true,
+                upstream_error: Some(super::diagnostics::invalid_event(event, &data, &error)),
+                ..TerminalEvent::default()
+            };
+        }
     };
     let event_type = value.get("type").and_then(Value::as_str);
-    let outcome = match event_type {
+    let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
+        || is_compaction_payload(&value, event_type);
+    let upstream_error_category = upstream_event_failure_category(event_type, &value);
+    let mut outcome = match event_type {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
         }
@@ -134,9 +179,26 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             Some(TerminalOutcome::Failure)
         }
         Some("response.incomplete") => Some(TerminalOutcome::Incomplete),
+        None if upstream_error_category.is_none() && crate::protocol::gemini_incomplete(&value) => {
+            Some(TerminalOutcome::Incomplete)
+        }
         _ => None,
     };
-    let error_category = upstream_event_failure_category(event_type, &value);
+    let error_category = upstream_error_category.or_else(|| {
+        (outcome == Some(TerminalOutcome::Incomplete)).then_some(error_codes::RESPONSE_INCOMPLETE)
+    });
+    if let Some(category) = error_category {
+        let explicitly_incomplete = outcome == Some(TerminalOutcome::Incomplete)
+            || matches!(event_type, Some("response.completed" | "response.done"))
+                && value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete");
+        outcome = Some(
+            if category == error_codes::RESPONSE_INCOMPLETE && explicitly_incomplete {
+                TerminalOutcome::Incomplete
+            } else {
+                TerminalOutcome::Failure
+            },
+        );
+    }
     let error_status = error_category.map(|category| {
         let status = upstream_status_from_value(&value)
             .filter(|status| !status.is_success())
@@ -146,6 +208,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     let cooldown_hint = rate_limit_body_hint_value(&value, SystemTime::now());
     let preserved_error = preserved_stream_error(&value);
     let has_output_delta = has_output_delta(&value, event_type);
+    let semantic_output = has_semantic_output(&value, event_type);
     let usage = find_usage(&value).cloned();
     let applied_service_tier = response_service_tier(&value);
     let response_id = response_id(&value).map(str::to_string);
@@ -155,9 +218,13 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     .then(|| value.get("item").cloned())
     .flatten();
     TerminalEvent {
+        upstream_error: error_category
+            .map(|_| crate::usage::UpstreamErrorDetails::from_value(None, &value)),
         has_data: true,
         valid: true,
         has_output_delta,
+        semantic_output,
+        is_compaction,
         outcome,
         error_status,
         error_category,
@@ -169,93 +236,12 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         response,
         output_item,
         payload: Some(value),
+        // Preserve the exact provider payload for all compaction forms. The
+        // output-item envelope is still useful to SSE clients, but an HTTP to
+        // WebSocket bridge must not reserialize the opaque encrypted item.
+        raw_data: is_compaction.then_some(data),
     }
 }
 
-pub(in crate::gateway) fn has_output_delta(value: &Value, event_type: Option<&str>) -> bool {
-    if matches!(
-        event_type,
-        Some(
-            "response.output_text.delta"
-                | "response.refusal.delta"
-                | "response.function_call_arguments.delta"
-                | "response.custom_tool_call_input.delta"
-                | "response.mcp_call_arguments.delta"
-                | "response.code_interpreter_call_code.delta"
-        )
-    ) && value
-        .get("delta")
-        .and_then(Value::as_str)
-        .is_some_and(|delta| !delta.is_empty())
-    {
-        return true;
-    }
-    if event_type == Some("content_block_delta")
-        && value.get("delta").is_some_and(|delta| {
-            ["text", "partial_json"].into_iter().any(|key| {
-                delta
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| !text.is_empty())
-            })
-        })
-    {
-        return true;
-    }
-    if event_type == Some("response.output_item.added")
-        && value
-            .get("item")
-            .is_some_and(output_item_has_meaningful_tool_call)
-    {
-        return true;
-    }
-    value
-        .get("choices")
-        .and_then(Value::as_array)
-        .is_some_and(|choices| choices.iter().any(chat_choice_has_output_delta))
-}
-
-fn output_item_has_meaningful_tool_call(item: &Value) -> bool {
-    matches!(
-        item.get("type").and_then(Value::as_str),
-        Some("function_call" | "custom_tool_call" | "mcp_call" | "computer_call")
-    ) && ["call_id", "id", "name"].into_iter().any(|field| {
-        item.get(field)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-    })
-}
-
-fn chat_choice_has_output_delta(choice: &Value) -> bool {
-    let Some(delta) = choice.get("delta") else {
-        return false;
-    };
-    ["content", "refusal"].into_iter().any(|key| {
-        delta
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|text| !text.is_empty())
-    }) || delta
-        .get("function_call")
-        .is_some_and(function_delta_has_output)
-        || delta
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .is_some_and(|calls| {
-                calls.iter().any(|call| {
-                    call.get("id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| !id.is_empty())
-                        || call.get("function").is_some_and(function_delta_has_output)
-                })
-            })
-}
-
-fn function_delta_has_output(function: &Value) -> bool {
-    ["name", "arguments"].into_iter().any(|key| {
-        function
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|text| !text.is_empty())
-    })
-}
+#[cfg(test)]
+mod tests;

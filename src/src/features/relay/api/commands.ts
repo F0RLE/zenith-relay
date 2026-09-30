@@ -1,8 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AccountExportInput,
   AccountExportResult,
+  AccountLoginDetails,
+  AccountLoginUpdate,
+  AccountTotpPreview,
   AccountImportProgress,
   AccountTransferProgress,
   CandidateRuntimeSnapshot,
@@ -11,8 +14,13 @@ import type {
   ConfigurationPresetApplyResult,
   ConfigurationPresetPreview,
   ConsumeResetCreditResponse,
+  CredentialRefreshResult,
   DefaultServiceTier,
+  ToolPolicyUpdate,
+  DiagnosticPaths,
+  DiagnosticSettings,
   ImportSession,
+  CacheSessionRecord,
   LocalUsagePage,
   OpenCodeConfigStatus,
   ProfileSnapshot,
@@ -24,22 +32,49 @@ import type {
   ProfileActivation,
   ProfileBinding,
   ProxyPoolImportResult,
+  ProxyCheckResult,
   ProxyPoolSummary,
   RelayStorageInfo,
   RevealedAccountIdentity,
   RemoteTarget,
   RemoteUsagePage,
   RemoteUsageQuery,
-  RoutingStrategy,
+  PoolRoutingPolicy,
+  PoolRoutingSnapshot,
   RuntimeActivitySnapshot,
   RuntimeSnapshot,
   SourceStats,
+  SourceProbeInput,
+  SourceProbeResult,
   SupportExportContext,
   SupportBundlePreview,
   StoredProxyAssignmentResult,
   UsageExportRow,
   WakeTask,
 } from "./types";
+import { sanitizeFeedbackError } from "../state/feedback";
+
+/**
+ * Keep the command surface typed while making every rejected IPC call
+ * observable in the native error log.  The reporter itself uses the raw
+ * invoke function to avoid an error-reporting loop.
+ */
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return tauriInvoke<T>(command, args).catch((cause) => {
+    if (command !== "record_frontend_diagnostic") {
+      const error = sanitizeFeedbackError(cause, "ipc_failed", "Relay command failed");
+      void tauriInvoke<void>("record_frontend_diagnostic", {
+        input: {
+          source: "tauri-command",
+          operation: command,
+          code: error.code,
+          message: error.message,
+        },
+      }).catch(() => undefined);
+    }
+    throw cause;
+  });
+}
 
 export type UiState = {
   providerActive: boolean;
@@ -60,6 +95,7 @@ export const relayCommands = {
   revealRemoteGatewayApiKey: () => invoke<string>("reveal_remote_gateway_api_key"),
   rotateRemoteGatewayApiKey: () => invoke<string>("rotate_remote_gateway_api_key"),
   localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
+  localCacheSessions: (input: RemoteUsageQuery = {}) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", { input }),
   clearLocalUsage: () => invoke("clear_local_usage"),
   refreshLocalPricingCatalog: () => invoke<CatalogRefreshOutcome>("refresh_local_pricing_catalog"),
   refreshRemotePricingCatalog: () => invoke<CatalogRefreshOutcome>("execute_remote_server_action", {
@@ -72,9 +108,13 @@ export const relayCommands = {
   setSourceEnabled: (sourceId: string, enabled: boolean) => invoke("set_local_source_enabled", { sourceId, enabled }),
   deleteSource: (sourceId: string) => invoke("delete_local_source", { sourceId }),
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
+  probeSource: (sourceId: string, input: SourceProbeInput) => invoke<SourceProbeResult>("probe_local_source", { sourceId, input }),
+  probeRemoteSource: (sourceId: string, input: SourceProbeInput) => invoke<SourceProbeResult>("execute_remote_server_action", {
+    input: { action: { type: "probe_source", id: sourceId }, payload: input },
+  }),
   refreshSourceData: (sourceId: string) => invoke("refresh_local_source_data", { sourceId }),
-  localSourceStats: (sourceId: string) => invoke<SourceStats>("get_local_source_stats", { sourceId }),
-  remoteSourceStats: (sourceId: string) => invoke<SourceStats>("get_remote_source_stats", { sourceId }),
+  localSourceStats: (sourceId: string, force = false) => invoke<SourceStats>("get_local_source_stats", { sourceId, force }),
+  remoteSourceStats: (sourceId: string, force = false) => invoke<SourceStats>("get_remote_source_stats", { sourceId, force }),
 
   startImport: (content: string) => invoke<ImportSession>("start_local_account_import", { input: { content } }),
   previewImportFiles: (paths?: string[]) => invoke<ImportSession | null>("preview_local_account_import_files", paths ? { paths } : {}),
@@ -86,6 +126,7 @@ export const relayCommands = {
   onImportProgress: (callback: (event: AccountImportProgress) => void) => listen<AccountImportProgress>("relay-account-import-progress", (event) => callback(event.payload)),
   cancelImport: (sessionId: string) => invoke("cancel_local_account_import", { sessionId }),
   refreshAccountQuota: (accountId: string) => invoke("refresh_local_account_quota", { accountId }),
+  forceRefreshAccountCredentials: (accountId: string) => invoke<CredentialRefreshResult>("force_refresh_local_account_credentials", { accountId }),
   refreshAllAccountQuotas: () => invoke<Array<{ accountId: string; status: "succeeded" | "failed" }>>("refresh_all_local_account_quotas"),
   consumeResetCredit: (accountId: string) => invoke<ConsumeResetCreditResponse>("consume_local_reset_credit", { accountId }),
   updateAccount: (input: Record<string, unknown>) => invoke("update_local_account", { input }),
@@ -94,6 +135,7 @@ export const relayCommands = {
   deleteAccounts: (accountIds: string[]) => invoke("delete_local_accounts", { accountIds }),
   setAccountProxy: (accountId: string, proxyUrl: string | null, bypassCommonProxy = false) => invoke("set_local_account_proxy", { input: { accountId, proxyUrl, bypassCommonProxy } }),
   getProxyPool: () => invoke<ProxyPoolSummary>("get_local_proxy_pool"),
+  checkStoredProxy: (proxyId: string) => invoke<ProxyCheckResult>("check_local_stored_proxy", { proxyId }),
   importProxyPool: (proxyUrls: string[]) => invoke<ProxyPoolImportResult>("import_local_proxy_pool", { input: { proxyUrls } }),
   deleteStoredProxy: (proxyId: string) => invoke<ProxyPoolSummary>("delete_local_stored_proxy", { proxyId }),
   deleteStoredProxies: (proxyIds: string[]) => invoke<ProxyPoolSummary>("delete_local_stored_proxies", { input: { proxyIds } }),
@@ -107,9 +149,12 @@ export const relayCommands = {
   forceActivateRemoteAccountLocally: (localAccountId: string) => invoke<{ localAccountId: string }>("force_activate_remote_account_locally", { input: { localAccountId, confirmRemoteMayStillBeRunning: true } }),
   onAccountTransferProgress: (callback: (event: AccountTransferProgress) => void) => listen<AccountTransferProgress>("relay-account-transfer-progress", (event) => callback(event.payload)),
   revealLocalAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_local_account_identity", { accountId }),
+  revealLocalAccountLogin: (accountId: string) => invoke<AccountLoginDetails>("reveal_local_account_login", { accountId }),
+  updateAccountLogin: (input: AccountLoginUpdate) => invoke<AccountLoginDetails>("update_local_account_login", { input }),
+  previewTotpCode: (secret: string) => invoke<AccountTotpPreview>("preview_totp_code", { secret }),
   revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
 
-  startOAuth: (openBrowser = true, accountId?: string) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}) }),
+  startOAuth: (openBrowser = true, accountId?: string, proxyId?: string) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}), ...(proxyId ? { proxyId } : {}) }),
   resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
   onOAuthStatus: (callback: (event: OAuthFlowEvent) => void) => listen<OAuthFlowEvent>("relay-oauth-status", (event) => callback(event.payload)),
   completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),
@@ -120,16 +165,20 @@ export const relayCommands = {
   setModelPrice: (modelId: string, inputMicroUsdPerMillion: number | null, cachedInputMicroUsdPerMillion: number | null, cacheWrite5mMicroUsdPerMillion: number | null, cacheWrite1hMicroUsdPerMillion: number | null, outputMicroUsdPerMillion: number | null) => invoke("set_local_model_price", { input: { modelId, inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion } }),
   setModelReasoning: (modelId: string, allowedLevels: string[]) => invoke("set_local_model_reasoning", { input: { modelId, allowedLevels } }),
   setModelServiceTier: (modelId: string, serviceTier: DefaultServiceTier) => invoke("set_local_model_service_tier", { input: { modelId, serviceTier } }),
+  /** An empty list clears manual positions and restores catalog ordering. */
   setModelDisplayOrder: (modelIds: string[]) => invoke("set_local_model_display_order", { input: { modelIds } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   previewLocalConfigurationPreset: () => invoke<ConfigurationPresetPreview | null>("preview_local_configuration_preset"),
   applyLocalConfigurationPreset: (preview: ConfigurationPresetPreview) => invoke<ConfigurationPresetApplyResult>("apply_local_configuration_preset", { input: { baseRevision: preview.baseRevision, preset: preview.preset } }),
-  updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, cooldownAfterFailures: number, keepLastCandidateAvailable: boolean, defaultServiceTier: DefaultServiceTier, subscriptionPlanOrder: string[]) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, cooldownAfterFailures, keepLastCandidateAvailable, defaultServiceTier, subscriptionPlanOrder } }),
+  updateRouting: (maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, poolRouting?: PoolRoutingPolicy, expectedPoolRouting?: PoolRoutingSnapshot, basisPointsEnabled?: boolean) => invoke("update_local_routing", { input: { maxRetryCandidates, defaultServiceTier, poolRouting, expectedPoolRouting, basisPointsEnabled } }),
+
   syncCodexDefaultServiceTier: (defaultServiceTier: DefaultServiceTier) => invoke<void>("sync_codex_default_service_tier", { defaultServiceTier }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),
   updateGatewayPort: (port: number) => invoke("update_local_gateway_port", { port }),
+  setToolPolicy: (input: ToolPolicyUpdate) => invoke("set_local_tool_policy", { input }),
+  setRemoteToolPolicy: (input: ToolPolicyUpdate) => invoke("execute_remote_server_action", { input: { action: { type: "set_tool_policy" }, payload: input } }),
   revealLocalGatewayApiKey: () => invoke<string>("reveal_local_gateway_api_key"),
   rotateLocalGatewayApiKey: () => invoke<string>("rotate_local_gateway_api_key"),
   updateChatgptQuotaReserve: (reserveBasisPoints: number) => invoke("update_chatgpt_interface_quota_reserve", { input: { reserveBasisPoints } }),
@@ -137,6 +186,8 @@ export const relayCommands = {
   setAccountProxyRequired: (required: boolean) => invoke("set_local_account_proxy_required", { input: { required } }),
   setCodexBackgroundTasks: (enabled: boolean) => invoke("set_local_codex_background_tasks", { input: { enabled } }),
   setRemoteCodexBackgroundTasks: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_codex_background_tasks" }, payload: { enabled } } }),
+  setChatgptRetryUntilAvailable: (enabled: boolean) => invoke("set_local_chatgpt_retry_until_available", { input: { enabled } }),
+  setRemoteChatgptRetryUntilAvailable: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_chatgpt_retry_until_available" }, payload: { enabled } } }),
   setCodexWebsockets: (enabled: boolean) => invoke("set_local_codex_websockets", { input: { enabled } }),
   setCodexProfileWebsockets: (enabled: boolean) => invoke("set_codex_profile_websockets", { input: { enabled } }),
   setRemoteCodexWebsockets: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_codex_websockets" }, payload: { enabled } } }),
@@ -145,8 +196,6 @@ export const relayCommands = {
   updateAutomation: (taskId: string, input: Record<string, unknown>) => invoke("update_quota_wake_automation", { taskId, input }),
   setAutomationEnabled: (taskId: string, enabled: boolean) => invoke("set_quota_wake_automation_enabled", { taskId, enabled }),
   deleteAutomation: (taskId: string) => invoke("delete_quota_wake_automation", { taskId }),
-  runWakeConfirmations: () => invoke<number>("run_due_quota_wake_confirmations", { maxClaims: 2 }),
-  testAutomation: (taskId: string) => invoke<{ taskId: string; status: string; eligibleAccounts: number }>("test_quota_wake_automation", { taskId }),
 
   attachCodexGateway: (boundOauthAccountId: string | null = null, disableOauthBinding = false) => invoke<ProfileActivation>("attach_codex_to_local_gateway", { boundOauthAccountId, ...(disableOauthBinding ? { disableOauthBinding: true } : {}) }),
   attachCodexRemoteGateway: () => invoke<ProfileActivation>("attach_codex_to_remote_gateway"),
@@ -155,6 +204,7 @@ export const relayCommands = {
   getOpenCodeConfigStatus: () => invoke<OpenCodeConfigStatus>("get_opencode_config_status"),
   createOpenCodeSnapshot: (name: string) => invoke<boolean>("create_opencode_snapshot", { name }),
   connectOpenCode: () => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("connect_opencode_to_local_gateway"),
+  launchOpenCodeSource: (sourceId: string) => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("launch_opencode_source", { sourceId }),
   restartOpenCode: () => invoke<void>("restart_opencode_app"),
   restoreOpenCodeConfig: () => invoke<boolean>("restore_opencode_config"),
   restoreCodex: () => invoke("restore_codex_profile"),
@@ -169,7 +219,19 @@ export const relayCommands = {
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
   restoreDefaultAccountProfile: () => invoke("restore_codex_account_profile", { profileDir: null }),
   storageInfo: () => invoke<RelayStorageInfo>("get_relay_storage_info"),
-  openFolder: (folder: "data" | "profile_backups") => invoke("open_relay_folder", { folder }),
+  recordFrontendDiagnostic: (input: {
+    source: string;
+    message: string;
+    operation?: string;
+    code?: string;
+    stack?: string;
+    fatal?: boolean;
+  }) => invoke<void>("record_frontend_diagnostic", { input }),
+  diagnosticPaths: () => invoke<DiagnosticPaths>("get_diagnostic_paths"),
+  diagnosticSettings: () => invoke<DiagnosticSettings>("get_diagnostic_settings"),
+  setDiagnosticDebugMode: (enabled: boolean) => invoke<DiagnosticSettings>("set_diagnostic_debug_mode", { enabled }),
+  openFolder: (folder: "data" | "logs" | "error_logs" | "crash_logs" | "operation_logs" | "profile_backups" | "opencode_backups") =>
+    invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),
   exportUsage: (rows: UsageExportRow[]) => invoke<string | null>("export_usage", { rows }),
   exportSupportBundle: (context: SupportExportContext) => invoke<string | null>("export_support_bundle", { context }),

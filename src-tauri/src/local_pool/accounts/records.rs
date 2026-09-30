@@ -1,7 +1,8 @@
 use super::credentials::{
-    credential_invalid_state_error as credential_error, credential_secret_ref,
-    StoredCodexCredentials,
+    credential_invalid_state_error as credential_error, credential_secret_ref, CredentialError,
+    CredentialStore, StoredCodexCredentials,
 };
+use super::NativeSecretBackend;
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
@@ -108,6 +109,8 @@ pub fn new_account_record(
         weight: 1,
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
+        client_auth_status: None,
+        last_client_login_redirect_at_ms: None,
     };
     record.normalize();
     Ok(record)
@@ -133,6 +136,69 @@ pub fn identity_hash(
         (None, None) => format!("account:{account}"),
     };
     hash(value.as_bytes())
+}
+
+pub(in crate::local_pool) fn codex_credentials_match(
+    credentials: &CredentialStore<NativeSecretBackend>,
+    account: &LocalAccountRecord,
+    target: &str,
+) -> std::result::Result<bool, CredentialError> {
+    let Some(stored) = credentials.load(&account.account.id)? else {
+        return Ok(false);
+    };
+    let Some(provider_account_id) = stored.provider_account_id() else {
+        return Ok(false);
+    };
+    Ok(identity_hash(
+        provider_account_id,
+        stored.provider_user_id(),
+        stored.email(),
+    ) == target)
+}
+
+/// Find the single ChatGPT account for an identity hash.
+/// A stored hash wins. Otherwise `matches` compares loaded credentials.
+/// Every candidate is still visited, so a later credential error is not hidden
+/// by an earlier duplicate.
+pub fn find_codex_account<'a, E>(
+    accounts: &'a [LocalAccountRecord],
+    identity_hash: &str,
+    mut matches: impl FnMut(&LocalAccountRecord) -> std::result::Result<bool, E>,
+    duplicate: impl Fn() -> E,
+) -> std::result::Result<Option<&'a LocalAccountRecord>, E> {
+    let direct = accounts
+        .iter()
+        .filter(|account| {
+            account.account.source_id == CODEX_SOURCE_ID
+                && account.account.identity.identity_hash == identity_hash
+        })
+        .collect::<Vec<_>>();
+    if direct.len() > 1 {
+        return Err(duplicate());
+    }
+    if let Some(account) = direct.into_iter().next() {
+        return Ok(Some(account));
+    }
+
+    let mut found = None;
+    let mut extra = false;
+    for account in accounts {
+        if account.account.source_id != CODEX_SOURCE_ID {
+            continue;
+        }
+        if matches(account)? {
+            if found.is_some() {
+                extra = true;
+            } else {
+                found = Some(account);
+            }
+        }
+    }
+    if extra {
+        Err(duplicate())
+    } else {
+        Ok(found)
+    }
 }
 
 pub fn candidate_health(account: &AccountRecord) -> CandidateHealth {
@@ -279,6 +345,9 @@ mod tests {
             supplemental: Vec::new(),
             limit_reached: false,
             reset_credits_available: None,
+            available_credits_micro_units: None,
+            provider_credits_available: false,
+            provider_credits_unlimited: false,
             direct_balance_micro_usd: None,
             updated_at_ms: Some(1),
             error: None,

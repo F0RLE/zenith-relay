@@ -5,9 +5,9 @@
   inset: 36px 0 0;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: 20px;
   background: var(--relay-overlay);
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(3px);
 }
 
 /* Error details can be opened from a toast while another modal is active. */
@@ -16,15 +16,15 @@
 }
 
 .relay-dialog {
-  width: min(520px, 100%);
-  max-height: calc(100vh - 84px);
+  width: min(560px, 100%);
+  max-height: calc(100dvh - 76px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid var(--relay-border-strong);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--relay-surface);
-  box-shadow: 0 22px 60px rgb(0 0 0 / 32%);
+  box-shadow: var(--relay-dialog-shadow);
 }
 
 .relay-dialog.wide {
@@ -37,41 +37,80 @@
 
 .relay-dialog > header,
 .relay-dialog > footer {
-  min-height: 56px;
+  min-height: 60px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--relay-border);
 }
 
 .relay-dialog > header {
   position: relative;
-  justify-content: center;
-  padding-inline: 56px;
+  justify-content: flex-start;
+  padding-right: 60px;
+  background: var(--relay-surface);
 }
 
 .relay-dialog > header h2 {
   max-width: 100%;
   margin: 0;
-  font-size: 16px;
-  text-align: center;
+  color: var(--relay-text);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 22px;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .relay-dialog > header > .relay-icon-button {
   position: absolute;
-  right: 14px;
+  right: 16px;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
 }
 
 .relay-dialog > footer {
   justify-content: flex-end;
+  flex-wrap: wrap;
+  padding-block: 12px;
+  background: var(--relay-surface);
   border-top: 1px solid var(--relay-border);
   border-bottom: 0;
 }
 
 .relay-dialog-body {
+  min-width: 0;
   overflow: auto;
-  padding: 18px;
+  overscroll-behavior: contain;
+  padding: 20px;
+}
+
+.relay-dialog .relay-field {
+  min-width: 0;
+}
+
+.relay-dialog .relay-field > input:not([type="checkbox"]):not([type="radio"]),
+.relay-dialog textarea {
+  min-width: 0;
+  width: 100%;
+}
+
+.relay-dialog > footer .relay-button {
+  min-height: 36px;
+  white-space: normal;
+}
+
+.relay-dialog.source-add-dialog,
+.relay-dialog.account-export-dialog {
+  width: min(640px, 100%);
+}
+
+.relay-dialog.account-import-dialog {
+  width: min(640px, 100%);
 }
 
 @media (max-height: 800px) {
@@ -80,7 +119,7 @@
   }
 
   .relay-dialog {
-    max-height: calc(100vh - 68px);
+    max-height: calc(100dvh - 68px);
   }
 }
 
@@ -90,7 +129,36 @@
   }
 
   .relay-dialog {
-    max-height: calc(100vh - 60px);
+    max-height: calc(100dvh - 60px);
+  }
+}
+
+@media (max-width: 620px) {
+  .relay-modal-backdrop {
+    padding: 12px;
+  }
+
+  .relay-dialog {
+    width: 100%;
+    max-height: calc(100dvh - 60px);
+    border-radius: 10px;
+  }
+
+  .relay-dialog > header,
+  .relay-dialog > footer {
+    padding-inline: 16px;
+  }
+
+  .relay-dialog > header {
+    padding-right: 56px;
+  }
+
+  .relay-dialog-body {
+    padding: 16px;
+  }
+
+  .relay-dialog > footer > .relay-button {
+    flex: 1 1 auto;
   }
 }
 
@@ -378,6 +446,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -555,26 +624,189 @@
   border-top: 0;
 }
 
-.import-preview .relay-table {
-  table-layout: fixed;
-  white-space: normal;
+.import-account-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  border: 1px solid var(--relay-border);
+  border-radius: 10px;
+  background: var(--relay-surface);
 }
 
-.import-preview .relay-table th:first-child { width: 42px; }
-.import-preview .relay-table th:nth-child(2) { width: 120px; }
-.import-preview .relay-table th:nth-child(4) { width: 22%; }
-.import-preview .relay-table th:nth-child(5) { width: 90px; }
+.import-account-card {
+  min-width: 0;
+  border-bottom: 1px solid var(--relay-border);
+  background: transparent;
+}
 
-.import-preview .relay-table td {
+.import-account-card:last-child {
+  border-bottom: 0;
+}
+
+.import-account-card:hover,
+.import-account-card:focus-within {
+  background: color-mix(in srgb, var(--relay-subtle) 70%, transparent);
+}
+
+.import-account-card.selected {
+  background: color-mix(in srgb, var(--relay-accent) 8%, var(--relay-surface));
+}
+
+.import-account-card > label {
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.import-select-all-row {
+  background: var(--relay-subtle);
+}
+
+.import-select-all-row:hover,
+.import-select-all-row:focus-within {
+  background: var(--relay-subtle);
+}
+
+.import-account-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.import-account-copy > strong,
+.import-account-title > strong {
+  overflow: hidden;
+  color: var(--relay-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-select-all-row small,
+.import-account-note {
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.import-account-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.import-account-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.import-account-identity {
   min-width: 0;
   overflow: hidden;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 16px;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.import-preview .relay-table td code {
+.import-row-status {
+  flex: 0 0 auto;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.import-row-status[data-status="warning"] {
+  background: var(--relay-warning-soft);
+  color: var(--relay-warning);
+}
+
+.import-row-status[data-status="error"] {
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
+}
+
+.import-row-status[data-status="info"] {
+  background: var(--relay-info-soft);
+  color: var(--relay-info);
+}
+
+.import-account-note {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-account-note.error-text {
+  color: var(--relay-error);
+}
+
+.import-after {
+  box-shadow: none;
+}
+
+.import-after .import-after-toggle {
+  min-height: 64px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--relay-border);
+  background: transparent;
+}
+
+.import-after .import-after-toggle:last-child {
+  border-bottom: 0;
+}
+
+.import-after .import-after-toggle:hover,
+.import-after .import-after-toggle:has(input:checked),
+.import-after .import-after-toggle:has(input:checked):hover {
+  border-color: transparent;
+  border-bottom-color: var(--relay-border);
+  background: color-mix(in srgb, var(--relay-subtle) 72%, transparent);
+}
+
+.import-after .import-after-toggle:last-child:hover,
+.import-after .import-after-toggle:last-child:has(input:checked),
+.import-after .import-after-toggle:last-child:has(input:checked):hover {
+  border-bottom-color: transparent;
+}
+
+.import-after .import-after-toggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.import-after .import-after-toggle strong {
+  color: var(--relay-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.import-after .import-after-toggle small {
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .import-file-loading {
@@ -726,12 +958,20 @@
   border-radius: 6px 0 0 6px;
 }
 
+/* Edge/Chromium adds its own password reveal control. SecretField already
+   renders the accessible themed toggle, so showing both creates two reveal
+   buttons and makes the key field look like it accepts two actions. */
+.secret-field input::-ms-reveal,
+.secret-field input::-ms-clear {
+  display: none;
+}
+
 .secret-field button {
   border-left: 0;
   border-radius: 0 6px 6px 0;
 }
 
-.secret-field:has(input:focus-visible, button:focus-visible) {
+.secret-field:focus-within {
   outline: 2px solid var(--relay-focus);
   outline-offset: 1px;
 }
@@ -742,13 +982,34 @@
 }
 
 .deployment-result {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  gap: 18px;
 }
 
-.deployment-result label {
+.deployment-result > .relay-status {
+  justify-self: start;
+}
+
+.deployment-result > label,
+.deployment-result > .relay-field {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr);
-  gap: 10px;
+  gap: 7px;
+  margin: 0;
+}
+
+.deployment-result > label > span,
+.deployment-result > .relay-field > span {
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.deployment-result > label > code,
+.deployment-result > .relay-field > code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.deployment-result > .form-note {
+  margin: 0;
 }

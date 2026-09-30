@@ -9,13 +9,14 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
+use zenith_relay_core::error_codes;
 
 pub async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> Response {
     if !state.store.gateway_enabled().unwrap_or(false) {
-        return unavailable("gateway_stopped");
+        return unavailable(error_codes::GATEWAY_STOPPED);
     }
     let Ok(Some(runtime)) = state.runtime() else {
-        return unavailable("runtime_unavailable");
+        return unavailable(error_codes::RUNTIME_UNAVAILABLE);
     };
     // relay-core is also used by the desktop loopback gateway. The server
     // invokes it in-process, so replace the untrusted public Host header with

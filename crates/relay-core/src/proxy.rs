@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use url::Url;
 
+use crate::url_has_userinfo;
+
 const MAX_PROXY_URL_BYTES: usize = 2_048;
 
 #[derive(Clone)]
@@ -94,8 +96,7 @@ fn normalize_proxy_authority(value: &str) -> String {
 
 fn is_proxy_endpoint(value: &str) -> bool {
     Url::parse(&format!("http://{value}")).is_ok_and(|url| {
-        url.username().is_empty()
-            && url.password().is_none()
+        !url_has_userinfo(&url)
             && url.host_str().is_some()
             && url.port().is_some()
             && matches!(url.path(), "" | "/")

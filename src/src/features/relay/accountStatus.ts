@@ -1,5 +1,17 @@
 import type { AccountSummary, CandidateRuntimeSnapshot, OperationalStatus } from "./api/types";
 
+const operationalStatusOrder: Record<OperationalStatus, number> = {
+  rotation: 0,
+  quotaWait: 1,
+  unavailable: 2,
+  disabled: 3,
+};
+
+/** Presentation groups only; dispatch priority stays owned by the scheduler. */
+export function compareOperationalStatus(left: OperationalStatus, right: OperationalStatus) {
+  return operationalStatusOrder[left] - operationalStatusOrder[right];
+}
+
 export function operationalStatusTone(status: OperationalStatus): "ready" | "warning" | "error" | "disabled" {
   if (status === "rotation") return "ready";
   if (status === "quotaWait") return "warning";
@@ -49,12 +61,15 @@ export function currentAccountErrorCode(account: AccountSummary) {
   if (requiresAccountReauthentication(account)) {
     return account.authState.reason ? `auth_${account.authState.reason}` : "auth_requires_reauth";
   }
-  const modelError = account.lastErrorCode?.trim();
-  if (modelError?.startsWith("models_")) return modelError;
+  const accountError = account.lastErrorCode?.trim();
+  if (accountError && (account.operationalStatus === "unavailable" || accountError.startsWith("models_"))) return accountError;
   const quotaError = account.quota.error?.code.trim();
   if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
   if (account.operationalStatus !== "unavailable") return null;
-  return account.lastErrorCode?.trim() || quotaError || account.routingBlockReason || "account_unavailable";
+  // Runtime availability can be false for a route, capacity or a protected
+  // quota reserve even when the account itself is healthy. Do not invent an
+  // account failure when no account-owned error has been observed.
+  return accountError || quotaError || account.routingBlockReason || null;
 }
 
 export function accountErrorTranslationKey(code: string) {
@@ -68,7 +83,10 @@ export function accountErrorTranslationKey(code: string) {
   if (/verification|verify.*account|phone/.test(normalized)) return "accounts.errors.verificationRequired";
   if (/credential|secret/.test(normalized)) return "accounts.errors.credentialsMissing";
   if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return "accounts.errors.blocked";
-  if (/forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
+  if (normalized === "upstream_forbidden") return "usage.errorCategories.upstream_forbidden";
+  if (normalized === "models_forbidden") return "accounts.importFailureReasons.modelsForbidden";
+  const endpointPermission = normalized === "quota_forbidden" || normalized === "subscription_forbidden";
+  if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
   if (/transport|timeout|network|connect/.test(normalized)) return "accounts.errors.connection";
   if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";

@@ -53,6 +53,7 @@ describe("account status policy", () => {
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" }, lastErrorCode: "models_prepare" }))).toBe("auth_expired");
     expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("provider_timeout");
+    expect(currentAccountErrorCode(account({ operationalStatus: "unavailable", authState: { state: "active" }, health: "healthy" }))).toBeNull();
   });
 
   test("does not let a stale quota result hide a required sign-in", () => {
@@ -66,10 +67,29 @@ describe("account status policy", () => {
     }))).toBe("updated");
   });
 
+  test("keeps the account failure visible when quota monitoring also fails", () => {
+    for (const lastErrorCode of ["workspace_disabled", "upstream_unauthorized", "checkpoint", "captcha"]) {
+      const unavailable = account({
+        operationalStatus: "unavailable",
+        lastErrorCode,
+        quotaRefreshStatus: "failed",
+        quota: { error: { code: "quota_timeout" } },
+      });
+      expect(currentAccountErrorCode(unavailable)).toBe(lastErrorCode);
+      expect(accountQuotaRefreshState(unavailable)).toBe("failed");
+    }
+  });
+
   test("maps safe error codes to stable translation keys", () => {
     expect(accountErrorTranslationKey("HTTP 429 rate-limit")).toBe("accounts.errors.rateLimited");
     expect(accountErrorTranslationKey("INVALID_GRANT")).toBe("accounts.errors.invalidGrant");
     expect(accountErrorTranslationKey("quota_exhausted")).toBe("accounts.errors.quotaExhausted");
     expect(accountErrorTranslationKey("unknown_provider_problem")).toBe("accounts.errors.unknown");
+    expect(accountErrorTranslationKey("upstream_forbidden")).toBe("usage.errorCategories.upstream_forbidden");
+    expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
+    expect(accountErrorTranslationKey("quota_forbidden")).toBe("accounts.errors.quota");
+    expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.unknown");
+    expect(accountErrorTranslationKey("deactivated_workspace")).toBe("accounts.errors.blocked");
+    expect(accountErrorTranslationKey("account_blocked")).toBe("accounts.errors.blocked");
   });
 });

@@ -27,16 +27,16 @@ export function CodexFeatureToggleControl({
   disabled,
   onChange,
 }: CodexFeatureToggleControlProps) {
-  return <section className={`${styleClassPrefix}-control${className ? ` ${className}` : ""}`}>
-    <div className={`${styleClassPrefix}-heading`}>
-      <span className={`${styleClassPrefix}-icon`}><Icon aria-hidden /></span>
+  return <section className={`codex-feature-control ${styleClassPrefix}-control${className ? ` ${className}` : ""}`}>
+    <div className="codex-feature-heading">
+      <span className="gateway-config-icon"><Icon aria-hidden /></span>
       <div>
         <h2>{title}</h2>
         <p>{hint}</p>
       </div>
     </div>
     <SettingToggle
-      className={`${styleClassPrefix}-toggle`}
+      className="codex-feature-toggle"
       label={label}
       description={description}
       checked={checked}

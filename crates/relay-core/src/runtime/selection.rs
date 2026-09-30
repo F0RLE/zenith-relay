@@ -1,7 +1,32 @@
+use super::admission::AdmissionRequest;
 use super::*;
+use crate::scheduler::rotation::{RotationOperation, SharedRequestBudget};
 use crate::{scheduler::CooldownReason, Selection, SelectionRequest};
 
+mod capacity;
+mod route;
+
 impl GatewayRuntime {
+    pub(crate) fn configured_executor_routes(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        protocols: &[WireApi],
+        stream: bool,
+    ) -> Vec<ExecutorRoute> {
+        let scope = key.scope_snapshot();
+        let ids = self
+            .lock_scheduler()
+            .candidates()
+            .filter(|candidate| candidate.is_configured(model, protocols, &scope))
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        ids.iter()
+            .filter_map(|id| self.executor_route(id, model, &scope, protocols, stream))
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) async fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,
@@ -12,7 +37,8 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
         let (response_affinity_key, prompt_affinity_key) = affinity_keys;
-        self.try_select_and_reserve_for(
+        let budget = SharedRequestBudget::for_incoming_request(self.request_dispatch_budget());
+        self.select_and_wait_for_capacity(
             key,
             model,
             allowed_protocols,
@@ -20,186 +46,88 @@ impl GatewayRuntime {
             response_affinity_key,
             prompt_affinity_key,
             now_ms,
-            CandidateLeaseLane::Text,
+            RotationOperation::Text,
+            &budget,
         )
-        .0
+        .await
     }
 
-    pub(crate) fn select_and_reserve_image(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Admission carries exact route, key scope, affinity and the shared request budget."
+    )]
+    pub(crate) async fn select_and_reserve_with_budget(
         &self,
         key: &AuthenticatedKey,
         model: &str,
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
+        affinity_keys: (Option<&str>, Option<&str>),
         now_ms: u64,
+        budget: &SharedRequestBudget,
     ) -> Option<(Selection, CandidateLease)> {
-        self.try_select_and_reserve_for(
+        self.select_and_reserve_operation_with_budget(
             key,
             model,
             allowed_protocols,
             tried,
-            None,
-            None,
+            affinity_keys,
             now_ms,
-            CandidateLeaseLane::Image,
+            RotationOperation::Text,
+            budget,
         )
-        .0
+        .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn try_select_and_reserve_for(
+    pub(crate) async fn select_and_reserve_image_with_budget(
         &self,
         key: &AuthenticatedKey,
         model: &str,
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
-        prompt_affinity_key: Option<&str>,
         now_ms: u64,
-        lane: CandidateLeaseLane,
-    ) -> (Option<(Selection, CandidateLease)>, bool) {
-        if let (Some(key), Some(store)) =
-            (response_affinity_key, self.response_affinity_store.as_ref())
-        {
-            let cached = self.lock_scheduler().has_response_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_response_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
-            }
-        }
-        if let (Some(key), Some(store)) =
-            (prompt_affinity_key, self.response_affinity_store.as_ref())
-        {
-            let cached = self.lock_scheduler().has_prompt_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_prompt_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
-            }
-        }
-        // Keep authorization live through selection and reservation. A pool
-        // mutation waits for this read lock, so it cannot race a stale scope
-        // into a newly reserved lease.
-        let scope = key.scope_read();
-        let mut scheduler = self.lock_scheduler();
-        let selection = match lane {
-            CandidateLeaseLane::Text => scheduler.select(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-            CandidateLeaseLane::Image => scheduler.select_image(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-        };
-        let reserved = selection.and_then(|selection| {
-            let reserved = match lane {
-                CandidateLeaseLane::Text => {
-                    scheduler.reserve_for(&selection.candidate_id, model, now_ms)
-                }
-                CandidateLeaseLane::Image => {
-                    scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
-                }
-            };
-            reserved.then(|| {
-                let lease = CandidateLease {
-                    scheduler: self.scheduler.clone(),
-                    availability: self.candidate_availability.clone(),
-                    candidate_id: selection.candidate_id.clone(),
-                    model: model.to_string(),
-                    lane,
-                    activity_callback: self.activity_callback.clone(),
-                    activity_revision: self.activity_revision.clone(),
-                    released: AtomicBool::new(false),
-                };
-                (selection, lease)
-            })
-        });
-        let activity = reserved.as_ref().map(|(selection, _)| {
-            let (in_flight, active_request_count, active_models) =
-                scheduler.runtime_activity_for(&selection.candidate_id);
-            RuntimeActivitySnapshot {
-                revision: self.activity_revision.fetch_add(1, Ordering::AcqRel) + 1,
-                candidate_id: selection.candidate_id.clone(),
-                in_flight,
-                active_request_count,
-                active_models,
-            }
-        });
-        drop(scheduler);
-        drop(scope);
-        if let Some(activity) = activity {
-            self.emit_activity_changed(activity);
-        }
-        if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
-            if selection.response_affinity_hit {
-                self.persist_response_affinity(key, &selection.candidate_id, now_ms);
-            }
-        }
-        (reserved, false)
-    }
-
-    pub(crate) fn earliest_retry_at(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
-        now_ms: u64,
-    ) -> Option<u64> {
-        let scope = key.scope_snapshot();
-        self.lock_scheduler().earliest_retry_at(SelectionRequest {
+        budget: &SharedRequestBudget,
+    ) -> Option<(Selection, CandidateLease)> {
+        self.select_and_reserve_operation_with_budget(
+            key,
             model,
             allowed_protocols,
-            scope: &scope,
             tried,
-            response_affinity_key,
-            prompt_affinity_key: None,
+            (None, None),
             now_ms,
-        })
+            RotationOperation::Image,
+            budget,
+        )
+        .await
     }
 
-    pub(crate) fn all_applicable_cooldown(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Admission carries exact route, operation, key scope and the shared request budget."
+    )]
+    pub(crate) async fn select_and_reserve_operation_with_budget(
         &self,
         key: &AuthenticatedKey,
         model: &str,
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
+        affinity_keys: (Option<&str>, Option<&str>),
         now_ms: u64,
-    ) -> Option<(u64, CooldownReason)> {
-        let scope = key.scope_snapshot();
-        self.lock_scheduler()
-            .all_applicable_cooldown(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key: None,
-                now_ms,
-            })
+        operation: RotationOperation,
+        budget: &SharedRequestBudget,
+    ) -> Option<(Selection, CandidateLease)> {
+        let (response_affinity_key, prompt_affinity_key) = affinity_keys;
+        self.select_and_wait_for_capacity(
+            key,
+            model,
+            allowed_protocols,
+            tried,
+            response_affinity_key,
+            prompt_affinity_key,
+            now_ms,
+            operation,
+            budget,
+        )
+        .await
     }
 }

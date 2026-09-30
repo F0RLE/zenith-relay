@@ -1,7 +1,8 @@
 use super::import_orchestrator::credential_local_error;
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
 use crate::local_pool::accounts::exports::{
-    finish_account_export, normalize_account_ids, AccountExportInput, AccountExportResult,
+    finish_account_export, normalize_account_ids, normalize_one_account_id, AccountExportInput,
+    AccountExportResult,
 };
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::commands::current_time_ms;
@@ -22,9 +23,7 @@ pub fn reveal_local_account_identity(
     account_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<RevealedAccountIdentity> {
-    let account_id = normalize_account_ids(vec![account_id])?
-        .pop()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::InvalidState, "account id is required"))?;
+    let account_id = normalize_one_account_id(account_id)?;
     {
         let store = state.store()?;
         if store.account(&account_id).is_none() {
@@ -101,6 +100,9 @@ pub(crate) fn build_local_account_export_document(
             Ok(AccountExportCredential {
                 label: export_account_label(&record.account.label, &credentials),
                 email: credentials.email().map(str::to_string),
+                phone: credentials.phone().map(str::to_string),
+                password: credentials.password().map(str::to_string),
+                totp_secret: credentials.totp_secret().map(str::to_string),
                 access_token: credentials.access_token().to_string(),
                 refresh_token: credentials.refresh_token().map(str::to_string),
                 id_token: credentials.id_token().map(str::to_string),
@@ -119,6 +121,7 @@ pub(crate) fn build_local_account_export_document(
                 created_at_ms: record.account.created_at_ms,
                 priority: record.priority,
                 enabled: record.account.enabled,
+                tags: record.account.tags.clone(),
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;
