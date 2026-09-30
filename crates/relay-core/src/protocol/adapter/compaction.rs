@@ -217,12 +217,13 @@ mod tests {
         let original = request.clone();
         let prepared = prepare_bridged_compaction(&request).unwrap();
         assert_eq!(request, original);
+        assert!(matches!(prepared, BridgedCompaction::Rewritten { .. }));
         let BridgedCompaction::Rewritten {
             request: rewritten,
             summarize,
         } = prepared
         else {
-            panic!("expected a rewritten summary request");
+            return;
         };
         assert!(summarize);
         assert!(rewritten.get("tools").is_none());
@@ -256,12 +257,17 @@ mod tests {
             "model": "vendor/model",
             "input": [response["output"][0].clone(), {"type": "message", "role": "user", "content": "continue"}]
         });
+        let prepared_checkpoint = prepare_bridged_compaction(&continued).unwrap();
+        assert!(matches!(
+            prepared_checkpoint,
+            BridgedCompaction::Rewritten { .. }
+        ));
         let BridgedCompaction::Rewritten {
             request: continued,
             summarize,
-        } = prepare_bridged_compaction(&continued).unwrap()
+        } = prepared_checkpoint
         else {
-            panic!("checkpoint should be rewritten");
+            return;
         };
         assert!(!summarize);
         assert!(continued["tools"].is_null() || continued.get("tools").is_none());
