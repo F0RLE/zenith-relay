@@ -139,6 +139,7 @@ jobs:
       - name: Verify macOS installer and updater contents
         if: runner.os == 'macOS'
         shell: bash
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -172,9 +173,27 @@ jobs:
 
           mount_point="$RUNNER_TEMP/relay-installer-verification"
           mkdir -p "$mount_point"
-          # The DMG license agreement cancels a non-interactive attach.
-          python3 .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}"
-          trap 'hdiutil detach "$mount_point"' EXIT
+          # The DMG license agreement cancels a non-interactive attach. The
+          # helper answers it, and this watchdog covers a helper that itself hangs.
+          python3 .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
+          attach_pid=$!
+          (
+            sleep 120
+            kill -9 "$attach_pid" 2>/dev/null || true
+            pkill -9 hdiutil 2>/dev/null || true
+          ) &
+          watchdog_pid=$!
+          set +e
+          wait "$attach_pid"
+          attach_status=$?
+          set -e
+          kill "$watchdog_pid" 2>/dev/null || true
+          wait "$watchdog_pid" 2>/dev/null || true
+          if (( attach_status != 0 )); then
+            echo 'Could not mount the macOS installer.' >&2
+            exit "$attach_status"
+          fi
+          trap 'hdiutil detach "$mount_point" || true' EXIT
           installed_apps=("$mount_point"/*.app)
           if (( ${#installed_apps[@]} != 1 )); then
             echo 'The macOS installer must contain exactly one app.' >&2
