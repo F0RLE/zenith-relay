@@ -1,5 +1,23 @@
+import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
+
+/** Click a viewport point that is not inside the open menu. */
+async function clickOutside(page: Page, menu: Locator) {
+  const box = await menu.boundingBox();
+  const candidates = [
+    { x: 24, y: 160 },
+    { x: 24, y: 420 },
+    { x: 640, y: 520 },
+  ];
+  const point = candidates.find((candidate) => {
+    if (!box) return true;
+    const inside = candidate.x >= box.x && candidate.x <= box.x + box.width
+      && candidate.y >= box.y && candidate.y <= box.y + box.height;
+    return !inside;
+  }) ?? { x: 8, y: 8 };
+  await page.mouse.click(point.x, point.y);
+}
 
 for (const theme of ["light", "dark"] as const) {
   test(`compact dialogs remain usable in ${theme} theme`, async ({ page }, testInfo) => {
@@ -54,7 +72,7 @@ test("transient menus close when the user clicks outside", async ({ page }) => {
   const actionMenu = page.locator(".relay-action-menu").first();
   await actionMenu.locator("summary").click();
   await expect(actionMenu).toHaveAttribute("open", "");
-  await page.mouse.click(420, 120);
+  await clickOutside(page, actionMenu);
   await expect(actionMenu).not.toHaveAttribute("open", "");
 
   await page.getByRole("tab", { name: "Automations", exact: true }).click();

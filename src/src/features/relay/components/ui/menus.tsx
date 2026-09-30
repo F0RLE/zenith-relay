@@ -13,27 +13,28 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   useEffect(() => {
-    if (!open) return;
-    const close = () => { if (menuRef.current) menuRef.current.open = false; };
+    const menu = menuRef.current;
+    if (!menu) return;
+    const close = () => { menu.open = false; };
     const onPointerDown = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) close();
+      // Stay attached from mount. A listener that waits for React to observe
+      // the native open state misses a click that arrives in that gap.
+      if (!menu.open || menu.contains(event.target as Node)) return;
+      close();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (!menu.open || event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
       close();
-      menuRef.current?.querySelector("summary")?.focus({ preventScroll: true });
+      menu.querySelector("summary")?.focus({ preventScroll: true });
     };
-    // Capture the dismissal before a native <details> toggle or another
-    // control handles the same pointer event. This keeps outside clicks
-    // deterministic across Chromium platform/font layouts.
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [open]);
+  }, []);
   useLayoutEffect(() => {
     if (!open) return;
     const place = () => {

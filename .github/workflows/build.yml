@@ -172,7 +172,8 @@ jobs:
 
           mount_point="$RUNNER_TEMP/relay-installer-verification"
           mkdir -p "$mount_point"
-          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "${dmgs[0]}"
+          # The DMG license agreement cancels a non-interactive attach.
+          python3 .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}"
           trap 'hdiutil detach "$mount_point"' EXIT
           installed_apps=("$mount_point"/*.app)
           if (( ${#installed_apps[@]} != 1 )); then
