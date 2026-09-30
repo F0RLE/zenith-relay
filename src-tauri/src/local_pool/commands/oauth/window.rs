@@ -1,7 +1,9 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use crate::platform::ui_text;
 use sha2::{Digest, Sha256};
-use std::{path::PathBuf, sync::Mutex};
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::{
     webview::NewWindowResponse, AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
