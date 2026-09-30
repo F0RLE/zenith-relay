@@ -326,7 +326,8 @@ test("frequent account actions use full-width zones and secondary actions stay i
   const menu = page.getByRole("menu");
   await expect(menu.getByRole("menuitem", { name: "Proxy: Common", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Export" })).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveCount(4);
+  await expect(menu.getByRole("menuitem", { name: "Notes", exact: true })).toBeVisible();
+  await expect(menu.getByRole("menuitem")).toHaveCount(5);
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
 });

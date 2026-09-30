@@ -233,7 +233,7 @@ for (const viewport of viewports) {
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Proxy: Common", "Export", "Disable", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Proxy: Common", "Export", "Disable", "Delete"]);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();

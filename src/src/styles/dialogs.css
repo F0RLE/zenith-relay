@@ -971,8 +971,9 @@
   border-radius: 0 6px 6px 0;
 }
 
-.secret-field:has(input:focus-visible, button:focus-visible) {
-  outline: none;
+.secret-field:focus-within {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 1px;
 }
 
 .secret-field input:focus-visible,

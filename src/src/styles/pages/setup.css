@@ -878,8 +878,8 @@
 }
 
 .source-price-input:focus-within {
-  border-color: var(--relay-border-strong);
-  box-shadow: none;
+  border-color: var(--price-field-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--price-field-focus) 18%, transparent);
 }
 
 .source-price-currency {

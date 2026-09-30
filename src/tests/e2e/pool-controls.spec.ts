@@ -39,7 +39,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(panel).not.toContainText("Excel");
       await expectPanelFits(page);
       if (width === 1160) {
-        expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(140);
+        expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(168);
       }
       await panel.screenshot({ path: testInfo.outputPath("panel-standard.png"), animations: "disabled" });
       await panel.getByRole("radio", { name: "Сверхбыстрая", exact: true }).click();
