@@ -55,8 +55,9 @@ pub(super) use replay::NativeReplayCapture;
 
 pub(super) use events::{
     has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
-    is_known_non_output_event, parse_sse_event, preserved_stream_error, rewrite_bridge_failure,
-    served_model_is_degraded, TerminalEvent, TerminalOutcome,
+    is_known_non_output_event, is_responses_output_delta_type, parse_sse_event,
+    preserved_stream_error, rewrite_bridge_failure, served_model_is_degraded, TerminalEvent,
+    TerminalOutcome,
 };
 
 mod bootstrap;

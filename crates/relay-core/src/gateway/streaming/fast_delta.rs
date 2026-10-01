@@ -28,7 +28,7 @@ pub(in crate::gateway) fn fast_response_delta_json(payload: &[u8]) -> Option<Fas
     // Same text-delta names as `has_output_delta`. Other `response.*.delta`
     // events, including compaction, can change route ownership or replay and
     // stay on the full parser.
-    if !is_fast_output_delta(kind) {
+    if !super::is_responses_output_delta_type(kind) {
         return None;
     }
     Some(FastResponseDelta {
@@ -96,20 +96,6 @@ impl FastDeltaBody<'_> {
             || self.item.is_some()
             || self.status.is_some()
     }
-}
-
-fn is_fast_output_delta(kind: &str) -> bool {
-    matches!(
-        kind,
-        "response.output_text.delta"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_summary_text.delta"
-            | "response.refusal.delta"
-            | "response.function_call_arguments.delta"
-            | "response.custom_tool_call_input.delta"
-            | "response.mcp_call_arguments.delta"
-            | "response.code_interpreter_call_code.delta"
-    )
 }
 
 fn single_json_data(frame: &[u8]) -> Option<&[u8]> {

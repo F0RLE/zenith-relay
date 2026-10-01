@@ -44,22 +44,11 @@ pub(in crate::gateway) fn is_known_non_output_event(
 }
 
 pub(in crate::gateway) fn has_output_delta(value: &Value, event_type: Option<&str>) -> bool {
-    if matches!(
-        event_type,
-        Some(
-            "response.output_text.delta"
-                | "response.reasoning_text.delta"
-                | "response.reasoning_summary_text.delta"
-                | "response.refusal.delta"
-                | "response.function_call_arguments.delta"
-                | "response.custom_tool_call_input.delta"
-                | "response.mcp_call_arguments.delta"
-                | "response.code_interpreter_call_code.delta"
-        )
-    ) && value
-        .get("delta")
-        .and_then(Value::as_str)
-        .is_some_and(|delta| !delta.is_empty())
+    if event_type.is_some_and(is_responses_output_delta_type)
+        && value
+            .get("delta")
+            .and_then(Value::as_str)
+            .is_some_and(|delta| !delta.is_empty())
     {
         return true;
     }
@@ -90,6 +79,22 @@ pub(in crate::gateway) fn has_output_delta(value: &Value, event_type: Option<&st
             .get("candidates")
             .and_then(Value::as_array)
             .is_some_and(|candidates| candidates.iter().any(gemini_candidate_has_output_delta))
+}
+
+/// Responses delta names that carry generated output. The full parser and the
+/// fast SSE path share this list so a new event cannot be handled by only one.
+pub(in crate::gateway) fn is_responses_output_delta_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.refusal.delta"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+            | "response.mcp_call_arguments.delta"
+            | "response.code_interpreter_call_code.delta"
+    )
 }
 
 /// Detects the upstream's silent pre-output abort precisely enough for a safe

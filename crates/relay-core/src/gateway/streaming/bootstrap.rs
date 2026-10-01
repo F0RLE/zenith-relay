@@ -31,10 +31,6 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "The bounded bootstrap failure carries the diagnostics needed for retry and response ownership."
-)]
 pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFailure {
     let failure = AttemptFailure::classified_with_hint(
         upstream_failure_status(error_codes::UPSTREAM_ROUTE_DEGRADED),
@@ -50,6 +46,10 @@ pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFail
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The bounded bootstrap failure carries the diagnostics needed for retry and response ownership."
+)]
 pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
     block_degraded_routes: bool,
