@@ -296,7 +296,7 @@ async fn selection_restores_persisted_prompt_affinity_before_reserving() {
         "source-a",
         true,
         CandidateHealth::Healthy,
-        CandidateQuota::Available(6_500),
+        CandidateQuota::Available(9_000),
         Some(123),
     ));
     assert!(runtime.update_candidate_availability_at(

@@ -130,8 +130,13 @@ impl GatewayRuntime {
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
-        let scheduler = self.lock_scheduler();
-        let mut order = scheduler.runtime_order(runtime_now_ms());
+        let projection = self.lock_scheduler().clone();
+        let mut order = projection.into_runtime_order(
+            &CandidateScope::default(),
+            &crate::ModelRules::default(),
+            &crate::WireApi::ALL,
+            runtime_now_ms(),
+        );
         let revision = self.activity_revision.load(Ordering::Acquire);
         for candidate in &mut order {
             candidate.runtime_id = self.activity_runtime_id;
@@ -154,21 +159,26 @@ impl GatewayRuntime {
         let scope = key
             .scope
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let protocols = key.client_wire_apis.as_deref().map_or_else(
             super::super::all_native_wire_apis,
             super::super::client_wire_apis_to_native,
         );
-        let scheduler = self.lock_scheduler();
-        let mut models = key.model_rules.clone();
-        models.excluded.extend(
-            scheduler
-                .candidates()
-                .flat_map(|candidate| &candidate.models)
-                .filter(|model| super::super::is_image_model_id(model))
-                .cloned(),
-        );
-        let mut order = scheduler.runtime_order_for(&scope, &models, &protocols, runtime_now_ms());
+        let (models, projection) = {
+            let scheduler = self.lock_scheduler();
+            let mut models = key.model_rules.clone();
+            models.excluded.extend(
+                scheduler
+                    .candidates()
+                    .flat_map(|candidate| &candidate.models)
+                    .filter(|model| super::super::is_image_model_id(model))
+                    .cloned(),
+            );
+            (models, scheduler.clone())
+        };
+        let mut order =
+            projection.into_runtime_order(&scope, &models, &protocols, runtime_now_ms());
         let revision = self.activity_revision.load(Ordering::Acquire);
         for candidate in &mut order {
             candidate.runtime_id = self.activity_runtime_id;

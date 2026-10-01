@@ -73,6 +73,31 @@ pub(in crate::gateway::execution) async fn execute_request(
         if !budget.can_dispatch() {
             break;
         }
+        if !repairs.quota_yield {
+            repairs.quota_yield = true;
+            if let Some(affinity_key) = response_affinity_key.clone() {
+                if runtime.automatic_response_owner_should_yield_for_quota(
+                    &key,
+                    &affinity_key,
+                    &resolved_model,
+                    candidate_protocols(wire_api),
+                    &tried,
+                    now_ms(),
+                ) && drop_materialized_previous_response_id(
+                    &runtime,
+                    &key.id,
+                    &mut request,
+                    &resolved_model,
+                    now_ms(),
+                ) {
+                    clear_materialized_continuation(
+                        &mut response_affinity_key,
+                        &mut requires_affinity_owner,
+                        &mut has_unpaired_tool_output,
+                    );
+                }
+            }
+        }
         // Recovery can deliberately remove an unusable opaque response id.
         // Derive continuation semantics from the request that will actually be
         // sent on this attempt, rather than from its original payload.

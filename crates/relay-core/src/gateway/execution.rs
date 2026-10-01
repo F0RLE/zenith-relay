@@ -44,6 +44,7 @@ pub(super) struct AttemptRepairs {
     pub(super) legacy_call_id: bool,
     pub(super) model_switch_reset: bool,
     pub(super) stale_tool_history: bool,
+    pub(super) quota_yield: bool,
 }
 
 /// Records the one allowed model-switch reset and drops the opaque continuation binding.

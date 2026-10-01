@@ -88,6 +88,10 @@ pub struct RotationCandidate {
     pub route_rates: BTreeMap<String, RateState>,
     pub auth: AuthState,
     pub quota: QuotaState,
+    /// Known remainder in basis points. Ranking uses it only while `quota` is
+    /// `Available`; zero and missing values do not outrank anyone.
+    pub quota_remaining_basis_points: Option<u64>,
+    pub quota_observed_at_ms: Option<u64>,
     pub rate: RateState,
 }
 
@@ -119,6 +123,8 @@ impl RotationCandidate {
             route_rates: BTreeMap::from([(route_key, RateState::Ready)]),
             auth: AuthState::Ready,
             quota: QuotaState::Unknown,
+            quota_remaining_basis_points: None,
+            quota_observed_at_ms: None,
             rate: RateState::Ready,
         }
     }
@@ -323,6 +329,8 @@ pub enum RotationSelectionReason {
     Recovery,
     OnlyEligible,
     LeastLoaded,
+    /// Automatic mode kept the members with the greatest known remainder.
+    QuotaHeadroom,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

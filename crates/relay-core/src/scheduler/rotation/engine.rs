@@ -79,6 +79,7 @@ pub struct RotationEngine {
     recovery_credits: u32,
     recovery_in_flight: u32,
     successful_requests_since_recovery: u32,
+    quota_stale_after_ms: u64,
 }
 
 impl Default for RotationEngine {
@@ -103,6 +104,7 @@ impl Default for RotationEngine {
             recovery_in_flight: 0,
             successful_requests_since_recovery: 0,
             recovery_policy: policy,
+            quota_stale_after_ms: super::super::QUOTA_STALE_AFTER_MS,
         }
     }
 }

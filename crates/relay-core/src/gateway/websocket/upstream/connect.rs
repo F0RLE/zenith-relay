@@ -34,6 +34,21 @@ pub(super) async fn connect_upstream(
         // Read the live setting on every retry cycle so disabling it wakes
         // an active persistent wait through the configuration event.
         let wait_for_candidate_availability = runtime.route_recovery_enabled();
+        if !repairs.quota_yield {
+            repairs.quota_yield = true;
+            if let Some(affinity_key) = request.response_affinity_key.clone() {
+                if runtime.automatic_response_owner_should_yield_for_quota(
+                    key,
+                    &affinity_key,
+                    &request.resolved_model,
+                    WEBSOCKET_PROTOCOLS,
+                    &tried,
+                    now_ms(),
+                ) {
+                    let _ = request.drop_previous_response_id(runtime, &key.id);
+                }
+            }
+        }
         let selected = runtime
             .select_and_reserve_with_budget(
                 key,

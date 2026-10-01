@@ -5,6 +5,7 @@ mod selection;
 mod success;
 
 use super::super::continuation::{
+    clear_materialized_continuation, drop_materialized_previous_response_id,
     prepare_response_continuation, previous_response_id, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
     RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
@@ -140,6 +141,36 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         );
         if !budget.can_dispatch() {
             break;
+        }
+        // Wake checks one named account. Compact and search can leave that
+        // account once, before selection, when another account has a strictly
+        // larger fresh remainder and the saved history can be resent.
+        if !repairs.quota_yield {
+            repairs.quota_yield = true;
+            if endpoint != AccountEndpoint::Wake {
+                if let Some(affinity_key) = response_affinity_key.clone() {
+                    if runtime.automatic_response_owner_should_yield_for_quota(
+                        &key,
+                        &affinity_key,
+                        &resolved_model,
+                        &[WireApi::Responses],
+                        &tried,
+                        now_ms(),
+                    ) && drop_materialized_previous_response_id(
+                        &runtime,
+                        &key.id,
+                        &mut request,
+                        &resolved_model,
+                        now_ms(),
+                    ) {
+                        clear_materialized_continuation(
+                            &mut response_affinity_key,
+                            &mut requires_affinity_owner,
+                            &mut has_unpaired_tool_output,
+                        );
+                    }
+                }
+            }
         }
         // A model-switch or stale-tool recovery can remove the opaque
         // continuation id. Retry policy must then use the repaired request,

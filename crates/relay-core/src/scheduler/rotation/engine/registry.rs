@@ -18,6 +18,10 @@ impl RotationEngine {
         }
     }
 
+    pub fn set_quota_stale_after_ms(&mut self, stale_after_ms: u64) {
+        self.quota_stale_after_ms = stale_after_ms.max(1);
+    }
+
     pub fn set_max_in_flight(&mut self, max_in_flight: u32) -> Result<(), &'static str> {
         if max_in_flight == 0 || max_in_flight > 65_536 {
             return Err("rotation runtime capacity is invalid");
@@ -65,6 +69,8 @@ impl RotationEngine {
             // cannot clear auth, quota, rate or active leases.
             candidate.auth = runtime.candidate.auth;
             candidate.quota = runtime.candidate.quota;
+            candidate.quota_remaining_basis_points = runtime.candidate.quota_remaining_basis_points;
+            candidate.quota_observed_at_ms = runtime.candidate.quota_observed_at_ms;
             candidate.rate = runtime.candidate.rate;
             candidate.route_rates = runtime
                 .candidate
@@ -275,8 +281,27 @@ impl RotationEngine {
             return false;
         };
         runtime.candidate.quota = quota;
+        if !matches!(quota, QuotaState::Available) {
+            runtime.candidate.quota_remaining_basis_points = None;
+            runtime.candidate.quota_observed_at_ms = None;
+        }
         self.quota_revisions
             .insert(candidate_id.to_owned(), revision);
+        true
+    }
+
+    pub fn set_quota_remaining(
+        &mut self,
+        candidate_id: &str,
+        remaining_basis_points: Option<u64>,
+        observed_at_ms: Option<u64>,
+    ) -> bool {
+        let Some(runtime) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        let remaining = remaining_basis_points.filter(|remaining| *remaining > 0);
+        runtime.candidate.quota_remaining_basis_points = remaining;
+        runtime.candidate.quota_observed_at_ms = observed_at_ms.filter(|_| remaining.is_some());
         true
     }
 
