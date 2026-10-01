@@ -19,6 +19,21 @@ export function operationalStatusTone(status: OperationalStatus): "ready" | "war
   return "disabled";
 }
 
+/** Same icon color as the account card, without live pool-runtime hints. */
+export function accountSurfaceTone(account: AccountSummary, onServer = false): "ready" | "warning" | "error" | "info" | "disabled" {
+  if (onServer) return "info";
+  const quotaStatus = accountQuotaRefreshState(account);
+  const displayedError = quotaStatus === "refreshing" ? null : currentAccountErrorCode(account);
+  if (displayedError) return "error";
+  if (account.operationalStatus === "unavailable" || account.operationalStatus === "disabled") {
+    return operationalStatusTone(account.operationalStatus);
+  }
+  if (quotaStatus === "refreshing" || quotaStatus === "pending") return "disabled";
+  if (quotaStatus === "failed" || quotaStatus === "requires_reauth") return "error";
+  if (account.clientAuthStatus === "login_required") return "warning";
+  return operationalStatusTone(account.operationalStatus);
+}
+
 export function transientCandidateTone(
   candidate: CandidateRuntimeSnapshot | undefined,
   nowMs: number,

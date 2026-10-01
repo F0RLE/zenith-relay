@@ -9,7 +9,7 @@ import {
   groupModelSummaries,
   modelSummaries,
 } from "../src/features/relay/modelSummaries";
-import { applyRuntimeActivity, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivity, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {
@@ -436,6 +436,15 @@ describe("pool helpers", () => {
     ], "responses", "messages");
 
     expect(state).toMatchObject({ available: false, nextRetryAtMs: 2_000 });
+  });
+
+  test("treats an unchanged live routing poll as the same order", () => {
+    const order = [
+      { candidateId: "account-a", kind: "oauth_account" as const, available: true, inFlight: 0, activeRequestCount: 1, activeModels: [{ model: "gpt-5.6-sol", requestCount: 1 }], modelRetries: [{ model: "gpt-5.6-luna", retryAtMs: 20 }], lastUsedAtMs: 5, nextRetryAtMs: 20, halfOpen: false, dispatches: 1 },
+    ];
+    expect(sameRuntimeOrder(order, order.map((item) => ({ ...item, activeModels: item.activeModels.map((model) => ({ ...model })), modelRetries: item.modelRetries.map((retry) => ({ ...retry })) })))).toBe(true);
+    expect(sameRuntimeOrder(order, [{ ...order[0], available: false }])).toBe(false);
+    expect(sameRuntimeOrder(order, [{ ...order[0], activeModels: [{ model: "gpt-5.6-sol", requestCount: 2 }] }])).toBe(false);
   });
 
   test("does not treat a legacy Messages source candidate as a pooled Responses route", () => {

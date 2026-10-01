@@ -3,6 +3,7 @@ import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/r
 import {
   accountQuotaRefreshState,
   accountErrorTranslationKey,
+  accountSurfaceTone,
   currentAccountErrorCode,
   isCodexOauthAccountEligible,
   operationalStatusTone,
@@ -91,5 +92,19 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.unknown");
     expect(accountErrorTranslationKey("deactivated_workspace")).toBe("accounts.errors.blocked");
     expect(accountErrorTranslationKey("account_blocked")).toBe("accounts.errors.blocked");
+  });
+
+  test("uses the same surface color outside the pool as on the account card", () => {
+    expect(accountSurfaceTone(account({ inPool: false, operationalStatus: "rotation" }))).toBe("ready");
+    expect(accountSurfaceTone(account({ inPool: false, operationalStatus: "quotaWait" }))).toBe("warning");
+    expect(accountSurfaceTone(account({ inPool: false, operationalStatus: "disabled" }))).toBe("disabled");
+    expect(accountSurfaceTone(account({ inPool: false, operationalStatus: "unavailable", lastErrorCode: "provider_timeout" }))).toBe("error");
+    expect(accountSurfaceTone(account({
+      inPool: false,
+      operationalStatus: "rotation",
+      quotaRefreshStatus: "failed",
+      quota: { error: { code: "quota_timeout" } },
+    }))).toBe("error");
+    expect(accountSurfaceTone(account({ inPool: false }), true)).toBe("info");
   });
 });

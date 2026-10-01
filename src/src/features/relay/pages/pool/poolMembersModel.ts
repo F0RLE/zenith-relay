@@ -117,9 +117,23 @@ function activityRuntimeState(
 export function orderedPoolMembers(
   members: readonly PoolMember[],
   runtimeOrder: CandidateRuntimeSnapshot[],
+  savedMembers?: readonly { id: string }[],
 ) {
-  const orderByMember = routingOrderPositions(runtimeOrder);
+  // The scheduler preview moves the active and next candidate to the front on
+  // every attempt. That is useful telemetry, but it makes the cards jump while
+  // a request is failing over. The saved member list is the order the user can
+  // actually edit. Live order is only the fallback before that list exists.
+  const savedOrder = savedMemberPositions(savedMembers);
+  const orderByMember = savedOrder.size > 0 ? savedOrder : routingOrderPositions(runtimeOrder);
   return [...members].sort((left, right) => comparePoolMembers(left, right, orderByMember));
+}
+
+function savedMemberPositions(members: readonly { id: string }[] | undefined) {
+  const positions = new Map<string, number>();
+  for (const member of members ?? []) {
+    if (member.id && !positions.has(member.id)) positions.set(member.id, positions.size);
+  }
+  return positions;
 }
 
 export function poolMemberSourceIds(members: readonly PoolMember[]) {

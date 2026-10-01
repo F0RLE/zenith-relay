@@ -57,7 +57,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     () => poolMemberRuntimeStates(poolMembers, runtimeOrder, runtimeActivity),
     [poolMembers, runtimeActivity, runtimeOrder],
   );
-  const members = useMemo(() => orderedPoolMembers(poolMembers, runtimeOrder), [poolMembers, runtimeOrder]);
+  const savedRoutingMembers = runtime?.gateway.poolRouting?.members;
+  const members = useMemo(
+    () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers),
+    [poolMembers, runtimeOrder, savedRoutingMembers],
+  );
   const providerCredits = useMemo(() => poolProviderCreditsSummary(members), [members]);
   const providerCreditsValue = providerCredits == null
     ? null

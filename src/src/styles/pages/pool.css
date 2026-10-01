@@ -1030,6 +1030,7 @@
 
 .pool-picker-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
@@ -1061,6 +1062,76 @@
 
 .pool-picker-plan .relay-button {
   max-width: 130px;
+}
+
+.pool-picker-health {
+  flex: 1 0 100%;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.pool-picker-health button {
+  min-height: 28px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--relay-border);
+  border-radius: 5px;
+  background: var(--relay-surface);
+  color: var(--relay-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pool-picker-health button:hover {
+  border-color: var(--relay-border-strong);
+  color: var(--relay-text);
+}
+
+.pool-picker-health button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.pool-picker-health button[data-health="cooldown"][aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-warning) 55%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-warning) 10%, var(--relay-surface));
+  color: var(--relay-warning);
+}
+
+.pool-picker-health button[data-health="error"][aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-error) 9%, var(--relay-surface));
+  color: var(--relay-error);
+}
+
+.pool-picker-health button[data-health="disabled"][aria-pressed="true"] {
+  border-color: var(--relay-border-strong);
+  background: var(--relay-subtle);
+  color: var(--relay-text);
+}
+
+.pool-picker-health button[data-health="info"][aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-info) 55%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-info) 10%, var(--relay-surface));
+  color: var(--relay-info);
+}
+
+.pool-picker-health button small {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--relay-subtle);
+  color: inherit;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .pool-picker-selection {
@@ -1141,9 +1212,29 @@
   height: 17px;
 }
 
-.pool-picker-option[data-selected="true"] .pool-picker-avatar {
+.pool-picker-avatar[data-status="ready"] {
+  background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
-  background: var(--relay-surface);
+}
+
+.pool-picker-avatar[data-status="warning"] {
+  background: var(--relay-warning-soft);
+  color: var(--relay-warning);
+}
+
+.pool-picker-avatar[data-status="error"] {
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
+}
+
+.pool-picker-avatar[data-status="info"] {
+  background: var(--relay-info-soft);
+  color: var(--relay-info);
+}
+
+.pool-picker-avatar[data-status="disabled"] {
+  background: var(--relay-subtle);
+  color: var(--relay-muted);
 }
 
 .pool-member-option-copy {
@@ -1168,6 +1259,12 @@
   color: var(--relay-muted);
   font-size: 11px;
 }
+
+.pool-picker-status[data-status="ready"] { color: var(--relay-accent-hover); }
+.pool-picker-status[data-status="warning"] { color: var(--relay-warning); }
+.pool-picker-status[data-status="error"] { color: var(--relay-error); }
+.pool-picker-status[data-status="info"] { color: var(--relay-info); }
+.pool-picker-status[data-status="disabled"] { color: var(--relay-muted); }
 
 .pool-picker-option > input {
   grid-column: 4;

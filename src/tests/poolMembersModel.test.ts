@@ -165,6 +165,22 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, order).map((item) => item.id)).toEqual(["account-1", "source-1"]);
   });
 
+  test("keeps the saved member order while a live request bubbles another card", () => {
+    const members = [
+      member("account", "first", { label: "First" }),
+      member("account", "second", { label: "Second" }),
+    ];
+    const live = [
+      candidate("second", { activeRequestCount: 1, nextForNewRequest: true }),
+      candidate("first"),
+    ];
+    expect(orderedPoolMembers(members, live).map((item) => item.id)).toEqual(["second", "first"]);
+    expect(orderedPoolMembers(members, live, [
+      { id: "first" },
+      { id: "second" },
+    ]).map((item) => item.id)).toEqual(["first", "second"]);
+  });
+
   test("derives active and last-used route state from runtime snapshots", () => {
     const members = [member("account", "active"), member("source", "source-last"), member("source", "source-next")];
     const order = [
