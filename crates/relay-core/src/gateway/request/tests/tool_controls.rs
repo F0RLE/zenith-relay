@@ -41,7 +41,7 @@ fn saved_automatic_policy_does_not_defer_native_responses() {
     let mut policy = RequestToolPolicy::new(&runtime, &original);
 
     let mut body = original.clone();
-    policy.apply_value(&mut body, true).unwrap();
+    policy.apply_value(&mut body).unwrap();
     assert_eq!(body, original);
     assert!(!policy.diagnostics.deferred_tool_search);
     assert_eq!(
@@ -49,7 +49,6 @@ fn saved_automatic_policy_does_not_defer_native_responses() {
         Some(crate::ToolPolicyOutcome::PassThrough)
     );
     assert!(!policy.diagnostics.policy_fallback);
-    assert!(!policy.prepare_deferred_fallback());
 }
 #[test]
 fn direct_non_responses_account_endpoint_keeps_the_catalog_unchanged() {
@@ -57,7 +56,7 @@ fn direct_non_responses_account_endpoint_keeps_the_catalog_unchanged() {
     let original = two_function_tools();
     let mut policy = RequestToolPolicy::new(&runtime, &original);
     let mut body = original.clone();
-    policy.apply_value(&mut body, false).unwrap();
+    policy.apply_value(&mut body).unwrap();
     assert_eq!(body, original);
     assert!(!policy.diagnostics.deferred_tool_search);
 }

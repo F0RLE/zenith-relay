@@ -142,7 +142,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
     };
     // Saved tool optimization is not applied. Wake, compact, and alpha/search
     // all keep the catalog the client sent.
-    if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body, false) {
+    if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body) {
         return step;
     }
     if basis_points_route {
@@ -276,18 +276,14 @@ fn prepare_account_upstream_body(
 fn apply_account_tool_policy(
     tool_policy: &mut RequestToolPolicy,
     upstream_body: &mut Value,
-    allow_deferred_tool_search: bool,
 ) -> Option<AccountPrepare> {
-    tool_policy
-        .apply_value(upstream_body, allow_deferred_tool_search)
-        .err()
-        .map(|message| {
-            AccountPrepare::Respond(api_error(
-                StatusCode::BAD_REQUEST,
-                message,
-                error_codes::INVALID_REQUEST,
-            ))
-        })
+    tool_policy.apply_value(upstream_body).err().map(|message| {
+        AccountPrepare::Respond(api_error(
+            StatusCode::BAD_REQUEST,
+            message,
+            error_codes::INVALID_REQUEST,
+        ))
+    })
 }
 
 #[allow(clippy::result_large_err)]

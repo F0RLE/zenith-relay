@@ -9,7 +9,6 @@ use super::super::super::errors::{
     PreservedUpstreamError,
 };
 use super::super::super::now_ms;
-use super::super::super::request::{is_deferred_tool_search_compatibility_error, AccountEndpoint};
 use super::super::super::response::{emit_usage, proxy_error_response, usage_event, UsageAttempt};
 use super::super::super::turn_state::relay_account_response_header;
 use super::super::request::recover_stale_tool_history;
@@ -47,7 +46,6 @@ pub(super) struct AccountStatusFailureInput<'a> {
     pub(super) requested_model: &'a str,
     pub(super) tool_use: &'a ToolUseDiagnostics,
     pub(super) started: Instant,
-    pub(super) endpoint: &'a AccountEndpoint,
     pub(super) request: &'a mut Value,
     pub(super) resolved_model: &'a str,
     pub(super) client_headers: &'a HeaderMap,
@@ -59,7 +57,6 @@ pub(super) struct AccountStatusFailureInput<'a> {
     pub(super) tried: &'a mut HashSet<String>,
     pub(super) has_unpaired_tool_output: &'a mut bool,
     pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) tool_policy: &'a mut crate::gateway::request::RequestToolPolicy,
     pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_failure_origin: &'a mut ErrorOrigin,
@@ -69,7 +66,6 @@ pub(super) struct AccountStatusFailureInput<'a> {
 struct ClassifiedAccountFailure {
     failure: AttemptFailure,
     event: crate::usage::UsageEvent,
-    upstream_error: crate::usage::UpstreamErrorDetails,
     cache_write_rejected: bool,
 }
 
@@ -168,7 +164,6 @@ fn classify_account_failure(input: &mut AccountStatusFailureInput<'_>) -> Classi
         cache_write_rejected: prompt_cache_write_rejected(&input.bytes),
         failure,
         event,
-        upstream_error,
     }
 }
 
@@ -176,21 +171,6 @@ fn repair_classified_account_failure(
     input: &mut AccountStatusFailureInput<'_>,
     classified: &mut ClassifiedAccountFailure,
 ) -> Option<AccountStatusFailure> {
-    if *input.endpoint == AccountEndpoint::Wake
-        && is_deferred_tool_search_compatibility_error(input.status, &classified.upstream_error)
-        && input.tool_policy.prepare_deferred_fallback()
-    {
-        // Retry once with the original catalog. This is still before any
-        // client output because account responses are collected before this
-        // status branch.
-        classified.event.tool_use.policy_fallback = true;
-        emit_usage(input.runtime, classified.event.clone());
-        input.tried.remove(&input.route.candidate_id);
-        input.lease.settle_rotation_repair(now_ms());
-        *input.last_failure = Some(classified.failure);
-        *input.last_failure_origin = input.selected_error_origin;
-        return Some(AccountStatusFailure::Continue);
-    }
     if input.has_previous_response_id
         && recover_stale_tool_history(
             input.runtime,

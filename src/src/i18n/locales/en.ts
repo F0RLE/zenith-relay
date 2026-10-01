@@ -1730,9 +1730,6 @@ const relayEn = {
 export const en = {
   toolPolicy: {
     title: "Tool optimization",
-    optimize: "Optimized mode",
-    description: "For tools on OpenAI models. On a normal Responses route, schemas open only when needed and the list is not cut. Excel and other models still send the full list.",
-    hint: "The provider chooses which schema to load. If it rejects that, Relay retries the request once without optimization. Action permissions stay unchanged.",
     modes: { pass_through: "Standard", automatic: "Optimized" },
     result: "Optimization",
     deferred: "Deferred loading",

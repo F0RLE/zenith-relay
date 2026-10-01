@@ -102,23 +102,6 @@ pub(super) fn repair_collected_rejection(
     event.error_category = Some(failure.category.to_string());
     if wire_api == WireApi::Responses
         && adapter_is_passthrough
-        && is_deferred_tool_search_compatibility_error(status, &upstream_error)
-        && tool_policy.prepare_deferred_fallback()
-    {
-        // An older or non-OpenAI Responses endpoint may reject the
-        // standard tool-search fields. Retry once without changing
-        // the selected policy, and only before output.
-        event.tool_use.policy_fallback = true;
-        emit_usage(runtime, event.clone());
-        tried.remove(&route.candidate_id);
-        lease.allow_rotation_repair();
-        *last_failure = Some(failure);
-        *last_failure_origin = selected_error_origin;
-        lease.settle_rotation_repair(now_ms());
-        return AfterRepair::Step(FailureStep::Continue);
-    }
-    if wire_api == WireApi::Responses
-        && adapter_is_passthrough
         && has_previous_response_id
         && !*native_replay_attempted
         && (previous_response_requires_websocket(&bytes)

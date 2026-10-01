@@ -17,8 +17,7 @@ pub(super) use super::super::super::errors::{
 pub(super) use super::super::super::now_ms;
 pub(super) use super::super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
-    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers,
-    is_deferred_tool_search_compatibility_error, normalize_account_request,
+    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
     normalize_responses_lite_request, repair_legacy_responses_call_ids,
     responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, RequestToolPolicy,
     CODEX_RESPONSES_LITE_HEADER,

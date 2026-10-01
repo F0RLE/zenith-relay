@@ -1,4 +1,4 @@
-use super::{apply_tool_policy, catalog::catalog_stats, enable_deferred_tool_search, ToolPolicy};
+use super::{apply_tool_policy, catalog::catalog_stats, ToolPolicy};
 use crate::{ToolPolicyMode, ToolPolicyOutcome};
 use serde_json::{json, Value};
 
@@ -24,7 +24,7 @@ fn standard_mode_is_transparent() {
 }
 
 #[test]
-fn automatic_mode_keeps_the_catalog_and_defers_even_a_small_catalog() {
+fn automatic_mode_forwards_even_a_small_catalog_unchanged() {
     let mut request = named_catalog(1);
     let original = request.clone();
     let policy = ToolPolicy {
@@ -33,53 +33,6 @@ fn automatic_mode_keeps_the_catalog_and_defers_even_a_small_catalog() {
     let result = apply_tool_policy(&mut request, &policy).unwrap();
     assert_eq!(request, original);
     assert_eq!(result.outcome, ToolPolicyOutcome::Unchanged);
-
-    assert!(enable_deferred_tool_search(&mut request, &policy));
-    assert_eq!(request["tools"][0]["name"], "tool_0");
-    assert_eq!(request["tools"][0]["defer_loading"], true);
-    assert_eq!(request["tools"][1], json!({"type":"tool_search"}));
-}
-
-#[test]
-fn automatic_native_search_defers_function_schemas_without_changing_identity() {
-    let mut request = json!({
-        "tools": [
-            {"type":"namespace","name":"files","description":"File tools","tools":[
-                {"type":"function","name":"read","description":"Read a file","parameters":{"type":"object"}},
-                {"type":"function","name":"write","description":"Write a file","parameters":{"type":"object"}}
-            ]},
-            {"type":"function","name":"search","parameters":{"type":"object"}},
-            {"type":"web_search"}
-        ]
-    });
-    let policy = ToolPolicy {
-        mode: ToolPolicyMode::Automatic,
-    };
-
-    assert!(enable_deferred_tool_search(&mut request, &policy));
-    assert_eq!(request["tools"][0]["name"], "files");
-    assert_eq!(request["tools"][0]["tools"][0]["name"], "read");
-    assert_eq!(request["tools"][0]["tools"][0]["defer_loading"], true);
-    assert_eq!(request["tools"][1]["name"], "search");
-    assert_eq!(request["tools"][1]["defer_loading"], true);
-    assert_eq!(request["tools"][3], json!({"type":"tool_search"}));
-    assert_eq!(catalog_stats(&request).count, 4);
-    assert!(!enable_deferred_tool_search(&mut request, &policy));
-}
-
-#[test]
-fn automatic_native_search_respects_explicit_eager_function_flags() {
-    let mut request = json!({"tools":[
-        {"type":"function","name":"eager","defer_loading":false},
-        {"type":"function","name":"deferred"}
-    ]});
-    let policy = ToolPolicy {
-        mode: ToolPolicyMode::Automatic,
-    };
-
-    assert!(enable_deferred_tool_search(&mut request, &policy));
-    assert_eq!(request["tools"][0]["defer_loading"], false);
-    assert_eq!(request["tools"][1]["defer_loading"], true);
 }
 
 #[test]
@@ -95,8 +48,9 @@ fn existing_client_or_provider_deferred_catalog_is_left_untouched() {
         mode: ToolPolicyMode::Automatic,
     };
 
-    assert!(!enable_deferred_tool_search(&mut request, &policy));
+    let result = apply_tool_policy(&mut request, &policy).unwrap();
     assert_eq!(request, original);
+    assert_eq!(result.outcome, ToolPolicyOutcome::Unchanged);
 }
 
 #[test]

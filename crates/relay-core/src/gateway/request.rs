@@ -20,7 +20,6 @@ pub(super) use responses_items::{
 pub(super) use routing::{
     candidate_protocols, chat_request_is_text_or_image_only, request_id, requested_reasoning_effort,
 };
-pub(super) use tool_policy::is_deferred_tool_search_compatibility_error;
 #[cfg(test)]
 pub(super) use tool_policy::tool_use_diagnostics;
 pub(in crate::gateway) use tool_policy::RequestToolPolicy;
@@ -53,7 +52,7 @@ use crate::codex_catalog_entry_is_compatible;
 use crate::{GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi};
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Request, Response, StatusCode};
+use axum::http::{HeaderMap, Request, Response};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
