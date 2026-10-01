@@ -24,12 +24,38 @@ fn basis_points_headers_match_excel_client_contract() {
     assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
     assert_eq!(
         headers.get("x-stainless-package-version").unwrap(),
-        "6.31.0"
+        "7.25.0"
     );
     assert_eq!(headers.get("x-stainless-retry-count").unwrap(), "0");
     assert_eq!(
         headers.get("x-stainless-runtime").unwrap(),
         "browser:chrome"
+    );
+    assert_eq!(
+        headers.get("user-agent").unwrap(),
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    );
+    assert_eq!(
+        headers.get("x-stainless-runtime-version").unwrap(),
+        "154.0.0"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-browser-ua-brands")
+            .unwrap(),
+        "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\""
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-browser-name")
+            .unwrap(),
+        "Chrome"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-basispoints-browser-ua-platform")
+            .unwrap(),
+        "\"Windows\""
     );
     assert!(headers
         .get("x-openai-internal-basispoints-oiiice-host")

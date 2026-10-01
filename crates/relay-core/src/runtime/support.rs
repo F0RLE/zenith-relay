@@ -78,22 +78,36 @@ pub(in crate::runtime) fn basis_points_headers(account_id: &str) -> HeaderMap {
         ("x-openai-internal-basispoints-client-runtime", "desktop"),
         ("x-openai-internal-basispoints-office-host", "Excel"),
         ("x-openai-internal-basispoints-office-platform", "PC"),
+        ("x-openai-internal-basispoints-browser-name", "Chrome"),
+        (
+            "x-openai-internal-basispoints-browser-ua-brands",
+            "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
+        ),
+        (
+            "x-openai-internal-basispoints-browser-ua-mobile",
+            "?0",
+        ),
+        (
+            "x-openai-internal-basispoints-browser-ua-platform",
+            "\"Windows\"",
+        ),
         ("x-stainless-arch", "unknown"),
         ("x-stainless-lang", "js"),
         ("x-stainless-os", "Unknown"),
-        ("x-stainless-package-version", "6.31.0"),
+        ("x-stainless-package-version", "7.25.0"),
         ("x-stainless-retry-count", "0"),
         ("x-stainless-runtime", "browser:chrome"),
+        ("x-stainless-runtime-version", "154.0.0"),
+        (
+            "user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+        ),
     ] {
         headers.insert(
             HeaderName::from_static(name),
             HeaderValue::from_static(value),
         );
     }
-    headers.insert(
-        HeaderName::from_static("user-agent"),
-        HeaderValue::from_static("zenith-relay-basispoints"),
-    );
     headers.insert(
         HeaderName::from_static("accept-encoding"),
         HeaderValue::from_static("identity"),

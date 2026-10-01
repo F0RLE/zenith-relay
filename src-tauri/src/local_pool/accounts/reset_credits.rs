@@ -16,7 +16,7 @@ const RESET_CREDITS_CONSUME_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 const MAX_RESET_CREDITS_RESPONSE_BYTES: usize = 256 * 1024;
 const CHATGPT_WEB_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

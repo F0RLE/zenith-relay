@@ -157,7 +157,7 @@ impl CodexSubscriptionClient {
 
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 // These ChatGPT Web endpoints require browser-shaped headers, not the Codex API identity envelope.
-pub(super) const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+pub(super) const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
 fn authorization_header(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {
     if !valid_access_token(access_token) {
