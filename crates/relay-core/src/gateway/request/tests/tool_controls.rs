@@ -25,7 +25,7 @@ fn tool_policy_snapshot_survives_hot_updates_and_retry_clones() {
         assert_eq!(attempt.diagnostics.filtered_tool_count, 0);
         assert_eq!(
             attempt.diagnostics.policy_outcome,
-            Some(crate::ToolPolicyOutcome::Unchanged)
+            Some(crate::ToolPolicyOutcome::PassThrough)
         );
     }
     let mut next = original.clone();
@@ -35,28 +35,20 @@ fn tool_policy_snapshot_survives_hot_updates_and_retry_clones() {
     assert_eq!(next, original);
 }
 #[test]
-fn direct_native_responses_policy_defers_then_restores_the_full_catalog() {
+fn saved_automatic_policy_does_not_defer_native_responses() {
     let runtime = automatic_tool_policy_test_runtime();
     let original = two_function_tools();
     let mut policy = RequestToolPolicy::new(&runtime, &original);
 
-    let mut deferred = original.clone();
-    policy.apply_value(&mut deferred, true).unwrap();
-    assert_eq!(deferred["tools"].as_array().unwrap().len(), 3);
-    assert_eq!(deferred["tools"][0]["defer_loading"], true);
-    assert_eq!(deferred["tools"][2], json!({"type":"tool_search"}));
-    assert!(policy.diagnostics.deferred_tool_search);
+    let mut body = original.clone();
+    policy.apply_value(&mut body, true).unwrap();
+    assert_eq!(body, original);
+    assert!(!policy.diagnostics.deferred_tool_search);
     assert_eq!(
         policy.diagnostics.policy_outcome,
-        Some(crate::ToolPolicyOutcome::Deferred)
+        Some(crate::ToolPolicyOutcome::PassThrough)
     );
-
-    assert!(policy.prepare_deferred_fallback());
-    let mut fallback = original.clone();
-    policy.apply_value(&mut fallback, true).unwrap();
-    assert_eq!(fallback, original);
-    assert!(!policy.diagnostics.deferred_tool_search);
-    assert!(policy.diagnostics.policy_fallback);
+    assert!(!policy.diagnostics.policy_fallback);
     assert!(!policy.prepare_deferred_fallback());
 }
 #[test]

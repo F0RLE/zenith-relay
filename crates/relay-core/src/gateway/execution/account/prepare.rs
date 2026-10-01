@@ -140,14 +140,9 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         Ok(body) => body,
         Err(step) => return step,
     };
-    // Only the native Responses wake path has the provider contract for
-    // `tool_search`. Compact and alpha/search are separate account endpoints
-    // and must keep their ordinary full catalog.
-    if let Some(step) = apply_account_tool_policy(
-        tool_policy,
-        &mut upstream_body,
-        endpoint == AccountEndpoint::Wake && !basis_points_route,
-    ) {
+    // Saved tool optimization is not applied. Wake, compact, and alpha/search
+    // all keep the catalog the client sent.
+    if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body, false) {
         return step;
     }
     if basis_points_route {

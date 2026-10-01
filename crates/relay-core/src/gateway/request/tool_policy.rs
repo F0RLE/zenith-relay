@@ -44,7 +44,10 @@ pub(in crate::gateway) struct RequestToolPolicy {
 
 impl RequestToolPolicy {
     pub(in crate::gateway) fn new(runtime: &GatewayRuntime, request: &Value) -> Self {
-        let policy = runtime.tool_policy();
+        let mut policy = runtime.tool_policy();
+        // The settings switch is gone. A saved automatic mode must not keep
+        // adding defer_loading or tool_search to new requests.
+        policy.mode = crate::ToolPolicyMode::PassThrough;
         Self {
             configured_mode: policy.mode,
             policy,

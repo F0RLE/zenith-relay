@@ -1,12 +1,9 @@
-//! Opt-in provider-native tool-catalog optimization.
+//! Tool catalogs are forwarded unchanged.
 //!
-//! Relay deliberately has only two catalog modes:
-//! - `pass_through` keeps the request unchanged;
-//! - `automatic` lets a compatible native Responses provider defer function
-//!   schemas and choose what to load.
-//!
-//! Relay does not infer relevance locally, remove tools by name, or turn this
-//! setting into an execution permission boundary.
+//! `automatic` remains readable in saved settings and old usage rows, but new
+//! requests always use `pass_through`. Relay does not add `defer_loading` or
+//! `tool_search`, infer relevance, remove tools, or treat catalog handling as
+//! an execution permission boundary.
 mod catalog;
 
 use serde::{Deserialize, Deserializer, Serialize};
