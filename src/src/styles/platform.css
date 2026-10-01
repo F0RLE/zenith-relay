@@ -69,7 +69,6 @@ button {
   background: var(--relay-sidebar);
   color: var(--relay-text);
   user-select: none;
-  -webkit-app-region: drag;
 }
 
 .titlebar-drag,
@@ -153,13 +152,22 @@ button {
 
 .titlebar-macos {
   justify-content: flex-start;
-  padding-left: 12px;
+  padding-left: 14px;
+}
+
+.titlebar-macos .titlebar-drag {
+  justify-content: flex-end;
+  padding-right: 14px;
+}
+
+.titlebar-macos .titlebar-logo {
+  order: 1;
 }
 
 .window-controls-macos {
   gap: 8px;
-  width: 66px;
-  flex: 0 0 66px;
+  flex: 0 0 auto;
+  padding-right: 6px;
 }
 
 .window-controls-macos button {
@@ -167,6 +175,7 @@ button {
   height: 12px;
   border-radius: 999px;
   border: 1px solid rgba(0, 0, 0, 0.18);
+  color: rgba(0, 0, 0, 0.72);
 }
 
 .window-controls-macos .close {
@@ -177,23 +186,28 @@ button {
   background: #ffbd2e;
 }
 
-.window-controls-macos .maximize {
+.window-controls-macos .zoom {
   background: #28c840;
 }
 
 .window-controls-macos button:hover {
-  filter: brightness(0.95);
+  filter: brightness(0.94);
 }
 
-.window-controls-macos button.close:hover,
-.window-controls-macos button:hover {
-  color: transparent;
+.window-controls-macos button svg {
+  width: 8px;
+  height: 8px;
+  opacity: 0;
+  stroke: rgba(0, 0, 0, 0.65);
+  fill: none;
+  stroke-width: 1.4px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.window-controls-macos span {
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
+.window-controls-macos:hover button svg,
+.window-controls-macos button:focus-visible svg {
+  opacity: 1;
 }
 
 .window-controls-linux {
