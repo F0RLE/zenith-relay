@@ -1,6 +1,49 @@
 import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/types";
 import { modelIdKey } from "./modelGroups";
 
+export function sameRuntimeOrder(
+  left: readonly CandidateRuntimeSnapshot[],
+  right: readonly CandidateRuntimeSnapshot[],
+) {
+  return left.length === right.length && left.every((candidate, index) => sameRuntimeCandidate(candidate, right[index]));
+}
+
+function sameRuntimeCandidate(left: CandidateRuntimeSnapshot | undefined, right: CandidateRuntimeSnapshot | undefined) {
+  if (!left || !right) return false;
+  return left.candidateId === right.candidateId
+    && left.kind === right.kind
+    && left.available === right.available
+    && left.nextForNewRequest === right.nextForNewRequest
+    && left.activityRevision === right.activityRevision
+    && left.runtimeId === right.runtimeId
+    && left.inFlight === right.inFlight
+    && left.activeRequestCount === right.activeRequestCount
+    && left.lastUsedAtMs === right.lastUsedAtMs
+    && left.nextRetryAtMs === right.nextRetryAtMs
+    && left.halfOpen === right.halfOpen
+    && left.dispatches === right.dispatches
+    && sameCounts(left.activeModels, right.activeModels)
+    && sameRetries(left.modelRetries, right.modelRetries);
+}
+
+function sameCounts(
+  left: CandidateRuntimeSnapshot["activeModels"],
+  right: CandidateRuntimeSnapshot["activeModels"],
+) {
+  const current = left ?? [];
+  const next = right ?? [];
+  return current.length === next.length && current.every((item, index) => item.model === next[index]?.model && item.requestCount === next[index]?.requestCount);
+}
+
+function sameRetries(
+  left: CandidateRuntimeSnapshot["modelRetries"],
+  right: CandidateRuntimeSnapshot["modelRetries"],
+) {
+  const current = left ?? [];
+  const next = right ?? [];
+  return current.length === next.length && current.every((item, index) => item.model === next[index]?.model && item.retryAtMs === next[index]?.retryAtMs);
+}
+
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   const positions = new Map<string, number>();
   const sourcePositions = new Map<string, { index: number; active: boolean }>();

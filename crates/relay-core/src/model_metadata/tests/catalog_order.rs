@@ -158,25 +158,81 @@ fn same_generation_families_use_stable_family_order_not_release_date() {
             "openai/gpt-5.6-sol-max":{"name":"GPT-5.6 Sol","family":"gpt-sol","release_date":"2026-07-09"},
             "openai/gpt-6-astra":{"name":"GPT-6 Astra","family":"gpt-astra","release_date":"2026-09-04"},
             "openai/gpt-6.1-sol":{"name":"GPT-6.1 Sol","family":"gpt-sol","release_date":"2026-09-29"},
+            "openai/gpt-7-sol":{"name":"GPT-7 Sol","family":"gpt-sol","release_date":"2027-01-15"},
+            "openai/gpt-6.2-luna":{"name":"GPT-6.2 Luna","family":"gpt-luna","release_date":"2026-10-01"},
             "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","family":"gpt-luna","release_date":"2026-07-09"},
-            "openai/gpt-5.6-terra":{"name":"GPT-5.6 Terra","family":"gpt-terra","release_date":"2026-07-09"}
+            "openai/gpt-5.6-terra":{"name":"GPT-5.6 Terra","family":"gpt-terra","release_date":"2026-07-09"},
+            "openai/gpt-9-nova":{"name":"GPT-9 Nova","family":"gpt-nova","release_date":"2028-01-01"}
         }"#,
     );
     let expected = [
         "gpt-6-astra",
+        "gpt-7-sol",
         "gpt-6.1-sol",
         "gpt-6-sol",
         "gpt-6-sol-max",
-        "gpt-5.6-terra",
         "gpt-5.6-sol",
         "gpt-5.6-sol-max",
+        "gpt-5.6-terra",
+        "gpt-6.2-luna",
         "gpt-5.6-luna",
+        "gpt-9-nova",
     ];
     assert_eq!(
         catalog.order_model_ids(expected.into_iter().rev()),
         expected
     );
     assert_eq!(catalog.order_model_ids(expected), expected);
+}
+
+#[test]
+fn product_tiers_survive_a_shared_or_missing_family() {
+    let shared_family = catalog(
+        r#"{
+            "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","family":"gpt","release_date":"2026-08-01"},
+            "openai/gpt-5.6-sol":{"name":"GPT-5.6 Sol","family":"gpt","release_date":"2026-07-09"},
+            "openai/gpt-8-terra":{"name":"GPT-8 Terra","family":"gpt","release_date":"2028-01-01"},
+            "openai/gpt-4o":{"name":"GPT-4o","family":"gpt","release_date":"2024-05-13"}
+        }"#,
+    );
+    assert_eq!(
+        shared_family.order_model_ids(["gpt-5.6-luna", "gpt-4o", "gpt-8-terra", "gpt-5.6-sol",]),
+        ["gpt-5.6-sol", "gpt-8-terra", "gpt-5.6-luna", "gpt-4o"]
+    );
+
+    let long_family = catalog(
+        r#"{
+            "openai/gpt-6.2-luna":{"name":"GPT-6.2 Luna","family":"gpt-6.2-luna","release_date":"2026-10-01"},
+            "openai/gpt-5.6-sol":{"name":"GPT-5.6 Sol","family":"gpt-5.6-sol","release_date":"2026-07-09"}
+        }"#,
+    );
+    assert_eq!(
+        long_family.order_model_ids(["gpt-6.2-luna", "gpt-5.6-sol"]),
+        ["gpt-5.6-sol", "gpt-6.2-luna"]
+    );
+
+    let unlabeled = catalog(
+        r#"{
+            "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","release_date":"2026-09-01"},
+            "openai/gpt-9-sol":{"name":"GPT-9 Sol","release_date":"2028-02-01"},
+            "anthropic/claude-haiku-9":{"name":"Claude Haiku 9","release_date":"2028-03-01"},
+            "anthropic/claude-opus-9":{"name":"Claude Opus 9","release_date":"2027-01-01"}
+        }"#,
+    );
+    assert_eq!(
+        unlabeled.order_model_ids([
+            "claude-haiku-9",
+            "gpt-5.6-luna",
+            "claude-opus-9",
+            "gpt-9-sol",
+        ]),
+        [
+            "gpt-9-sol",
+            "gpt-5.6-luna",
+            "claude-opus-9",
+            "claude-haiku-9"
+        ]
+    );
 }
 
 #[test]

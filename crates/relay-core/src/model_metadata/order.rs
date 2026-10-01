@@ -53,11 +53,10 @@ pub(super) fn family_order(
             });
     }
 
-    // Sibling families in one numbered model generation form a catalog
-    // cohort. Rank that cohort by its newest release, then order its
-    // variants by their stable metadata family IDs. A newer sibling such
-    // as GPT-6 Sol must not leapfrog GPT-6 Astra just because it launched
-    // later.
+    // Unknown sibling families that share one numbered generation form a
+    // catalog cohort. They keep that cohort's newest release, then sort by
+    // family ID. Canonical tiers such as Astra before Sol are not decided
+    // here; known_family_rank owns that order across versions.
     let mut cohort_releases = BTreeMap::new();
     for ((provider, _), order) in &families {
         let Some(generation) = &order.generation else {
@@ -98,6 +97,7 @@ pub(super) fn compare_metadata(
                     artificial_analysis_rank(left_id).cmp(&artificial_analysis_rank(right_id))
                 })
                 .then_with(|| compare_families(left_key, left, right, family_order))
+                .then_with(|| compare_model_product_tiers(left_key, left_id, right_id))
                 .then_with(|| compare_model_dates(left, right))
         }
         (Some(left_key), Some(right_key)) => company_order(left_key)
@@ -167,13 +167,11 @@ fn compare_families(
         (Some(left), Some(right)) if left != right => {
             let left_order = &families[&(provider.to_string(), left.clone())];
             let right_order = &families[&(provider.to_string(), right.clone())];
-            // Release dates are useful for versions within one family, but
-            // they are not a stable ranking for sibling product families.
-            // Anthropic can publish a newer Opus before a newer Fable while
-            // the picker still needs to keep the product families together in
-            // Relay's canonical order: Fable, Opus, Sonnet, Haiku. New or
-            // provider-specific families remain after the known families and
-            // continue to use the metadata date/ID tie-breakers below.
+            // Release dates order versions inside one family. They do not
+            // rank sibling product families. OpenAI stays Astra, Sol, Terra,
+            // then Luna. Anthropic stays Fable, Opus, Sonnet, then Haiku,
+            // even when a lower tier ships later. Unknown families stay after
+            // the known lineup and use the date and family-name tie-breakers.
             compare_known_family_order(provider, &left, &right)
                 .then_with(|| {
                     compare_optional_date_desc(
@@ -202,37 +200,77 @@ fn compare_known_family_order(provider: &str, left: &str, right: &str) -> Orderi
 
 /// Stable product-family precedence used only where the provider exposes a
 /// canonical tier order that release dates cannot represent. This deliberately
-/// ranks family labels, not individual model IDs, so future versions inherit
-/// the same placement automatically and unknown families remain discoverable.
+/// ranks family labels, not individual model IDs, so a future version of the
+/// same catalog family inherits its place and unknown families stay after the
+/// known lineup.
 fn known_family_rank(provider: &str, family: &str) -> Option<u8> {
-    if provider != "anthropic" {
-        return None;
-    }
-    let family = family.strip_prefix("claude-").unwrap_or(family);
-    match family {
-        "fable" => Some(0),
-        "opus" => Some(1),
-        "sonnet" => Some(2),
-        "haiku" => Some(3),
+    let normalized = normalize(family);
+    let stripped = match provider {
+        "anthropic" => normalized.strip_prefix("claude-").unwrap_or(&normalized),
+        "openai" => normalized.strip_prefix("gpt-").unwrap_or(&normalized),
+        _ => return None,
+    };
+    // Family labels are not always the bare tier. `gpt-5.6-sol` and a future
+    // `gpt-8-sol` are still Sol; a shared `gpt` family carries no tier.
+    tier_token_rank(provider, stripped).or_else(|| {
+        normalized
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .find_map(|token| tier_token_rank(provider, token))
+    })
+}
+
+fn tier_token_rank(provider: &str, token: &str) -> Option<u8> {
+    match provider {
+        "anthropic" => match token {
+            "fable" => Some(0),
+            "opus" => Some(1),
+            "sonnet" => Some(2),
+            "haiku" => Some(3),
+            _ => None,
+        },
+        "openai" => match token {
+            "astra" => Some(0),
+            "sol" => Some(1),
+            "terra" => Some(2),
+            "luna" => Some(3),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// Same-family and unlabeled rows still need the product tier. Alphabetical
+/// ids put Luna before Sol, and a newer release date would do the same.
+fn compare_model_product_tiers(provider: &str, left_id: &str, right_id: &str) -> Ordering {
+    let left = model_product_tier(provider, left_id);
+    let right = model_product_tier(provider, right_id);
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn model_product_tier(provider: &str, id: &str) -> Option<u8> {
+    let normalized = normalize(id);
+    let leaf = catalog_model_leaf(strip_reasoning_effort(&normalized));
+    known_family_rank(provider, leaf)
 }
 
 /// Image-generation models stay after every text model from the same company.
 /// A newer image release must not sit between chat families. Vision-capable
 /// chat models still output text, so they keep their normal family position.
-/// Same Artificial Analysis snapshot as the public catalog, 2026-09-29.
-/// Text lines follow Intelligence Index and image lines follow Text-to-Image
-/// Elo. The rank is the exact line after a reasoning-effort suffix is removed.
-/// A shared family token is not enough: `gpt-5.6-sol` is not the `gpt-6-sol`
-/// line. Unknown models compare as equal here and keep the existing family
-/// and date order after known lines.
+/// Known image lines follow the 2026-09-29 Text-to-Image Elo snapshot after a
+/// reasoning-effort suffix is removed. Text models compare as equal here:
+/// OpenAI and Anthropic product tiers come from `known_family_rank`, so a new
+/// version does not need its own ID in this list.
 fn artificial_analysis_rank(model: &str) -> u32 {
     let model = catalog_model_leaf(strip_reasoning_effort(model));
     if model.starts_with("gpt-image-") || model.starts_with("dall-e") {
         return artificial_analysis_image_rank(model);
     }
-    artificial_analysis_text_rank(model)
+    0
 }
 
 fn catalog_model_leaf(model: &str) -> &str {
@@ -258,17 +296,6 @@ fn strip_reasoning_effort(model: &str) -> &str {
         }
     }
     model
-}
-
-fn artificial_analysis_text_rank(model: &str) -> u32 {
-    match model {
-        "gpt-6-astra" => 0,
-        "gpt-6.1-sol" | "gpt-6-1-sol" => 1,
-        "gpt-6-sol" => 2,
-        "gpt-5.6-terra" => 3,
-        "gpt-6-luna" => 4,
-        _ => u32::MAX,
-    }
 }
 
 fn artificial_analysis_image_rank(model: &str) -> u32 {
