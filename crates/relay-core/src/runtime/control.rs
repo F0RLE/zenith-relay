@@ -11,6 +11,7 @@ pub(crate) const DEFAULT_ROUTE_RECOVERY_WINDOW_MS: u64 = 30_000;
 pub(crate) struct RuntimeControl {
     codex_background_tasks_enabled: AtomicBool,
     codex_websockets_enabled: AtomicBool,
+    block_degraded_routes_enabled: AtomicBool,
     route_recovery_enabled: AtomicBool,
     route_recovery_window_ms: AtomicU64,
     request_origins: Mutex<BTreeMap<String, &'static str>>,
@@ -21,6 +22,7 @@ impl Default for RuntimeControl {
         Self {
             codex_background_tasks_enabled: AtomicBool::new(true),
             codex_websockets_enabled: AtomicBool::new(true),
+            block_degraded_routes_enabled: AtomicBool::new(true),
             route_recovery_enabled: AtomicBool::new(false),
             route_recovery_window_ms: AtomicU64::new(DEFAULT_ROUTE_RECOVERY_WINDOW_MS),
             request_origins: Mutex::new(BTreeMap::new()),
@@ -44,6 +46,15 @@ impl RuntimeControl {
 
     pub(crate) fn set_codex_websockets_enabled(&self, enabled: bool) {
         self.codex_websockets_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn block_degraded_routes_enabled(&self) -> bool {
+        self.block_degraded_routes_enabled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_block_degraded_routes_enabled(&self, enabled: bool) {
+        self.block_degraded_routes_enabled
             .store(enabled, Ordering::Release);
     }
 
@@ -147,6 +158,7 @@ mod tests {
         let control = RuntimeControl::default();
         assert!(control.codex_background_tasks_enabled());
         assert!(control.codex_websockets_enabled());
+        assert!(control.block_degraded_routes_enabled());
         assert!(!control.route_recovery_enabled());
     }
 

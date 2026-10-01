@@ -233,3 +233,46 @@ async fn streaming_chat_usage_captures_cached_prompt_tokens() {
     assert_eq!(events[0].total_tokens, Some(38));
     assert_eq!(events[0].applied_service_tier, Some("default".to_string()));
 }
+
+#[tokio::test]
+async fn response_deltas_forward_immediately_and_keep_terminal_usage() {
+    let empty =
+        Bytes::from_static(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n");
+    let delta = Bytes::from_static(
+        b"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\n",
+    );
+    let done = Bytes::from_static(
+        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n",
+    );
+    let mut combined = Vec::new();
+    combined.extend_from_slice(&empty);
+    combined.extend_from_slice(&delta);
+    combined.extend_from_slice(&done);
+
+    for input in [
+        vec![
+            Ok::<_, Infallible>(empty.clone()),
+            Ok(delta.clone()),
+            Ok(done.clone()),
+        ],
+        combined
+            .chunks(5)
+            .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>(),
+    ] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut stream = usage_stream_with_events(stream::iter(input), events.clone());
+        let mut forwarded = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            forwarded.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(forwarded, combined);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].success);
+        assert!(events[0].ttft_ms.is_some());
+        assert_eq!(events[0].input_tokens, Some(3));
+        assert_eq!(events[0].output_tokens, Some(2));
+        assert_eq!(events[0].total_tokens, Some(5));
+    }
+}

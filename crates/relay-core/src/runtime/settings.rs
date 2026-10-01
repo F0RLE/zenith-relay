@@ -74,6 +74,29 @@ impl GatewayRuntime {
         self.control.set_codex_websockets_enabled(enabled);
     }
 
+    pub fn block_degraded_routes_enabled(&self) -> bool {
+        self.control.block_degraded_routes_enabled()
+    }
+
+    pub fn set_block_degraded_routes_enabled(&self, enabled: bool) {
+        self.control.set_block_degraded_routes_enabled(enabled);
+    }
+
+    /// Internal downgrade ids stay ordinary missing models while this is off.
+    pub(crate) fn effective_upstream_category<'a>(&self, category: &'a str) -> &'a str {
+        if category == crate::error_codes::UPSTREAM_ROUTE_DEGRADED
+            && !self.block_degraded_routes_enabled()
+        {
+            crate::error_codes::UPSTREAM_MODEL_NOT_FOUND
+        } else {
+            category
+        }
+    }
+
+    pub(crate) fn degraded_route_blocked(&self, model: &str) -> bool {
+        self.block_degraded_routes_enabled() && crate::is_degraded_route_model(model)
+    }
+
     pub fn route_recovery_enabled(&self) -> bool {
         self.control.route_recovery_enabled()
     }

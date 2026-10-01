@@ -215,7 +215,8 @@ pub(super) async fn execute(
             .await
             .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
     if !status.is_success() {
-        let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        super::errors::apply_degraded_route_policy(runtime, &mut failure);
         return Err(Box::new((failure, headers)));
     }
     let body = compact_output(&bytes).map_err(|failure| Box::new((failure, headers.clone())))?;

@@ -52,6 +52,8 @@ pub struct GatewaySettings {
     /// clients. Retained so existing local settings survive upgrades.
     #[serde(default)]
     pub chatgpt_retry_until_available: bool,
+    #[serde(default = "default_block_degraded_routes_enabled")]
+    pub block_degraded_routes_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_refresh_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +95,7 @@ impl Default for GatewaySettings {
             codex_background_tasks_enabled: true,
             codex_websockets_enabled: true,
             chatgpt_retry_until_available: false,
+            block_degraded_routes_enabled: true,
             catalog_refresh_error: None,
             catalog_refresh_error_at_ms: None,
             hidden_models: Vec::new(),
@@ -187,6 +190,10 @@ fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {
 }
 
 fn default_codex_background_tasks_enabled() -> bool {
+    true
+}
+
+fn default_block_degraded_routes_enabled() -> bool {
     true
 }
 

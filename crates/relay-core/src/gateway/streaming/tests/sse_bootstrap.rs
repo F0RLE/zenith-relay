@@ -63,7 +63,7 @@ async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output
         "data: {\"type\":\"response.incomplete\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
     );
     let (upstream, server) = response_from_sse_event(event.into()).await;
-    let failure = bootstrap_stream(upstream)
+    let failure = bootstrap_stream(upstream, false)
         .await
         .err()
         .expect("empty incomplete stream must not commit client output");
@@ -81,7 +81,7 @@ async fn bootstrap_does_not_commit_an_opaque_compaction_before_disconnect() {
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}}\n\n"
     );
     let (upstream, server) = response_from_sse_event(event.into()).await;
-    let failure = bootstrap_stream(upstream)
+    let failure = bootstrap_stream(upstream, false)
         .await
         .err()
         .expect("compaction alone must remain retryable");
@@ -97,7 +97,7 @@ async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
     let event =
         format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{delta}\"}}\n\n");
     let (upstream, server) = response_from_sse_event(event).await;
-    let result = bootstrap_stream(upstream).await;
+    let result = bootstrap_stream(upstream, false).await;
     server.await.unwrap();
     assert!(
         result.is_ok(),
@@ -278,4 +278,56 @@ async fn quiet_stream_keeps_sending_heartbeats_until_provider_completion() {
     assert!(events[0].success);
     assert_eq!(events[0].total_tokens, Some(3));
     assert_eq!(events[0].cached_input_tokens, None);
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_a_degraded_served_model_before_output_is_committed() {
+    let event = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra-degrade2-luna\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hidden\"}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let failure = bootstrap_stream(upstream, true)
+        .await
+        .err()
+        .expect("degraded model must not commit client output");
+    server.await.unwrap();
+
+    assert_eq!(failure.failure.category, "upstream_route_degraded");
+    assert_eq!(failure.failure.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::NotSent
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_forwards_a_degraded_model_when_blocking_is_off() {
+    let event = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra-degrade2-luna\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let opened = bootstrap_stream(upstream, false).await;
+    server.await.unwrap();
+    let (_, buffered, _) = match opened {
+        Ok(opened) => opened,
+        Err(failure) => panic!(
+            "blocking off keeps the upstream stream, got {}",
+            failure.failure.category
+        ),
+    };
+    assert!(buffered.windows(7).any(|window| window == b"visible"));
+}
+
+#[tokio::test]
+async fn bootstrap_accepts_the_requested_model_name() {
+    let event = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let result = bootstrap_stream(upstream, true).await;
+    server.await.unwrap();
+    assert!(result.is_ok(), "a normal served model is not a downgrade");
 }

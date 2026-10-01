@@ -112,6 +112,15 @@ pub(in crate::gateway) enum TerminalOutcome {
     Failure,
 }
 
+/// OpenAI names the model it actually served on `model` or `response.model`.
+/// Only those fields count: a `degradeN` token anywhere else can be user text.
+pub(in crate::gateway) fn served_model_is_degraded(value: &Value) -> bool {
+    [value.get("model"), value.pointer("/response/model")]
+        .into_iter()
+        .filter_map(|model| model.and_then(Value::as_str))
+        .any(crate::is_degraded_route_model)
+}
+
 pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     let data = crate::protocol::sse_data(event);
     let event_name = crate::protocol::sse_lines(event)

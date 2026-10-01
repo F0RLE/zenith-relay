@@ -52,9 +52,9 @@ pub mod usage;
 pub use catalog::{
     apply_codex_ultra_from_official_model, canonicalize_model_ids, canonicalize_reasoning_levels,
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias,
-    deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
-    merge_model_display_order, model_id_key, normalize_bounded_model_ids,
+    codex_model_is_picker_eligible, codex_model_is_picker_eligible_for, decode_codex_model_alias,
+    deserialize_model_reasoning_allowed_levels, is_degraded_route_model, is_valid_model_id,
+    is_valid_model_token, merge_model_display_order, model_id_key, normalize_bounded_model_ids,
     normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, publish_routed_codex_context, reasoning_level_rank,

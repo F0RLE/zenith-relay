@@ -43,8 +43,11 @@ mod bridge;
 mod completion;
 mod diagnostics;
 mod events;
+mod fast_delta;
 mod replay;
 mod upstream_usage;
+
+pub(in crate::gateway) use fast_delta::{fast_response_delta_json, FastResponseDelta};
 
 use bridge::{bridge_adapter_stream, bridge_gemini_stream, bridge_messages_stream};
 
@@ -53,11 +56,13 @@ pub(super) use replay::NativeReplayCapture;
 pub(super) use events::{
     has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
     is_known_non_output_event, parse_sse_event, preserved_stream_error, rewrite_bridge_failure,
-    TerminalEvent, TerminalOutcome,
+    served_model_is_degraded, TerminalEvent, TerminalOutcome,
 };
 
 mod bootstrap;
-pub(super) use bootstrap::{bootstrap_stream, StreamBootstrapFailure};
+pub(super) use bootstrap::{
+    bootstrap_stream, degraded_route_stream_failure, StreamBootstrapFailure,
+};
 
 /// Owns the work after an upstream stream has emitted client-visible output.
 /// From this point the response is committed and no fallback is legal.

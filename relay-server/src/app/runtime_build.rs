@@ -49,6 +49,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
     let chatgpt_retry_until_available = state.store.chatgpt_retry_until_available()?;
+    let block_degraded_routes_enabled = state.store.block_degraded_routes_enabled()?;
     let (mut pool_source_ids, mut pool_account_ids) =
         pool_member_ids(&source_records, &account_records);
     if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
@@ -122,6 +123,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(codex_websockets_enabled);
     runtime.set_route_recovery_enabled(chatgpt_retry_until_available);
+    runtime.set_block_degraded_routes_enabled(block_degraded_routes_enabled);
     let breaker_store = state.store.clone();
     runtime.set_chatgpt_team_breaker_callback(move |account_ids| {
         let _ = breaker_store.block_accounts_for_team(&account_ids);

@@ -48,6 +48,25 @@ pub async fn set_chatgpt_retry_until_available(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlockDegradedRoutesInput {
+    enabled: bool,
+}
+
+pub async fn set_block_degraded_routes(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<BlockDegradedRoutesInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    commit_runtime_flag(
+        &state,
+        input.enabled,
+        Store::block_degraded_routes_enabled,
+        Store::set_block_degraded_routes_enabled,
+        GatewayRuntime::set_block_degraded_routes_enabled,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexWebsocketsInput {
     enabled: bool,
 }

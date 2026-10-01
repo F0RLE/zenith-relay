@@ -1,4 +1,5 @@
 use super::*;
+use crate::codex_model_is_picker_eligible;
 use serde_json::json;
 
 #[test]

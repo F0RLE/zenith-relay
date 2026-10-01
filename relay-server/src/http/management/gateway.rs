@@ -10,7 +10,8 @@ mod settings;
 use diagnose::diagnose_gateway;
 use lifecycle::{start_gateway, stop_gateway};
 use settings::{
-    set_chatgpt_retry_until_available, set_codex_background_tasks, set_codex_websockets,
+    set_block_degraded_routes, set_chatgpt_retry_until_available, set_codex_background_tasks,
+    set_codex_websockets,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -25,6 +26,10 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route(
             "/gateway/chatgpt-retry-until-available",
             post(set_chatgpt_retry_until_available),
+        )
+        .route(
+            "/gateway/block-degraded-routes",
+            post(set_block_degraded_routes),
         )
         .route("/gateway/codex-websockets", post(set_codex_websockets))
 }

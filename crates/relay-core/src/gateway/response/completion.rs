@@ -7,6 +7,7 @@ use serde_json::Value;
 pub(in crate::gateway) fn completed_upstream_response(
     bytes: &[u8],
     account_stream: bool,
+    block_degraded_routes: bool,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
         let response = value.get("response").unwrap_or(&value);
@@ -25,6 +26,11 @@ pub(in crate::gateway) fn completed_upstream_response(
                 ..failure.into()
             }));
         }
+        if block_degraded_routes && super::super::streaming::served_model_is_degraded(&value) {
+            return Err(Box::new(
+                super::super::streaming::degraded_route_stream_failure(),
+            ));
+        }
         return Ok(bytes.to_vec());
     }
     if !account_stream {
@@ -35,6 +41,16 @@ pub(in crate::gateway) fn completed_upstream_response(
     let mut saw_output = false;
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
+        if block_degraded_routes
+            && terminal
+                .payload
+                .as_ref()
+                .is_some_and(super::super::streaming::served_model_is_degraded)
+        {
+            return Err(Box::new(
+                super::super::streaming::degraded_route_stream_failure(),
+            ));
+        }
         if terminal.has_data && !terminal.valid {
             return Err(Box::new(StreamBootstrapFailure {
                 upstream_error: terminal.upstream_error,

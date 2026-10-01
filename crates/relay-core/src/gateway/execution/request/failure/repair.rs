@@ -57,6 +57,7 @@ pub(super) fn repair_collected_rejection(
         native_replay: native_replay_attempted,
         stale_tool_history: stale_tool_history_recovered,
         model_switch_reset: model_switch_reset_attempted,
+        ..
     } = repairs;
     if try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
         request,
@@ -92,7 +93,8 @@ pub(super) fn repair_collected_rejection(
         lease.settle_rotation_repair(now_ms());
         return AfterRepair::Step(FailureStep::Continue);
     }
-    let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+    let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+    super::super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
     *last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
     let upstream_error =
         crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);

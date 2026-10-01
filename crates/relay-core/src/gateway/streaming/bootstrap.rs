@@ -35,8 +35,24 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
     clippy::result_large_err,
     reason = "The bounded bootstrap failure carries the diagnostics needed for retry and response ownership."
 )]
+pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFailure {
+    let failure = AttemptFailure::classified_with_hint(
+        upstream_failure_status(error_codes::UPSTREAM_ROUTE_DEGRADED),
+        error_codes::UPSTREAM_ROUTE_DEGRADED,
+        Default::default(),
+    );
+    // `From<AttemptFailure>` marks the attempt unknown. This rejection is
+    // proven before any client byte, so rotation may try another account.
+    let execution = failure.execution;
+    StreamBootstrapFailure {
+        execution,
+        ..failure.into()
+    }
+}
+
 pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
+    block_degraded_routes: bool,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
@@ -67,6 +83,17 @@ pub(in crate::gateway) async fn bootstrap_stream(
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
+                    if block_degraded_routes
+                        && event
+                            .payload
+                            .as_ref()
+                            .is_some_and(super::served_model_is_degraded)
+                    {
+                        // The served model is known, and this buffer has not
+                        // reached the client. Drop the attempt, including a
+                        // later delta that arrived in the same chunk.
+                        return Err(degraded_route_stream_failure());
+                    }
                     if event.has_data && !event.valid {
                         return Err(StreamBootstrapFailure {
                             upstream_error: event.upstream_error,

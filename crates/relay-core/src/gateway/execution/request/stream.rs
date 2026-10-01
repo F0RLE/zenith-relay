@@ -106,7 +106,12 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
         requested_model,
         prompt_affinity_key,
     };
-    match bootstrap_stream(upstream).await {
+    match bootstrap_stream(
+        upstream,
+        route.account_id.is_some() && runtime.block_degraded_routes_enabled(),
+    )
+    .await
+    {
         Ok((headers, first, remaining)) => {
             let account_route = route.account_id.is_some();
             respond_opened_stream(

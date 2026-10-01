@@ -160,6 +160,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
     runtime.set_route_recovery_enabled(settings.chatgpt_retry_until_available);
+    runtime.set_block_degraded_routes_enabled(settings.block_degraded_routes_enabled);
     runtime
         .set_model_service_tier_overrides(settings.model_service_tier_overrides)
         .map_err(core_error)?;

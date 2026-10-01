@@ -44,6 +44,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 "upstream_model_not_found",
             ),
             (
+                StatusCode::NOT_FOUND,
+                br#"{"error":{"code":"model_not_found","message":"The model `gpt-6-astra-degrade2-luna-1p-codexswic-ev3` does not exist or you do not have access to it."}}"#.as_slice(),
+                "upstream_route_degraded",
+            ),
+            (
                 StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"unsupported_parameter"}}"#.as_slice(),
                 "upstream_unsupported_request",

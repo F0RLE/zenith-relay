@@ -74,6 +74,23 @@ test("old remote server does not advertise cross-protocol route recovery", async
   await expect(page.getByRole("checkbox", { name: "Wait for route recovery" })).toHaveCount(0);
 });
 
+test("API degraded-route switch is on for ChatGPT accounts and saves immediately", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await openGatewayApi(page);
+  const toggle = page.getByRole("checkbox", { name: "Degraded routes", exact: true });
+  await expect(toggle).toBeChecked();
+  await expect(page.getByText("For ChatGPT accounts. Do not send a request when OpenAI replaces the model with an internal downgrade id.")).toBeVisible();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  const values = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { enabled?: boolean } } }>;
+  }).__TAURI_TEST_INVOKES__
+    .filter((call) => call.command === "set_local_block_degraded_routes")
+    .map((call) => call.args.input?.enabled));
+  expect(values).toEqual([false]);
+});
+
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false, importDescription: "# Seller package\n\n- Two Business accounts" });
   await page.goto("/");

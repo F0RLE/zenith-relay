@@ -92,7 +92,16 @@ pub fn decode_codex_model_alias(alias: &str) -> Option<String> {
 }
 
 pub fn codex_model_is_picker_eligible(model: &str) -> bool {
+    codex_model_is_picker_eligible_for(model, true)
+}
+
+/// Picker eligibility with the operator policy for internal downgrade ids.
+/// Media and transport exclusions stay in place when that policy is off.
+pub fn codex_model_is_picker_eligible_for(model: &str, block_degraded_routes: bool) -> bool {
     if !valid_model_id(model) {
+        return false;
+    }
+    if block_degraded_routes && super::order::is_degraded_route_model(model) {
         return false;
     }
     let id = crate::model_id_key(model);

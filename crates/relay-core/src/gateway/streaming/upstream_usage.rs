@@ -19,8 +19,19 @@ impl UpstreamUsage {
             self.pending.clear();
             return;
         }
+        let bytes = if self.pending.is_empty() {
+            skip_aligned_response_deltas(bytes)
+        } else {
+            bytes
+        };
+        if bytes.is_empty() {
+            return;
+        }
         self.pending.extend_from_slice(bytes);
         while let Some(frame) = crate::protocol::take_sse_event(&mut self.pending) {
+            if super::fast_delta::fast_response_delta(&frame).is_some() {
+                continue;
+            }
             let parsed = parse_sse_event(&frame);
             if let Some(usage) = parsed.usage {
                 apply_usage(&mut self.event, &usage);
@@ -45,6 +56,20 @@ impl UpstreamUsage {
             .applied_service_tier
             .clone_from(&self.event.applied_service_tier);
     }
+}
+
+fn skip_aligned_response_deltas(bytes: &[u8]) -> &[u8] {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let Some(end) = crate::protocol::sse_event_end(&bytes[offset..]) else {
+            break;
+        };
+        if super::fast_delta::fast_response_delta(&bytes[offset..offset + end]).is_none() {
+            break;
+        }
+        offset += end;
+    }
+    &bytes[offset..]
 }
 
 #[cfg(test)]
@@ -84,5 +109,26 @@ mod tests {
         assert_eq!(event.cached_input_tokens, None);
         assert_eq!(event.cache_write_input_tokens, None);
         assert_eq!(event.cache_write_ttl, None);
+    }
+
+    #[test]
+    fn response_deltas_keep_terminal_usage_and_explicit_delta_usage() {
+        let mut capture = UpstreamUsage::new(crate::gateway::test_support::test_usage_event());
+        let frames = b"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n";
+        for chunk in frames.chunks(4) {
+            capture.observe(chunk);
+        }
+        let mut event = crate::gateway::test_support::test_usage_event();
+        capture.apply_to(&mut event);
+        assert_eq!(event.input_tokens, Some(3));
+        assert_eq!(event.output_tokens, Some(2));
+        assert_eq!(event.total_tokens, Some(5));
+
+        let mut capture = UpstreamUsage::new(crate::gateway::test_support::test_usage_event());
+        capture.observe(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1,\"total_tokens\":10}}\n\n");
+        let mut event = crate::gateway::test_support::test_usage_event();
+        capture.apply_to(&mut event);
+        assert_eq!(event.input_tokens, Some(9));
+        assert_eq!(event.output_tokens, Some(1));
     }
 }

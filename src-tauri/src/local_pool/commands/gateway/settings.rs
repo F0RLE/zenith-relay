@@ -69,6 +69,12 @@ pub struct SetCodexWebsocketsInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetBlockDegradedRoutesInput {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetChatgptRetryUntilAvailableInput {
     enabled: bool,
 }
@@ -159,6 +165,23 @@ pub async fn set_local_chatgpt_retry_until_available(
         |gateway| gateway.chatgpt_retry_until_available,
         |gateway, enabled| gateway.chatgpt_retry_until_available = enabled,
         GatewayRuntime::set_route_recovery_enabled,
+    )
+    .await
+}
+
+/// Keeps OpenAI internal downgrade ids out of ChatGPT account routing.
+/// Turning it off restores ordinary delivery and model-not-found handling.
+#[tauri::command]
+pub async fn set_local_block_degraded_routes(
+    input: SetBlockDegradedRoutesInput,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    save_gateway_flag(
+        state.inner(),
+        input.enabled,
+        |gateway| gateway.block_degraded_routes_enabled,
+        |gateway, enabled| gateway.block_degraded_routes_enabled = enabled,
+        GatewayRuntime::set_block_degraded_routes_enabled,
     )
     .await
 }

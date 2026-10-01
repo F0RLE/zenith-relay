@@ -26,7 +26,7 @@ fn buffered_json_and_account_stream_keep_original_failure_details() {
             "Constraint check failed",
         ),
     ] {
-        let failure = completed_upstream_response(body, account_stream).unwrap_err();
+        let failure = completed_upstream_response(body, account_stream, false).unwrap_err();
         let details = failure.upstream_error.unwrap();
         assert_eq!(details.code.as_deref(), Some(expected_code));
         assert_eq!(details.message.as_deref(), Some(expected_message));
@@ -194,4 +194,16 @@ fn proxy_keeps_safe_native_retry_and_request_headers_only() {
     assert!(response.headers().get("authorization").is_none());
     assert!(response.headers().get("set-cookie").is_none());
     assert!(response.headers().get("server").is_none());
+}
+
+#[test]
+fn buffered_success_with_a_degraded_model_stays_retryable_only_while_blocking() {
+    let body = br#"{"id":"resp_test","model":"gpt-6-astra-degrade2","output":[]}"#;
+    let failure = completed_upstream_response(body, false, true).unwrap_err();
+    assert_eq!(failure.failure.category, "upstream_route_degraded");
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::NotSent
+    );
+    assert!(completed_upstream_response(body, false, false).is_ok());
 }

@@ -390,7 +390,11 @@ async fn read_completed_body(
             return Err(CompletionStep::Continue);
         }
     };
-    match completed_upstream_response(&bytes, read.account_route) {
+    match completed_upstream_response(
+        &bytes,
+        read.account_route,
+        read.account_route && read.runtime.block_degraded_routes_enabled(),
+    ) {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
             let mut failure = upstream_failure.failure;

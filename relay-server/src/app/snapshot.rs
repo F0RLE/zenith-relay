@@ -70,6 +70,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let codex_background_tasks_enabled = state.store.codex_background_tasks_enabled()?;
     let codex_websockets_enabled = state.store.codex_websockets_enabled()?;
     let chatgpt_retry_until_available = state.store.chatgpt_retry_until_available()?;
+    let block_degraded_routes_enabled = state.store.block_degraded_routes_enabled()?;
     let running = state.store.gateway_enabled()? && runtime.is_some();
     let routing_order = runtime
         .as_ref()
@@ -193,6 +194,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             codex_background_tasks_enabled,
             codex_websockets_enabled,
             chatgpt_retry_until_available,
+            block_degraded_routes_enabled,
             routing_order,
         },
         platform: std::env::consts::OS.to_string(),

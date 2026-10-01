@@ -35,6 +35,7 @@ pub(crate) fn retryable_failure(
                 | error_codes::UPSTREAM_FORBIDDEN
                 | error_codes::UPSTREAM_REGION_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_ROUTE_DEGRADED
                 | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
                 | error_codes::UPSTREAM_QUOTA_EXHAUSTED

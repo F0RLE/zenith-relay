@@ -15,6 +15,9 @@ impl GatewayRuntime {
             Some(prefix) => strip_prefix_ignore_ascii_case(model, &format!("{prefix}/"))?,
             None => model,
         };
+        if self.degraded_route_blocked(model) {
+            return None;
+        }
         (key.model_rules.allows(model) && self.model_enabled(model)).then(|| model.to_string())
     }
 
@@ -130,7 +133,11 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
-            .filter(|model| key.model_rules.allows(model) && self.model_enabled(model))
+            .filter(|model| {
+                !self.degraded_route_blocked(model)
+                    && key.model_rules.allows(model)
+                    && self.model_enabled(model)
+            })
             .collect::<Vec<_>>();
         let order = self
             .model_display_order

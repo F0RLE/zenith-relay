@@ -47,14 +47,21 @@ impl NativeReplayCapture {
             || kind == Some("response.output_item.added")
             || kind.is_some_and(|kind| kind.starts_with("response.") && kind.ends_with(".delta"))
         {
-            if let Some(index) = index {
-                self.pending.insert(index);
-                if self.pending.len() > MAX_CAPTURE_ITEMS {
-                    self.disable();
-                }
-            } else {
-                self.unindexed_output = true;
+            self.observe_response_delta(index);
+        }
+    }
+
+    pub(in crate::gateway) fn observe_response_delta(&mut self, output_index: Option<u64>) {
+        if self.disabled {
+            return;
+        }
+        if let Some(index) = output_index {
+            self.pending.insert(index);
+            if self.pending.len() > MAX_CAPTURE_ITEMS {
+                self.disable();
             }
+        } else {
+            self.unindexed_output = true;
         }
     }
 
@@ -171,5 +178,26 @@ mod tests {
         assert!(capture
             .finish(Some(json!({"id":"resp_large","output":[]})), None)
             .is_none());
+    }
+
+    #[test]
+    fn response_delta_index_tracking_does_not_need_the_payload_tree() {
+        let mut from_payload = NativeReplayCapture::default();
+        let mut from_index = NativeReplayCapture::default();
+        from_payload
+            .observe(&json!({"type":"response.output_text.delta","output_index":2,"delta":"x"}));
+        from_index.observe_response_delta(Some(2));
+        assert_eq!(from_payload.pending, from_index.pending);
+        assert_eq!(from_payload.unindexed_output, from_index.unindexed_output);
+
+        let mut unindexed_payload = NativeReplayCapture::default();
+        let mut unindexed_fast = NativeReplayCapture::default();
+        unindexed_payload
+            .observe(&json!({"type":"response.function_call_arguments.delta","delta":"{"}));
+        unindexed_fast.observe_response_delta(None);
+        assert!(unindexed_payload.unindexed_output);
+        assert!(unindexed_fast.unindexed_output);
+        assert!(unindexed_payload.pending.is_empty());
+        assert!(unindexed_fast.pending.is_empty());
     }
 }

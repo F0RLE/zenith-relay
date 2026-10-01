@@ -5,9 +5,9 @@ import { relayCommands } from "../../api/commands";
 import { ActionMenu, ActionMenuItem, CopyButton, EmptyState, IconButton, copyText, useConfirm } from "../../components/Ui";
 import { sourcePort } from "../../sourceUrl";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { ToolPolicyControl } from "./ToolPolicyControl";
 import { ModelProtectionControl } from "./ModelProtectionControl";
 import { RouteRecoveryControl } from "./RouteRecoveryControl";
+import { DegradedRoutesControl } from "./DegradedRoutesControl";
 
 export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: string }) {
   const { t } = useTranslation();
@@ -108,8 +108,8 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
             <IconButton type="submit" icon={<Save aria-hidden />} label={running ? t("gateway.applyRestart") : t("common.save")} disabled={!canSavePort} busy={savingPort} />
           </div>
         </form> : null}
-        <ToolPolicyControl />
         <ModelProtectionControl />
+        <DegradedRoutesControl />
         <RouteRecoveryControl />
       </div>
     </div>

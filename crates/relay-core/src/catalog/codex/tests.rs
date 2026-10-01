@@ -27,6 +27,13 @@ fn relay_aliases_are_exact_and_media_models_stay_out_of_codex() {
     assert_eq!(codex_model_display_name(model), "Claude Opus 4.8");
     assert!(codex_model_is_picker_eligible(model));
     assert!(!codex_model_is_picker_eligible("gpt-image-2"));
+    assert!(!codex_model_is_picker_eligible(
+        "gpt-6-astra-degrade2-luna-1p-codexswic-ev3"
+    ));
+    assert!(codex_model_is_picker_eligible_for(
+        "gpt-6-astra-degrade2-luna-1p-codexswic-ev3",
+        false
+    ));
     assert!(decode_codex_model_alias("zenith/not-base64!").is_none());
 }
 

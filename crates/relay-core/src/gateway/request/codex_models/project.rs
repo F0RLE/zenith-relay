@@ -55,7 +55,10 @@ pub(super) fn build_codex_models_response_from_manifests(
                 continue;
             };
             if !is_valid_model_id(slug)
-                || !codex_model_is_picker_eligible(slug)
+                || !codex_model_is_picker_eligible_for(
+                    slug,
+                    runtime.block_degraded_routes_enabled(),
+                )
                 || object
                     .get("visibility")
                     .and_then(Value::as_str)
@@ -78,7 +81,10 @@ pub(super) fn build_codex_models_response_from_manifests(
 
     let mut models = Vec::with_capacity(visible.len());
     for (index, (normalized, (upstream_id, display_id))) in visible.into_iter().enumerate() {
-        if !codex_model_is_picker_eligible(&upstream_id) {
+        if !codex_model_is_picker_eligible_for(
+            &upstream_id,
+            runtime.block_degraded_routes_enabled(),
+        ) {
             continue;
         }
         let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);

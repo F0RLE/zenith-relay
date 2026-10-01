@@ -33,6 +33,7 @@ pub enum Feature {
     CodexWebsockets,
     ChatgptRetryUntilAvailable,
     RouteRecovery,
+    BlockDegradedRoutes,
     ToolPolicy,
     Images,
 }
@@ -69,6 +70,7 @@ impl Feature {
             // The wire feature name predates support for all four text protocols.
             Self::ChatgptRetryUntilAvailable => "chatgpt_retry_until_available",
             Self::RouteRecovery => "route_recovery_v1",
+            Self::BlockDegradedRoutes => "block_degraded_routes",
             Self::ToolPolicy => "tool_policy_v1",
             Self::Images => "images",
         }
@@ -139,6 +141,7 @@ impl Capabilities {
             Feature::CodexWebsockets,
             Feature::ChatgptRetryUntilAvailable,
             Feature::RouteRecovery,
+            Feature::BlockDegradedRoutes,
             Feature::ToolPolicy,
             Feature::Images,
         ]

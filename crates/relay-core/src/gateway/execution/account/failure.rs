@@ -135,7 +135,8 @@ fn repair_account_body(input: &mut AccountStatusFailureInput<'_>) -> Option<Acco
 }
 
 fn classify_account_failure(input: &mut AccountStatusFailureInput<'_>) -> ClassifiedAccountFailure {
-    let failure = AttemptFailure::status_with_body(input.status, Some(&input.bytes));
+    let mut failure = AttemptFailure::status_with_body(input.status, Some(&input.bytes));
+    super::super::super::errors::apply_degraded_route_policy(input.runtime, &mut failure);
     if input.status == StatusCode::PAYMENT_REQUIRED
         && input.route.account_id.is_some()
         && is_deactivated_workspace(&input.bytes)

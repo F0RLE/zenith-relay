@@ -177,3 +177,17 @@ fn empty_incomplete_requires_explicit_zero_tokens_and_no_output() {
     assert!(!is_empty_responses_incomplete(&empty, true, 0));
     assert!(!is_empty_responses_incomplete(&empty, false, 1));
 }
+
+#[test]
+fn only_the_served_model_field_marks_a_degraded_route() {
+    assert!(served_model_is_degraded(&json!({
+        "type": "response.created",
+        "response": {"id": "resp_test", "model": "gpt-6-astra-degrade2-luna"}
+    })));
+    assert!(served_model_is_degraded(&json!({"model": "DEGRADE1"})));
+    assert!(!served_model_is_degraded(&json!({
+        "type": "response.created",
+        "response": {"model": "gpt-6-astra", "instructions": "mention degrade2"}
+    })));
+    assert!(!served_model_is_degraded(&json!({"model": "degrade"})));
+}

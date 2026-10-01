@@ -18,7 +18,8 @@ impl GatewayRuntime {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for model in &inventory.configured_models {
-                if key.model_rules.allows(model)
+                if !self.degraded_route_blocked(model)
+                    && key.model_rules.allows(model)
                     && self.model_enabled(model)
                     && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
                 {

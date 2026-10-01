@@ -152,6 +152,7 @@ pub(crate) async fn build_local_runtime_state(
             codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
             codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
             chatgpt_retry_until_available: inputs.gateway.chatgpt_retry_until_available,
+            block_degraded_routes_enabled: inputs.gateway.block_degraded_routes_enabled,
             routing_order,
         },
         platform: platform::platform_name().to_string(),

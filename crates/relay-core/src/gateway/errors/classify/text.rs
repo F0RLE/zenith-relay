@@ -169,6 +169,7 @@ const RULES: &[Rule] = &[
         &["model_not_available"],
         error_codes::UPSTREAM_MODEL_UNAVAILABLE,
     ),
+    Rule::Custom(degraded_route_model),
     Rule::Phrases(
         &[error_codes::MODEL_NOT_FOUND],
         error_codes::UPSTREAM_MODEL_NOT_FOUND,
@@ -242,6 +243,10 @@ fn tool_call_mismatch(_status: StatusCode, text: &str) -> Option<&'static str> {
         ],
     ) || super::super::failure::responses_call_id_is_missing_text(text))
     .then_some(error_codes::UPSTREAM_TOOL_CALL_MISMATCH)
+}
+
+fn degraded_route_model(_status: StatusCode, text: &str) -> Option<&'static str> {
+    crate::is_degraded_route_model(text).then_some(error_codes::UPSTREAM_ROUTE_DEGRADED)
 }
 
 fn context_too_large(_status: StatusCode, text: &str) -> Option<&'static str> {

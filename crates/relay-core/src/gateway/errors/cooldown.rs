@@ -31,13 +31,14 @@ pub(crate) fn settle_attempt_failure(
     failure: &AttemptFailure,
     headers: &reqwest::header::HeaderMap,
 ) -> FailureState {
+    let category = runtime.effective_upstream_category(failure.category);
     let now = SystemTime::now();
     let cooldown = failure_cooldown(CooldownInput {
         runtime,
         candidate_id: lease.candidate_id(),
         model,
         status: failure.status,
-        category: failure.category,
+        category,
         headers,
         hint: failure.cooldown_hint,
         now,
@@ -76,7 +77,9 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
     let status = canonical_upstream_status(status, category);
     let now = crate::unix_time_ms_at(now_system);
     let header_retry_after_ms = retry_after_ms(headers, now_system);
-    let explicit = header_retry_after_ms.is_some() || hint.retry_after_ms.is_some();
+    let explicit = header_retry_after_ms.is_some()
+        || hint.retry_after_ms.is_some()
+        || category == error_codes::UPSTREAM_ROUTE_DEGRADED;
     let reason = failure_cooldown_reason(status, category, explicit);
     if reason == CooldownReason::Transient {
         return None;
@@ -106,8 +109,10 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
             status,
             StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN
         )
-        || category == error_codes::UPSTREAM_QUOTA_EXHAUSTED
-    {
+        || matches!(
+            category,
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED | error_codes::UPSTREAM_ROUTE_DEGRADED
+        ) {
         MAX_RATE_LIMIT_COOLDOWN_MS
     } else if status == StatusCode::TOO_MANY_REQUESTS {
         1_000
@@ -137,6 +142,7 @@ pub(crate) fn settle_classified_failure(
     headers: &reqwest::header::HeaderMap,
     hint: RateLimitBodyHint,
 ) -> FailureState {
+    let category = runtime.effective_upstream_category(category);
     let now = SystemTime::now();
     let cooldown = failure_cooldown(CooldownInput {
         runtime,
@@ -200,6 +206,7 @@ pub(crate) fn failure_cooldown_reason(
                 | error_codes::UPSTREAM_REGION_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_NOT_FOUND
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_ROUTE_DEGRADED
                 | error_codes::UPSTREAM_MODEL_CAPACITY
                 | error_codes::UPSTREAM_CANDIDATE_REJECTED
                 | error_codes::IMAGE_GENERATION_NOT_ENABLED

@@ -212,6 +212,11 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
             "/gateway/chatgpt-retry-until-available".to_string(),
             true,
         ),
+        RemoteServerAction::SetBlockDegradedRoutes => (
+            Method::POST,
+            "/gateway/block-degraded-routes".to_string(),
+            true,
+        ),
         RemoteServerAction::SetCodexWebsockets => {
             (Method::POST, "/gateway/codex-websockets".to_string(), true)
         }

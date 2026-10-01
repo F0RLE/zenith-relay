@@ -74,28 +74,52 @@ pub(super) async fn open_upgraded_socket(
         // Do not cool the route or replay an unknown outcome.
         return Err(failure);
     }
-    let initial_messages =
-        match initial_application_messages(&mut upstream, source_error_origin).await {
-            Ok(messages) => messages,
-            Err(failure) => {
-                lease.settle_rotation_unknown(now_ms());
-                let response_headers = HeaderMap::new();
-                record_connect_failure(
-                    &ConnectTrace {
-                        runtime,
-                        lease: &lease,
-                        key,
-                        route: &route,
-                        request: &request,
-                        attempt: *attempt,
-                        started,
-                    },
-                    &failure,
-                    Some(&response_headers),
-                );
-                return Err(failure);
-            }
-        };
+    let block_degraded_routes =
+        route.account_id.is_some() && runtime.block_degraded_routes_enabled();
+    let initial_messages = match initial_application_messages(
+        &mut upstream,
+        source_error_origin,
+        block_degraded_routes,
+    )
+    .await
+    {
+        Ok(messages) => messages,
+        Err(failure) if failure.category == error_codes::UPSTREAM_ROUTE_DEGRADED => {
+            record_connect_failure(
+                &ConnectTrace {
+                    runtime,
+                    lease: &lease,
+                    key,
+                    route: &route,
+                    request: &request,
+                    attempt: *attempt,
+                    started,
+                },
+                &failure,
+                None,
+            );
+            *last_failure = Some(failure);
+            return Ok(OpenedSocket::Continue(request));
+        }
+        Err(failure) => {
+            lease.settle_rotation_unknown(now_ms());
+            let response_headers = HeaderMap::new();
+            record_connect_failure(
+                &ConnectTrace {
+                    runtime,
+                    lease: &lease,
+                    key,
+                    route: &route,
+                    request: &request,
+                    attempt: *attempt,
+                    started,
+                },
+                &failure,
+                Some(&response_headers),
+            );
+            return Err(failure);
+        }
+    };
     if initial_messages_are_empty_incomplete(&initial_messages) {
         lease.settle_rotation_terminal(now_ms());
         let failure = GatewayFailure::classified(

@@ -41,7 +41,8 @@ pub(super) async fn handle_upgrade_rejection(
     .await
     .ok()
     .and_then(Result::ok);
-    let failure = GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin);
+    let failure = GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin)
+        .apply_degraded_route_policy(runtime);
     if !*legacy_call_id_repair_attempted
         && body
             .as_deref()

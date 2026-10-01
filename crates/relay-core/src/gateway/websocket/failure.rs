@@ -85,6 +85,16 @@ impl GatewayFailure {
         self
     }
 
+    pub(super) fn apply_degraded_route_policy(mut self, runtime: &GatewayRuntime) -> Self {
+        let category = runtime.effective_upstream_category(self.category);
+        if category != self.category {
+            self.status = super::super::errors::canonical_upstream_status(self.status, category);
+            self.message = super::super::errors::upstream_failure_message(category);
+            self.category = category;
+        }
+        self
+    }
+
     pub(super) fn invalid_request(message: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

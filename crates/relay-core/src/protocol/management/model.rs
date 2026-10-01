@@ -62,6 +62,8 @@ pub struct GatewaySummary {
     #[serde(default)]
     /// Legacy snapshot key retained for older desktop/server clients.
     pub chatgpt_retry_until_available: bool,
+    #[serde(default = "default_block_degraded_routes_enabled")]
+    pub block_degraded_routes_enabled: bool,
     #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
 }
@@ -71,6 +73,10 @@ fn default_codex_websockets_enabled() -> bool {
 }
 
 fn default_codex_background_tasks_enabled() -> bool {
+    true
+}
+
+fn default_block_degraded_routes_enabled() -> bool {
     true
 }
 
@@ -199,11 +205,12 @@ pub fn apply_pool_model_configuration(
     runtime: Option<&GatewayRuntime>,
 ) {
     let routes = super::model_protocols::ModelProtocolIndex::new(sources, accounts);
+    let block_degraded_routes = runtime.is_none_or(GatewayRuntime::block_degraded_routes_enabled);
     for model in models {
         let model_id = model.id.clone();
         model.protocol_routes = routes.routes_for(&model_id);
         model.codex_visible = model.enabled
-            && crate::codex_model_is_picker_eligible(&model_id)
+            && crate::codex_model_is_picker_eligible_for(&model_id, block_degraded_routes)
             && model
                 .protocol_routes
                 .iter()

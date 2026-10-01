@@ -25,6 +25,22 @@ pub fn is_valid_model_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_MODEL_ID_BYTES && !value.chars().any(char::is_control)
 }
 
+/// OpenAI's internal downgrade route, for example `gpt-6-astra-degrade2-luna-...`.
+/// A numbered `degrade` segment is not a model Relay can send.
+pub fn is_degraded_route_model(value: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(is_degrade_level_segment)
+}
+
+fn is_degrade_level_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    let prefix = b"degrade";
+    bytes.len() > prefix.len()
+        && bytes[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && bytes[prefix.len()..].iter().all(u8::is_ascii_digit)
+}
+
 /// Checks a model ID that must be safe to use as one unescaped protocol token.
 pub fn is_valid_model_token(value: &str) -> bool {
     is_valid_model_id(value) && !value.chars().any(char::is_whitespace)
@@ -302,6 +318,16 @@ mod tests {
         assert!(!is_valid_model_id(&"x".repeat(MAX_MODEL_ID_BYTES + 1)));
         assert!(is_valid_model_token("gpt-test"));
         assert!(!is_valid_model_token("gpt test"));
+        assert!(is_degraded_route_model(
+            "gpt-6-astra-degrade2-luna-1p-codexswic-ev3"
+        ));
+        assert!(is_degraded_route_model(
+            "The model `gpt-6-astra-degrade2-luna-1p-codexswic-ev3` does not exist"
+        ));
+        assert!(is_degraded_route_model("DEGRADE1"));
+        assert!(!is_degraded_route_model("gpt-6-astra"));
+        assert!(!is_degraded_route_model("degrade"));
+        assert!(!is_degraded_route_model("degraded account"));
     }
 
     #[test]

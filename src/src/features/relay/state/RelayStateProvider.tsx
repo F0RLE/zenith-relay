@@ -188,6 +188,16 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "feedback.saved",
   ), [mode, perform, t]);
 
+  const setBlockDegradedRoutesEnabled = useCallback((enabled: boolean) => perform(
+    "block-degraded-routes",
+    mode === "local"
+      ? () => relayCommands.setBlockDegradedRoutes(enabled)
+      : mode === "remote"
+        ? () => relayCommands.setRemoteBlockDegradedRoutes(enabled)
+        : () => Promise.reject(new Error(t("errors.block_degraded_routes_unavailable"))),
+    "feedback.saved",
+  ), [mode, perform, t]);
+
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
@@ -255,6 +265,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     codexWebsocketsEnabled: displayRuntime?.gateway.codexWebsocketsEnabled ?? true,
     routeRecoveryEnabled: displayRuntime?.gateway.chatgptRetryUntilAvailable ?? false,
     setRouteRecoveryEnabled,
+    blockDegradedRoutesEnabled: displayRuntime?.gateway.blockDegradedRoutesEnabled ?? true,
+    setBlockDegradedRoutesEnabled,
   }), [
     mode,
     setMode,
@@ -290,6 +302,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
     setRouteRecoveryEnabled,
+    setBlockDegradedRoutesEnabled,
   ]);
 
   const usage = useMemo<RelayUsageContextValue>(() => ({

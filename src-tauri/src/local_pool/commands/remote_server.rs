@@ -79,6 +79,7 @@ pub enum RemoteServerAction {
     SetCodexBackgroundTasks,
     SetToolPolicy,
     SetChatgptRetryUntilAvailable,
+    SetBlockDegradedRoutes,
     SetCodexWebsockets,
     CreateWakeTask,
     UpdateWakeTask { id: String },
