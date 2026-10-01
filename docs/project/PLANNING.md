@@ -176,12 +176,13 @@ complete file into memory.
 Backend ordering places OpenAI, Anthropic, Google,
 then xAI first, followed by other companies alphabetically. Within a company,
 stable provider family precedence is used where the provider has a canonical
-product-tier order (Anthropic is Fable, Opus, Sonnet, then Haiku); unknown
-families follow the catalog fallback. Families that share the same numbered
-model generation form a cohort and use the newest release in that cohort, then
-normalized family IDs; this keeps sibling variants together instead of letting
-a later launch date outrank another variant. Release/update dates order
-versions within a family. Missing families follow known families; missing dates
+product-tier order: OpenAI is Astra, Sol, Terra, then Luna; Anthropic is Fable,
+Opus, Sonnet, then Haiku. A later release does not move a lower tier ahead of a
+higher one, and a new version inherits its place from the catalog family label
+rather than a model-ID list. Unknown families follow known families. Families
+that share the same numbered model generation and have no canonical tier form a
+cohort and use the newest release in that cohort, then normalized family IDs.
+Release/update dates order versions within a family. Missing families follow known families; missing dates
 follow dated versions in the same family. Equal dates use normalized family and
 model IDs as deterministic tie-breakers, so provider inventory order cannot
 change catalog ranking. Company/family ordering comes from validated catalog
@@ -270,11 +271,18 @@ The host-refresh and remaining acceptance gates in
 [ROADMAP.md](ROADMAP.md) remain open. The design is a target, not proof of
 full acceptance.
 
-Automatic selection compares normalized local load (`in_flight / effective
-capacity`) among eligible physical members, then uses weights among equal-load
-members. It does not score quota percentages, balance, recent latency or money.
-Unknown and stale quota are neutral; confirmed exhaustion remains a block.
-Soft affinity only breaks a tie among equally eligible automatic winners.
+Automatic selection ranks eligible physical members by the freshest known
+remaining quota. A one-point difference is enough: that member is used until
+its remainder falls below another known remainder. Normalized load
+(`in_flight / effective capacity`) and request share apply only inside an
+equal-remainder group. Unknown quota and observations older than the stale
+window do not outrank a known remainder. Balance, recent latency and money
+still do not rank. Confirmed exhaustion remains a block. Soft cache affinity
+only breaks a tie inside the current automatic group. In every mode, an opaque
+response owner stays put unless Automatic mode can replay saved local history
+onto a member with a strictly larger known remainder. A foreign response id is
+never sent to another member.
+
 In order selects the first ready member in the saved order; busy or blocked
 members do not prevent trying the next one. Round robin uses smooth weighted
 rotation and ignores soft affinity. Hard response ownership applies in every
@@ -799,32 +807,18 @@ misattributed lane event. Do not claim full WebSocket multiplexing support.
 
 ## Tool catalog policy
 
-The shared Rust runtime owns two opt-in modes: `pass_through` (default) sends
-the complete catalog unchanged, and `automatic` enables provider-native
-deferred schema loading on every eligible request. Relay does not select, hide, or
-rename tools by name and does not perform local semantic relevance search.
-The complete trusted catalog remains available to the provider; the provider
-performs its own tool search and loading. Catalog size does not affect whether
-automatic mode is applied.
+Relay forwards each tool catalog unchanged. It does not add `defer_loading` or
+`tool_search`, hide or rename tools, or run a local relevance search. A saved
+`automatic` policy is ignored for new requests, including retries and
+HTTP/WebSocket fallback. Desktop and server may still store that old value;
+it no longer changes the wire catalog.
 
-Automatic mode uses the provider-native Responses `tool_search` contract only
-for tools on OpenAI models, and only on native Responses routes with automatic
-or unspecified `tool_choice`.
-Converted protocols, explicit tool choices, and WebSocket payloads keep the
-ordinary full catalog path. If a compatible native endpoint rejects the
-deferred fields, Relay retries once before output without optimization. This
-fallback is compatibility behavior, not a second policy mode.
-
-Each request captures an immutable policy through retries and HTTP/WebSocket
-fallback. Desktop and server persist compare-and-set updates and hot-apply
-them to new requests without restarting the listener. A single UI switch saves
-the selected mode immediately; remote editing requires `tool_policy_v1`.
-Usage stores aggregate input/forwarded counts and catalog JSON bytes, mode,
-outcome, compatibility fallback and whether provider-hosted deferred tool
-search was used, not schemas or tool names. Bytes are not token/billing
-savings; provider-reported usage remains the source of truth, and changes to
-catalog serialization can affect prompt-cache reuse. This is not an execution
-authorization boundary.
+Usage keeps aggregate input and forwarded counts, catalog JSON bytes, mode,
+outcome, compatibility fallback, and whether an older request used
+provider-hosted deferred tool search. Those fields describe history, not tool
+names or schemas. Bytes are not token or billing savings; provider-reported
+usage remains the source of truth. This is not an execution authorization
+boundary.
 
 ## Usage and prices
 
@@ -834,8 +828,10 @@ entitlement, provider debit, Zenith customer billing, or a routing input.
 
 Subscription usage uses the exact LiteLLM record in its declared official
 family or remains unpriced. API sources resolve provider evidence, exact
-LiteLLM provider/model, explicitly declared-family canonical price, then manual
-price. Endpoint/protocol changes invalidate stale source evidence. Input,
+LiteLLM provider/model, the official catalog price for a known model family, an
+explicitly declared family for any other model, then manual price. Known families
+are GPT, ChatGPT, and Codex to OpenAI, Claude to Anthropic, Gemini to Google, and
+Grok to xAI. The family comes from the model id, never from a source label or URL. Endpoint/protocol changes invalidate stale source evidence. Input,
 cached input, cache writes, output, and request/image prices remain distinct;
 missing required counters/prices are unknown, not `$0`. Adapters follow the
 actual upstream cache contract without borrowing another protocol's semantics.

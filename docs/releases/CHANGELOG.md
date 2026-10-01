@@ -6,6 +6,38 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-10-01
+
+<!-- relay-notes:en -->
+
+Zenith Relay 1.1.4 keeps automatic rotation on the member with the most remaining quota, blocks internal ChatGPT downgrade ids, and keeps model families in their product order.
+
+### Changed
+
+- Automatic rotation chooses the member with the greatest fresh quota remainder. A one-point difference is enough. Load is compared only when the remainder is equal. A continuation stays on its member unless saved history can be resent to a member with a larger remainder.
+- OpenAI models follow Astra, Sol, Terra, then Luna. Anthropic models follow Fable, Opus, Sonnet, then Haiku. A future version of the same catalog family keeps that place without a new model-ID list.
+- API prices use the provider price first. Otherwise they use the official price for the model family: GPT, ChatGPT, and Codex use OpenAI, Claude uses Anthropic, Gemini uses Google, and Grok uses xAI. A manual price is used only when neither is available.
+- The API tab can block degraded ChatGPT routes. An internal id such as degrade2 is not a model. The account leaves rotation briefly and another member can take the request. Turning the switch off sends those requests again.
+- The tool-optimization switch is gone. Tool lists go out as the client sent them. A previously saved optimized mode no longer changes new requests.
+- The pool member picker can filter working, cooldown, unavailable, disabled, and server connections. The status color matches the account card.
+- On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right.
+- Model switches save without waiting for a full snapshot, and the launcher no longer draws focus rings.
+
+<!-- relay-notes:ru -->
+
+Zenith Relay 1.1.4 оставляет автоматическую ротацию на участнике с наибольшим остатком квоты, не отправляет внутренние id понижения ChatGPT и держит семейства моделей в их продуктовом порядке.
+
+### Изменения
+
+- Автоматическая ротация выбирает участника с наибольшим свежим остатком квоты. Разницы в один пункт достаточно. Нагрузка сравнивается только при равном остатке. Продолжение чата остаётся на своём участнике, если сохранённую историю нельзя переслать участнику с большим остатком.
+- Модели OpenAI идут в порядке Astra, Sol, Terra, затем Luna. Модели Anthropic идут в порядке Fable, Opus, Sonnet, затем Haiku. Будущая версия того же семейства занимает это место без нового списка ID.
+- Для цены API сначала берётся цена провайдера. Иначе используется официальная цена семейства: GPT, ChatGPT и Codex относятся к OpenAI, Claude к Anthropic, Gemini к Google, Grok к xAI. Ручная цена нужна только когда обеих нет.
+- На вкладке API можно блокировать пониженные маршруты ChatGPT. Внутренний id вроде degrade2 не является моделью. Аккаунт ненадолго уходит из ротации, запрос может уйти другому участнику. Выключение снова разрешает отправку.
+- Переключатель оптимизации инструментов убран. Список инструментов уходит так, как его прислал клиент. Сохранённый оптимизированный режим больше не меняет новые запросы.
+- При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта.
+- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа.
+- Переключение модели сохраняется без ожидания полного снимка, а у лаунчера больше нет обводки фокуса.
+
 ## [1.1.3] - 2026-09-30
 
 <!-- relay-notes:en -->
@@ -1289,7 +1321,8 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.4...HEAD
+[1.1.4]: https://github.com/F0RLE/zenith-relay/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.2
 [1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1
