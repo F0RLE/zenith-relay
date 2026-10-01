@@ -5,6 +5,8 @@ export type Feedback = { kind: "success" | "error"; key: string; error?: Feedbac
 export type PerformOptions = {
   /** Finish a dependent step before refreshing, only while the operation is current. */
   afterWork?: () => Promise<unknown>;
+  /** Unlock the UI after the command succeeds and refresh without holding the busy lock. */
+  backgroundRefresh?: boolean;
   /** Keep an operation error local to the surface that initiated it. */
   reportError?: boolean;
   onError?: (error: FeedbackError, key: string) => void;
@@ -47,6 +49,23 @@ export async function runRelayOperation({
     if (options?.afterWork) {
       await options.afterWork();
       if (!isCurrent()) return false;
+    }
+    if (options?.backgroundRefresh) {
+      if (successKey) setFeedback({ kind: "success", key: successKey });
+      settle();
+      if (!isCurrent()) return true;
+      try {
+        await refresh();
+      } catch (cause) {
+        if (!isCurrent()) return true;
+        const resolved = resolveError(cause);
+        options.onError?.(resolved.error, resolved.key);
+        if (options.reportError !== false) {
+          setFeedback({ kind: "error", key: resolved.key, error: resolved.error });
+        }
+        return false;
+      }
+      return true;
     }
     await refresh();
     if (!isCurrent()) return false;

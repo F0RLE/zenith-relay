@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
 };
 
 const SECRET_PREFIX: &str = "local-pool:";
@@ -24,6 +27,15 @@ struct ConfiguredVault {
 
 static VAULT: OnceLock<ConfiguredVault> = OnceLock::new();
 static INITIALIZE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SECRET_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub fn generation() -> u64 {
+    SECRET_GENERATION.load(Ordering::Acquire)
+}
+
+fn bump_generation() {
+    SECRET_GENERATION.fetch_add(1, Ordering::Release);
+}
 
 pub fn initialize(vault_root: &Path, migration_root: &Path) -> Result<()> {
     let _guard = INITIALIZE_LOCK
@@ -70,9 +82,12 @@ pub fn save(secret_ref: &str, value: &str) -> Result<()> {
             .save(secret_ref, value)
             .map_err(vault_error)?;
         let _ = delete_keyring_secret(secret_ref);
+        bump_generation();
         return Ok(());
     }
-    save_keyring_secret(secret_ref, value)
+    save_keyring_secret(secret_ref, value)?;
+    bump_generation();
+    Ok(())
 }
 
 pub fn load(secret_ref: &str) -> Result<Option<String>> {
@@ -92,6 +107,19 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
         .map_err(vault_error)?;
     let _ = delete_keyring_secret(secret_ref);
     Ok(Some(value))
+}
+
+/// Presence check for snapshots. A vault hit does not clone the secret.
+/// Keyring leftovers stay visible, while [`load`] remains the migration path.
+pub fn contains(secret_ref: &str) -> Result<bool> {
+    validate_secret_ref(secret_ref)?;
+    let Some(configured) = VAULT.get() else {
+        return Ok(load_keyring_secret(secret_ref)?.is_some());
+    };
+    if configured.vault.contains(secret_ref).map_err(vault_error)? {
+        return Ok(true);
+    }
+    Ok(load_keyring_secret(secret_ref)?.is_some())
 }
 
 fn migrate_legacy_keyring_once(migration_root: &Path, vault: &Vault) -> Result<()> {
@@ -139,8 +167,12 @@ pub fn delete(secret_ref: &str) -> Result<()> {
     validate_secret_ref(secret_ref)?;
     if let Some(configured) = VAULT.get() {
         configured.vault.delete(secret_ref).map_err(vault_error)?;
+        bump_generation();
+        return delete_keyring_secret(secret_ref);
     }
-    delete_keyring_secret(secret_ref)
+    delete_keyring_secret(secret_ref)?;
+    bump_generation();
+    Ok(())
 }
 
 fn canonical_root(root: &Path) -> Result<PathBuf> {

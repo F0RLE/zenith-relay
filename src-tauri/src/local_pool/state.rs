@@ -80,6 +80,7 @@ pub struct DesktopStateOwner {
     subscription_refresh_lock: AsyncMutex<()>,
     setup_lock: tokio::sync::Mutex<()>,
     account_check_url: Url,
+    credential_cache: Mutex<snapshot::CredentialCache>,
 }
 
 impl DesktopState {
@@ -179,6 +180,7 @@ impl DesktopState {
                 setup_lock: tokio::sync::Mutex::new(()),
                 account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT)
                     .expect("the built-in account-check endpoint must be valid"),
+                credential_cache: Mutex::new(snapshot::CredentialCache::default()),
             }),
         })
     }

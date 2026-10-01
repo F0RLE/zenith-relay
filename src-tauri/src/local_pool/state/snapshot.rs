@@ -26,6 +26,10 @@ use zenith_relay_core::{
 
 pub(super) trait SecretLookup {
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
+
+    fn contains(&self, secret_ref: &str) -> Result<bool> {
+        Ok(self.load(secret_ref)?.is_some())
+    }
 }
 
 struct OsSecretLookup;
@@ -33,6 +37,24 @@ struct OsSecretLookup;
 impl SecretLookup for OsSecretLookup {
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {
         crate::local_pool::store::secret_store::load(secret_ref)
+    }
+
+    fn contains(&self, secret_ref: &str) -> Result<bool> {
+        crate::local_pool::store::secret_store::contains(secret_ref)
+    }
+}
+
+pub(super) struct CredentialCache {
+    generation: u64,
+    values: HashMap<String, Option<StoredCodexCredentials>>,
+}
+
+impl Default for CredentialCache {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            values: HashMap::new(),
+        }
     }
 }
 
@@ -86,7 +108,7 @@ impl DesktopState {
             running,
         } = self.snapshot_base().await?;
         for source in &sources {
-            if secrets.load(&source.secret_ref)?.is_none() {
+            if !secrets.contains(&source.secret_ref)? {
                 warnings.push(warning_code(error_codes::SOURCE_SECRET_MISSING, &source.id));
             }
         }
@@ -132,18 +154,7 @@ impl DesktopState {
                 secret_store::load(&source.secret_ref).map(|value| (source.id.clone(), value))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
-        let account_credentials = accounts
-            .iter()
-            .map(|account| {
-                credential_store
-                    .load(&account.account.id)
-                    .map(|credentials| (account.account.id.clone(), credentials))
-                    .map_err(|error| {
-                        LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
-                    })
-            })
-            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+        let account_credentials = self.cached_account_credentials(&accounts)?;
         for source in &sources {
             if source_api_keys
                 .get(&source.id)
@@ -177,6 +188,44 @@ impl DesktopState {
             account_refresh,
             account_credentials,
         })
+    }
+
+    fn cached_account_credentials(
+        &self,
+        accounts: &[LocalAccountRecord],
+    ) -> Result<HashMap<String, Option<StoredCodexCredentials>>> {
+        let generation = secret_store::generation();
+        let mut cache = self.credential_cache.lock().map_err(|_| {
+            LocalPoolError::new(ErrorCode::Io, "credential cache lock is unavailable")
+        })?;
+        if cache.generation != generation {
+            cache.values.clear();
+            cache.generation = generation;
+        }
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let mut loaded = HashMap::with_capacity(accounts.len());
+        for account in accounts {
+            let id = &account.account.id;
+            if let Some(credentials) = cache.values.get(id) {
+                loaded.insert(id.clone(), credentials.clone());
+                continue;
+            }
+            let credentials = credential_store.load(id).map_err(|error| {
+                LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+            })?;
+            cache.values.insert(id.clone(), credentials.clone());
+            loaded.insert(id.clone(), credentials);
+        }
+        let live = accounts
+            .iter()
+            .map(|account| account.account.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        cache.values.retain(|id, _| live.contains(id.as_str()));
+        if secret_store::generation() != generation {
+            cache.generation = 0;
+            cache.values.clear();
+        }
+        Ok(loaded)
     }
 
     async fn snapshot_base(&self) -> Result<SnapshotBase> {
@@ -278,7 +327,7 @@ pub(super) fn account_secret_available(
     let secret_ref =
         crate::local_pool::accounts::credentials::credential_secret_ref(&account.account.id)
             .map_err(LocalPoolError::invalid_state)?;
-    Ok(secrets.load(&secret_ref)?.is_some())
+    Ok(secrets.contains(&secret_ref)?)
 }
 
 fn warning_code(code: &str, id: &str) -> String {

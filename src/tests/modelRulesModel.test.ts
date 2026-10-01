@@ -8,6 +8,9 @@ import {
   reorderById,
   reorderModelGroups,
   supportedReasoningLevels,
+  pendingModelEnabled,
+  reconcilePendingModelEnabled,
+  clearPendingModelEnabled,
   type ModelRuleGroup,
 } from "../src/features/relay/pages/pool/modelRulesModel";
 
@@ -86,3 +89,27 @@ describe("model rules model", () => {
     }))).toEqual([]);
   });
 });
+
+describe("optimistic model switches", () => {
+  test("shows the pending value and clears it only after the runtime agrees", () => {
+    const pending = { "gpt-5.4": false, "gpt-5.5": true };
+    expect(pendingModelEnabled(pending, { id: "gpt-5.4", enabled: true })).toBeFalse();
+    expect(pendingModelEnabled(pending, { id: "other", enabled: true })).toBeTrue();
+    const waiting = reconcilePendingModelEnabled(pending, [
+      { id: "gpt-5.4", enabled: true },
+      { id: "gpt-5.5", enabled: false },
+    ]);
+    expect(waiting).toBe(pending);
+    expect(reconcilePendingModelEnabled(pending, [
+      { id: "gpt-5.4", enabled: false },
+      { id: "gpt-5.5", enabled: false },
+    ])).toEqual({ "gpt-5.5": true });
+  });
+
+  test("rolls back only the failed attempt", () => {
+    const pending = { "gpt-5.4": false, "gpt-5.5": true };
+    expect(clearPendingModelEnabled(pending, "gpt-5.4", true)).toBe(pending);
+    expect(clearPendingModelEnabled(pending, "gpt-5.4", false)).toEqual({ "gpt-5.5": true });
+  });
+});
+

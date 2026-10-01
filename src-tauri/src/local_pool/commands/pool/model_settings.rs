@@ -2,7 +2,6 @@ use super::model_policy::{configured_pool_model_ids, model_policy_error};
 use super::CommandResult;
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError},
-    models::LocalPoolSnapshot,
     state::DesktopState,
 };
 use serde::Deserialize;
@@ -45,7 +44,7 @@ pub struct SetModelDisplayOrderInput {
 pub(super) async fn set_local_model_enabled(
     input: SetModelEnabledInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
     let canonical = super::canonical_pool_model(&state, &input.model_id)?;
     let mut gateway = state.store()?.gateway().clone();
@@ -57,20 +56,20 @@ pub(super) async fn set_local_model_enabled(
         gateway.hidden_models.push(canonical);
     }
     if gateway.hidden_models == previous {
-        return state.snapshot().await.map_err(Into::into);
+        return Ok(());
     }
     let hidden = gateway.hidden_models.clone();
     state.store()?.replace_gateway(gateway)?;
     if let Some(runtime) = state.gateway.runtime().await {
         runtime.set_hidden_models(hidden);
     }
-    state.snapshot().await.map_err(Into::into)
+    Ok(())
 }
 
 pub(super) async fn set_local_model_price(
     input: SetModelPriceInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     let price = ApiModelPriceOverride::from_optional_fields(
         input.input_micro_usd_per_million,
         input.cached_input_micro_usd_per_million,
@@ -93,13 +92,13 @@ pub(super) async fn set_local_model_price(
         let mut store = state.store()?;
         store.replace_gateway(gateway)?;
     }
-    state.snapshot().await.map_err(Into::into)
+    Ok(())
 }
 
 pub(super) async fn set_local_model_service_tier(
     input: SetModelServiceTierInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
     let canonical = super::canonical_pool_model(&state, &input.model_id)?;
     let runtime = state.gateway.runtime().await;
@@ -115,7 +114,6 @@ pub(super) async fn set_local_model_service_tier(
         )
         .into());
     }
-    let snapshot = state.snapshot().await?;
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
     let key = zenith_relay_core::model_id_key(&canonical);
@@ -123,7 +121,7 @@ pub(super) async fn set_local_model_service_tier(
         .model_service_tier_overrides
         .insert(key, input.service_tier);
     if gateway == old_gateway {
-        return Ok(snapshot);
+        return Ok(());
     }
     state.store()?.replace_gateway(gateway.clone())?;
     if let Some(runtime) = runtime {
@@ -134,15 +132,14 @@ pub(super) async fn set_local_model_service_tier(
             return Err(LocalPoolError::invalid_state(error).into());
         }
     }
-    state.snapshot().await.map_err(Into::into)
+    Ok(())
 }
 
 pub(super) async fn set_local_model_display_order(
     input: SetModelDisplayOrderInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
-    let snapshot = state.snapshot().await?;
     let inputs = state.runtime_inputs().await?;
     let old_gateway = state.store()?.gateway().clone();
     let order = complete_model_display_order(
@@ -154,11 +151,11 @@ pub(super) async fn set_local_model_display_order(
     let mut gateway = old_gateway.clone();
     gateway.model_display_order = order;
     if gateway == old_gateway {
-        return Ok(snapshot);
+        return Ok(());
     }
     state.store()?.replace_gateway(gateway.clone())?;
     if let Some(runtime) = state.gateway.runtime().await {
         runtime.set_model_display_order(gateway.model_display_order);
     }
-    state.snapshot().await.map_err(Into::into)
+    Ok(())
 }

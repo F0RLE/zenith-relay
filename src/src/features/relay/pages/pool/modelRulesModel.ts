@@ -111,3 +111,41 @@ export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "sp
   if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
   return ordered.length ? [...ordered] : ["standard"];
 }
+
+/** Shown switch state: the pending click wins until the runtime snapshot confirms it. */
+export function pendingModelEnabled(
+  pending: Readonly<Record<string, boolean>>,
+  model: { id: string; enabled: boolean },
+) {
+  return pending[model.id] ?? model.enabled;
+}
+
+/** Drop pending switches once the runtime reports the same value. */
+export function reconcilePendingModelEnabled(
+  pending: Readonly<Record<string, boolean>>,
+  models: readonly { id: string; enabled: boolean }[],
+) {
+  const confirmed = new Map(models.map((model) => [model.id, model.enabled]));
+  let changed = false;
+  const next: Record<string, boolean> = {};
+  for (const [id, enabled] of Object.entries(pending)) {
+    if (confirmed.get(id) === enabled) {
+      changed = true;
+      continue;
+    }
+    next[id] = enabled;
+  }
+  return changed ? next : pending;
+}
+
+/** Remove one pending value only when it is still the failed attempt. */
+export function clearPendingModelEnabled(
+  pending: Readonly<Record<string, boolean>>,
+  id: string,
+  enabled: boolean,
+) {
+  if (pending[id] !== enabled) return pending;
+  const next = { ...pending };
+  delete next[id];
+  return next;
+}

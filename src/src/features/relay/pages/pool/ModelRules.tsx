@@ -11,10 +11,13 @@ import {
   toggleReasoningLevel,
 } from "./modelReasoningPolicy";
 import {
+  clearPendingModelEnabled,
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
   normalizeReasoningSelection,
+  pendingModelEnabled,
+  reconcilePendingModelEnabled,
   reorderById,
   reorderModelGroups,
   supportedReasoningLevels,
@@ -42,6 +45,8 @@ export function ModelRulesView() {
   const poolModels = models;
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
+  const [savingModels, setSavingModels] = useState<Record<string, number>>({});
   const orderMutation = useRef(false);
   const currentModels = useRef(models);
   currentModels.current = models;
@@ -49,14 +54,40 @@ export function ModelRulesView() {
   useEffect(() => {
     setOrderedModels(models);
   }, [runtime?.configurationRevision, catalogSignature]);
+  useEffect(() => {
+    setPendingEnabled((current) => reconcilePendingModelEnabled(current, models));
+  }, [catalogSignature]);
   const modelGroups = groupModelSummaries(orderedModels, runtime?.accounts ?? []);
-  const toggleModel = (model: ModelSummary) => perform(
-    `model-toggle-${model.id}`,
-    () => mode === "local"
-      ? relayCommands.setModelEnabled(model.id, !model.enabled)
-      : relayCommands.remoteAction({ type: "set_model_enabled" }, { modelId: model.id, enabled: !model.enabled }),
-    "feedback.saved",
-  );
+  const toggleModel = (model: ModelSummary) => {
+    const enabled = !pendingModelEnabled(pendingEnabled, model);
+    setPendingEnabled((current) => ({ ...current, [model.id]: enabled }));
+    setSavingModels((current) => ({ ...current, [model.id]: (current[model.id] ?? 0) + 1 }));
+    let saved = false;
+    const release = () => setSavingModels((current) => {
+      const count = (current[model.id] ?? 1) - 1;
+      if (count > 0) return { ...current, [model.id]: count };
+      const next = { ...current };
+      delete next[model.id];
+      return next;
+    });
+    void perform(
+      `model-toggle-${model.id}`,
+      async () => {
+        try {
+          if (mode === "local") await relayCommands.setModelEnabled(model.id, enabled);
+          else await relayCommands.remoteAction({ type: "set_model_enabled" }, { modelId: model.id, enabled });
+          saved = true;
+        } finally {
+          release();
+        }
+      },
+      "feedback.saved",
+      { backgroundRefresh: true },
+    ).then((ok) => {
+      if (saved || ok) return;
+      setPendingEnabled((current) => clearPendingModelEnabled(current, model.id, enabled));
+    });
+  };
   const persistModelOrder = (next: ModelSummary[]) => perform(
     "model-order",
     () => mode === "local"
@@ -147,9 +178,11 @@ export function ModelRulesView() {
                 </th>
               </tr>
               {!groupCollapsed && group.items.map((model) => {
-                const toggling = busy === `model-toggle-${model.id}`;
+                const enabled = pendingModelEnabled(pendingEnabled, model);
+                const toggling = Boolean(savingModels[model.id]);
+                const foreignBusy = Boolean(busy) && !busy?.startsWith("model-toggle-");
                 const displayName = model.catalogName || model.codexDisplayName || model.id;
-                const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
+                const toggleLabel = t(enabled ? "models.disable" : "models.enable", { model: model.id });
                 const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true;
                 const canEditReasoning = Boolean(model.reasoningConfigurable);
                 const speedTiers = modelSpeedTiers(model);
@@ -161,7 +194,7 @@ export function ModelRulesView() {
                 return <tr
                   key={model.id}
                   data-model-id={model.id}
-                  data-enabled={model.enabled ? "true" : "false"}
+                  data-enabled={enabled ? "true" : "false"}
                   data-drop-target={dropModelId === model.id ? "true" : undefined}
                   className={dragModelId === model.id ? "model-dragging" : undefined}
                   draggable
@@ -210,9 +243,9 @@ export function ModelRulesView() {
                       data-model-toggle={model.id}
                       label={toggleLabel}
                       className="model-toggle"
-                      checked={model.enabled}
+                      checked={enabled}
                       aria-busy={toggling}
-                      disabled={Boolean(busy)}
+                      disabled={foreignBusy || toggling}
                       onChange={() => void toggleModel(model)}
                     />
                   </div></td>
