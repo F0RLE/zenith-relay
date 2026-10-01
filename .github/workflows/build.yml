@@ -175,7 +175,7 @@ jobs:
           mkdir -p "$mount_point"
           # The DMG license agreement cancels a non-interactive attach. The
           # helper answers it, and this watchdog covers a helper that itself hangs.
-          python3 .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
+          python3 -B .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
           attach_pid=$!
           (
             sleep 120
