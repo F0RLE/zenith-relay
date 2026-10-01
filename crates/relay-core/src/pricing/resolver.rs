@@ -2,7 +2,9 @@ use super::{CatalogEntry, PriceSource, PricingCatalog, ResolvedPrice, TokenPrice
 
 impl PricingCatalog {
     /// Resolves a source price using provider evidence, then LiteLLM exact,
-    /// official-family canonical matching, and finally a manual override.
+    /// the official catalog family for a known model id, an explicitly
+    /// declared family for any other model, and finally a manual override.
+    /// The known family comes only from the model id.
     pub fn resolve_source(
         &self,
         model: &str,
@@ -19,7 +21,11 @@ impl PricingCatalog {
                 return self.resolved(price, PriceSource::LiteLlmExact);
             }
         }
-        if let Some(family) = official_provider_family {
+        // A recognized model keeps its own official family even when the
+        // source declared a different one. Unrecognized models can still use
+        // that explicit declaration. Neither choice reads a source label or URL.
+        let family = Self::official_model_family(model).or(official_provider_family);
+        if let Some(family) = family {
             if let Some(entry) = self.canonical_entry(model, family) {
                 if let Some(price) = entry.token {
                     return self.resolved(price, PriceSource::LiteLlmCanonical);
@@ -30,6 +36,27 @@ impl PricingCatalog {
             || ResolvedPrice::unpriced(self.metadata()),
             |price| self.resolved(price, PriceSource::Manual),
         )
+    }
+
+    /// Official LiteLLM family for a model id Relay already knows.
+    ///
+    /// Prefixes cover later versions without a version list. Qualified ids use
+    /// the unqualified model component, so `xai/grok-4.7` and `grok-4.7` share
+    /// one family. Gemini's official catalog namespace is `gemini`.
+    fn official_model_family(model: &str) -> Option<&'static str> {
+        let model = super::unqualified(model);
+        if model.starts_with("gpt-") || model.starts_with("chatgpt-") || model.starts_with("codex-")
+        {
+            Some("openai")
+        } else if model.starts_with("claude-") {
+            Some("anthropic")
+        } else if model.starts_with("gemini-") {
+            Some("gemini")
+        } else if model.starts_with("grok-") {
+            Some("xai")
+        } else {
+            None
+        }
     }
 
     /// Account pricing is intentionally isolated to the official family.
