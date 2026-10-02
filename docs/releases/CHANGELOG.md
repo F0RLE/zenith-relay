@@ -8,21 +8,7 @@ release entries are kept concise and link to the corresponding tag.
 
 <!-- relay-notes:en -->
 
-### Changed
-
-- Excel / Basis Points accepts an image in a user message. A data URL is uploaded with the account and replaced by `file_id`. A remote image URL is rejected, and `detail` is not forwarded.
-- Excel / Basis Points keeps long history identifiers within the upstream limit and preserves a visible reasoning summary. Maximum reasoning is sent as the supported extra-high level.
-- A blank ChatGPT model-catalog response no longer removes models the account already reported.
-- A failed model-list refresh now says that the list could not be refreshed. A later local preparation failure does not hide the provider error already recorded for that account.
-
 <!-- relay-notes:ru -->
-
-### Изменения
-
-- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на `file_id`. Внешняя ссылка отклоняется, поле `detail` не пересылается.
-- Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе и сохраняет видимое краткое содержание размышления. Максимальное размышление отправляется как поддерживаемый экстра-высокий уровень.
-- Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил.
-- Ошибка обновления списка моделей теперь говорит, что список не удалось обновить. Поздняя локальная ошибка подготовки не скрывает уже записанную ошибку провайдера.
 
 ## [1.1.4] - 2026-10-01
 
@@ -40,6 +26,10 @@ Zenith Relay 1.1.4 keeps automatic rotation on the member with the most remainin
 - The pool member picker can filter working, cooldown, unavailable, disabled, and server connections. The status color matches the account card.
 - On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right.
 - Model switches save without waiting for a full snapshot, and the launcher no longer draws focus rings.
+- Excel / Basis Points accepts an image in a user message. A data URL is uploaded with the account and replaced by `file_id`. A remote image URL is rejected, and `detail` is not forwarded.
+- Excel / Basis Points keeps long history identifiers within the upstream limit and preserves a visible reasoning summary. Maximum reasoning is sent as the supported extra-high level.
+- A blank ChatGPT model-catalog response no longer removes models the account already reported.
+- A failed model-list refresh now says that the list could not be refreshed. A later local preparation failure does not hide the provider error already recorded for that account.
 
 <!-- relay-notes:ru -->
 
@@ -55,6 +45,10 @@ Zenith Relay 1.1.4 оставляет автоматическую ротаци�
 - При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта.
 - На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа.
 - Переключение модели сохраняется без ожидания полного снимка, а у лаунчера больше нет обводки фокуса.
+- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на `file_id`. Внешняя ссылка отклоняется, поле `detail` не пересылается.
+- Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе и сохраняет видимое краткое содержание размышления. Максимальное размышление отправляется как поддерживаемый экстра-высокий уровень.
+- Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил.
+- Ошибка обновления списка моделей теперь говорит, что список не удалось обновить. Поздняя локальная ошибка подготовки не скрывает уже записанную ошибку провайдера.
 
 ## [1.1.3] - 2026-09-30
 
