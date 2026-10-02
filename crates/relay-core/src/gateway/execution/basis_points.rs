@@ -8,7 +8,8 @@
 //!
 //! `catalog` reads the client tool list, `codec` owns the small JSON helpers,
 //! `history` rewrites prior calls, `prepare` builds the upstream request,
-//! `attachments` uploads user images, and `response` turns the native tool relay back into the client protocol.
+//! `attachments` uploads user images, and `response` turns the native tool
+//! relay back into the client protocol.
 
 mod attachments;
 mod catalog;

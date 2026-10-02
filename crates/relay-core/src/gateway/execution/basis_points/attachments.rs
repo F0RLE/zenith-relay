@@ -391,8 +391,8 @@ fn cached_file_id(key: &[u8; 32]) -> Option<String> {
 
 fn remember_file_id(key: [u8; 32], file_id: String) {
     let mut cache = crate::poison::mutex(attachment_cache());
-    if cache.entries.contains_key(&key) {
-        cache.entries.insert(key, file_id);
+    if let std::collections::hash_map::Entry::Occupied(mut entry) = cache.entries.entry(key) {
+        entry.insert(file_id);
         if let Some(position) = cache.order.iter().position(|item| *item == key) {
             if let Some(item) = cache.order.remove(position) {
                 cache.order.push_front(item);

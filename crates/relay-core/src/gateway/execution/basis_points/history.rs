@@ -4,12 +4,18 @@ use super::{is_transport_tool, TRANSPORT_TOOL};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
+mod identifiers;
+
+pub(in crate::gateway::execution::basis_points) use identifiers::fit_responses_id as fit_item_id;
+use identifiers::fit_responses_id;
+
 fn function_transport_id(call_id: &str) -> String {
-    if call_id.starts_with("fc_") {
+    let raw = if call_id.starts_with("fc_") {
         call_id.to_string()
     } else {
         format!("fc_{call_id}")
-    }
+    };
+    fit_responses_id(&raw)
 }
 
 pub(super) fn transport_call(
@@ -126,9 +132,12 @@ pub(super) fn translate_input_items(
             "reasoning" => {
                 // Same-account continuity needs the ciphertext on the first
                 // attempt. A rejection drops the whole item: the ciphertext is
-                // bound to that item and cannot be edited safely.
-                if has_ciphertext(object.get("encrypted_content")) {
+                // bound to that item and cannot be edited safely. Visible
+                // summaries without ciphertext are still useful context.
+                if has_item_ciphertext(object.get("encrypted_content")) {
                     result.push(value);
+                } else if let Some(visible) = visible_item_without_ciphertext(object) {
+                    result.push(visible);
                 }
             }
             "additional_tools" => {}
@@ -136,6 +145,7 @@ pub(super) fn translate_input_items(
             _ => result.push(value),
         }
     }
+    identifiers::limit_responses_identifiers(&mut result);
     Ok(result)
 }
 
@@ -155,7 +165,7 @@ fn is_foreign_encrypted_context(item: &Value) -> bool {
     let Some(object) = item.as_object() else {
         return false;
     };
-    if !has_ciphertext(object.get("encrypted_content")) {
+    if !has_item_ciphertext(object.get("encrypted_content")) {
         return false;
     }
     let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
@@ -168,10 +178,36 @@ fn is_foreign_encrypted_context(item: &Value) -> bool {
         .is_some_and(|id| id.starts_with("rs_") || id.starts_with("cmp_"))
 }
 
-fn has_ciphertext(value: Option<&Value>) -> bool {
+pub(super) fn has_item_ciphertext(value: Option<&Value>) -> bool {
     match value {
         Some(Value::String(text)) => !text.trim().is_empty(),
         None | Some(Value::Null) => false,
         Some(_) => true,
     }
+}
+
+/// Drop a ciphertext blob and the id bound to it. Visible summary text stays.
+fn visible_item_without_ciphertext(object: &Map<String, Value>) -> Option<Value> {
+    let mut kept = object.clone();
+    kept.remove("encrypted_content");
+    kept.remove("id");
+    if has_visible_text(&kept) {
+        Some(Value::Object(kept))
+    } else {
+        None
+    }
+}
+
+fn has_visible_text(object: &Map<String, Value>) -> bool {
+    text_list_has_content(object.get("summary")) || text_list_has_content(object.get("content"))
+}
+
+fn text_list_has_content(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_array).is_some_and(|parts| {
+        parts.iter().any(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
+    })
 }

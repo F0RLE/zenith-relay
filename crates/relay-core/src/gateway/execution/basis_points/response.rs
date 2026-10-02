@@ -1,5 +1,6 @@
 use super::catalog::{client_tools, requires_tool_call, selected_tools, tool_spec};
 use super::codec::{json_text, parse_json_object};
+use super::history::fit_item_id;
 use super::is_transport_tool;
 use crate::protocol::AdapterError;
 use serde_json::{Map, Value};
@@ -121,11 +122,11 @@ pub(in crate::gateway::execution) fn translate_response(
         if !call_ids.insert(call_id.clone()) {
             return Err(invalid_tool_output("output.run_officejs.call_id"));
         }
-        let item_id = if tool.kind == "custom" {
+        let item_id = fit_item_id(&if tool.kind == "custom" {
             format!("ctc_{call_id}")
         } else {
             format!("fc_{call_id}")
-        };
+        });
         let args = inner.get("args").or_else(|| inner.get("arguments"));
         let mut translated = Map::new();
         translated.insert(
