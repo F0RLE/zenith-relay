@@ -376,3 +376,31 @@ async fn scope_capture_waits_for_setup_transaction_and_late_errors_are_discarded
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn local_model_refresh_failure_keeps_a_provider_catalog_error() {
+    with_store(|store, scope| {
+        let mut current = scope.before.clone();
+        current.account.health = AccountHealthState::Degraded;
+        current.account.last_error_code = Some("models_transport".into());
+        store.upsert_account(current.clone()).unwrap();
+
+        apply_read_error(
+            store,
+            scope,
+            RefreshReadKind::Models,
+            &LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "synthetic local preparation failure",
+            ),
+        )
+        .unwrap();
+
+        let account = store.account("test-account").unwrap();
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("models_transport")
+        );
+        assert_eq!(account.account.health, AccountHealthState::Degraded);
+    });
+}

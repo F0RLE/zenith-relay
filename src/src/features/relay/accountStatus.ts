@@ -103,6 +103,7 @@ export function accountErrorTranslationKey(code: string) {
   const endpointPermission = normalized === "quota_forbidden" || normalized === "subscription_forbidden";
   if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
+  if (normalized.startsWith("models_")) return "accounts.errors.models";
   if (/transport|timeout|network|connect/.test(normalized)) return "accounts.errors.connection";
   if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";
   if (/quota/.test(normalized)) return "accounts.errors.quota";

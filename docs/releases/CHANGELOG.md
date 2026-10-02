@@ -13,6 +13,7 @@ release entries are kept concise and link to the corresponding tag.
 - Excel / Basis Points accepts an image in a user message. A data URL is uploaded with the account and replaced by `file_id`. A remote image URL is rejected, and `detail` is not forwarded.
 - Excel / Basis Points keeps long history identifiers within the upstream limit and preserves a visible reasoning summary. Maximum reasoning is sent as the supported extra-high level.
 - A blank ChatGPT model-catalog response no longer removes models the account already reported.
+- A failed model-list refresh now says that the list could not be refreshed. A later local preparation failure does not hide the provider error already recorded for that account.
 
 <!-- relay-notes:ru -->
 
@@ -21,6 +22,7 @@ release entries are kept concise and link to the corresponding tag.
 - Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на `file_id`. Внешняя ссылка отклоняется, поле `detail` не пересылается.
 - Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе и сохраняет видимое краткое содержание размышления. Максимальное размышление отправляется как поддерживаемый экстра-высокий уровень.
 - Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил.
+- Ошибка обновления списка моделей теперь говорит, что список не удалось обновить. Поздняя локальная ошибка подготовки не скрывает уже записанную ошибку провайдера.
 
 ## [1.1.4] - 2026-10-01
 

@@ -165,7 +165,9 @@ pub(in crate::local_pool) fn apply_read_error(
                 }
             }
             RefreshReadKind::Models => {
-                if let Some((code, retryable)) = model_refresh_error_kind(error.code) {
+                if let Some((incoming, retryable)) = model_refresh_error_kind(error.code) {
+                    let current = account.account.last_error_code.clone();
+                    let code = prefer_model_refresh_error(current.as_deref(), incoming);
                     if !account.account.auth_state.requires_fresh_login()
                         || code != error_codes::MODELS_PREPARE
                     {
@@ -256,6 +258,35 @@ pub(in crate::local_pool) fn model_refresh_error_kind(
         ErrorCode::ProfileRestoreBlocked => (error_codes::MODELS_PROFILE_RESTORE, false),
         ErrorCode::NotFound | ErrorCode::SourceProbeStale => return None,
     })
+}
+
+/// A local refresh failure is not a ChatGPT catalog response. It must not
+/// replace a provider code such as `models_transport` or `models_unauthorized`.
+pub(in crate::local_pool) fn prefer_model_refresh_error<'a>(
+    current: Option<&'a str>,
+    incoming: &'a str,
+) -> &'a str {
+    let current_is_provider =
+        current.is_some_and(|code| code.starts_with("models_") && model_code_is_provider(code));
+    let incoming_is_local = !model_code_is_provider(incoming);
+    if current_is_provider && incoming_is_local {
+        current.unwrap_or(incoming)
+    } else {
+        incoming
+    }
+}
+
+fn model_code_is_provider(code: &str) -> bool {
+    !matches!(
+        code,
+        error_codes::MODELS_PREPARE
+            | error_codes::MODELS_SECRET_STORE
+            | error_codes::MODELS_STORAGE
+            | error_codes::MODELS_ACCOUNT_LOCATION
+            | error_codes::MODELS_PROFILE_RESTORE
+            | error_codes::MODELS_PROXY_UNAVAILABLE
+            | error_codes::MODELS_CLIENT_INIT
+    )
 }
 
 #[cfg(test)]

@@ -699,6 +699,7 @@ const relayEn = {
       quotaExhausted: "Account quota exhausted",
       quota: "Quota check error",
       invalidResponse: "Invalid provider response",
+      models: "The model list could not be refreshed",
       unknown: "Account error",
     },
     identity: "Identity",

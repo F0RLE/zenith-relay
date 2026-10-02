@@ -88,6 +88,8 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("unknown_provider_problem")).toBe("accounts.errors.unknown");
     expect(accountErrorTranslationKey("upstream_forbidden")).toBe("usage.errorCategories.upstream_forbidden");
     expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
+    expect(accountErrorTranslationKey("models_prepare")).toBe("accounts.errors.models");
+    expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.models");
     expect(accountErrorTranslationKey("quota_forbidden")).toBe("accounts.errors.quota");
     expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.unknown");
     expect(accountErrorTranslationKey("deactivated_workspace")).toBe("accounts.errors.blocked");
