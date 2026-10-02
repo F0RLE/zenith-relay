@@ -19,7 +19,10 @@ use crate::local_pool::{
 use zenith_relay_core::{
     error_codes,
     providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome},
-    quota::{QuotaRefreshFailure, QuotaTransition, Subscription},
+    quota::{
+        QuotaRefreshFailure, QuotaSnapshot, QuotaTransition, QuotaWindow, Subscription,
+        SupplementalQuotaWindow,
+    },
 };
 
 pub(in crate::local_pool) struct AccountRefreshScope {
@@ -181,17 +184,48 @@ pub(in crate::local_pool) fn apply_read_error(
 }
 
 fn quota_is_newer(account: &LocalAccountRecord, scope: &AccountRefreshScope) -> bool {
-    let quota = &account.account.quota;
-    let observed_at_ms = quota
-        .updated_at_ms
-        .into_iter()
-        .chain(quota.error.as_ref().map(|error| error.occurred_at_ms))
-        .max();
-    // A host wall-clock correction must not make a concurrently persisted
-    // observation look older than the read. The captured snapshot is also a
-    // fence, not only its provider timestamp.
-    quota != &scope.before.account.quota
-        || observed_at_ms.is_some_and(|at| at > scope.started_at_ms)
+    // Passive headers move reset timers while a full /wham/usage read is in
+    // flight. That clock shift is not a newer remainder, so it must not discard
+    // the complete response. A changed remainder, limit, credit ledger, or
+    // supplemental window still wins over the late read.
+    scheduling_quota(&account.account.quota) != scheduling_quota(&scope.before.account.quota)
+}
+
+fn scheduling_quota(
+    quota: &QuotaSnapshot,
+) -> (
+    Option<u16>,
+    Option<u16>,
+    bool,
+    Option<u32>,
+    Option<u64>,
+    bool,
+    bool,
+    Option<u64>,
+    Vec<(String, Option<u16>)>,
+) {
+    (
+        window_remaining(quota.primary.as_ref()),
+        window_remaining(quota.secondary.as_ref()),
+        quota.limit_reached,
+        quota.reset_credits_available,
+        quota.available_credits_micro_units,
+        quota.provider_credits_available,
+        quota.provider_credits_unlimited,
+        quota.direct_balance_micro_usd,
+        supplemental_remaining(&quota.supplemental),
+    )
+}
+
+fn window_remaining(window: Option<&QuotaWindow>) -> Option<u16> {
+    window.and_then(|window| window.available_basis_points)
+}
+
+fn supplemental_remaining(windows: &[SupplementalQuotaWindow]) -> Vec<(String, Option<u16>)> {
+    windows
+        .iter()
+        .map(|window| (window.id.clone(), window.window.available_basis_points))
+        .collect()
 }
 
 fn quota_refresh_error_kind(code: ErrorCode) -> Option<&'static str> {

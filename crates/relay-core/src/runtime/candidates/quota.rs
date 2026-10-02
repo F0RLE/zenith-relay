@@ -259,12 +259,15 @@ impl GatewayRuntime {
         }
 
         match category {
-            // The gateway already applied a candidate-scoped cooldown before
-            // emitting this event. A bare 429 is not a durable quota snapshot:
-            // treating it as `Exhausted` keeps an otherwise healthy slot out
-            // of rotation until a separate refresh happens to run. Only an
-            // actual quota snapshot above may mark the candidate exhausted.
-            error_codes::UPSTREAM_QUOTA_EXHAUSTED => {}
+            // A bare rejection is not a complete quota snapshot. Do not invent
+            // windows or a permanent limit. An already-open primary window is
+            // zeroed so rotation stops using the stale remainder. The secondary
+            // window stays untouched: a false weekly zero can spend a reset credit.
+            error_codes::UPSTREAM_QUOTA_EXHAUSTED => {
+                if event.quota_snapshot.is_none() {
+                    self.note_reported_primary_exhaustion(candidate_id, observed_at_ms);
+                }
+            }
             error_codes::UPSTREAM_UNAUTHORIZED | error_codes::ACCOUNT_AUTH => {
                 self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
             }
@@ -276,6 +279,45 @@ impl GatewayRuntime {
             }
             _ => {}
         }
+    }
+
+    fn note_reported_primary_exhaustion(&self, candidate_id: &str, observed_at_ms: u64) -> bool {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
+            return false;
+        }
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = quotas.get_mut(candidate_id) else {
+            return false;
+        };
+        if !state
+            .snapshot
+            .note_reported_window_exhaustion(observed_at_ms)
+        {
+            return false;
+        }
+        state.dirty = true;
+        state.force_persist = true;
+        let quota = CandidateQuota::from_snapshot(
+            &state.snapshot,
+            observed_at_ms,
+            self.quota_stale_after_ms,
+        );
+        let updated = self.lock_scheduler().update_candidate_quota_at(
+            candidate_id,
+            quota,
+            state.snapshot.updated_at_ms,
+            state.snapshot.limiting_reset_at_ms(),
+            state.snapshot.available_credits_micro_units,
+            state.snapshot.provider_credits_unlimited,
+        );
+        drop(quotas);
+        if updated {
+            self.candidate_availability.notify_waiters();
+        }
+        updated
     }
 }
 

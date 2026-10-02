@@ -356,10 +356,35 @@ fn account_usage_reducer_distinguishes_refreshable_and_access_only_401() {
 
 #[test]
 fn account_usage_reducer_keeps_quota_and_entitlement_failures_recoverable() {
-    for (status, category, refresh_quota) in [
-        (403, "upstream_quota_exhausted", true),
-        (403, "upstream_usage_not_included", false),
-        (429, "upstream_rate_limited", true),
+    for (status, category, refresh_quota, health, error) in [
+        (
+            403,
+            "upstream_quota_exhausted",
+            true,
+            AccountHealthState::Healthy,
+            None,
+        ),
+        (
+            429,
+            "upstream_quota_exhausted",
+            true,
+            AccountHealthState::Healthy,
+            None,
+        ),
+        (
+            403,
+            "upstream_usage_not_included",
+            false,
+            AccountHealthState::Degraded,
+            Some("upstream_usage_not_included"),
+        ),
+        (
+            429,
+            "upstream_rate_limited",
+            true,
+            AccountHealthState::Degraded,
+            Some("upstream_rate_limited"),
+        ),
     ] {
         let update = reduce_account_usage(
             usage_state(),
@@ -373,10 +398,53 @@ fn account_usage_reducer_keeps_quota_and_entitlement_failures_recoverable() {
             None,
             None,
         );
-        assert_eq!(update.state.health, AccountHealthState::Degraded);
-        assert_eq!(update.state.last_error_code.as_deref(), Some(category));
+        assert_eq!(update.state.health, health);
+        assert_eq!(update.state.last_error_code.as_deref(), error);
         assert_eq!(update.refresh_quota, refresh_quota);
     }
+
+    let mut stale_quota = usage_state();
+    stale_quota.health = AccountHealthState::Degraded;
+    stale_quota.last_error_code = Some("upstream_quota_exhausted".into());
+    let cleared = reduce_account_usage(
+        stale_quota,
+        AccountUsageObservation {
+            success: false,
+            http_status: 403,
+            error_category: Some("upstream_quota_exhausted"),
+            affects_account: true,
+        },
+        10,
+        None,
+        None,
+    );
+    assert_eq!(cleared.state.health, AccountHealthState::Healthy);
+    assert_eq!(cleared.state.last_error_code, None);
+    assert!(cleared.refresh_quota);
+    assert!(cleared.reset_runtime_failures);
+
+    let mut rate_limited = usage_state();
+    rate_limited.health = AccountHealthState::Degraded;
+    rate_limited.last_error_code = Some("upstream_rate_limited".into());
+    let kept = reduce_account_usage(
+        rate_limited,
+        AccountUsageObservation {
+            success: false,
+            http_status: 403,
+            error_category: Some("upstream_quota_exhausted"),
+            affects_account: true,
+        },
+        10,
+        None,
+        None,
+    );
+    assert_eq!(kept.state.health, AccountHealthState::Degraded);
+    assert_eq!(
+        kept.state.last_error_code.as_deref(),
+        Some("upstream_rate_limited")
+    );
+    assert!(kept.refresh_quota);
+    assert!(!kept.reset_runtime_failures);
 
     let forbidden = reduce_account_usage(
         usage_state(),

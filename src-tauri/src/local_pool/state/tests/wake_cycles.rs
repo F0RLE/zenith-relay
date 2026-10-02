@@ -212,11 +212,29 @@ fn quota_classification_queues_refresh_without_blocking_the_account() {
         None,
         false,
     ));
-    assert_eq!(account.account.health, AccountHealthState::Degraded);
+    assert_eq!(account.account.health, AccountHealthState::Healthy);
+    assert_eq!(account.account.last_error_code, None);
     assert_eq!(
-        account.account.last_error_code.as_deref(),
-        Some("upstream_quota_exhausted")
+        account
+            .account
+            .quota
+            .primary
+            .as_ref()
+            .unwrap()
+            .available_basis_points,
+        Some(0)
     );
+    assert_eq!(
+        account
+            .account
+            .quota
+            .primary
+            .as_ref()
+            .unwrap()
+            .explicitly_full,
+        Some(false)
+    );
+    assert!(!account.account.quota.limit_reached);
 }
 #[test]
 fn account_usage_persists_natural_wake_completion_across_restart() {
