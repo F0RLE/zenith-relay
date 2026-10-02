@@ -62,9 +62,6 @@ pub(crate) struct LocalRuntimeInputs {
     pub gateway: GatewaySettings,
     pub sources: Vec<ProviderSourceRecord>,
     pub accounts: Vec<LocalAccountRecord>,
-    pub automations: AutomationRecords,
-    pub warnings: Vec<String>,
-    pub running: bool,
     pub source_api_keys: BTreeMap<String, Option<String>>,
     pub source_refresh: BTreeMap<String, SourceRefreshSnapshot>,
     pub account_refresh: BTreeMap<String, AccountRefreshState>,
@@ -75,6 +72,51 @@ pub(crate) struct SourceRefreshSnapshot {
     pub revision: u64,
     pub stats: Option<zenith_relay_core::SourceProviderStats>,
     pub state: SourceRefreshState,
+}
+
+/// Fields the desktop snapshot needs from an account secret. Token material
+/// stays in the credential cache and is not copied into each UI refresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AccountCredentialFacts {
+    pub has_oauth: bool,
+    pub agent_identity: bool,
+    pub has_provider_account_id: bool,
+    pub has_account_proxy: bool,
+    pub account_proxy_valid: bool,
+    pub bypass_common_proxy: bool,
+}
+
+impl AccountCredentialFacts {
+    pub(crate) fn from_stored(credentials: &StoredCodexCredentials) -> Self {
+        let proxy_url = credentials.proxy_url();
+        Self {
+            has_oauth: credentials.has_oauth(),
+            agent_identity: credentials.is_agent_identity(),
+            has_provider_account_id: credentials.provider_account_id().is_some(),
+            has_account_proxy: proxy_url.is_some(),
+            account_proxy_valid: proxy_url
+                .is_some_and(|value| zenith_relay_core::ProxyConfig::parse(value).is_ok()),
+            bypass_common_proxy: credentials.bypass_common_proxy(),
+        }
+    }
+
+    pub(crate) fn basis_points_available(self) -> bool {
+        self.has_oauth && !self.agent_identity
+    }
+}
+
+/// UI projection inputs. Source keys are presence checks, not decrypted copies.
+pub(crate) struct SnapshotInputs {
+    pub gateway: GatewaySettings,
+    pub sources: Vec<ProviderSourceRecord>,
+    pub accounts: Vec<LocalAccountRecord>,
+    pub automations: AutomationRecords,
+    pub warnings: Vec<String>,
+    pub running: bool,
+    pub source_secret_available: BTreeMap<String, bool>,
+    pub source_refresh: BTreeMap<String, SourceRefreshSnapshot>,
+    pub account_refresh: BTreeMap<String, AccountRefreshState>,
+    pub account_facts: HashMap<String, Option<AccountCredentialFacts>>,
 }
 
 struct SnapshotBase {
@@ -144,9 +186,7 @@ impl DesktopState {
             source_refresh,
             account_refresh,
             accounts,
-            automations,
-            mut warnings,
-            running,
+            ..
         } = self.snapshot_base().await?;
         let source_api_keys = sources
             .iter()
@@ -155,19 +195,50 @@ impl DesktopState {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let account_credentials = self.cached_account_credentials(&accounts)?;
+        Ok(LocalRuntimeInputs {
+            gateway,
+            sources,
+            accounts,
+            source_api_keys,
+            source_refresh,
+            account_refresh,
+            account_credentials,
+        })
+    }
+
+    pub(crate) async fn snapshot_inputs(&self) -> Result<SnapshotInputs> {
+        let SnapshotBase {
+            gateway,
+            sources,
+            source_refresh,
+            account_refresh,
+            accounts,
+            automations,
+            mut warnings,
+            running,
+        } = self.snapshot_base().await?;
+        let source_secret_available = sources
+            .iter()
+            .map(|source| {
+                secret_store::contains(&source.secret_ref)
+                    .map(|present| (source.id.clone(), present))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let account_facts = self.cached_account_credential_facts(&accounts)?;
         for source in &sources {
-            if source_api_keys
+            if !source_secret_available
                 .get(&source.id)
-                .and_then(Option::as_ref)
-                .is_none()
+                .copied()
+                .unwrap_or(false)
             {
                 warnings.push(warning_code(error_codes::SOURCE_SECRET_MISSING, &source.id));
             }
         }
         for account in &accounts {
-            if account_credentials
+            if account_facts
                 .get(&account.account.id)
-                .and_then(Option::as_ref)
+                .copied()
+                .flatten()
                 .is_none()
             {
                 warnings.push(warning_code(
@@ -176,17 +247,17 @@ impl DesktopState {
                 ));
             }
         }
-        Ok(LocalRuntimeInputs {
+        Ok(SnapshotInputs {
             gateway,
             sources,
             accounts,
             automations,
             warnings,
             running,
-            source_api_keys,
+            source_secret_available,
             source_refresh,
             account_refresh,
-            account_credentials,
+            account_facts,
         })
     }
 
@@ -194,6 +265,25 @@ impl DesktopState {
         &self,
         accounts: &[LocalAccountRecord],
     ) -> Result<HashMap<String, Option<StoredCodexCredentials>>> {
+        self.project_cached_credentials(accounts, Clone::clone)
+    }
+
+    fn cached_account_credential_facts(
+        &self,
+        accounts: &[LocalAccountRecord],
+    ) -> Result<HashMap<String, Option<AccountCredentialFacts>>> {
+        self.project_cached_credentials(accounts, |credentials| {
+            credentials
+                .as_ref()
+                .map(AccountCredentialFacts::from_stored)
+        })
+    }
+
+    fn project_cached_credentials<T>(
+        &self,
+        accounts: &[LocalAccountRecord],
+        project: impl Fn(&Option<StoredCodexCredentials>) -> T,
+    ) -> Result<HashMap<String, T>> {
         let generation = secret_store::generation();
         let mut cache = self.credential_cache.lock().map_err(|_| {
             LocalPoolError::new(ErrorCode::Io, "credential cache lock is unavailable")
@@ -207,14 +297,15 @@ impl DesktopState {
         for account in accounts {
             let id = &account.account.id;
             if let Some(credentials) = cache.values.get(id) {
-                loaded.insert(id.clone(), credentials.clone());
+                loaded.insert(id.clone(), project(credentials));
                 continue;
             }
             let credentials = credential_store.load(id).map_err(|error| {
                 LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
             })?;
-            cache.values.insert(id.clone(), credentials.clone());
-            loaded.insert(id.clone(), credentials);
+            let projected = project(&credentials);
+            cache.values.insert(id.clone(), credentials);
+            loaded.insert(id.clone(), projected);
         }
         let live = accounts
             .iter()

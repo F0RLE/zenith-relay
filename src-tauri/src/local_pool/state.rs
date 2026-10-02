@@ -7,9 +7,9 @@ mod snapshot;
 pub(crate) use adapters::DesktopOAuthEvents;
 use coordination::wake_coordinator;
 pub(crate) use paths::migrate_storage_layout;
-pub(crate) use snapshot::LocalRuntimeInputs;
 #[cfg(test)]
 use snapshot::{account_secret_available, SecretLookup};
+pub(crate) use snapshot::{AccountCredentialFacts, LocalRuntimeInputs, SnapshotInputs};
 
 use super::{
     accounts::{

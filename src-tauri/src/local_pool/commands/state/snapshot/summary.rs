@@ -1,11 +1,9 @@
 use crate::local_pool::{
-    accounts::{
-        credentials::StoredCodexCredentials,
-        proxy::{effective_proxy_config, proxy_status},
-    },
     models::{GatewaySettings, LocalAccountRecord, ProviderSourceRecord},
+    state::AccountCredentialFacts,
 };
 use zenith_relay_core::error_codes;
+use zenith_relay_core::protocol::ProxyMode;
 use zenith_relay_core::protocol::{
     account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
     QuotaWindowUsage, SourceSummary,
@@ -61,7 +59,7 @@ pub(super) fn local_source_summary(
 
 pub(super) struct LocalAccountSummaryContext<'a> {
     pub(super) settings: &'a GatewaySettings,
-    pub(super) credentials: Option<&'a StoredCodexCredentials>,
+    pub(super) credentials: Option<AccountCredentialFacts>,
     pub(super) common_proxy_available: bool,
     pub(super) api_equivalent: ApiEquivalentSummary,
     pub(super) quota_window_usage: Option<QuotaWindowUsage>,
@@ -86,8 +84,8 @@ pub(super) fn local_account_summary(
     } = context;
     let secret_available = credentials.is_some();
     let (proxy_mode, proxy_available) = credentials
-        .map(|credentials| proxy_status(settings, credentials, common_proxy_available))
-        .unwrap_or((zenith_relay_core::protocol::ProxyMode::Direct, false));
+        .map(|credentials| proxy_status_from_facts(settings, credentials, common_proxy_available))
+        .unwrap_or((ProxyMode::Direct, false));
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     let operational = account_operational_state(AccountOperationalInput {
         enabled: record.account.enabled,
@@ -115,9 +113,9 @@ pub(super) fn local_account_summary(
             .collect(),
         provider_family: record.provider_family.clone(),
         basis_points_available: credentials
-            .is_some_and(|value| value.has_oauth() && !value.is_agent_identity()),
+            .is_some_and(AccountCredentialFacts::basis_points_available),
         basis_points_enabled: settings.basis_points_enabled
-            && credentials.is_some_and(|value| value.has_oauth() && !value.is_agent_identity()),
+            && credentials.is_some_and(AccountCredentialFacts::basis_points_available),
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
@@ -166,16 +164,18 @@ pub(in crate::local_pool::commands::state) fn oauth_account_runtime_available(
 
 pub(super) fn account_runtime_warning(
     record: &LocalAccountRecord,
-    settings: &crate::local_pool::models::GatewaySettings,
-    _account_id: &str,
-    credentials: Option<&StoredCodexCredentials>,
+    settings: &GatewaySettings,
+    credentials: Option<AccountCredentialFacts>,
+    common_proxy_available: bool,
 ) -> String {
     let code = match credentials {
         None => error_codes::ACCOUNT_RUNTIME_CREDENTIAL_MISSING,
-        Some(credentials) if credentials.provider_account_id().is_none() => {
+        Some(credentials) if !credentials.has_provider_account_id => {
             error_codes::ACCOUNT_RUNTIME_PROVIDER_ACCOUNT_ID_MISSING
         }
-        Some(credentials) if effective_proxy_config(settings, credentials).is_err() => {
+        Some(credentials)
+            if account_proxy_route_invalid(settings, credentials, common_proxy_available) =>
+        {
             error_codes::ACCOUNT_RUNTIME_PROXY_INVALID
         }
         Some(_) => "account_runtime_not_registered",
@@ -189,4 +189,122 @@ pub(super) fn account_runtime_warning(
         )
     };
     format!("{code}:{redacted}")
+}
+
+fn proxy_status_from_facts(
+    settings: &GatewaySettings,
+    facts: AccountCredentialFacts,
+    common_available: bool,
+) -> (ProxyMode, bool) {
+    if facts.has_account_proxy {
+        return (ProxyMode::Account, facts.account_proxy_valid);
+    }
+    if facts.bypass_common_proxy {
+        return (ProxyMode::Direct, !settings.account_proxy_required);
+    }
+    if settings.common_proxy_configured {
+        return (ProxyMode::Common, common_available);
+    }
+    (ProxyMode::Direct, !settings.account_proxy_required)
+}
+
+/// Same failure cases as `effective_proxy_config`, without reading the common
+/// proxy secret again. `common_available` is already the parsed common proxy.
+fn account_proxy_route_invalid(
+    settings: &GatewaySettings,
+    facts: AccountCredentialFacts,
+    common_available: bool,
+) -> bool {
+    if facts.has_account_proxy {
+        return !facts.account_proxy_valid;
+    }
+    if !facts.bypass_common_proxy && settings.common_proxy_configured {
+        return !common_available;
+    }
+    settings.account_proxy_required
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_pool::accounts::{
+        credentials::StoredCodexCredentials,
+        proxy::{effective_proxy_config, proxy_status},
+    };
+
+    fn credentials() -> StoredCodexCredentials {
+        StoredCodexCredentials::new(
+            "account_snapshot_facts",
+            "synthetic-access".into(),
+            Some("synthetic-refresh".into()),
+            None,
+            None,
+            1,
+            1,
+            None,
+            Some("provider-account".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn snapshot_facts_match_proxy_decisions_without_reloading_the_common_secret() {
+        let settings = GatewaySettings::default();
+        let direct = credentials();
+        let direct_facts = AccountCredentialFacts::from_stored(&direct);
+        assert_eq!(
+            proxy_status(&settings, &direct, false),
+            proxy_status_from_facts(&settings, direct_facts, false)
+        );
+        assert_eq!(
+            effective_proxy_config(&settings, &direct).is_err(),
+            account_proxy_route_invalid(&settings, direct_facts, false)
+        );
+
+        let mut required = settings.clone();
+        required.account_proxy_required = true;
+        assert!(account_proxy_route_invalid(&required, direct_facts, false));
+        assert!(effective_proxy_config(&required, &direct).is_err());
+
+        let account_proxy = direct
+            .clone()
+            .with_proxy_url(Some("http://127.0.0.1:8080".into()))
+            .unwrap();
+        let account_facts = AccountCredentialFacts::from_stored(&account_proxy);
+        assert_eq!(
+            proxy_status(&required, &account_proxy, false),
+            proxy_status_from_facts(&required, account_facts, false)
+        );
+        assert!(!account_proxy_route_invalid(
+            &required,
+            account_facts,
+            false
+        ));
+        assert!(effective_proxy_config(&required, &account_proxy).is_ok());
+
+        let bypass = credentials().with_proxy_route(None, true).unwrap();
+        let bypass_facts = AccountCredentialFacts::from_stored(&bypass);
+        assert_eq!(
+            proxy_status(&required, &bypass, true),
+            proxy_status_from_facts(&required, bypass_facts, true)
+        );
+        assert!(account_proxy_route_invalid(&required, bypass_facts, true));
+
+        let mut common = settings.clone();
+        common.common_proxy_configured = true;
+        assert_eq!(
+            proxy_status(&common, &direct, false),
+            proxy_status_from_facts(&common, direct_facts, false)
+        );
+        assert_eq!(
+            proxy_status(&common, &direct, true),
+            proxy_status_from_facts(&common, direct_facts, true)
+        );
+        assert!(account_proxy_route_invalid(&common, direct_facts, false));
+        assert!(!account_proxy_route_invalid(&common, direct_facts, true));
+    }
 }

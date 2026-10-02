@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::local_pool::error::LocalPoolError;
 use crate::local_pool::models::LocalAccountRecord;
-use crate::local_pool::state::{DesktopState, LocalRuntimeInputs};
+use crate::local_pool::state::{DesktopState, SnapshotInputs};
 use crate::local_pool::store::telemetry_db::{TelemetryDb, UsageEquivalents};
 use zenith_relay_core::pricing::{PricingCatalog, PricingContext};
 use zenith_relay_core::protocol::{AccountSummary, QuotaWindowUsage, SourceSummary};
@@ -61,7 +61,7 @@ pub(super) fn project_quota_window_usages(
 }
 
 pub(super) fn project_source_summaries(
-    inputs: &LocalRuntimeInputs,
+    inputs: &SnapshotInputs,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &UsageEquivalents,
 ) -> Result<Vec<SourceSummary>, LocalPoolError> {
@@ -74,10 +74,10 @@ pub(super) fn project_source_summaries(
                 record,
                 observation.map(|value| value.revision),
                 inputs
-                    .source_api_keys
+                    .source_secret_available
                     .get(&record.id)
-                    .and_then(Option::as_ref)
-                    .is_some(),
+                    .copied()
+                    .unwrap_or(false),
                 (inputs.running && record.enabled).then(|| {
                     if record.in_pool {
                         pooled_source_runtime_available(routing_order, &record.id)
@@ -103,7 +103,7 @@ pub(super) fn project_source_summaries(
 
 pub(super) fn project_account_summaries(
     state: &DesktopState,
-    inputs: &LocalRuntimeInputs,
+    inputs: &SnapshotInputs,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &UsageEquivalents,
     quota_window_usages: &BTreeMap<String, QuotaWindowUsage>,
@@ -119,9 +119,10 @@ pub(super) fn project_account_summaries(
                 LocalAccountSummaryContext {
                     settings: &inputs.gateway,
                     credentials: inputs
-                        .account_credentials
+                        .account_facts
                         .get(&record.account.id)
-                        .and_then(Option::as_ref),
+                        .copied()
+                        .flatten(),
                     common_proxy_available,
                     api_equivalent: equivalents
                         .accounts
@@ -149,8 +150,9 @@ pub(super) fn project_account_summaries(
 
 pub(super) fn append_missing_runtime_warnings(
     warnings: &mut Vec<String>,
-    inputs: &LocalRuntimeInputs,
+    inputs: &SnapshotInputs,
     routing_order: &[CandidateRuntimeSnapshot],
+    common_proxy_available: bool,
 ) {
     if !inputs.running {
         return;
@@ -164,11 +166,12 @@ pub(super) fn append_missing_runtime_warnings(
             warnings.push(account_runtime_warning(
                 record,
                 &inputs.gateway,
-                &record.account.id,
                 inputs
-                    .account_credentials
+                    .account_facts
                     .get(&record.account.id)
-                    .and_then(Option::as_ref),
+                    .copied()
+                    .flatten(),
+                common_proxy_available,
             ));
         }
     }
