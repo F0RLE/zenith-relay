@@ -45,18 +45,10 @@ impl SecretLookup for OsSecretLookup {
     }
 }
 
+#[derive(Default)]
 pub(super) struct CredentialCache {
     generation: u64,
     values: HashMap<String, Option<StoredCodexCredentials>>,
-}
-
-impl Default for CredentialCache {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            values: HashMap::new(),
-        }
-    }
 }
 
 pub(crate) struct LocalRuntimeInputs {
@@ -421,7 +413,7 @@ pub(super) fn account_secret_available(
     let secret_ref =
         crate::local_pool::accounts::credentials::credential_secret_ref(&account.account.id)
             .map_err(LocalPoolError::invalid_state)?;
-    Ok(secrets.contains(&secret_ref)?)
+    secrets.contains(&secret_ref)
 }
 
 fn warning_code(code: &str, id: &str) -> String {
