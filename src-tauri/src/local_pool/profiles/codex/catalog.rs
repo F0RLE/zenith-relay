@@ -16,7 +16,6 @@ const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
 mod installed;
 
-use installed::add_installed_codex_ultra;
 pub(super) use installed::bundled_codex_ultra_models;
 #[cfg(test)]
 use installed::{
