@@ -19,10 +19,7 @@ use crate::local_pool::{
 use zenith_relay_core::{
     error_codes,
     providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome},
-    quota::{
-        QuotaRefreshFailure, QuotaSnapshot, QuotaTransition, QuotaWindow, Subscription,
-        SupplementalQuotaWindow,
-    },
+    quota::{QuotaRefreshFailure, QuotaSnapshot, QuotaTransition, QuotaWindow, Subscription},
 };
 
 pub(in crate::local_pool) struct AccountRefreshScope {
@@ -188,44 +185,47 @@ fn quota_is_newer(account: &LocalAccountRecord, scope: &AccountRefreshScope) -> 
     // flight. That clock shift is not a newer remainder, so it must not discard
     // the complete response. A changed remainder, limit, credit ledger, or
     // supplemental window still wins over the late read.
-    scheduling_quota(&account.account.quota) != scheduling_quota(&scope.before.account.quota)
+    QuotaSchedulingEvidence::from_snapshot(&account.account.quota)
+        != QuotaSchedulingEvidence::from_snapshot(&scope.before.account.quota)
 }
 
-fn scheduling_quota(
-    quota: &QuotaSnapshot,
-) -> (
-    Option<u16>,
-    Option<u16>,
-    bool,
-    Option<u32>,
-    Option<u64>,
-    bool,
-    bool,
-    Option<u64>,
-    Vec<(String, Option<u16>)>,
-) {
-    (
-        window_remaining(quota.primary.as_ref()),
-        window_remaining(quota.secondary.as_ref()),
-        quota.limit_reached,
-        quota.reset_credits_available,
-        quota.available_credits_micro_units,
-        quota.provider_credits_available,
-        quota.provider_credits_unlimited,
-        quota.direct_balance_micro_usd,
-        supplemental_remaining(&quota.supplemental),
-    )
+/// The quota fields that make an in-flight refresh stale. Reset timers are
+/// intentionally absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuotaSchedulingEvidence {
+    primary_remaining: Option<u16>,
+    secondary_remaining: Option<u16>,
+    limit_reached: bool,
+    reset_credits_available: Option<u32>,
+    available_credits_micro_units: Option<u64>,
+    provider_credits_available: bool,
+    provider_credits_unlimited: bool,
+    direct_balance_micro_usd: Option<u64>,
+    supplemental: Vec<(String, Option<u16>)>,
+}
+
+impl QuotaSchedulingEvidence {
+    fn from_snapshot(quota: &QuotaSnapshot) -> Self {
+        Self {
+            primary_remaining: window_remaining(quota.primary.as_ref()),
+            secondary_remaining: window_remaining(quota.secondary.as_ref()),
+            limit_reached: quota.limit_reached,
+            reset_credits_available: quota.reset_credits_available,
+            available_credits_micro_units: quota.available_credits_micro_units,
+            provider_credits_available: quota.provider_credits_available,
+            provider_credits_unlimited: quota.provider_credits_unlimited,
+            direct_balance_micro_usd: quota.direct_balance_micro_usd,
+            supplemental: quota
+                .supplemental
+                .iter()
+                .map(|window| (window.id.clone(), window.window.available_basis_points))
+                .collect(),
+        }
+    }
 }
 
 fn window_remaining(window: Option<&QuotaWindow>) -> Option<u16> {
     window.and_then(|window| window.available_basis_points)
-}
-
-fn supplemental_remaining(windows: &[SupplementalQuotaWindow]) -> Vec<(String, Option<u16>)> {
-    windows
-        .iter()
-        .map(|window| (window.id.clone(), window.window.available_basis_points))
-        .collect()
 }
 
 fn quota_refresh_error_kind(code: ErrorCode) -> Option<&'static str> {
