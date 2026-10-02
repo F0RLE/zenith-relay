@@ -372,6 +372,6 @@ impl<S> UsageStream<S> {
         else {
             return;
         };
-        *crate::poison::mutex(&shared) = Some(response);
+        *crate::poison::mutex(shared) = Some(response);
     }
 }

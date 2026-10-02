@@ -134,7 +134,7 @@ impl StreamExecution {
         let capture_stream = upstream_usage.clone();
         let remaining: UpstreamStream = Box::pin(remaining.inspect(move |chunk| {
             if let (Some(capture), Ok(bytes)) = (&capture_stream, chunk) {
-                crate::poison::mutex(&capture).observe(bytes);
+                crate::poison::mutex(capture).observe(bytes);
             }
         }));
         let completion_runtime = runtime.clone();
