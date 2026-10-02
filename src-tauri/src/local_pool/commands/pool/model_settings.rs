@@ -140,19 +140,23 @@ pub(super) async fn set_local_model_display_order(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
-    let inputs = state.runtime_inputs().await?;
-    let old_gateway = state.store()?.gateway().clone();
-    let order = complete_model_display_order(
-        configured_pool_model_ids(&inputs.sources, &inputs.accounts),
-        &input.model_ids,
-        &old_gateway.model_display_order,
-    )
-    .map_err(model_policy_error)?;
-    let mut gateway = old_gateway.clone();
-    gateway.model_display_order = order;
-    if gateway == old_gateway {
+    // Order only needs configured model ids. Loading every source key and
+    // account token here made a drag wait on the secret vault.
+    let (order, old_gateway) = {
+        let store = state.store()?;
+        let order = complete_model_display_order(
+            configured_pool_model_ids(store.sources(), store.accounts()),
+            &input.model_ids,
+            &store.gateway().model_display_order,
+        )
+        .map_err(model_policy_error)?;
+        (order, store.gateway().clone())
+    };
+    if order == old_gateway.model_display_order {
         return Ok(());
     }
+    let mut gateway = old_gateway;
+    gateway.model_display_order = order;
     state.store()?.replace_gateway(gateway.clone())?;
     if let Some(runtime) = state.gateway.runtime().await {
         runtime.set_model_display_order(gateway.model_display_order);
