@@ -8,8 +8,8 @@ use zenith_relay_core::accounts::AccountAuthState;
 
 use zenith_relay_core::{
     accounts::{
+        accept_discovered_models,
         apply_model_discovery_failure as apply_account_model_discovery_failure,
-        recover_model_discovery_state,
     },
     error_codes,
     providers::chatgpt::{
@@ -98,15 +98,13 @@ pub(super) async fn read_models(
 fn apply_discovered_models(account: &mut ServerAccountRecord, result: ModelReadResult) {
     match result {
         Ok(models) => {
-            let models = zenith_relay_core::normalize_model_ids(models);
-            if account.models.is_empty() && !models.is_empty() {
-                account.models = models.clone();
-            }
-            account.discovered_models = Some(models);
-            recover_model_discovery_state(
+            accept_discovered_models(
+                &mut account.models,
+                &mut account.discovered_models,
                 &mut account.auth_state,
                 &mut account.health,
                 &mut account.last_error_code,
+                zenith_relay_core::normalize_model_ids(models),
             );
         }
         Err((code, retryable, _)) => {

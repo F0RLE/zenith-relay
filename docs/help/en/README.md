@@ -184,7 +184,7 @@ It is different from a pool preset, which contains settings only.
 On the computer, a late quota/model refresh does not overwrite an account after
 you sign in again, change its proxy, or remove and re-add it. Newer quota data
 received with a model request also takes precedence over an older background read.
-Quota and model lists refresh independently. A manual refresh joins any matching
+A blank model-catalog response does not replace models the account already reported. Quota and model lists refresh independently. A manual refresh joins any matching
 read already in progress; closing its waiting view does not cancel shared work.
 Provider-requested pauses still apply, including to repeated manual refreshes.
 

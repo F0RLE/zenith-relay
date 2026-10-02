@@ -182,6 +182,32 @@ pub fn apply_model_discovery_failure(
     }
 }
 
+/// Applies one successful model-catalog read.
+///
+/// A blank payload is not a catalog. It must not replace models the account
+/// already reported, and it is not substituted from a cache. A nonempty read
+/// replaces the discovered list. The configured baseline is filled only while
+/// it is still empty.
+pub fn accept_discovered_models(
+    models: &mut Vec<String>,
+    discovered_models: &mut Option<Vec<String>>,
+    auth_state: &mut AccountAuthState,
+    health: &mut AccountHealthState,
+    last_error_code: &mut Option<String>,
+    discovered: Vec<String>,
+) -> bool {
+    if discovered.is_empty() {
+        let configured = discovered_models.as_deref().unwrap_or(models);
+        return !configured.is_empty();
+    }
+    if models.is_empty() {
+        *models = discovered.clone();
+    }
+    *discovered_models = Some(discovered);
+    recover_model_discovery_state(auth_state, health, last_error_code);
+    true
+}
+
 /// Clears a stale model-discovery error after a successful catalog refresh.
 pub fn recover_model_discovery_state(
     auth_state: &mut AccountAuthState,

@@ -58,7 +58,11 @@ pub(super) fn preserve_existing_settings(
     next.purchase_cost_micro_usd = current.purchase_cost_micro_usd;
     next.remote_location = current.remote_location.clone();
     let fresh_models = std::mem::take(&mut next.models);
-    let fresh_discovered_models = next.discovered_models.take();
+    // Some([]) is not a live catalog and must not hide models already shown.
+    let fresh_discovered_models = next
+        .discovered_models
+        .take()
+        .filter(|models| !models.is_empty());
     next.models = current.models.clone();
     next.discovered_models = fresh_discovered_models.or_else(|| {
         if fresh_models.is_empty() {

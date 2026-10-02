@@ -191,15 +191,22 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
     assert!(account.account.last_error_code.is_none());
 }
 #[test]
-fn successful_empty_model_refresh_is_authoritative() {
+fn empty_model_refresh_does_not_replace_a_live_list() {
     let mut account = account_record("account_empty_models");
+    let before = account.effective_models().to_vec();
+    account.account.health = AccountHealthState::Degraded;
+    account.account.last_error_code = Some("models_transport".into());
 
-    assert!(apply_model_discovery(&mut account, Ok(Vec::new())));
+    assert!(!apply_model_discovery(&mut account, Ok(Vec::new())));
 
-    assert_eq!(account.discovered_models, Some(Vec::new()));
-    assert!(account.effective_models().is_empty());
-    assert!(account.account.last_error_code.is_none());
-    assert_eq!(account.account.health, AccountHealthState::Healthy);
+    assert_eq!(account.account.health, AccountHealthState::Degraded);
+    assert_eq!(
+        account.account.last_error_code.as_deref(),
+        Some("models_transport")
+    );
+
+    assert!(account.discovered_models.is_none());
+    assert_eq!(account.effective_models(), before);
 }
 #[test]
 fn successful_model_refresh_recovers_a_transient_auth_error() {

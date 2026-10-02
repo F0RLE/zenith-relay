@@ -181,10 +181,7 @@ async fn prepare_oauth_completion(
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
-    let model_discovery_succeeded = model_issue.is_none();
-    if model_discovery_succeeded {
-        // Preserve an explicit empty discovery result. It is different from
-        // a failed probe and must suppress an older configured catalog.
+    if model_issue.is_none() && !record.models.is_empty() {
         record.discovered_models = Some(record.models.clone());
     }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {

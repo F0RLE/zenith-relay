@@ -262,7 +262,7 @@ fn duplicate_identity_preserves_local_id_and_user_settings() {
 }
 
 #[test]
-fn duplicate_identity_preserves_a_successful_empty_model_snapshot() {
+fn duplicate_identity_keeps_models_when_the_new_snapshot_is_empty() {
     let current = account("account_empty_models", "provider-account", "old-refresh");
     let mut next = account("account_empty_models", "provider-account", "new-refresh");
     next.models.clear();
@@ -271,8 +271,8 @@ fn duplicate_identity_preserves_a_successful_empty_model_snapshot() {
     preserve_existing_settings(&mut next, &current);
 
     assert_eq!(next.models, current.models);
-    assert_eq!(next.discovered_models, Some(Vec::new()));
-    assert!(next.effective_models().is_empty());
+    assert!(next.discovered_models.is_none());
+    assert_eq!(next.effective_models(), ["gpt-test"]);
 }
 
 #[test]

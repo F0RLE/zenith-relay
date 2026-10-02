@@ -543,3 +543,87 @@ fn account_usage_reducer_keeps_quota_and_entitlement_failures_recoverable() {
         Some("upstream_account_verification_required")
     );
 }
+
+#[test]
+fn blank_model_discovery_keeps_the_previous_catalog() {
+    let mut models = vec!["gpt-live".into()];
+    let mut discovered = Some(vec!["gpt-live".into()]);
+    let mut auth = AccountAuthState::Active;
+    let mut health = AccountHealthState::Healthy;
+    let mut error = None;
+
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        Vec::new(),
+    ));
+    assert_eq!(models, ["gpt-live"]);
+    assert_eq!(discovered.as_deref(), Some(models.as_slice()));
+
+    discovered = None;
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        Vec::new(),
+    ));
+    assert_eq!(models, ["gpt-live"]);
+    assert!(discovered.is_none());
+
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        vec!["gpt-next".into()],
+    ));
+    assert_eq!(models, ["gpt-live"]);
+    assert_eq!(
+        discovered.as_deref(),
+        Some(["gpt-next".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn first_nonempty_model_discovery_fills_an_empty_baseline() {
+    let mut models = Vec::new();
+    let mut discovered = None;
+    let mut auth = AccountAuthState::Error;
+    let mut health = AccountHealthState::Unhealthy;
+    let mut error = Some("models_transport".into());
+
+    assert!(!accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        Vec::new(),
+    ));
+    assert!(models.is_empty());
+    assert!(discovered.is_none());
+    assert_eq!(error.as_deref(), Some("models_transport"));
+
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        vec!["gpt-recovered".into()],
+    ));
+    assert_eq!(models, ["gpt-recovered"]);
+    assert_eq!(
+        discovered.as_deref(),
+        Some(["gpt-recovered".to_string()].as_slice())
+    );
+    assert_eq!(auth, AccountAuthState::Active);
+    assert_eq!(health, AccountHealthState::Healthy);
+    assert!(error.is_none());
+}

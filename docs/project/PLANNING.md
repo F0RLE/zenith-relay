@@ -691,6 +691,7 @@ Per-file and file-count bounds, snapshot validation and rollback remain enforced
 Native account catalog reads run with at most four concurrent requests and a
 shared twelve-second budget; completed results retain account ranking and
 unreachable accounts keep their own last known transport metadata.
+A successful blank model-catalog response is not a catalog. Desktop and server keep the models the account already reported and do not clear a prior discovery error from that blank response.
 
 ChatGPT account HTTP and WebSocket handshakes retain only the infrastructure
 cookie `__oailb`, in memory, per account executor and credential. The store is
@@ -718,7 +719,7 @@ request no longer includes their catalog. A declared tool excluded by
 `tool_choice` is rejected as a choice error, not as a missing tool. Encrypted
 `agent_message` content is rejected before dispatch. The upstream returns
 completed JSON, so requested SSE is buffered and emitted only after completion.
-A user input image is uploaded to the account attachment endpoint and sent as file_id. Remote image URLs and explicit nonstandard service tiers are incompatible with this route. `auto`, `default`, and `standard` are ordinary tiers and are omitted from the upstream body. Structured `text.format` is rejected rather than dropped. Developer instructions follow the v0.2.8 adapter: examples are generated only for tools allowed in the request and match the declared function or custom shape, including the two JSON layers of a function payload. A second developer message repeats the transport reminder and tells each custom tool to keep its input raw. The one malformed-relay retry hint is appended after that prepared input, before a compaction trigger.
+A user input image is uploaded to the account attachment endpoint and sent as file_id. Item identifiers longer than 64 characters keep their namespace prefix and a stable hash of the original value, so a call and its output stay paired. Ciphertext-bound ids are left unchanged. A reasoning summary without ciphertext stays in history. Requested maximum reasoning is sent as the supported extra-high level; ultra stays ultra. Remote image URLs and explicit nonstandard service tiers are incompatible with this route. `auto`, `default`, and `standard` are ordinary tiers and are omitted from the upstream body. Structured `text.format` is rejected rather than dropped. Developer instructions follow the v0.2.8 adapter: examples are generated only for tools allowed in the request and match the declared function or custom shape, including the two JSON layers of a function payload. A second developer message repeats the transport reminder and tells each custom tool to keep its input raw. The one malformed-relay retry hint is appended after that prepared input, before a compaction trigger.
 opaque `previous_response_id` continuation is rejected before dispatch rather
 than silently removed. Completed and incomplete buffered responses retain
 their respective terminal status in JSON and synthesized SSE.
