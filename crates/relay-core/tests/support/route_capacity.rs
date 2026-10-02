@@ -401,7 +401,7 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 }
 
 #[tokio::test]
-async fn independent_chat_uses_a_ready_api_while_an_oauth_account_is_occupied() {
+async fn independent_chat_stays_on_the_account_with_known_quota() {
     let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("source-response")]).await;
@@ -433,23 +433,20 @@ async fn independent_chat_uses_a_ready_api_while_an_oauth_account_is_occupied() 
 
     let independent = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
         .await
-        .expect("the independent chat did not use the lower-load member");
+        .expect("the independent chat did not stay on the account with known quota");
     assert_eq!(independent.status(), StatusCode::OK);
     let _ = independent.bytes().await.unwrap();
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(source_state.requests.lock().unwrap().len(), 0);
 
     stream_state.release.notify_one();
     let _ = open_stream.bytes().await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .any(|event| event.account_id.as_deref() == Some("stream-account")));
-    assert!(events
-        .iter()
-        .any(|event| event.source_id == "z-reserve-api"));
+    assert!(events.iter().all(|event| {
+        event.account_id.as_deref() == Some("stream-account") && event.source_id != "z-reserve-api"
+    }));
 }
 
 #[tokio::test]
