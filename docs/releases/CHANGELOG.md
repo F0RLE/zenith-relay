@@ -10,45 +10,49 @@ release entries are kept concise and link to the corresponding tag.
 
 <!-- relay-notes:ru -->
 
-## [1.1.4] - 2026-10-01
+## [1.1.4] - 2026-10-02
 
 <!-- relay-notes:en -->
 
-Zenith Relay 1.1.4 keeps automatic rotation on the member with the most remaining quota, blocks internal ChatGPT downgrade ids, and keeps model families in their product order.
+Zenith Relay 1.1.4 rotates to the account with the most remaining quota, blocks hidden ChatGPT downgrades, and keeps each model family in its product order.
 
 ### Changed
 
-- Automatic rotation chooses the member with the greatest fresh quota remainder. A one-point difference is enough. Load is compared only when the remainder is equal. A continuation stays on its member unless saved history can be resent to a member with a larger remainder.
-- OpenAI models follow Astra, Sol, Terra, then Luna. Anthropic models follow Fable, Opus, Sonnet, then Haiku. A future version of the same catalog family keeps that place without a new model-ID list.
-- API prices use the provider price first. Otherwise they use the official price for the model family: GPT, ChatGPT, and Codex use OpenAI, Claude uses Anthropic, Gemini uses Google, and Grok uses xAI. A manual price is used only when neither is available.
-- The API tab can block degraded ChatGPT routes. An internal id such as degrade2 is not a model. The account leaves rotation briefly and another member can take the request. Turning the switch off sends those requests again.
-- The tool-optimization switch is gone. Tool lists go out as the client sent them. A previously saved optimized mode no longer changes new requests.
-- The pool member picker can filter working, cooldown, unavailable, disabled, and server connections. The status color matches the account card.
-- On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right.
-- Model switches save without waiting for a full snapshot, and the launcher no longer draws focus rings.
-- Excel / Basis Points accepts an image in a user message. A data URL is uploaded with the account and replaced by `file_id`. A remote image URL is rejected, and `detail` is not forwarded.
-- Excel / Basis Points keeps long history identifiers within the upstream limit and preserves a visible reasoning summary. Maximum reasoning is sent as the supported extra-high level.
-- A blank ChatGPT model-catalog response no longer removes models the account already reported.
-- A failed model-list refresh now says that the list could not be refreshed. A later local preparation failure does not hide the provider error already recorded for that account.
+- Automatic rotation picks the member with the largest fresh quota remainder. One point is enough to switch. Load is compared only when the remainder is equal. A chat stays on its member when the saved history cannot be resent to a member with more quota left.
+- OpenAI models stay in the order Astra, Sol, Terra, then Luna. Anthropic models stay in the order Fable, Opus, Sonnet, then Haiku. A newer version of the same family keeps that place.
+- An API price uses the provider price first. If the provider does not send one, Relay uses the official family price: GPT, ChatGPT, and Codex use OpenAI; Claude uses Anthropic; Gemini uses Google; Grok uses xAI. A manual price is used only when neither exists.
+- The API tab can block degraded ChatGPT routes. An internal id such as degrade2 is not a model. That account leaves rotation briefly and another member can take the request. Turning the switch off sends those requests again.
+- The tool-optimization switch is removed. Tool lists leave Relay exactly as the client sent them. A previously saved optimized mode no longer changes new requests.
+- Switching an account keeps the official ChatGPT catalog and its official models. A direct API connection uses the models reported by that provider. Known reasoning levels come from the catalog parser and are connected directly, without the pool rewriting them.
+- The pool picker filters working, cooldown, unavailable, disabled, and server connections. The status color matches the account card. The automatic queue is the left-to-right order of the cards, not a text list.
+- Model speed is shown as icons. A reasoning control appears only for a text model that has reasoning levels, and it sits after the speed icons.
+- On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right. The launcher no longer draws focus rings.
+- A model switch saves without waiting for a full snapshot. Other switches keep their new value while a background refresh runs, so the rest of the window stays usable.
+- ChatGPT account requests use current Chrome headers. Quota rejection keeps the account recoverable and applies to the open primary window instead of marking the account broken.
+- Excel / Basis Points accepts an image inside a user message. A data URL is uploaded with the account and replaced by file_id. A remote image URL is rejected, and detail is not forwarded. One encrypted-content failure drops the foreign ciphertext and retries the same account.
+- Excel / Basis Points keeps long history identifiers within the upstream limit, so a tool call still matches its output. A visible reasoning summary stays even without ciphertext. Maximum reasoning is sent as the extra-high level this route supports.
+- A blank ChatGPT model-catalog response no longer removes models the account already reported. A failed model-list refresh says that the list could not be refreshed, and a later local failure does not hide the provider error already recorded for that account.
 
 <!-- relay-notes:ru -->
 
-Zenith Relay 1.1.4 оставляет автоматическую ротацию на участнике с наибольшим остатком квоты, не отправляет внутренние id понижения ChatGPT и держит семейства моделей в их продуктовом порядке.
+Zenith Relay 1.1.4 ставит в ротацию аккаунт с наибольшим остатком квоты, блокирует скрытое понижение ChatGPT и держит семейства моделей в их продуктовом порядке.
 
 ### Изменения
 
-- Автоматическая ротация выбирает участника с наибольшим свежим остатком квоты. Разницы в один пункт достаточно. Нагрузка сравнивается только при равном остатке. Продолжение чата остаётся на своём участнике, если сохранённую историю нельзя переслать участнику с большим остатком.
-- Модели OpenAI идут в порядке Astra, Sol, Terra, затем Luna. Модели Anthropic идут в порядке Fable, Opus, Sonnet, затем Haiku. Будущая версия того же семейства занимает это место без нового списка ID.
-- Для цены API сначала берётся цена провайдера. Иначе используется официальная цена семейства: GPT, ChatGPT и Codex относятся к OpenAI, Claude к Anthropic, Gemini к Google, Grok к xAI. Ручная цена нужна только когда обеих нет.
-- На вкладке API можно блокировать пониженные маршруты ChatGPT. Внутренний id вроде degrade2 не является моделью. Аккаунт ненадолго уходит из ротации, запрос может уйти другому участнику. Выключение снова разрешает отправку.
+- Автоматическая ротация выбирает участника с наибольшим свежим остатком квоты. Одного пункта достаточно для переключения. Нагрузка сравнивается только при равном остатке. Чат остаётся на своём участнике, если сохранённую историю нельзя переслать участнику с большим остатком.
+- Модели OpenAI остаются в порядке Astra, Sol, Terra, затем Luna. Модели Anthropic остаются в порядке Fable, Opus, Sonnet, затем Haiku. Новая версия того же семейства занимает это же место.
+- Цена API сначала берётся у провайдера. Если провайдер её не прислал, Relay использует официальную цену семейства: GPT, ChatGPT и Codex относятся к OpenAI, Claude к Anthropic, Gemini к Google, Grok к xAI. Ручная цена нужна только когда обеих нет.
+- На вкладке API можно блокировать пониженные маршруты ChatGPT. Внутренний id вроде degrade2 не является моделью. Такой аккаунт ненадолго уходит из ротации, и запрос может уйти другому участнику. Выключение снова разрешает отправку.
 - Переключатель оптимизации инструментов убран. Список инструментов уходит так, как его прислал клиент. Сохранённый оптимизированный режим больше не меняет новые запросы.
-- При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта.
-- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа.
-- Переключение модели сохраняется без ожидания полного снимка, а у лаунчера больше нет обводки фокуса.
-- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на `file_id`. Внешняя ссылка отклоняется, поле `detail` не пересылается.
-- Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе и сохраняет видимое краткое содержание размышления. Максимальное размышление отправляется как поддерживаемый экстра-высокий уровень.
-- Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил.
-- Ошибка обновления списка моделей теперь говорит, что список не удалось обновить. Поздняя локальная ошибка подготовки не скрывает уже записанную ошибку провайдера.
+- Переключение аккаунта сохраняет официальный каталог ChatGPT и его официальные модели. Прямое API-подключение берёт модели, которые сообщил этот провайдер. Известные уровни размышления берутся из разбора каталога и подключаются напрямую, без переписывания пулом.
+- При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта. Автоматическая очередь видна порядком карточек слева направо, а не текстовым списком.
+- Скорость модели показана иконками. Выбор размышления появляется только у текстовой модели, у которой есть уровни, и стоит после иконок скорости.
+- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа. У лаунчера больше нет обводки фокуса.
+- Переключение модели сохраняется без ожидания полного снимка. Остальные переключатели сохраняют новое значение, пока идёт фоновое обновление, поэтому остальным окном можно пользоваться.
+- Запросы аккаунта ChatGPT отправляются с актуальными заголовками Chrome. Отказ по квоте оставляет аккаунт восстановимым и применяется к открытому основному окну, а не помечает аккаунт сломанным.
+- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на file_id. Внешняя ссылка отклоняется, поле detail не пересылается. Одна ошибка зашифрованного содержимого убирает чужой шифротекст и повторяет запрос тем же аккаунтом.
+- Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе, поэтому вызов инструмента по-прежнему совпадает со своим ответом. Видимое краткое содержание размышления сохраняется даже без шифротекста. Максимальное размышление отправляется как экстра-высокий уровень, который поддерживает этот маршрут.
+- Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил. Ошибка обновления списка моделей говорит, что список не удалось обновить, а поздняя локальная ошибка не скрывает уже записанную ошибку провайдера.
 
 ## [1.1.3] - 2026-09-30
 

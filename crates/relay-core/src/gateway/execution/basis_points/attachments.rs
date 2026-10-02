@@ -634,11 +634,11 @@ mod tests {
             STANDARD.encode(png_bytes())
         )));
         let (content_type, body) = multipart_body(&image);
-        let header = format!("multipart/form-data; boundary=");
-        assert!(content_type.starts_with(&header));
-        let boundary = content_type.trim_start_matches(&header);
+        let header = "multipart/form-data; boundary=";
+        assert!(content_type.starts_with(header));
+        let boundary = content_type.trim_start_matches(header);
         let text = String::from_utf8_lossy(&body);
-        assert!(text.contains(&format!("filename=\"image.png\"")));
+        assert!(text.contains("filename=\"image.png\""));
         assert!(text.contains("Content-Type: image/png"));
         assert!(text.contains(boundary));
         assert!(body
