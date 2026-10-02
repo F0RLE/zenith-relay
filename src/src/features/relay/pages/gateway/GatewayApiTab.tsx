@@ -27,7 +27,7 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
   const savingPort = busy === "gateway-port";
   const canSavePort = portValid && portChanged && !savingPort;
   const savePort = () => {
-    if (canSavePort) void perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved");
+    if (canSavePort) void perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved", { backgroundRefresh: true });
   };
   const canCopyApiKey = mode === "local" || (mode === "remote" && running && Boolean(runtime?.capabilities.features.includes("profile_attach")));
   const canRotateApiKey = mode === "local" || (canCopyApiKey && Boolean(runtime?.capabilities.features.includes("profile_key_rotation")));
@@ -43,7 +43,7 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
     await copyText(mode === "local"
       ? await relayCommands.revealLocalGatewayApiKey()
       : await relayCommands.revealRemoteGatewayApiKey());
-  }, "feedback.copied");
+  }, "feedback.copied", { backgroundRefresh: true });
   const rotateApiKey = async () => {
     if (!await confirm(t("gateway.regenerateApiKeyConfirm"), {
       title: t("gateway.regenerateApiKey"),
@@ -54,7 +54,7 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
       await copyText(mode === "local"
         ? await relayCommands.rotateLocalGatewayApiKey()
         : await relayCommands.rotateRemoteGatewayApiKey());
-    }, "feedback.copied");
+    }, "feedback.copied", { backgroundRefresh: true });
   };
 
   return <section className="gateway-tab-panel gateway-api-tab" role="tabpanel" aria-label={t("gateway.tabs.api")}>

@@ -199,7 +199,7 @@ export function PoolMemberCard({
             <IconButton
               label={t("pool.refreshSourceStats")}
               icon={sourceState?.loading ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />}
-              disabled={!member.secretAvailable || sourceState?.loading || Boolean(busy)}
+              disabled={!member.secretAvailable || sourceState?.loading}
               onClick={onRefreshSource}
             />
           ) : null}
@@ -209,11 +209,12 @@ export function PoolMemberCard({
               icon={busy === `pool-account-quota-${member.id}`
                 ? <Loader2 className="spin" aria-hidden />
                 : <RefreshCw aria-hidden />}
-              disabled={!canRefreshQuota || !member.secretAvailable || Boolean(busy)}
+              disabled={!canRefreshQuota || !member.secretAvailable || busy === `pool-account-quota-${member.id}`}
               onClick={() => void perform(
                 `pool-account-quota-${member.id}`,
                 () => refreshOneAccountQuota(mode, member.id),
                 "feedback.refreshed",
+                { backgroundRefresh: true },
               )}
             />
           ) : null}

@@ -90,6 +90,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         }
       }
     }, source ? "feedback.saved" : "feedback.sourceAdded", {
+      backgroundRefresh: true,
       reportError: false,
       onError: (error, messageKey) => setOperationError({ error, messageKey }),
     });

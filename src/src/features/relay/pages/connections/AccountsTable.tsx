@@ -217,7 +217,7 @@ export function AccountsTable({
     const ok = await perform("pool-membership-bulk", async () => {
       const accountIds = selectedAccounts.map((account) => account.id);
       await updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate });
-    }, "feedback.saved");
+    }, "feedback.saved", { backgroundRefresh: true });
     if (ok) setSelected([]);
   };
   const deleteAccounts = async (accountIds: string[], operation: string) => {
@@ -231,7 +231,7 @@ export function AccountsTable({
       } else {
         for (const accountId of accountIds) await relayCommands.remoteAction({ type: "delete_account", id: accountId });
       }
-    }, "feedback.deleted");
+    }, "feedback.deleted", { backgroundRefresh: true });
     if (!ok) await refresh().catch(() => undefined);
     if (ok) setSelected((current) => current.filter((id) => !accountIds.includes(id)));
     return ok;
@@ -254,7 +254,7 @@ export function AccountsTable({
     })) return;
     const accountIds = [...selectedIds];
     let bindings: ProfileBinding[] = [];
-    const bindingsLoaded = await perform("move-profile-check", async () => { bindings = await relayCommands.profileBindings(); });
+    const bindingsLoaded = await perform("move-profile-check", async () => { bindings = await relayCommands.profileBindings(); }, undefined, { backgroundRefresh: true });
     if (!bindingsLoaded) return;
     const usesSelectedAccount = bindings.some((binding) => binding.active
       && (accountIds.includes(binding.credentialId) || (binding.boundOauthAccountId != null && accountIds.includes(binding.boundOauthAccountId))));
@@ -268,13 +268,13 @@ export function AccountsTable({
       if (!switchedProfile) return;
     }
     setTransfer({ accountIds, progress: { completed: 0, total: accountIds.length, phase: "preparing", ...(accountIds[0] ? { currentAccountId: accountIds[0] } : {}) } });
-    const ok = await perform("move-accounts-to-remote", () => relayCommands.moveAccountsToRemote(accountIds), "feedback.accountsMovedToServer");
+    const ok = await perform("move-accounts-to-remote", () => relayCommands.moveAccountsToRemote(accountIds), "feedback.accountsMovedToServer", { backgroundRefresh: true });
     setTransfer(null);
     if (!ok && switchedProfile) {
       await relayCommands.restoreDefaultAccountProfile().then(() => refresh()).catch(() => undefined);
     }
     if (ok && switchedProfile) {
-      await perform("move-profile-launch", relayCommands.launchManagedCodex, "feedback.launched");
+      await perform("move-profile-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true });
     }
     if (ok) setSelected([]);
   };
@@ -282,7 +282,7 @@ export function AccountsTable({
     let report: AccountQuotaRefreshReport | null = null;
     const ok = await perform("quota-all", async () => {
       report = await refreshAllAccountQuotas(mode);
-    });
+    }, undefined, { backgroundRefresh: true });
     if (ok && report) setQuotaReport(report);
   };
   return (
@@ -365,7 +365,7 @@ export function AccountsTable({
               <IconButton
                 label={t("accounts.includeSelectedInPool")}
                 icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />}
-                disabled={Boolean(busy)}
+                disabled={busy === "pool-membership-bulk"}
                 onClick={() => void updateSelectedParticipation(true)}
               />
             ) : null}
@@ -373,7 +373,7 @@ export function AccountsTable({
               <IconButton
                 label={t("accounts.excludeSelectedFromPool")}
                 icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />}
-                disabled={Boolean(busy)}
+                disabled={busy === "pool-membership-bulk"}
                 onClick={() => void updateSelectedParticipation(false)}
               />
             ) : null}
@@ -381,7 +381,7 @@ export function AccountsTable({
               <IconButton
                 label={t("accounts.moveToServer")}
                 icon={busy === "move-accounts-to-remote" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}
-                disabled={Boolean(busy) || selectedSecretsUnavailable || selectedAccessOnly || selectedOnServer}
+                disabled={busy === "move-accounts-to-remote" || selectedSecretsUnavailable || selectedAccessOnly || selectedOnServer}
                 title={selectedOnServer
                   ? t("accounts.moveToServerAlreadyRemote")
                   : selectedAccessOnly
@@ -395,7 +395,7 @@ export function AccountsTable({
             <IconButton
               label={t("accounts.exportSelected", { count: selectedCount })}
               icon={<Download aria-hidden />}
-              disabled={!canExport || Boolean(busy)}
+              disabled={!canExport}
               title={!canExport ? t("remote.capabilityUnavailable") : t("accounts.exportSelected", { count: selectedCount })}
               onClick={() => onExport(exportIds)}
             />
@@ -403,7 +403,7 @@ export function AccountsTable({
               className="danger"
               label={t("accounts.deleteSelected")}
               icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />}
-              disabled={Boolean(busy)}
+              disabled={busy === "delete-selected-accounts"}
               onClick={deleteSelected}
             />
             <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
@@ -428,7 +428,7 @@ export function AccountsTable({
                 label={t("accounts.refreshAll")}
                 icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />}
                 aria-busy={busy === "quota-all"}
-                disabled={Boolean(busy)}
+                disabled={busy === "quota-all"}
                 onClick={() => void refreshAllQuotas()}
               />
             ) : null}

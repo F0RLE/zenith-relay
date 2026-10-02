@@ -10,7 +10,7 @@ import { RecoveryConfirmationDialog, RecoveryEmptyState, RecoverySnapshotTable, 
 export function ChatGptRecoveryHeaderAction() {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
-  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened")}>{t("profiles.openFolder")}</Button>;
+  return <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened", { backgroundRefresh: true })}>{t("profiles.openFolder")}</Button>;
 }
 
 export function ChatGptRecoveryTab() {
@@ -37,7 +37,7 @@ export function ChatGptRecoveryTab() {
 
   const createSnapshot = async () => {
     const name = snapshotName.trim();
-    if (name && await perform("profile-snapshot-create", () => relayCommands.createProfileSnapshot(name), "feedback.snapshotCreated")) {
+    if (name && await perform("profile-snapshot-create", () => relayCommands.createProfileSnapshot(name), "feedback.snapshotCreated", { backgroundRefresh: true })) {
       setSnapshotName("");
       loadSnapshots();
     }
@@ -45,7 +45,7 @@ export function ChatGptRecoveryTab() {
 
   const restoreSnapshot = async () => {
     const snapshot = restoreTarget;
-    if (snapshot && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id), "feedback.snapshotRestored")) {
+    if (snapshot && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id), "feedback.snapshotRestored", { backgroundRefresh: true })) {
       setRestoreTarget(null);
       loadSnapshots();
     }
@@ -53,7 +53,7 @@ export function ChatGptRecoveryTab() {
 
   const deleteSnapshot = async () => {
     const snapshot = deleteTarget;
-    if (snapshot && await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted")) {
+    if (snapshot && await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted", { backgroundRefresh: true })) {
       setDeleteTarget(null);
       loadSnapshots();
     }
@@ -78,7 +78,6 @@ export function ChatGptRecoveryTab() {
           variant="secondary"
           icon={<RotateCcw aria-hidden />}
           aria-label={t("profiles.restoreSnapshot", { name: snapshot.name })}
-          disabled={Boolean(busy)}
           onClick={() => setRestoreTarget(snapshot)}
         >
           {t("profiles.restoreAction")}
@@ -87,7 +86,6 @@ export function ChatGptRecoveryTab() {
           className="danger"
           label={t("profiles.deleteSnapshot", { name: snapshot.name })}
           icon={<Trash2 aria-hidden />}
-          disabled={Boolean(busy)}
           onClick={() => setDeleteTarget(snapshot)}
         />
       </>
@@ -117,7 +115,7 @@ export function ChatGptRecoveryTab() {
         variant="primary"
         icon={<Camera aria-hidden />}
         busy={busy === "profile-snapshot-create"}
-        disabled={!snapshotName.trim() || Boolean(busy)}
+        disabled={!snapshotName.trim() || busy === "profile-snapshot-create"}
       >
         {t("profiles.createSnapshot")}
       </Button>

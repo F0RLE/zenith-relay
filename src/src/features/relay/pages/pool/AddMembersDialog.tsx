@@ -129,7 +129,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
     if (healthFilter !== "all" && !availableHealth.split("\n").includes(healthFilter)) setHealthFilter("all");
   }, [availableHealth, healthFilter]);
   const add = async () => {
-    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: selectedAccounts, sourceIds: selectedSources, inPool: true }), "feedback.saved");
+    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: selectedAccounts, sourceIds: selectedSources, inPool: true }), "feedback.saved", { backgroundRefresh: true });
     if (ok) onClose();
   };
   const saving = busy === "pool-add-members";

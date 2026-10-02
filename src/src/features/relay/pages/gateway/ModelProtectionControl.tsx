@@ -1,8 +1,9 @@
-import { useId, useState } from "react";
+import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { ToggleSwitch } from "../../components/Ui";
 import { persistRoutingPolicy } from "../../routingPolicy";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { usePendingFlag } from "../../state/usePendingFlag";
 
 export function ModelProtectionControl() {
   const { mode, runtime } = useRelayState();
@@ -14,28 +15,22 @@ export function ModelProtectionControl() {
 
 function ModelProtectionToggle() {
   const { t } = useTranslation();
-  const { mode, runtime, busy, perform } = useRelayState();
+  const { mode, runtime, perform } = useRelayState();
   const id = useId();
-  const [pending, setPending] = useState<boolean | null>(null);
+  const saved = Boolean(runtime?.gateway.basisPointsEnabled);
+  const { checked, select } = usePendingFlag(saved);
   if (!runtime) return null;
   const { gateway } = runtime;
-
-  const saving = pending !== null || busy === "gateway-basis-points";
-  const change = async (enabled: boolean) => {
-    if (saving || enabled === Boolean(gateway.basisPointsEnabled)) return;
-    setPending(enabled);
-    try {
-      await perform("gateway-basis-points", () => persistRoutingPolicy(mode, {
-        maxRetryCandidates: gateway.maxRetryCandidates,
-        defaultServiceTier: gateway.defaultServiceTier,
-        basisPointsEnabled: enabled,
-      }), "feedback.saved");
-    } finally {
-      setPending(null);
-    }
+  const change = (enabled: boolean) => {
+    if (enabled === checked) return;
+    select(enabled, () => perform("gateway-basis-points", () => persistRoutingPolicy(mode, {
+      maxRetryCandidates: gateway.maxRetryCandidates,
+      defaultServiceTier: gateway.defaultServiceTier,
+      basisPointsEnabled: enabled,
+    }), "feedback.saved", { backgroundRefresh: true, uiLock: false }));
   };
 
-  return <div className="model-protection-control gateway-api-toggle-setting" aria-busy={saving}>
+  return <div className="model-protection-control gateway-api-toggle-setting">
     <div className="relay-toggle-setting">
       <label htmlFor={id} data-relay-tooltip={t("gateway.modelProtectionHint")}>
         <strong>{t("gateway.modelProtection")}</strong>
@@ -43,7 +38,7 @@ function ModelProtectionToggle() {
       </label>
       <ToggleSwitch id={id} label={t("gateway.modelProtection")}
         aria-describedby={`${id}-description`}
-        checked={pending ?? gateway.basisPointsEnabled ?? false} disabled={saving}
+        checked={checked}
         onChange={(enabled) => void change(enabled)} />
     </div>
   </div>;

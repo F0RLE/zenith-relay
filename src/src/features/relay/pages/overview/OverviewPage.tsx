@@ -8,6 +8,7 @@ import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialo
 import { SourceStatsPanel } from "../../components/SourceStatsPanel";
 import { useSourceStats } from "../../hooks/useSourceStats";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { useSavedChoice } from "../../state/usePendingFlag";
 import { useRelayUsageContext } from "../../state/relayStateContext";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
 import { sourceHost } from "../../sourceUrl";
@@ -51,15 +52,16 @@ export function OverviewPage() {
     ...(runtime?.accounts ?? []).map((account) => ({ value: `account:${account.id}`, label: `${t("overview.scopeAccount")} · ${account.label}` })),
   ], [runtime?.accounts, runtime?.sources, t]);
   const analytics = overviewData;
-  const running = Boolean(runtime?.gateway.running);
+  const gatewayRunning = useSavedChoice(Boolean(runtime?.gateway.running));
+  const running = gatewayRunning.value;
   const setAnalyticsScope = useCallback((value: string) => {
     const next = value as AnalyticsScope;
     setAnalyticsScopeSelection(next);
     localStorage.setItem("relay.overviewAnalyticsScope", next);
   }, []);
   const connectOpenCode = async (launchAfterConnect: boolean) => {
-    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved");
-    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched");
+    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
+    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true });
   };
 
   useEffect(() => {
@@ -154,7 +156,14 @@ export function OverviewPage() {
       variant={running ? "secondary" : "primary"}
       busy={busy === "gateway"}
       icon={running ? <Square aria-hidden /> : <Play aria-hidden />}
-      onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}
+      onClick={() => {
+        const next = !running;
+        void perform("gateway", async () => {
+          if (next) await relayCommands.startGateway();
+          else await relayCommands.stopGateway();
+          gatewayRunning.confirm(next);
+        }, next ? "feedback.started" : "feedback.stopped", { backgroundRefresh: true });
+      }}
     >
       {running ? t("gateway.stop") : t("gateway.start")}
     </Button>
@@ -205,13 +214,13 @@ export function OverviewPage() {
         title={t("overview.applicationPickerTitle")}
         showLaunchToggle={false}
         onClose={() => setApplicationDialog(false)}
-        onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched"); }}
+        onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true }); }}
         onOpenCode={() => void connectOpenCode(false)}
       />
     ) : null}
   </section>;
 }
-function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean> }) {
+function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string, options?: { backgroundRefresh?: boolean }) => Promise<boolean> }) {
   const { t } = useTranslation();
   const { busy } = useRelayState();
   const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
@@ -225,7 +234,7 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
   };
   const refreshSourceData = async () => {
     if (!source) return;
-    await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed");
+    await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed", { backgroundRefresh: true });
     await readSourceStats(source.id, true);
   };
   const sourceRefreshBusy = busy === "source-data-refresh";

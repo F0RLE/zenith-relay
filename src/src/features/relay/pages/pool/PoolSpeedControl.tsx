@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Gauge, Loader2, Rocket, Zap } from "lucide-react";
+import { Gauge, Rocket, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { DefaultServiceTier } from "../../api/types";
 
@@ -24,7 +24,7 @@ export function PoolSpeedControl({ value, disabled, saving, onChange, className 
   const available = modes.length ? modes : SPEED_MODES;
   const selected = available.some(({ tier }) => tier === value) ? value : available[0]!.tier;
   const selectTier = (tier: DefaultServiceTier) => {
-    if (tier !== selected && !disabled && !saving) onChange(tier);
+    if (tier !== selected && !disabled) onChange(tier);
   };
   useEffect(() => {
     const group = groupRef.current;
@@ -62,11 +62,11 @@ export function PoolSpeedControl({ value, disabled, saving, onChange, className 
         className={active ? "active" : ""}
         aria-checked={active}
         tabIndex={active ? 0 : -1}
-        disabled={disabled || saving}
+        disabled={disabled}
         data-relay-tooltip={label}
         onClick={() => selectTier(tier)}
       >
-        {saving && active ? <Loader2 className="spin" aria-hidden /> : <Icon aria-hidden />}
+        <Icon aria-hidden />
         <span className={active ? undefined : "sr-only"}>{label}</span>
       </button>;
     })}

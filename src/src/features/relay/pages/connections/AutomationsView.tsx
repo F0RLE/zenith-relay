@@ -5,6 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { WakeTask } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, ToggleSwitch, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { usePendingFlag } from "../../state/usePendingFlag";
 import {
   automationAccountSelectionValid,
   automationDisplayName,
@@ -19,9 +20,29 @@ import {
   resolveAutomationModel,
   selectedAutomationAccounts,
 } from "./automationModel";
+
+function AutomationEnabledControl({ task }: { task: WakeTask }) {
+  const { t } = useTranslation();
+  const { mode, perform } = useRelayState();
+  const pending = usePendingFlag(task.enabled);
+  return <ToggleSwitch
+    checked={pending.checked}
+    label={t("common.enabled")}
+    aria-busy={pending.checked !== task.enabled}
+    onChange={(enabled) => pending.select(enabled, () => perform(
+      `automation-${task.id}`,
+      () => mode === "local"
+        ? relayCommands.setAutomationEnabled(task.id, enabled)
+        : relayCommands.remoteAction({ type: "update_wake_task", id: task.id }, { ...task, enabled, executionPolicy: "automatic" }),
+      "feedback.saved",
+      { backgroundRefresh: true, uiLock: false },
+    ))}
+  />;
+}
+
 export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode, runtime, perform } = useRelayState();
   const confirm = useConfirm();
   if (!runtime?.automations.length) {
     return <EmptyState title={t("automations.emptyTitle")} description={t("automations.emptyDescription")} />;
@@ -37,19 +58,7 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
             return (
               <article className="automation-card" role="listitem" key={task.id}>
                 <header>
-                  <ToggleSwitch
-                    checked={task.enabled}
-                    label={t("common.enabled")}
-                    disabled={Boolean(busy)}
-                    aria-busy={busy === `automation-${task.id}`}
-                    onChange={() => void perform(
-                      `automation-${task.id}`,
-                      () => mode === "local"
-                        ? relayCommands.setAutomationEnabled(task.id, !task.enabled)
-                        : relayCommands.remoteAction({ type: "update_wake_task", id: task.id }, { ...task, enabled: !task.enabled, executionPolicy: "automatic" }),
-                      "feedback.saved",
-                    )}
-                  />
+                  <AutomationEnabledControl task={task} />
                   <div className="connection-identity">
                     <strong>{name}</strong>
                     {name !== typeName ? <small>{typeName}</small> : null}
@@ -64,6 +73,7 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
                           `delete-${task.id}`,
                           () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }),
                           "feedback.deleted",
+                          { backgroundRefresh: true },
                         ))}
                       >
                         {t("common.delete")}
@@ -144,6 +154,7 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
           submission.remoteInput,
         ),
       task ? "feedback.saved" : "feedback.automationAdded",
+      { backgroundRefresh: true },
     );
     if (ok) onClose();
   };

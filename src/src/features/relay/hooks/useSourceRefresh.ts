@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { relayCommands } from "../api/commands";
+import type { PerformOptions } from "../state/relayOperationModel";
 import type { RelayMode, SourceSummary } from "../api/types";
 import { refreshSourceCatalog, refreshSourceCatalogs, type SourceRefreshExecutor, type SourceRefreshReport } from "./sourceRefresh";
 
-type Perform = (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean>;
+type Perform = (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
 
 type UseSourceRefreshInput = {
   mode: RelayMode;
@@ -38,7 +39,7 @@ export function useSourceRefresh({ mode, sources, resetKey, perform }: UseSource
         sources: sourceSnapshot,
         executor: sourceRefreshExecutor,
       });
-    }).then((completed) => {
+    }, undefined, { backgroundRefresh: true }).then((completed) => {
       if (completed && nextReport && revision === contextRevision.current) setReport(nextReport);
     });
   }, [mode, perform, sources]);
@@ -48,6 +49,7 @@ export function useSourceRefresh({ mode, sources, resetKey, perform }: UseSource
       `source-refresh-${sourceId}`,
       () => refreshSourceCatalog(mode, sourceId, sourceRefreshExecutor),
       "feedback.refreshed",
+      { backgroundRefresh: true },
     );
   }, [mode, perform]);
 

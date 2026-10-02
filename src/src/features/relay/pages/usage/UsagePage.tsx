@@ -195,11 +195,11 @@ export function UsagePage() {
     errorOrigin: row.errorOrigin,
     ...(row.serviceTier ? { serviceTier: row.serviceTier } : {}),
     appliedServiceTier: row.appliedServiceTier,
-  }))), "feedback.exported");
+  }))), "feedback.exported", { backgroundRefresh: true });
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
     setPage(1);
-    await perform("usage-clear", () => mode === "local" ? relayCommands.clearLocalUsage() : relayCommands.remoteAction({ type: "clear_usage" }), "feedback.cleared");
+    await perform("usage-clear", () => mode === "local" ? relayCommands.clearLocalUsage() : relayCommands.remoteAction({ type: "clear_usage" }), "feedback.cleared", { backgroundRefresh: true });
   };
   const canClear = mode === "local" || (mode === "remote" && remoteUsageSupported);
   const refreshUsage = async () => {

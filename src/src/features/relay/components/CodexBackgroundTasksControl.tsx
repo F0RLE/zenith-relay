@@ -2,14 +2,15 @@ import { Bot } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { CodexFeatureToggleControl } from "./CodexFeatureToggleControl";
 import { useRelayState } from "../state/RelayStateProvider";
+import { usePendingFlag } from "../state/usePendingFlag";
 
 /** Shared policy control for Codex-owned activity summaries and task titles. */
 export function CodexBackgroundTasksControl({ className = "" }: { className?: string }) {
   const { t } = useTranslation();
-  const { mode, runtime, busy, codexBackgroundTasksEnabled, setCodexBackgroundTasksEnabled } = useRelayState();
+  const { mode, runtime, codexBackgroundTasksEnabled, setCodexBackgroundTasksEnabled } = useRelayState();
+  const { checked, select } = usePendingFlag(codexBackgroundTasksEnabled);
   const supported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("codex_background_tasks"));
   if (!supported) return null;
-  const disabled = !runtime || busy === "codex-background-tasks";
   return <CodexFeatureToggleControl
     className={className}
     styleClassPrefix="codex-background-tasks"
@@ -17,9 +18,9 @@ export function CodexBackgroundTasksControl({ className = "" }: { className?: st
     title={t("codex.backgroundTasksTitle")}
     hint={t("codex.backgroundTasksHint")}
     label={t("codex.backgroundTasks")}
-    description={codexBackgroundTasksEnabled ? t("codex.backgroundTasksEnabled") : t("codex.backgroundTasksDisabled")}
-    checked={codexBackgroundTasksEnabled}
-    disabled={disabled}
-    onChange={(enabled) => void setCodexBackgroundTasksEnabled(enabled)}
+    description={checked ? t("codex.backgroundTasksEnabled") : t("codex.backgroundTasksDisabled")}
+    checked={checked}
+    disabled={!runtime}
+    onChange={(enabled) => select(enabled, () => setCodexBackgroundTasksEnabled(enabled))}
   />;
 }

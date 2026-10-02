@@ -12,7 +12,7 @@ export function RemoteView({ onConnect, onDeploy }: { onConnect: () => void; onD
   const confirm = useConfirm();
   const disconnect = async () => {
     const counted = await captureOperationResult(
-      (work) => perform("remote-disconnect-check", work),
+      (work) => perform("remote-disconnect-check", work, undefined, { backgroundRefresh: true }),
       () => relayCommands.remoteLinkedAccountCount(),
     );
     if (!counted.ok || counted.value === undefined) return;
@@ -20,7 +20,7 @@ export function RemoteView({ onConnect, onDeploy }: { onConnect: () => void; onD
       ? t("remote.disconnectLinkedConfirm", { count: counted.value })
       : t("remote.disconnectConfirm");
     if (await confirm(message, { danger: true })) {
-      await perform("remote-disconnect", relayCommands.disconnectRemote, "feedback.disconnected");
+      await perform("remote-disconnect", relayCommands.disconnectRemote, "feedback.disconnected", { backgroundRefresh: true });
     }
   };
   if (!runtime) {
@@ -64,7 +64,7 @@ export function RemoteDialog({ onClose }: { onClose: () => void }) {
       managementToken: token,
       allowInsecureHttp: insecure && allowInsecure,
       confirmIdentityChange,
-    }), "feedback.connected");
+    }), "feedback.connected", { backgroundRefresh: true });
     if (ok) onClose();
   };
   return <Dialog
@@ -96,7 +96,7 @@ export function DeployDialog({ onClose }: { onClose: () => void }) {
   const [plan, setPlan] = useState<{ directory: string; managementToken: string; vaultKey: string; composeCommand: string } | null>(null);
   const generate = async () => {
     const captured = await captureOperationResult(
-      (work) => perform("remote-deploy", work, "feedback.deploymentPrepared"),
+      (work) => perform("remote-deploy", work, "feedback.deploymentPrepared", { backgroundRefresh: true }),
       () => relayCommands.prepareRemoteDeployment(url),
     );
     if (captured.ok && captured.value) setPlan(captured.value);

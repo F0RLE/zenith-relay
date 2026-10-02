@@ -46,7 +46,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
     if (!firstProxyId) return;
     const operation = proxyIds.length === 1 ? `proxy-delete-${firstProxyId}` : "proxy-delete-selected";
     const captured = await captureOperationResult(
-      (work) => perform(operation, work, "feedback.deleted"),
+      (work) => perform(operation, work, "feedback.deleted", { backgroundRefresh: true }),
       async () => {
         for (const entry of assignedEntries) await relayCommands.setStoredProxyAccounts(entry.id, []);
         return proxyIds.length === 1
@@ -87,7 +87,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
       </div>
       {selected.length ? <div className="inline-actions">
         <span className="proxy-selected-count">{t("proxies.selectedCount", { count: selected.length })}</span>
-        <Button variant="danger" icon={busy === "proxy-delete-selected" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => void remove(selected)}>{t("common.delete")}</Button>
+        <Button variant="danger" icon={busy === "proxy-delete-selected" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={busy === "proxy-delete-selected"} onClick={() => void remove(selected)}>{t("common.delete")}</Button>
         <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
       </div> : <>
         <div className="proxy-storage-counts" aria-label={t("proxies.storageSummary")}>
@@ -119,9 +119,9 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
             <div className="proxy-storage-account-count" data-relay-tooltip={assignedNames.join(", ")}><span>{assignedNames[0] ?? "-"}</span>{assignedNames.length > 1 ? <small>+{assignedNames.length - 1}</small> : null}</div>
             <div className="row-actions">
               <IconButton label={t("proxies.testConnection")} icon={<Globe aria-hidden />} busy={Boolean(diagnostics.checks[entry.id]?.pending)} onClick={() => void diagnostics.check(entry.id)} />
-              <IconButton label={t("proxies.manageAccounts")} icon={<UsersRound aria-hidden />} disabled={Boolean(busy)} onClick={() => setManagedProxyId(entry.id)} />
+              <IconButton label={t("proxies.manageAccounts")} icon={<UsersRound aria-hidden />} onClick={() => setManagedProxyId(entry.id)} />
               <ActionMenu>
-                <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => void remove([entry.id])}>{t("common.delete")}</ActionMenuItem>
+                <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={busy === `proxy-delete-${entry.id}` || busy === "proxy-delete-selected"} onClick={() => void remove([entry.id])}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
             </div>
           </div>;
@@ -152,7 +152,7 @@ function ProxyAccountsDialog({ entry, accounts, onSaved, onClose }: { entry: Pro
   const allSelected = accounts.length > 0 && accounts.every((account) => selected.includes(account.id));
   const save = async () => {
     const captured = await captureOperationResult(
-      (work) => perform(`proxy-accounts-${entry.id}`, work, "feedback.saved"),
+      (work) => perform(`proxy-accounts-${entry.id}`, work, "feedback.saved", { backgroundRefresh: true }),
       () => relayCommands.setStoredProxyAccounts(entry.id, selected),
     );
     if (captured.ok && captured.value) {
@@ -216,7 +216,7 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
   const proxyUrls = content.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   const importProxies = async () => {
     const captured = await captureOperationResult(
-      (work) => perform("proxy-import", work, "feedback.saved"),
+      (work) => perform("proxy-import", work, "feedback.saved", { backgroundRefresh: true }),
       () => relayCommands.importProxyPool(proxyUrls),
     );
     if (!captured.ok || !captured.value) return;
@@ -294,7 +294,7 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
   }, [account.proxyMode, current, pool]);
   const apply = async () => {
     const captured = await captureOperationResult(
-      (work) => perform(`proxy-${account.id}`, work, "feedback.saved"),
+      (work) => perform(`proxy-${account.id}`, work, "feedback.saved", { backgroundRefresh: true }),
       async () => {
         if (choice === "direct") {
           await relayCommands.setAccountProxy(account.id, null, true);
@@ -404,6 +404,7 @@ function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummar
       `proxy-${account.id}`,
       () => relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: choice === "custom" ? proxyUrl.trim() : null, bypassCommonProxy: choice === "direct" }),
       "feedback.saved",
+      { backgroundRefresh: true },
     );
     if (ok) onClose();
   };
@@ -491,7 +492,7 @@ function LocalBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; o
   const needProxy = accounts.filter((account) => account.proxyMode !== "account").length;
   const assign = async () => {
     const captured = await captureOperationResult(
-      (work) => perform("proxy-bulk", work, "feedback.saved"),
+      (work) => perform("proxy-bulk", work, "feedback.saved", { backgroundRefresh: true }),
       () => relayCommands.assignAutomaticProxies(accounts.map((account) => account.id)),
     );
     if (captured.ok && captured.value) {
@@ -536,7 +537,7 @@ function RemoteBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; 
   const toggle = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
   const assign = async () => {
     const captured = await captureOperationResult(
-      (work) => perform("proxy-bulk", work, "feedback.saved"),
+      (work) => perform("proxy-bulk", work, "feedback.saved", { backgroundRefresh: true }),
       async () => await relayCommands.remoteAction({ type: "assign_account_proxies" }, { accountIds: selectedAccountIds, proxyUrls }) as ProxyAssignmentResult,
     );
     if (captured.ok) {

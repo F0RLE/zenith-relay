@@ -15,7 +15,7 @@ export function OpenCodeRecoveryHeaderAction() {
       variant="secondary"
       icon={<FolderOpen aria-hidden />}
       busy={busy === "opencode-open-folder"}
-      onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened")}
+      onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened", { backgroundRefresh: true })}
     >
       {t("profiles.openFolder")}
     </Button>
@@ -37,13 +37,13 @@ export function OpenCodeRecoveryTab() {
   const snapshotDate = (value: number | null | undefined) => value ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "-";
   const createSnapshot = async () => {
     const name = snapshotName.trim();
-    if (name && !hasSnapshot && await perform("opencode-snapshot-create", () => relayCommands.createOpenCodeSnapshot(name), "feedback.openCodeSnapshotCreated")) {
+    if (name && !hasSnapshot && await perform("opencode-snapshot-create", () => relayCommands.createOpenCodeSnapshot(name), "feedback.openCodeSnapshotCreated", { backgroundRefresh: true })) {
       setSnapshotName("");
       refreshStatus();
     }
   };
   const restore = async () => {
-    if (await perform("opencode-restore", relayCommands.restoreOpenCodeConfig, "feedback.restored")) {
+    if (await perform("opencode-restore", relayCommands.restoreOpenCodeConfig, "feedback.restored", { backgroundRefresh: true })) {
       setRestoreRequested(false);
       refreshStatus();
     }
@@ -58,7 +58,6 @@ export function OpenCodeRecoveryTab() {
         variant="secondary"
         icon={<RotateCcw aria-hidden />}
         aria-label={t("profiles.openCodeRestore")}
-        disabled={Boolean(busy)}
         onClick={() => setRestoreRequested(true)}
       >
         {t("profiles.restoreAction")}
@@ -82,7 +81,7 @@ export function OpenCodeRecoveryTab() {
         variant="primary"
         icon={<Camera aria-hidden />}
         busy={busy === "opencode-snapshot-create"}
-        disabled={!snapshotName.trim() || hasSnapshot || Boolean(busy)}
+        disabled={!snapshotName.trim() || hasSnapshot || busy === "opencode-snapshot-create"}
       >
         {t("profiles.openCodeCreateSnapshot")}
       </Button>

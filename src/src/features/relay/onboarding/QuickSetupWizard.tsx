@@ -91,7 +91,7 @@ export function QuickSetupWizard() {
   };
 
   const completeCurrentProfileSetup = async (run: number, importedCount: number) => {
-    const ready = await perform("onboarding-current-profile-runtime", prepareLocalRuntime);
+    const ready = await perform("onboarding-current-profile-runtime", prepareLocalRuntime, undefined, { backgroundRefresh: true });
     if (run !== currentProfileImportRun.current) return;
     if (!ready) {
       setCurrentProfileImport({ kind: "failed", phase: "runtime", importedCount });
@@ -110,7 +110,7 @@ export function QuickSetupWizard() {
     const run = ++currentProfileImportRun.current;
     setCurrentProfileImport({ kind: "importing" });
     const captured = await captureOperationResult(
-      (work) => perform("onboarding-current-profile", work),
+      (work) => perform("onboarding-current-profile", work, undefined, { backgroundRefresh: true }),
       async () => {
         const session = await relayCommands.previewCurrentCodexImport();
         if (run !== currentProfileImportRun.current) {
@@ -177,12 +177,12 @@ export function QuickSetupWizard() {
         managementToken: serverToken,
         allowInsecureHttp: insecureRemote && allowInsecureRemote,
         confirmIdentityChange: false,
-      }), "feedback.connected");
+      }), "feedback.connected", { backgroundRefresh: true });
       if (!ok) return;
       setConnectionReady(true);
     }
     if (step === 2 && mode === "local") {
-      const ok = await perform("onboarding-local", prepareLocalRuntime);
+      const ok = await perform("onboarding-local", prepareLocalRuntime, undefined, { backgroundRefresh: true });
       if (!ok) return;
     }
     if (step === 3 && client === "codex" && mode === "local") {
@@ -196,7 +196,7 @@ export function QuickSetupWizard() {
       // OpenCode is the first supported "other" client. Its configuration is
       // switched to the local pool, with an automatic one-shot recovery copy
       // made by the native command before the first write. Do not launch it.
-      const ok = await perform("onboarding-opencode", relayCommands.connectOpenCode, "feedback.saved");
+      const ok = await perform("onboarding-opencode", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
       if (!ok) return;
     }
     if (step === 4) finishOnboarding(mode);
@@ -298,7 +298,7 @@ function ConnectionStep({
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
   const oauth = useOAuthSignIn(async (result) => {
-    const added = await perform("oauth-pool-membership", () => relayCommands.setPoolMembership([result.account.id], [], true), "feedback.accountAdded");
+    const added = await perform("oauth-pool-membership", () => relayCommands.setPoolMembership([result.account.id], [], true), "feedback.accountAdded", { backgroundRefresh: true });
     if (added) onConnected();
   });
   useEffect(() => {
@@ -335,7 +335,7 @@ function ConnectionStep({
           type="button"
           className="setup-oauth-reopen"
           disabled={flow.status !== "pending" || busy === "oauth-reopen"}
-          onClick={() => void perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId))}
+          onClick={() => void perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId), undefined, { backgroundRefresh: true })}
         >
           <ExternalLink aria-hidden />
           <span>{t("accounts.openSignIn")}</span>
