@@ -3,6 +3,7 @@
 //! revision, so the revision alone is not sufficient for cache delivery.
 use super::RefreshFreshness;
 use crate::SourceProviderStats;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct SourceStatsObservation {
@@ -28,6 +29,27 @@ impl SourceStatsObservation {
         value.stale |= matches!(freshness, RefreshFreshness::Stale { .. });
         Some(value)
     }
+
+    /// Projects one cached balance read. A mismatched endpoint or another read kind is absent.
+    pub fn read_cached<T, E>(
+        cached: Option<(Arc<Result<T, E>>, RefreshFreshness)>,
+        base_url: &str,
+    ) -> Option<SourceProviderStats>
+    where
+        T: SourceStatsRead,
+    {
+        let (read, freshness) = cached?;
+        read.as_ref()
+            .as_ref()
+            .ok()?
+            .source_stats()?
+            .snapshot(base_url, freshness)
+    }
+}
+
+/// Host-owned refresh value that may carry a source-stats observation.
+pub trait SourceStatsRead {
+    fn source_stats(&self) -> Option<&SourceStatsObservation>;
 }
 
 #[cfg(test)]

@@ -90,26 +90,16 @@ impl GatewayRuntime {
             (removed, deferred)
         };
         {
-            let mut manifests = self
-                .model_metadata
-                .codex_manifests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut manifests = crate::poison::mutex(&self.model_metadata.codex_manifests);
             for route_id in &candidate_ids {
                 manifests.remove(route_id);
             }
         }
         if !deferred.contains(candidate_id) {
-            self.passive_quotas
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(candidate_id);
+            crate::poison::mutex(&self.passive_quotas).remove(candidate_id);
             if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
                 account.active.store(false, Ordering::Release);
-                *account
-                    .agent_identity
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *crate::poison::write(&account.agent_identity) = None;
             }
         }
         if let Some(store) = self.response_affinity_store.as_ref() {
@@ -156,11 +146,7 @@ impl GatewayRuntime {
             }
             return order;
         };
-        let scope = key
-            .scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let scope = crate::poison::read(&key.scope).clone();
         let protocols = key.client_wire_apis.as_deref().map_or_else(
             super::super::all_native_wire_apis,
             super::super::client_wire_apis_to_native,

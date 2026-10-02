@@ -69,11 +69,7 @@ pub fn normalize_account_ids(account_ids: Vec<String>) -> Result<Vec<String>, Co
     let mut normalized = Vec::with_capacity(account_ids.len());
     for account_id in account_ids {
         let account_id = account_id.trim();
-        if account_id.is_empty()
-            || account_id.len() > 128
-            || !account_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        if !zenith_relay_core::is_ascii_token(account_id, 128)
             || !seen.insert(account_id.to_string())
         {
             return Err(LocalPoolError::new(

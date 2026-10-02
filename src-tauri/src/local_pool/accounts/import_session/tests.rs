@@ -26,9 +26,7 @@ struct MemorySecretState {
 
 impl MemorySecrets {
     fn state(&self) -> MutexGuard<'_, MemorySecretState> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        zenith_relay_core::poison::mutex(&self.0)
     }
 
     fn contains(&self, secret_ref: &str) -> bool {

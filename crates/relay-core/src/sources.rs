@@ -49,11 +49,11 @@ pub use binding::{
     runtime_source_supports_any_wire_api, runtime_source_supports_wire_api,
     source_models_for_wire_api, SourceProtocolBinding, SourceProtocolBindingKey,
 };
-pub(crate) use provider::normalized_base_url;
 pub use provider::{
     is_http_endpoint, is_loopback_url, source_points_to_gateway, url_has_userinfo, LocalGatewayKey,
     ProviderSource,
 };
+pub(crate) use provider::{normalized_base_url, redact_url};
 pub use wire::{CacheWriteTtl, WireApi};
 
 /// Longest operator-configured wait before a source route is eligible again.

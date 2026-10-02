@@ -58,13 +58,13 @@ pub(super) async fn cleanup(state: DesktopState) {
 }
 
 #[tokio::test]
-async fn desktop_runtime_inputs_report_saved_account_evidence_without_a_provider_read() {
+async fn desktop_snapshot_inputs_report_saved_account_evidence_without_a_provider_read() {
     let state = state();
     let mut saved = account();
     let id = saved.account.id.clone();
     saved.account.quota.updated_at_ms = Some(1);
     state.store().unwrap().upsert_account(saved).unwrap();
-    let inputs = state.runtime_inputs().await.unwrap();
+    let inputs = state.snapshot_inputs().await.unwrap();
     assert_eq!(inputs.account_refresh[&id].models, RefreshStatus::Stale);
     assert_eq!(inputs.account_refresh[&id].quota, RefreshStatus::Stale);
     cleanup(state).await;

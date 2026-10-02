@@ -1,14 +1,12 @@
 use super::*;
 use crate::{
-    config::Config,
     state::{AccountCredential, ServerAccountRecord},
-    store::{Store, Vault},
+    test_fixtures::test_app_state,
 };
 use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use zenith_relay_core::{
-    accounts::{AccountAuthState, AccountHealthState},
-    quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
+    quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind},
     scheduler::refresh::{
         service::RefreshRegistration, service::RefreshResult, RefreshFreshness, RefreshOutcome,
     },
@@ -16,35 +14,7 @@ use zenith_relay_core::{
 };
 
 fn test_account(id: &str) -> ServerAccountRecord {
-    ServerAccountRecord {
-        id: id.to_string(),
-        label: id.to_string(),
-        identity_hint: id.to_string(),
-        enabled: true,
-        in_pool: true,
-        draining: false,
-        source_id: "openai_codex".to_string(),
-        secret_ref: format!("account:{id}"),
-        provider_family: Some("openai".to_string()),
-        auth_state: AccountAuthState::Active,
-        health: AccountHealthState::Healthy,
-        models: vec!["gpt-test".to_string()],
-        discovered_models: None,
-        allowed_models: Vec::new(),
-        excluded_models: Vec::new(),
-        priority: 0,
-        weight: 1,
-        subscription: Subscription::default(),
-        quota: Default::default(),
-        purchase_cost_micro_usd: None,
-        cooldowns: Default::default(),
-        consecutive_failures: 0,
-        created_at_ms: 1,
-        last_used_at_ms: None,
-        last_error_code: None,
-        proxy_id: None,
-        bypass_common_proxy: false,
-    }
+    crate::test_fixtures::synthetic_server_account(id)
 }
 
 fn usage_event(request_id: &str, account_id: &str) -> UsageEvent {
@@ -90,10 +60,9 @@ fn usage_event(request_id: &str, account_id: &str) -> UsageEvent {
 #[test]
 fn missing_account_does_not_block_other_usage_updates_or_count_as_a_write_failure() {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store.clone(), vault.clone()).unwrap();
+    let state = test_app_state(root.path());
+    let store = Arc::clone(&state.store);
+    let vault = Arc::clone(&state.vault);
     for id in ["account_a", "account_b"] {
         let account = test_account(id);
         store.save_account(&account).unwrap();
@@ -153,10 +122,8 @@ fn missing_account_does_not_block_other_usage_updates_or_count_as_a_write_failur
 #[test]
 fn persisted_passive_quota_is_fresh_for_the_registered_account_only() {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store.clone(), vault).unwrap();
+    let state = test_app_state(root.path());
+    let store = Arc::clone(&state.store);
     let now = now_ms();
     let mut account = test_account("account_a");
     account.subscription.active_until_ms = Some(now + 3_600_000);

@@ -105,6 +105,13 @@ pub enum AccountHealthState {
     Blocked,
 }
 
+impl AccountHealthState {
+    /// Lowercase debug name used by account summaries.
+    pub fn summary_label(self) -> String {
+        format!("{self:?}").to_ascii_lowercase()
+    }
+}
+
 pub fn automatic_quota_monitoring_eligible(enabled: bool, auth_state: AccountAuthState) -> bool {
     enabled && !auth_state.requires_fresh_login()
 }

@@ -4,21 +4,12 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::RuntimeStateSnapshot;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct PoolMembershipInput {
-    #[serde(default)]
-    pub(super) account_ids: Vec<String>,
-    #[serde(default)]
-    pub(super) source_ids: Vec<String>,
-    pub(super) in_pool: bool,
-}
+pub(super) use zenith_relay_core::protocol::PoolMembershipInput;
 
 pub(super) async fn set_pool_membership(
     State(state): State<Arc<AppState>>,

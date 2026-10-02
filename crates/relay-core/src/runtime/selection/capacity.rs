@@ -94,10 +94,7 @@ impl GatewayRuntime {
         // Live principal scope stays locked through selection and reservation.
         let scope = key.scope_read();
         let mut scheduler = self.lock_scheduler();
-        let hidden = self
-            .hidden_models
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hidden = crate::poison::read(&self.hidden_models);
         if hidden.contains(&crate::model_id_key(model)) {
             return (None, false);
         }

@@ -61,20 +61,13 @@ fn account_runtime_policy(
     let proxy_available = credential
         .as_ref()
         .is_some_and(|credential| account_proxy_config(state, account, credential).is_ok());
-    let operational = account_operational_state(AccountOperationalInput {
-        enabled: account.enabled,
-        in_pool: account.in_pool,
-        draining: account.draining,
+    let operational = account_operational_state(AccountOperationalInput::from_source(
+        account,
         secret_available,
         proxy_available,
-        auth_state: account.auth_state,
-        health: account.health,
-        subscription: &account.subscription,
-        quota: &account.quota,
-        last_error_code: account.last_error_code.as_deref(),
-        now_ms: now_ms(),
-        quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
-    });
+        now_ms(),
+        zenith_relay_core::QUOTA_STALE_AFTER_MS,
+    ));
     Ok(RuntimeCandidatePolicy {
         enabled: account_candidate_enabled(account.enabled, operational.routing_block_reason),
         draining: account.draining,

@@ -12,7 +12,7 @@ mod quota;
 mod source;
 
 pub use quota::{api_equivalent_projection_window, QuotaWindowUsage};
-pub use source::{SourceRefreshState, SourceSummary};
+pub use source::{SourceRefreshState, SourceSummary, SourceSummaryRecord};
 
 /// Refresh evidence, not an inference eligibility or health decision. The
 /// coordinator's as-of clock is monotonic and must not be sent as wall time.

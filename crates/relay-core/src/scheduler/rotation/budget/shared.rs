@@ -27,10 +27,7 @@ impl SharedRequestBudget {
     }
 
     pub(crate) fn can_dispatch(&self) -> bool {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .can_dispatch()
+        crate::poison::mutex(&self.budget).can_dispatch()
     }
 
     #[cfg(test)]
@@ -39,71 +36,44 @@ impl SharedRequestBudget {
     }
 
     pub(crate) fn dispatches(&self) -> u8 {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .dispatches()
+        crate::poison::mutex(&self.budget).dispatches()
     }
 
     pub(crate) fn request_id(&self) -> RequestId {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .request_id()
+        crate::poison::mutex(&self.budget).request_id()
     }
 
     pub(crate) fn with_budget<R>(&self, callback: impl FnOnce(&mut RequestBudget) -> R) -> R {
-        let mut budget = self
-            .budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut budget = crate::poison::mutex(&self.budget);
         callback(&mut budget)
     }
 
     pub(crate) fn start_wire_attempt(&self) -> Option<u16> {
-        self.budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .start_wire_attempt()
+        crate::poison::mutex(&self.budget).start_wire_attempt()
     }
 
     pub(crate) fn configure_retry_window(&self, window_ms: u64, persistent: bool) {
         self.with_budget(|budget| budget.configure_retry_window(window_ms, persistent));
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .persistent = persistent;
+        crate::poison::mutex(&self.waiting).persistent = persistent;
     }
 
     pub(crate) fn attempted_members(&self) -> BTreeSet<String> {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        crate::poison::mutex(&self.attempted_members).clone()
     }
 
     pub(crate) fn record_member_attempt(&self, member: &str) {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(member.to_owned());
+        crate::poison::mutex(&self.attempted_members).insert(member.to_owned());
     }
 
     /// A verified compatibility repair may retry its owner; it cannot refund
     /// dispatches or undo unknown/commit/cancel evidence.
     pub(crate) fn allow_member_repair(&self, member: &str) {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(member);
+        crate::poison::mutex(&self.attempted_members).remove(member);
     }
 
     /// Called only after the controller awaited actionable scheduler recovery.
     pub(crate) fn begin_recovery_pass(&self) {
-        self.attempted_members
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        crate::poison::mutex(&self.attempted_members).clear();
     }
 
     pub(crate) fn retry_wait_deadline(&self, window_ms: u64) -> tokio::time::Instant {

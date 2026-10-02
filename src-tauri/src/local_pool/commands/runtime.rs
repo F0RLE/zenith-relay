@@ -56,20 +56,13 @@ pub(in crate::local_pool) fn runtime_account_operational_state(
     account: &AccountRecord,
     now_ms: u64,
 ) -> AccountOperationalState {
-    account_operational_state(AccountOperationalInput {
-        enabled: account.enabled,
-        in_pool: account.in_pool,
-        draining: account.draining,
-        secret_available: true,
-        proxy_available: true,
-        auth_state: account.auth_state,
-        health: account.health,
-        subscription: &account.subscription,
-        quota: &account.quota,
-        last_error_code: account.last_error_code.as_deref(),
+    account_operational_state(AccountOperationalInput::from_source(
+        account,
+        true,
+        true,
         now_ms,
-        quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
-    })
+        QUOTA_STALE_AFTER_MS,
+    ))
 }
 
 pub(in crate::local_pool) async fn apply_source_policy_if_running(

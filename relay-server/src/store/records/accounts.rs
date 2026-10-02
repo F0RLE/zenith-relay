@@ -204,8 +204,7 @@ impl Store {
                 .map_err(db_error)?;
             transaction
                 .execute(
-                    "DELETE FROM usage_candidate_rollups
-                     WHERE candidate_kind = 'account' AND candidate_id = ?1",
+                    zenith_relay_core::usage::DELETE_ACCOUNT_CANDIDATE_ROLLUPS_SQL,
                     [&candidate_hint],
                 )
                 .map_err(db_error)?;

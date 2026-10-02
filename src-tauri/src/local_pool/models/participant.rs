@@ -6,10 +6,8 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
     normalize_model_price_overrides,
     protocol::RemoteAccountLocation,
-    ApiModelPriceOverride, PoolAccess, PoolParticipant, RuntimeCandidatePolicy,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceCatalogEvidence,
-    SourceCatalogRecord, SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution,
-    SourceTransportIdentity, SourceTransportRecord, WireApi,
+    ApiModelPriceOverride, PoolAccess, PoolParticipant, SourceProtocolBinding,
+    SourceProtocolConfig, SourceProtocolResolution, WireApi,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -138,14 +136,8 @@ impl LocalAccountRecord {
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty());
     }
-
-    /// Returns the catalog used by runtime and management views. A successful
-    /// discovery snapshot wins, while legacy/imported `models` remains the
-    /// safe fallback when discovery has not completed yet.
-    pub fn effective_models(&self) -> &[String] {
-        self.discovered_models.as_deref().unwrap_or(&self.models)
-    }
 }
+zenith_relay_core::impl_effective_models!(LocalAccountRecord);
 
 impl PoolParticipant for LocalAccountRecord {
     fn pool_access(&self) -> PoolAccess<'_> {
@@ -176,6 +168,36 @@ impl Default for AutomationRecords {
                 .expect("static wake automation bounds are valid"),
             weekly_reset_fingerprints: BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn synthetic_responses_source() -> ProviderSourceRecord {
+    ProviderSourceRecord {
+        id: "source".into(),
+        name: "Provider".into(),
+        enabled: true,
+        in_pool: true,
+        draining: false,
+        base_url: "https://provider.test/v1".into(),
+        secret_ref: "source:test".into(),
+        pricing_provider: None,
+        official_provider_family: None,
+        wire_api: WireApi::Responses,
+        protocol_config: Default::default(),
+        protocol_bindings: Vec::new(),
+        models: vec!["model-a".into()],
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        priority: 0,
+        weight: 1,
+        recovery_delay_seconds: 0,
+        model_price_overrides: BTreeMap::new(),
+        detected_model_prices: BTreeMap::new(),
+        last_used_at: None,
+        last_test_at: None,
+        last_test_status: None,
+        last_error: None,
     }
 }
 
@@ -234,82 +256,7 @@ impl ProviderSourceRecord {
     }
 }
 
-impl SourceProtocolResolution for ProviderSourceRecord {
-    fn protocol_base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn protocol_models(&self) -> &[String] {
-        &self.models
-    }
-
-    fn stored_protocol_bindings(&self) -> &[SourceProtocolBinding] {
-        &self.protocol_bindings
-    }
-
-    fn protocol_fallback(&self) -> WireApi {
-        self.wire_api
-    }
-
-    fn source_protocol_config(&self) -> &SourceProtocolConfig {
-        &self.protocol_config
-    }
-}
-
-impl RuntimeSourcePolicyRecord for ProviderSourceRecord {
-    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate {
-        RuntimeSourcePolicyUpdate {
-            source_id: self.id.clone(),
-            policy: RuntimeCandidatePolicy {
-                enabled: self.enabled,
-                draining: self.draining,
-                priority: self.priority,
-                weight: self.weight,
-                allowed_models: self.allowed_models.clone(),
-                excluded_models: self.excluded_models.clone(),
-            },
-            recovery_delay_seconds: self.recovery_delay_seconds,
-        }
-    }
-}
-
-impl SourceTransportRecord for ProviderSourceRecord {
-    fn transport_identity(&self) -> SourceTransportIdentity<'_> {
-        SourceTransportIdentity {
-            id: &self.id,
-            base_url: &self.base_url,
-            secret_ref: &self.secret_ref,
-            wire_api: self.wire_api,
-            protocol_bindings: &self.protocol_bindings,
-            protocol_config: &self.protocol_config,
-            models: &self.models,
-        }
-    }
-}
-
-impl SourceCatalogRecord for ProviderSourceRecord {
-    fn catalog_evidence(&self) -> SourceCatalogEvidence<'_> {
-        SourceCatalogEvidence {
-            base_url: &self.base_url,
-            models: &self.models,
-            protocol_bindings: &self.protocol_bindings,
-            protocol_config: &self.protocol_config,
-            detected_model_prices: &self.detected_model_prices,
-        }
-    }
-}
-
-impl PoolParticipant for ProviderSourceRecord {
-    fn pool_access(&self) -> PoolAccess<'_> {
-        PoolAccess {
-            enabled: self.enabled,
-            in_pool: self.in_pool,
-            draining: self.draining,
-            allowed_models: &self.allowed_models,
-            excluded_models: &self.excluded_models,
-        }
-    }
-}
+zenith_relay_core::impl_stored_source_record!(ProviderSourceRecord);
 
 pub(super) fn validate_model_price_overrides(
     overrides: &BTreeMap<String, ApiModelPriceOverride>,

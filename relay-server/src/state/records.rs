@@ -5,10 +5,8 @@ use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenSet},
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaSnapshot, Subscription},
-    ApiModelPriceOverride, PoolAccess, PoolParticipant, RuntimeCandidatePolicy,
-    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, SourceCatalogEvidence,
-    SourceCatalogRecord, SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution,
-    SourceTransportIdentity, SourceTransportRecord, WireApi,
+    ApiModelPriceOverride, SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution,
+    WireApi,
 };
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -78,82 +76,7 @@ impl SourceRecord {
     }
 }
 
-impl SourceProtocolResolution for SourceRecord {
-    fn protocol_base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn protocol_models(&self) -> &[String] {
-        &self.models
-    }
-
-    fn stored_protocol_bindings(&self) -> &[SourceProtocolBinding] {
-        &self.protocol_bindings
-    }
-
-    fn protocol_fallback(&self) -> WireApi {
-        self.wire_api
-    }
-
-    fn source_protocol_config(&self) -> &SourceProtocolConfig {
-        &self.protocol_config
-    }
-}
-
-impl RuntimeSourcePolicyRecord for SourceRecord {
-    fn runtime_source_policy_update(&self) -> RuntimeSourcePolicyUpdate {
-        RuntimeSourcePolicyUpdate {
-            source_id: self.id.clone(),
-            policy: RuntimeCandidatePolicy {
-                enabled: self.enabled,
-                draining: self.draining,
-                priority: self.priority,
-                weight: self.weight,
-                allowed_models: self.allowed_models.clone(),
-                excluded_models: self.excluded_models.clone(),
-            },
-            recovery_delay_seconds: self.recovery_delay_seconds,
-        }
-    }
-}
-
-impl SourceTransportRecord for SourceRecord {
-    fn transport_identity(&self) -> SourceTransportIdentity<'_> {
-        SourceTransportIdentity {
-            id: &self.id,
-            base_url: &self.base_url,
-            secret_ref: &self.secret_ref,
-            wire_api: self.wire_api,
-            protocol_bindings: &self.protocol_bindings,
-            protocol_config: &self.protocol_config,
-            models: &self.models,
-        }
-    }
-}
-
-impl SourceCatalogRecord for SourceRecord {
-    fn catalog_evidence(&self) -> SourceCatalogEvidence<'_> {
-        SourceCatalogEvidence {
-            base_url: &self.base_url,
-            models: &self.models,
-            protocol_bindings: &self.protocol_bindings,
-            protocol_config: &self.protocol_config,
-            detected_model_prices: &self.detected_model_prices,
-        }
-    }
-}
-
-impl PoolParticipant for SourceRecord {
-    fn pool_access(&self) -> PoolAccess<'_> {
-        PoolAccess {
-            enabled: self.enabled,
-            in_pool: self.in_pool,
-            draining: self.draining,
-            allowed_models: &self.allowed_models,
-            excluded_models: &self.excluded_models,
-        }
-    }
-}
+zenith_relay_core::impl_stored_source_record!(SourceRecord);
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,23 +119,10 @@ pub struct ServerAccountRecord {
     pub bypass_common_proxy: bool,
 }
 
-impl ServerAccountRecord {
-    pub fn effective_models(&self) -> &[String] {
-        self.discovered_models.as_deref().unwrap_or(&self.models)
-    }
-}
+zenith_relay_core::impl_effective_models!(ServerAccountRecord);
 
-impl PoolParticipant for ServerAccountRecord {
-    fn pool_access(&self) -> PoolAccess<'_> {
-        PoolAccess {
-            enabled: self.enabled,
-            in_pool: self.in_pool,
-            draining: self.draining,
-            allowed_models: &self.allowed_models,
-            excluded_models: &self.excluded_models,
-        }
-    }
-}
+zenith_relay_core::impl_pool_participant!(ServerAccountRecord);
+zenith_relay_core::impl_account_operational_source!(ServerAccountRecord);
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

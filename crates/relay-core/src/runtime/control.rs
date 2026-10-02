@@ -77,10 +77,7 @@ impl RuntimeControl {
     }
 
     pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
-        let mut origins = self
-            .request_origins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut origins = crate::poison::mutex(&self.request_origins);
         origins.insert(request_id.to_string(), origin);
         if origins.len() > MAX_TRACKED_REQUEST_ORIGINS {
             let excess = origins.len() - MAX_TRACKED_REQUEST_ORIGINS;
@@ -92,9 +89,7 @@ impl RuntimeControl {
     }
 
     pub(crate) fn request_origin(&self, request_id: &str) -> Option<&'static str> {
-        self.request_origins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.request_origins)
             .get(request_id)
             .copied()
     }

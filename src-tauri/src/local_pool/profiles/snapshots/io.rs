@@ -63,10 +63,6 @@ pub(super) fn io_error(error: std::io::Error) -> LocalPoolError {
     )
 }
 
-pub(super) fn io_error_message(error: String) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error)
-}
-
 pub(super) fn snapshot_changed() -> LocalPoolError {
     LocalPoolError::new(
         ErrorCode::ProfileRestoreBlocked,

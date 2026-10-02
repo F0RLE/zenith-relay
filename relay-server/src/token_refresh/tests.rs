@@ -1,9 +1,6 @@
 use super::client::collect_token_response;
 use super::*;
-use crate::{
-    config::Config,
-    store::{Store, Vault},
-};
+use crate::test_fixtures::test_app_state;
 use tempfile::TempDir;
 use zenith_relay_core::accounts::TokenPersistenceAdapter;
 use zenith_relay_core::accounts::TokenRefreshAdapter;
@@ -25,10 +22,7 @@ async fn refresh_client_never_falls_back_to_direct_for_unknown_account() {
 #[tokio::test]
 async fn old_persistence_cannot_write_a_replaced_login_or_auth_state() {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store, vault).unwrap();
+    let state = test_app_state(root.path());
     let mut record: ServerAccountRecord = serde_json::from_value(serde_json::json!({
         "id": "synthetic", "label": "Synthetic", "identityHint": "synthetic",
         "enabled": true, "inPool": false, "draining": false,

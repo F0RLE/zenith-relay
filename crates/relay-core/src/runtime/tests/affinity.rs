@@ -23,10 +23,7 @@ fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
     runtime.bind_response_affinity(Some(response_id), "source-1", 123);
 
     assert_eq!(
-        *store
-            .upserts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *crate::poison::mutex(&store.upserts),
         vec![ResponseAffinityBinding {
             key: affinity_key.clone(),
             candidate_id: "source-1".to_string(),
@@ -35,13 +32,7 @@ fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
     );
     assert!(runtime.invalidate_response_affinity(Some(&affinity_key)));
     assert!(!runtime.invalidate_response_affinity(Some(&affinity_key)));
-    assert_eq!(
-        *store
-            .deletes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-        vec![affinity_key]
-    );
+    assert_eq!(*crate::poison::mutex(&store.deletes), vec![affinity_key]);
 }
 #[tokio::test]
 async fn incomplete_response_affinity_is_connection_scoped_and_never_persisted() {
@@ -165,10 +156,7 @@ fn prompt_affinity_persists_only_its_opaque_binding_and_ttl() {
     runtime.bind_prompt_affinity(Some("cache:opaque-hash"), "source-1", 123);
 
     assert_eq!(
-        *store
-            .upserts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *crate::poison::mutex(&store.upserts),
         vec![ResponseAffinityBinding {
             key: "cache:opaque-hash".to_string(),
             candidate_id: "source-1".to_string(),
@@ -230,10 +218,7 @@ async fn selection_restores_persisted_response_affinity_before_reserving() {
     .unwrap();
     let response_id = "resp-restored";
     let affinity_key = runtime.response_affinity_key(Some(response_id)).unwrap();
-    *store
-        .restored_binding
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ResponseAffinityBinding {
+    *crate::poison::mutex(&store.restored_binding) = Some(ResponseAffinityBinding {
         key: affinity_key.clone(),
         candidate_id: "source-b".to_string(),
         expires_at_ms: 123 + crate::RESPONSE_AFFINITY_TTL_MS,
@@ -257,17 +242,11 @@ async fn selection_restores_persisted_response_affinity_before_reserving() {
     assert_eq!(selection.candidate_id, "source-b");
     assert!(selection.response_affinity_hit);
     assert_eq!(
-        *store
-            .found
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *crate::poison::mutex(&store.found),
         vec![affinity_key.clone()]
     );
     assert_eq!(
-        *store
-            .upserts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *crate::poison::mutex(&store.upserts),
         vec![ResponseAffinityBinding {
             key: affinity_key,
             candidate_id: "source-b".to_string(),
@@ -307,10 +286,7 @@ async fn selection_restores_persisted_prompt_affinity_before_reserving() {
         Some(123),
     ));
     let affinity_key = "cache:restored-prompt";
-    *store
-        .restored_binding
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ResponseAffinityBinding {
+    *crate::poison::mutex(&store.restored_binding) = Some(ResponseAffinityBinding {
         key: affinity_key.to_string(),
         candidate_id: "source-a".to_string(),
         expires_at_ms: 123 + crate::PROMPT_AFFINITY_TTL_MS,
@@ -337,10 +313,7 @@ async fn selection_restores_persisted_prompt_affinity_before_reserving() {
         crate::SelectionReason::PromptCacheAffinity
     );
     assert_eq!(
-        *store
-            .found
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        *crate::poison::mutex(&store.found),
         vec![affinity_key.to_string()]
     );
     drop(lease);

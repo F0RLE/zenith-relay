@@ -2,19 +2,12 @@ use crate::local_pool::{
     error::{CommandError, LocalPoolError},
     state::DesktopState,
 };
-use serde::Deserialize;
 use tauri::State;
 use zenith_relay_core::protocol::update_model_reasoning_policy;
 
-type CommandResult<T> = std::result::Result<T, CommandError>;
+pub(super) use zenith_relay_core::protocol::SetModelReasoningInput;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelReasoningInput {
-    pub(super) model_id: String,
-    #[serde(default)]
-    pub(super) allowed_levels: Vec<String>,
-}
+type CommandResult<T> = std::result::Result<T, CommandError>;
 
 pub(super) async fn set_local_model_reasoning(
     input: SetModelReasoningInput,

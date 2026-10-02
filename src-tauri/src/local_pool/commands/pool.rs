@@ -120,15 +120,7 @@ pub struct UpdateRoutingInput {
     default_service_tier: DefaultServiceTier,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PoolMembershipInput {
-    #[serde(default)]
-    pub(super) account_ids: Vec<String>,
-    #[serde(default)]
-    pub(super) source_ids: Vec<String>,
-    pub(super) in_pool: bool,
-}
+pub(crate) use zenith_relay_core::protocol::PoolMembershipInput;
 
 use model_settings::{
     SetModelDisplayOrderInput, SetModelEnabledInput, SetModelPriceInput, SetModelServiceTierInput,

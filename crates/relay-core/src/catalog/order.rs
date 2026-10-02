@@ -115,16 +115,6 @@ pub fn reasoning_level_rank(level: &str) -> u8 {
     }
 }
 
-/// Normalize and deduplicate model IDs while retaining discovery order.
-/// Presentation ordering is supplied by the optional models.dev catalog.
-pub fn canonicalize_model_ids<I, S>(models: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    normalize_model_ids(models)
-}
-
 /// Applies an operator's saved order while retaining discovery order for new
 /// models. Catalog-aware callers use `ModelMetadataCatalog::merge_display_order`.
 pub fn merge_model_display_order<I, S>(models: I, saved_order: &[String]) -> Vec<String>

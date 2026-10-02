@@ -35,20 +35,13 @@ pub(super) fn runtime_account(
     basis_points_enabled: bool,
     quota_stale_after_ms: u64,
 ) -> RuntimeChatGptAccount {
-    let operational = account_operational_state(AccountOperationalInput {
-        enabled: record.enabled,
-        in_pool: record.in_pool,
-        draining: record.draining,
-        secret_available: true,
-        proxy_available: true,
-        auth_state: record.auth_state,
-        health: record.health,
-        subscription: &record.subscription,
-        quota: &record.quota,
-        last_error_code: record.last_error_code.as_deref(),
-        now_ms: now_ms(),
+    let operational = account_operational_state(AccountOperationalInput::from_source(
+        &record,
+        true,
+        true,
+        now_ms(),
         quota_stale_after_ms,
-    });
+    ));
     let models = record.effective_models().to_vec();
     RuntimeChatGptAccount {
         id: record.id,

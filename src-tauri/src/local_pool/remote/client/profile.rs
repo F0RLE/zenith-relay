@@ -43,11 +43,7 @@ fn validate_profile_credential_fields(
     let actual_base_url =
         url::Url::parse(base_url).map_err(|_| RemoteClientError::InvalidResponse)?;
     if actual_base_url != expected_base_url
-        || key_id.is_empty()
-        || key_id.len() > 128
-        || !key_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !zenith_relay_core::is_ascii_token(key_id, 128)
         || !secret.starts_with("zrs_")
         || secret.len() < 24
         || secret.len() > 256
@@ -59,12 +55,7 @@ fn validate_profile_credential_fields(
 }
 
 pub(super) fn remote_object_path(collection: &str, id: &str) -> Result<String, RemoteClientError> {
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !zenith_relay_core::is_ascii_token(id, 128) {
         return Err(RemoteClientError::InvalidResponse);
     }
     Ok(format!("/{collection}/{id}"))

@@ -60,13 +60,7 @@ impl OwnershipOperationRecord {
                 suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
         };
-        let valid_object_id = |value: &str| {
-            !value.is_empty()
-                && value.len() <= 128
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        };
+        let valid_object_id = |value: &str| zenith_relay_core::is_ascii_token(value, 128);
         if !valid_id(&self.id, "ownership_")
             || self.server_id.is_empty()
             || self.server_id.len() > 128

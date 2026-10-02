@@ -13,10 +13,7 @@ impl GatewayRuntime {
             let Some(candidate) = scheduler.candidate(&account.id) else {
                 continue;
             };
-            let inventory = account
-                .model_inventory
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let inventory = crate::poison::read(&account.model_inventory);
             for model in &inventory.configured_models {
                 if !self.degraded_route_blocked(model)
                     && key.model_rules.allows(model)
@@ -43,10 +40,7 @@ impl GatewayRuntime {
         self.chatgpt_accounts
             .values()
             .filter(|account| {
-                account
-                    .model_inventory
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                crate::poison::read(&account.model_inventory)
                     .configured_models
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(model))
@@ -76,10 +70,7 @@ impl GatewayRuntime {
             .values()
             .filter(|account| {
                 !account.basis_points_enabled.load(Ordering::Relaxed)
-                    && account
-                        .model_inventory
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    && crate::poison::read(&account.model_inventory)
                         .configured_models
                         .iter()
                         .any(|candidate| candidate.eq_ignore_ascii_case(&model))
@@ -146,10 +137,7 @@ impl GatewayRuntime {
             return false;
         }
         let model = crate::model_id_key(&model);
-        let lite_models = self
-            .codex_responses_lite_models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lite_models = crate::poison::mutex(&self.codex_responses_lite_models);
         configured.into_iter().all(|(candidate_id, kind)| {
             kind == CandidateKind::OAuthAccount
                 && lite_models.contains(&(candidate_id, model.clone()))
@@ -184,10 +172,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn model_reasoning_policy_levels(&self, model: &str) -> Option<Vec<String>> {
-        let configured = self
-            .model_reasoning_allowed_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let configured = crate::poison::mutex(&self.model_reasoning_allowed_levels);
         reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
     }
 
@@ -220,10 +205,7 @@ impl GatewayRuntime {
     ) -> Result<()> {
         let allowed_levels = normalize_model_reasoning_allowed_levels(allowed_levels)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *self
-            .model_reasoning_allowed_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = allowed_levels;
+        *crate::poison::mutex(&self.model_reasoning_allowed_levels) = allowed_levels;
         Ok(())
     }
 }

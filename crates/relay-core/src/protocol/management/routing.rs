@@ -77,6 +77,44 @@ pub struct AccountOperationalInput<'a> {
     pub quota_stale_after_ms: u64,
 }
 
+/// Account fields that decide operational state. Secret and proxy availability
+/// stay outside the record because each caller checks them differently.
+pub trait AccountOperationalSource {
+    fn operational_enabled(&self) -> bool;
+    fn operational_in_pool(&self) -> bool;
+    fn operational_draining(&self) -> bool;
+    fn operational_auth_state(&self) -> AccountAuthState;
+    fn operational_health(&self) -> AccountHealthState;
+    fn operational_subscription(&self) -> &Subscription;
+    fn operational_quota(&self) -> &QuotaSnapshot;
+    fn operational_last_error_code(&self) -> Option<&str>;
+}
+
+impl<'a> AccountOperationalInput<'a> {
+    pub fn from_source(
+        source: &'a impl AccountOperationalSource,
+        secret_available: bool,
+        proxy_available: bool,
+        now_ms: u64,
+        quota_stale_after_ms: u64,
+    ) -> Self {
+        Self {
+            enabled: source.operational_enabled(),
+            in_pool: source.operational_in_pool(),
+            draining: source.operational_draining(),
+            secret_available,
+            proxy_available,
+            auth_state: source.operational_auth_state(),
+            health: source.operational_health(),
+            subscription: source.operational_subscription(),
+            quota: source.operational_quota(),
+            last_error_code: source.operational_last_error_code(),
+            now_ms,
+            quota_stale_after_ms,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccountOperationalState {
     pub status: OperationalStatus,

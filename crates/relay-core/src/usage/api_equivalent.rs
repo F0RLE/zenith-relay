@@ -1,4 +1,5 @@
 use super::ApiEquivalentSummary;
+use super::{sql_count_u64, sql_optional_u64};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -212,14 +213,6 @@ impl ObservedUsageSums {
             gate_measured_buckets,
         })
     }
-}
-
-fn sql_optional_u64(value: Option<i64>) -> Option<u64> {
-    value.and_then(|value| u64::try_from(value).ok())
-}
-
-fn sql_count_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or_default()
 }
 
 impl ApiEquivalentUsage {

@@ -78,10 +78,7 @@ pub(super) fn bridge_adapter_stream(
                     preserved_error.as_ref(),
                 );
                 if let Some(response) = state.bridge.completed().cloned() {
-                    *state
-                        .completed
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+                    *crate::poison::mutex(&state.completed) = Some(response);
                 }
                 if state.bridge.is_terminal() {
                     state.finished = true;

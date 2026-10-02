@@ -19,19 +19,14 @@ static CONFIGURED_CODEX_CLIENT_VERSION: LazyLock<RwLock<String>> =
 /// process. A built-in fallback remains available before the first network
 /// refresh or when GitHub cannot be reached.
 pub fn configured_codex_client_version() -> String {
-    CONFIGURED_CODEX_CLIENT_VERSION
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+    crate::poison::read(&CONFIGURED_CODEX_CLIENT_VERSION).clone()
 }
 
 /// Replaces the process-wide Codex release after the host verifies it from the
 /// official release feed. Pre-release tags, delayed results, and equal versions
 /// are ignored, so the process can never downgrade or move onto an alpha/beta.
 pub fn configure_codex_client_version(value: &str) -> bool {
-    let mut configured = CONFIGURED_CODEX_CLIENT_VERSION
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut configured = crate::poison::write(&CONFIGURED_CODEX_CLIENT_VERSION);
     if !is_newer_official_release(value, &configured) {
         return false;
     }

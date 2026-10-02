@@ -70,13 +70,11 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_content(
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .unwrap_or_else(Utc::now)
         .to_rfc3339_opts(SecondsFormat::Millis, true);
-    let content = serde_json::to_string_pretty(&serde_json::json!({
+    super::serialize_pretty(&serde_json::json!({
         "OPENAI_API_KEY": null,
         "last_refresh": last_refresh,
         "tokens": token_values,
     }))
-    .map_err(LocalPoolError::invalid_state)?;
-    Ok(format!("{content}\n"))
 }
 
 pub(in crate::local_pool::profiles::codex) fn auth_snapshot_json(
@@ -281,8 +279,7 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
 pub(in crate::local_pool::profiles::codex) fn serialize_account_backup(
     backup: &AccountProfileBackup,
 ) -> Result<String> {
-    let content = serde_json::to_string_pretty(backup).map_err(LocalPoolError::invalid_state)?;
-    Ok(format!("{content}\n"))
+    super::serialize_pretty(backup)
 }
 
 pub(in crate::local_pool::profiles::codex) fn binding_from_backup(

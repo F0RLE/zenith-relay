@@ -1,6 +1,5 @@
 use super::*;
-use crate::config::Config;
-use crate::store::{Store, Vault};
+use crate::test_fixtures::{pooled_source, test_app_state_bound};
 use axum::extract::{Path, State};
 use axum::routing::post;
 use std::collections::BTreeMap;
@@ -8,16 +7,8 @@ use tempfile::TempDir;
 use zenith_relay_core::Error;
 
 fn test_state(root: &TempDir, port: u16) -> Arc<AppState> {
-    let config = Config::for_test(
-        root.path().to_path_buf(),
-        format!("127.0.0.1:{port}").parse().unwrap(),
-    );
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    AppState::new(config, store, vault).unwrap()
+    test_app_state_bound(root.path(), format!("127.0.0.1:{port}").parse().unwrap())
 }
-
-use crate::test_fixtures::pooled_source;
 
 #[tokio::test]
 async fn source_probe_rejects_delete_and_readd_with_identical_configuration() {

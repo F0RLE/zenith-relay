@@ -1,4 +1,5 @@
 use super::{AccountAuthState, ReauthReason};
+use crate::poison::mutex as lock;
 use crate::providers::chatgpt::AgentIdentityCredential;
 use futures_util::future::BoxFuture;
 use futures_util::lock::Mutex as AsyncMutex;
@@ -131,10 +132,7 @@ impl TokenSlotEntry {
     }
 
     fn bump(&self) {
-        let mut revision = self
-            .revision
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut revision = crate::poison::write(&self.revision);
         revision.value = revision
             .value
             .checked_add(1)
@@ -142,19 +140,12 @@ impl TokenSlotEntry {
     }
 
     fn retire(&self) {
-        let mut revision = self
-            .revision
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut revision = crate::poison::write(&self.revision);
         revision.active = false;
     }
 
     fn snapshot(&self) -> TokenDispatchRevision {
-        let expected = self
-            .revision
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .value;
+        let expected = crate::poison::read(&self.revision).value;
         TokenDispatchRevision {
             state: self.revision.clone(),
             expected,
@@ -281,12 +272,6 @@ fn token_set_is_newer(current: &TokenSet, candidate: &TokenSet) -> bool {
     current.generation() > candidate.generation()
         || (current.generation() == candidate.generation()
             && current.issued_at_ms() > candidate.issued_at_ms())
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 mod prepare;

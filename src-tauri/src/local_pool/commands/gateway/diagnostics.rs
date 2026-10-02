@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tauri::State;
 use zenith_relay_core::is_valid_model_token;
 
+use super::super::remote_server::remote_error;
 use super::lifecycle::gateway_not_running;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
@@ -61,14 +62,14 @@ pub async fn diagnose_local_gateway(
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(45))
         .build()
-        .map_err(gateway_error)?;
+        .map_err(remote_error)?;
     let base_url = format!("http://{address}/v1");
     let models_response = client
         .get(format!("{base_url}/models"))
         .bearer_auth(&secret)
         .send()
         .await
-        .map_err(gateway_error)?;
+        .map_err(remote_error)?;
     let models_status = models_response.status();
     let models_body = read_limited(models_response).await?;
     if !models_status.is_success() {
@@ -102,7 +103,7 @@ pub async fn diagnose_local_gateway(
         }))
         .send()
         .await
-        .map_err(gateway_error)?;
+        .map_err(remote_error)?;
     let status = response.status();
     let body = read_limited(response).await?;
     if !status.is_success() {
@@ -149,7 +150,7 @@ async fn read_limited(mut response: Response) -> Result<Vec<u8>, CommandError> {
         .into());
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(gateway_error)? {
+    while let Some(chunk) = response.chunk().await.map_err(remote_error)? {
         if body.len().saturating_add(chunk.len()) > MAX_DIAGNOSTIC_BYTES {
             return Err(LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
@@ -180,10 +181,6 @@ fn status_error(stage: &str, status: StatusCode) -> CommandError {
         ..ErrorDiagnostics::default()
     })
     .into()
-}
-
-fn gateway_error(error: impl std::fmt::Display) -> CommandError {
-    LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string()).into()
 }
 
 #[cfg(test)]

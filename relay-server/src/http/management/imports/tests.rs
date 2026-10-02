@@ -5,19 +5,15 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
     use super::confirm::confirm_one_account_import;
     use super::preview::AccountImportPreview;
     use crate::{
-        config::Config,
-        state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
-        store::{PendingImport, Store, Vault},
+        state::{now_ms, AccountCredential, ServerAccountRecord},
+        store::PendingImport,
     };
     use std::{sync::Arc, time::Duration};
     use tempfile::TempDir;
     use zenith_relay_core::accounts::{AccountAuthState, TokenSet};
 
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store, vault).unwrap();
+    let state = crate::test_fixtures::test_app_state(root.path());
     let old: ServerAccountRecord = serde_json::from_value(serde_json::json!({
         "id": "synthetic", "label": "Synthetic", "identityHint": "synthetic",
         "enabled": true, "inPool": true, "draining": false,

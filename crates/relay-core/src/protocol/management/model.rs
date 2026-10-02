@@ -305,3 +305,46 @@ pub fn apply_model_reasoning_summary(
     }
     model.reasoning_configurable = has_pool_route && !model.reasoning_supported_levels.is_empty();
 }
+
+/// Model-setting bodies shared by the desktop commands and the management API.
+///
+/// Names stay camelCase and unknown fields are rejected, so both hosts keep the
+/// same request contract.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelEnabledInput {
+    pub model_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelPriceInput {
+    pub model_id: String,
+    pub input_micro_usd_per_million: Option<u64>,
+    pub cached_input_micro_usd_per_million: Option<u64>,
+    pub cache_write_5m_micro_usd_per_million: Option<u64>,
+    pub cache_write_1h_micro_usd_per_million: Option<u64>,
+    pub output_micro_usd_per_million: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelReasoningInput {
+    pub model_id: String,
+    #[serde(default)]
+    pub allowed_levels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelServiceTierInput {
+    pub model_id: String,
+    pub service_tier: DefaultServiceTier,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelOrderInput {
+    pub model_ids: Vec<String>,
+}

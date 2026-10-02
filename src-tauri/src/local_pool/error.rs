@@ -56,6 +56,10 @@ impl LocalPoolError {
         Self::new(ErrorCode::InvalidState, error.to_string())
     }
 
+    pub fn io(error: impl Display) -> Self {
+        Self::new(ErrorCode::Io, error.to_string())
+    }
+
     pub fn with_diagnostic(mut self, diagnostic: ErrorDiagnostics) -> Self {
         self.diagnostic = Some(Box::new(diagnostic));
         self

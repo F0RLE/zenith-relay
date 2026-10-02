@@ -3,6 +3,7 @@ use crate::local_pool::{
         credentials::{CredentialError, StoredCodexCredentials},
         import_session::SecretBackend,
         oauth::{CodexOAuthClient, OAuthTokenSet},
+        oauth_flow::callback_secret_ref,
         oauth_flow::{OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
         records::{self},
         NativeSecretBackend,
@@ -240,10 +241,6 @@ pub(super) fn store_completion_checkpoint(login_id: &str, encoded: &str) -> Loca
 
 pub(super) fn restore_completion_checkpoint(login_id: &str, encoded: &str) -> LocalResult<()> {
     store_completion_checkpoint(login_id, encoded)
-}
-
-pub(super) fn callback_secret_ref(login_id: &str) -> String {
-    format!("oauth-callback:{login_id}")
 }
 
 pub(super) fn invalid_completion_checkpoint() -> LocalPoolError {

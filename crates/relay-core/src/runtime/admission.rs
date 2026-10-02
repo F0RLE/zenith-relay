@@ -184,11 +184,7 @@ pub(super) struct AdmissionGuard<'a> {
 
 impl Drop for AdmissionGuard<'_> {
     fn drop(&mut self) {
-        self.runtime
-            .admission
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(self.id);
+        crate::poison::mutex(&self.runtime.admission).remove(self.id);
         self.runtime.admission_changed.notify_waiters();
     }
 }

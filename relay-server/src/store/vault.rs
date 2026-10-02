@@ -156,12 +156,7 @@ fn atomic_replace(path: &Path, backup: &Path, bytes: &[u8]) -> Result<(), String
 }
 
 fn validate_ref(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > 256
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
-    {
+    if !zenith_relay_core::is_ascii_ref(value, 256) {
         Err("secret reference is invalid".to_string())
     } else {
         Ok(())

@@ -102,6 +102,46 @@ struct AccountProjectionErrors {
     policy: &'static str,
 }
 
+pub(in crate::local_pool) struct RegisteredAccountAuthority {
+    pub(in crate::local_pool) tokens: TokenSet,
+    pub(in crate::local_pool) auth_state: AccountAuthState,
+}
+
+/// Registers tokens, then reads back the authority state that won.
+/// A newer registration can replace this one before the read returns.
+pub(in crate::local_pool) async fn register_active_authority(
+    state: &DesktopState,
+    account_id: &str,
+    tokens: TokenSet,
+    auth_state: AccountAuthState,
+    register_error: &str,
+    missing_tokens: &str,
+    missing_auth: &str,
+) -> LocalResult<RegisteredAccountAuthority> {
+    let authority = state.token_authority();
+    if let Err(error) = authority
+        .register_if_newer(account_id, tokens, auth_state)
+        .await
+    {
+        return Err(crate::local_pool::commands::fail_closed(
+            state,
+            format!("{register_error}: {error}"),
+        )
+        .await);
+    }
+    let Some(tokens) = authority.tokens(account_id).await else {
+        return Err(
+            crate::local_pool::commands::fail_closed(state, missing_tokens.to_string()).await,
+        );
+    };
+    let Some(auth_state) = authority.auth_state(account_id).await else {
+        return Err(
+            crate::local_pool::commands::fail_closed(state, missing_auth.to_string()).await,
+        );
+    };
+    Ok(RegisteredAccountAuthority { tokens, auth_state })
+}
+
 async fn project_registered_account(
     state: &DesktopState,
     account_id: &str,

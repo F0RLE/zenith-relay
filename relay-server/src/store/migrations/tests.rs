@@ -2,38 +2,9 @@ use super::*;
 use crate::state::ServerAccountRecord;
 use crate::store::sqlite::Store;
 use crate::store::test_support::test_root;
-use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
 
 fn account_record(id: &str) -> ServerAccountRecord {
-    ServerAccountRecord {
-        id: id.to_string(),
-        label: id.to_string(),
-        identity_hint: id.to_string(),
-        enabled: true,
-        in_pool: true,
-        draining: false,
-        source_id: "openai_codex".to_string(),
-        secret_ref: format!("account:{id}"),
-        provider_family: Some("openai".to_string()),
-        auth_state: AccountAuthState::Active,
-        health: AccountHealthState::Healthy,
-        models: vec!["gpt-test".to_string()],
-        discovered_models: None,
-        allowed_models: Vec::new(),
-        excluded_models: Vec::new(),
-        priority: 0,
-        weight: 1,
-        subscription: Default::default(),
-        quota: Default::default(),
-        purchase_cost_micro_usd: None,
-        cooldowns: Default::default(),
-        consecutive_failures: 0,
-        created_at_ms: 1,
-        last_used_at_ms: None,
-        last_error_code: None,
-        proxy_id: None,
-        bypass_common_proxy: false,
-    }
+    crate::test_fixtures::synthetic_server_account(id)
 }
 
 fn apply_migrations_through(connection: &mut Connection, target_version: u32) {

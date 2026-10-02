@@ -19,7 +19,7 @@ impl Store {
                     import.id,
                     import.preview_json,
                     import.secret_ref,
-                    import.created_at_ms.min(i64::MAX as u64) as i64
+                    zenith_relay_core::usage::sql_u64(import.created_at_ms)
                 ],
             )
             .map_err(db_error)?;
@@ -60,7 +60,9 @@ impl Store {
                 .prepare("SELECT secret_ref FROM pending_imports WHERE created_at_ms < ?1")
                 .map_err(db_error)?;
             let rows = statement
-                .query_map([cutoff_ms.min(i64::MAX as u64) as i64], |row| row.get(0))
+                .query_map([zenith_relay_core::usage::sql_u64(cutoff_ms)], |row| {
+                    row.get(0)
+                })
                 .map_err(db_error)?
                 .collect::<Result<Vec<String>, _>>()
                 .map_err(db_error)?;
@@ -69,7 +71,7 @@ impl Store {
         transaction
             .execute(
                 "DELETE FROM pending_imports WHERE created_at_ms < ?1",
-                [cutoff_ms.min(i64::MAX as u64) as i64],
+                [zenith_relay_core::usage::sql_u64(cutoff_ms)],
             )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;

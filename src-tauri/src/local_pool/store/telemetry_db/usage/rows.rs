@@ -101,16 +101,9 @@ fn normalize_wire_api(value: String) -> String {
         .unwrap_or(value)
 }
 
-pub(in crate::local_pool::store::telemetry_db) fn sql_u64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-pub(in crate::local_pool::store::telemetry_db) fn rust_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or_default()
-}
+pub(in crate::local_pool::store::telemetry_db) use zenith_relay_core::usage::sql_count_u64 as rust_u64;
+pub(in crate::local_pool::store::telemetry_db) use zenith_relay_core::usage::sql_u64;
 
 /// `NULL` and a corrupt negative sum are both "not measured". A normal zero
 /// stays zero. Counters that cannot be absent still use `rust_u64`.
-pub(in crate::local_pool::store::telemetry_db) fn optional_u64(value: Option<i64>) -> Option<u64> {
-    value.and_then(|value| u64::try_from(value).ok())
-}
+pub(in crate::local_pool::store::telemetry_db) use zenith_relay_core::usage::sql_optional_u64 as optional_u64;

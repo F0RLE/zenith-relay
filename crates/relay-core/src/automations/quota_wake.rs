@@ -248,12 +248,7 @@ pub struct WakeCompletion {
 }
 
 pub(super) fn is_safe_id(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    crate::is_ascii_token(value.trim(), 64)
 }
 
 #[cfg(test)]

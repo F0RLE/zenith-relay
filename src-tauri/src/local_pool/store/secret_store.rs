@@ -285,12 +285,7 @@ fn legacy_keyring_user(secret_ref: &str) -> Result<String> {
 }
 
 fn validate_secret_ref(secret_ref: &str) -> Result<()> {
-    let valid = !secret_ref.is_empty()
-        && secret_ref.len() <= 128
-        && secret_ref
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'));
-    if !valid {
+    if !zenith_relay_core::is_ascii_ref(secret_ref, 128) {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "secret reference contains unsupported characters",

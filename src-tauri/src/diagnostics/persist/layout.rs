@@ -15,11 +15,9 @@ pub(in crate::diagnostics) fn state() -> &'static DiagnosticState {
 
 pub(in crate::diagnostics) fn root_path() -> PathBuf {
     let state = state();
-    match state.root.try_lock() {
-        Ok(root) => root.clone(),
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
-        Err(std::sync::TryLockError::WouldBlock) => fallback_root(),
-    }
+    zenith_relay_core::poison::try_mutex(&state.root)
+        .map(|root| root.clone())
+        .unwrap_or_else(fallback_root)
 }
 
 fn fallback_root() -> PathBuf {

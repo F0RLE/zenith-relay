@@ -193,13 +193,7 @@ impl TelemetryDb {
         if !valid_performance_name(name)
             || !duration_ms.is_finite()
             || !(0.0..=600_000.0).contains(&duration_ms)
-            || context.is_some_and(|value| {
-                value.is_empty()
-                    || value.len() > 64
-                    || !value.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')
-                    })
-            })
+            || context.is_some_and(|value| !zenith_relay_core::is_ascii_ref(value, 64))
         {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,

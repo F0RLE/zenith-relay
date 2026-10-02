@@ -68,9 +68,8 @@ impl TranslationStream {
             self.fail();
             return;
         }
-        let mut pending = std::mem::take(&mut self.pending);
-        crate::protocol::consume_sse_frames(
-            &mut pending,
+        self.pending = crate::protocol::push_pending_sse_frames(
+            std::mem::take(&mut self.pending),
             bytes,
             self,
             |stream| stream.terminal,
@@ -80,7 +79,6 @@ impl TranslationStream {
                 }
             },
         );
-        self.pending = pending;
     }
 
     pub fn finish(&mut self) {

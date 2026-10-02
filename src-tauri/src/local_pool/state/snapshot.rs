@@ -64,8 +64,6 @@ pub(crate) struct LocalRuntimeInputs {
     pub sources: Vec<ProviderSourceRecord>,
     pub accounts: Vec<LocalAccountRecord>,
     pub source_api_keys: BTreeMap<String, Option<String>>,
-    pub source_refresh: BTreeMap<String, SourceRefreshSnapshot>,
-    pub account_refresh: BTreeMap<String, AccountRefreshState>,
     pub account_credentials: HashMap<String, Option<StoredCodexCredentials>>,
 }
 
@@ -192,8 +190,6 @@ impl DesktopState {
         let SnapshotBase {
             gateway,
             sources,
-            source_refresh,
-            account_refresh,
             accounts,
             ..
         } = self.snapshot_base().await?;
@@ -209,8 +205,6 @@ impl DesktopState {
             sources,
             accounts,
             source_api_keys,
-            source_refresh,
-            account_refresh,
             account_credentials,
         })
     }

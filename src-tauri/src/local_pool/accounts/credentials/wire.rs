@@ -49,12 +49,7 @@ pub(super) struct AgentIdentityWire {
 }
 
 pub(super) fn validate_local_account_id(value: &str) -> Result<(), CredentialError> {
-    let valid = !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    if valid {
+    if zenith_relay_core::is_ascii_token(value, 128) {
         Ok(())
     } else {
         Err(CredentialError::new(

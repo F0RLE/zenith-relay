@@ -93,7 +93,7 @@ impl Store {
             let mut statement = connection.prepare(&sql).map_err(db_error)?;
             let mut page_values = values;
             page_values.push(SqlValue::Integer(i64::from(page_size)));
-            page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
+            page_values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
             let rows = statement
                 .query_map(params_from_iter(page_values.iter()), map_usage_event)
                 .map_err(db_error)?;

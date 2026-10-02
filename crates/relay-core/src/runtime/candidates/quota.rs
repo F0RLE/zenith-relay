@@ -21,10 +21,7 @@ impl GatewayRuntime {
         {
             return false;
         }
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let Some(state) = quotas.get_mut(candidate_id) else {
             return false;
         };
@@ -79,10 +76,7 @@ impl GatewayRuntime {
         if !self.chatgpt_accounts.contains_key(candidate_id) {
             return false;
         }
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
             .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
@@ -157,10 +151,7 @@ impl GatewayRuntime {
         if !self.chatgpt_accounts.contains_key(candidate_id) {
             return false;
         }
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
             .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
@@ -204,10 +195,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> Option<QuotaSnapshot> {
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let state = quotas.get_mut(candidate_id)?;
         if !state.dirty
             || (!state.force_persist
@@ -285,10 +273,7 @@ impl GatewayRuntime {
         if !self.chatgpt_accounts.contains_key(candidate_id) {
             return false;
         }
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let Some(state) = quotas.get_mut(candidate_id) else {
             return false;
         };

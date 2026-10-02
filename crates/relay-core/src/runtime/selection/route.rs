@@ -71,10 +71,7 @@ impl GatewayRuntime {
         let account = self.chatgpt_accounts.get(candidate_id)?;
         Some(Self::account_executor_route(
             account,
-            account
-                .model_inventory
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            crate::poison::read(&account.model_inventory)
                 .image_main_model
                 .clone()?,
             allowed_protocols,
@@ -123,11 +120,7 @@ impl GatewayRuntime {
         let adapter =
             SourceAdapter::between(wire_api, WireApi::Responses).expect("registered account route");
         let account_transport = if account.basis_points_enabled.load(Ordering::Relaxed)
-            && account
-                .agent_identity
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
+            && crate::poison::read(&account.agent_identity).is_none()
         {
             AccountTransport::ExcelBasisPoints
         } else {

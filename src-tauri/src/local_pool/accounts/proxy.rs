@@ -29,13 +29,13 @@ pub use pool::ProxyPoolSummary;
 pub use refresh::ProxyRefreshClient;
 #[cfg(test)]
 use selection::choose_proxy_url;
+#[cfg(test)]
+pub use selection::proxy_status;
 pub use selection::{
     common_proxy_available, common_proxy_config, common_proxy_url, effective_proxy_config,
     effective_proxy_url, ensure_account_proxy, proxy_route_is_usable, proxy_route_status,
     ProxyRoute,
 };
-#[cfg(test)]
-pub use selection::proxy_status;
 
 #[cfg(test)]
 mod tests {

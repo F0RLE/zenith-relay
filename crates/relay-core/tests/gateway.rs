@@ -11,9 +11,7 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
     discover_source_models, discover_source_models_and_protocol_bindings,
@@ -44,6 +42,10 @@ mod error_recording;
 mod native_tool_repair;
 #[path = "support/protocol_bridges.rs"]
 mod protocol_bridges;
+
+#[path = "support/local_server.rs"]
+mod local_server;
+use local_server::{spawn, TestServer};
 #[path = "support/source_discovery.rs"]
 mod source_discovery;
 #[path = "support/stream_limits.rs"]
@@ -82,17 +84,6 @@ enum NativeReplayRejection {
     GenericInvalidRequest,
     ZenithGatewayInvalidRequest,
     ZenithGatewayInvalidRequestStream,
-}
-
-struct TestServer {
-    base_url: String,
-    task: JoinHandle<()>,
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 async fn spawn_gateway(
@@ -459,18 +450,6 @@ async fn spawn_strict_missing_call_id_upstream() -> (TestServer, UpstreamState) 
         )
         .with_state(state.clone());
     (spawn(app).await, state)
-}
-
-async fn spawn(app: Router) -> TestServer {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    TestServer {
-        base_url: format!("http://{address}"),
-        task,
-    }
 }
 
 async fn upstream_models(State(state): State<UpstreamState>, headers: HeaderMap) -> Response<Body> {

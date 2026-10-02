@@ -134,10 +134,7 @@ impl StreamExecution {
         let capture_stream = upstream_usage.clone();
         let remaining: UpstreamStream = Box::pin(remaining.inspect(move |chunk| {
             if let (Some(capture), Ok(bytes)) = (&capture_stream, chunk) {
-                capture
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .observe(bytes);
+                crate::poison::mutex(&capture).observe(bytes);
             }
         }));
         let completion_runtime = runtime.clone();

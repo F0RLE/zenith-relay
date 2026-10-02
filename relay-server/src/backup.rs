@@ -4,7 +4,7 @@ use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
 };
-use zenith_relay_core::unix_time_ms;
+use zenith_relay_core::{path_with_suffix as append_suffix, unix_time_ms};
 
 use crate::{
     config::Config,
@@ -227,12 +227,6 @@ fn temporary_sibling(path: &Path, label: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| "backup path has no file name".to_string())?
         .to_string_lossy();
     Ok(path.with_file_name(format!(".{name}.{label}-{}", uuid::Uuid::new_v4())))
-}
-
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
 }
 
 fn io_error(error: std::io::Error) -> String {

@@ -67,8 +67,8 @@ pub(super) fn account_pricing_aggregates(
     );
     let values = [
         SqlValue::Text(account_id.to_string()),
-        SqlValue::Integer(from_ms.min(i64::MAX as u64) as i64),
-        SqlValue::Integer(to_ms.min(i64::MAX as u64) as i64),
+        SqlValue::Integer(sql_u64(from_ms)),
+        SqlValue::Integer(sql_u64(to_ms)),
     ];
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
@@ -173,8 +173,8 @@ pub(super) fn usage_buckets(
         return Ok(Vec::new());
     };
     let start_ms = query.from_ms.unwrap_or_default();
-    let start = SqlValue::Integer(start_ms.min(i64::MAX as u64) as i64);
-    let bucket = SqlValue::Integer(bucket_ms.min(i64::MAX as u64) as i64);
+    let start = SqlValue::Integer(sql_u64(start_ms));
+    let bucket = SqlValue::Integer(sql_u64(bucket_ms));
     let bucket_sql = "? + ((CAST(strftime('%s', created_at) AS INTEGER) * 1000 - ?) / ?) * ?";
     let sql = format!(
         "SELECT {bucket_sql}, {USAGE_TOTAL_COLUMNS} \
@@ -224,17 +224,4 @@ pub(super) fn usage_buckets(
         .map_err(db_error)?;
     assign_bucket_equivalents(&mut buckets, rows);
     Ok(buckets)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rows::optional_u64;
-
-    #[test]
-    fn null_and_negative_measurements_stay_absent() {
-        assert_eq!(optional_u64(None), None);
-        assert_eq!(optional_u64(Some(-1)), None);
-        assert_eq!(optional_u64(Some(0)), Some(0));
-        assert_eq!(optional_u64(Some(12)), Some(12));
-    }
 }

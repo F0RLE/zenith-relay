@@ -56,9 +56,7 @@ const LOCAL_POOL_PROVIDER_ID: &str = "zenith_relay_local";
 static CODEX_PROFILE_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) fn lock_codex_profile() -> MutexGuard<'static, ()> {
-    CODEX_PROFILE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    zenith_relay_core::poison::mutex(&CODEX_PROFILE_LOCK)
 }
 
 pub fn enable_provider(api_key: &str, backup_dir: &Path) -> Result<(), String> {

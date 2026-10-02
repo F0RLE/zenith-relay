@@ -199,7 +199,7 @@ pub enum RefreshFreshness {
 }
 
 mod source_stats;
-pub use source_stats::SourceStatsObservation;
+pub use source_stats::{SourceStatsObservation, SourceStatsRead};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefreshCompletion {

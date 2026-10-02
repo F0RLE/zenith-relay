@@ -71,14 +71,11 @@ impl AccountExportRequest {
             return Err(validation("account export selection is invalid"));
         }
         let mut seen = HashSet::new();
-        if self.account_ids.iter().any(|account_id| {
-            account_id.is_empty()
-                || account_id.len() > 128
-                || !account_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-                || !seen.insert(account_id)
-        }) {
+        if self
+            .account_ids
+            .iter()
+            .any(|account_id| !crate::is_ascii_token(account_id, 128) || !seen.insert(account_id))
+        {
             return Err(validation("account export selection is invalid"));
         }
         let description = normalize_account_export_description(self.description.as_deref())?;

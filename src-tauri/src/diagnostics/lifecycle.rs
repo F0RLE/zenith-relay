@@ -27,10 +27,7 @@ pub(crate) fn install_panic_hook() {
 /// recorded before the AppHandle exists.
 pub(crate) fn initialize(root: &Path) {
     let state = persist::state();
-    match state.root.lock() {
-        Ok(mut current) => *current = root.to_path_buf(),
-        Err(poisoned) => *poisoned.into_inner() = root.to_path_buf(),
-    }
+    *zenith_relay_core::poison::mutex(&state.root) = root.to_path_buf();
     let layout_ready = persist::ensure_layout(root);
     let debug_marker = layout_ready.then(|| persist::read_debug_marker(root));
     let debug_enabled = match debug_marker

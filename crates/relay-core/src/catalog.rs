@@ -20,10 +20,10 @@ pub use context::{
     source_model_declares_image_input,
 };
 pub use order::{
-    canonicalize_model_ids, canonicalize_reasoning_levels, is_degraded_route_model,
-    is_valid_model_id, is_valid_model_token, merge_model_display_order, model_id_key,
-    normalize_bounded_model_ids, normalize_model_ids, reasoning_level_rank, reasoning_policy_key,
-    reasoning_policy_levels, ModelIdListError, MAX_MODEL_LIST_LEN,
+    canonicalize_reasoning_levels, is_degraded_route_model, is_valid_model_id,
+    is_valid_model_token, merge_model_display_order, model_id_key, normalize_bounded_model_ids,
+    normalize_model_ids, reasoning_level_rank, reasoning_policy_key, reasoning_policy_levels,
+    ModelIdListError, MAX_MODEL_LIST_LEN,
 };
 pub use registry::ModelRegistry;
 pub use rules::ModelRules;

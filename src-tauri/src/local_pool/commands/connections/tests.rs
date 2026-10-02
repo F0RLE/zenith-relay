@@ -1,32 +1,7 @@
 use super::*;
 
 fn source_record() -> ProviderSourceRecord {
-    ProviderSourceRecord {
-        id: "source".into(),
-        name: "Provider".into(),
-        enabled: true,
-        in_pool: true,
-        draining: false,
-        base_url: "https://provider.test/v1".into(),
-        secret_ref: "source:test".into(),
-        pricing_provider: None,
-        official_provider_family: None,
-        wire_api: WireApi::Responses,
-        protocol_config: Default::default(),
-        protocol_bindings: Vec::new(),
-        models: vec!["model-a".into()],
-        allowed_models: Vec::new(),
-        excluded_models: Vec::new(),
-        priority: 0,
-        weight: 1,
-        recovery_delay_seconds: 0,
-        model_price_overrides: BTreeMap::new(),
-        detected_model_prices: BTreeMap::new(),
-        last_used_at: None,
-        last_test_at: None,
-        last_test_status: None,
-        last_error: None,
-    }
+    crate::local_pool::models::synthetic_responses_source()
 }
 
 #[test]

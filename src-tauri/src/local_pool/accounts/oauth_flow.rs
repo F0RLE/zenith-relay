@@ -7,18 +7,20 @@ use super::oauth::{
 };
 use callback::{bind_callback_listener, run_listener};
 use serde::{Deserialize, Serialize};
+pub(crate) use snapshot::callback_secret_ref;
 use snapshot::{
-    callback_port, callback_secret_ref, load_snapshots, read_snapshot, remove_snapshot,
-    snapshot_path, validate_login_id, write_snapshot,
+    callback_port, load_snapshots, read_snapshot, remove_snapshot, snapshot_path,
+    validate_login_id, write_snapshot,
 };
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use uuid::Uuid;
+use zenith_relay_core::poison::mutex as lock;
 
 const SNAPSHOT_VERSION: u32 = 1;
 const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
@@ -298,12 +300,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or(1)
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

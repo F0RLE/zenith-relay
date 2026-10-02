@@ -45,20 +45,14 @@ impl GatewayRuntime {
     /// Requests snapshot this value once. Hot updates never rebuild the
     /// listener or change an already admitted request's policy during retry.
     pub fn tool_policy(&self) -> crate::ToolPolicy {
-        self.tool_policy
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        crate::poison::read(&self.tool_policy).clone()
     }
 
     pub fn set_tool_policy(&self, policy: crate::ToolPolicy) -> Result<()> {
         let policy = policy
             .normalized()
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *self
-            .tool_policy
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+        *crate::poison::write(&self.tool_policy) = policy;
         Ok(())
     }
 
@@ -188,13 +182,7 @@ impl GatewayRuntime {
         }
         let mut locked = Vec::with_capacity(keys.len());
         for (key, scope) in keys {
-            locked.push((
-                key,
-                scope,
-                key.scope
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            ));
+            locked.push((key, scope, crate::poison::write(&key.scope)));
         }
         let mut scheduler = self.lock_scheduler();
         scheduler.set_pool_routing(policy)?;
@@ -212,9 +200,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
-        self.source_recovery_delays_ms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.source_recovery_delays_ms)
             .get(candidate_id)
             .copied()
     }
@@ -238,18 +224,12 @@ impl GatewayRuntime {
     ) -> Result<()> {
         let overrides = normalize_model_service_tier_overrides(overrides)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *self
-            .model_service_tier_overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = overrides;
+        *crate::poison::mutex(&self.model_service_tier_overrides) = overrides;
         Ok(())
     }
 
     pub(crate) fn model_effective_service_tier(&self, model: &str) -> DefaultServiceTier {
-        let requested = self
-            .model_service_tier_overrides
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let requested = crate::poison::mutex(&self.model_service_tier_overrides)
             .get(&crate::model_id_key(model))
             .copied()
             .unwrap_or_else(|| self.default_service_tier());
@@ -257,11 +237,7 @@ impl GatewayRuntime {
     }
 
     pub fn set_model_display_order(&self, models: Vec<String>) {
-        *self
-            .model_display_order
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            crate::normalize_model_ids(models);
+        *crate::poison::mutex(&self.model_display_order) = crate::normalize_model_ids(models);
     }
 
     /// Switches the explicitly labelled Excel/Basis Points transport for OAuth
@@ -270,11 +246,7 @@ impl GatewayRuntime {
     /// concurrency reservation remain unchanged.
     pub fn set_basis_points_enabled(&self, enabled: bool) {
         for account in self.chatgpt_accounts.values() {
-            let oauth = account
-                .agent_identity
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none();
+            let oauth = crate::poison::read(&account.agent_identity).is_none();
             account
                 .basis_points_enabled
                 .store(enabled && oauth, Ordering::Relaxed);

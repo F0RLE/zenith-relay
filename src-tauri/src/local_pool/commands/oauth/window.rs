@@ -24,9 +24,7 @@ fn sign_in_session() -> std::sync::MutexGuard<'static, SignInSession> {
         generation: 0,
         bridge: None,
     });
-    SESSION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    zenith_relay_core::poison::mutex(&SESSION)
 }
 
 pub(super) async fn open_sign_in_window(

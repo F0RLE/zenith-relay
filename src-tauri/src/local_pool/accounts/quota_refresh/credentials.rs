@@ -167,37 +167,22 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
     // global order acyclic. A late automatic refresh can only replace this
     // result with a newer generation, never be rolled back by it.
     drop(refresh_guard);
-    let authority = state.token_authority();
-    if let Err(error) = authority
-        .register_if_newer(account_id, tokens.clone(), AccountAuthState::Active)
-        .await
-    {
-        return Err(crate::local_pool::commands::fail_closed(
-            state,
-            format!("failed to register refreshed credentials: {error}"),
-        )
-        .await);
-    }
-    let Some(authoritative_tokens) = authority.tokens(account_id).await else {
-        return Err(crate::local_pool::commands::fail_closed(
-            state,
-            "refreshed account token state disappeared".to_string(),
-        )
-        .await);
-    };
-    let Some(authoritative_auth_state) = authority.auth_state(account_id).await else {
-        return Err(crate::local_pool::commands::fail_closed(
-            state,
-            "refreshed account authentication state disappeared".to_string(),
-        )
-        .await);
-    };
+    let registered = super::register_active_authority(
+        state,
+        account_id,
+        tokens.clone(),
+        AccountAuthState::Active,
+        "failed to register refreshed credentials",
+        "refreshed account token state disappeared",
+        "refreshed account authentication state disappeared",
+    )
+    .await?;
     project_registered_account(
         state,
         account_id,
         &tokens,
-        &authoritative_tokens,
-        authoritative_auth_state,
+        &registered.tokens,
+        registered.auth_state,
         AccountProjectionErrors {
             persist: "newer refreshed account state could not be persisted",
             missing: "refreshed account state disappeared",
@@ -213,8 +198,8 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
         account_id: account_id.to_string(),
         status: CredentialRefreshStatus::Refreshed,
         code: "credentials_refreshed".to_string(),
-        expires_at_ms: authoritative_tokens.expires_at_ms(),
-        generation: Some(authoritative_tokens.generation()),
+        expires_at_ms: registered.tokens.expires_at_ms(),
+        generation: Some(registered.tokens.generation()),
     })
 }
 

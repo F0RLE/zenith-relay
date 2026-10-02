@@ -1,10 +1,6 @@
 use super::account_runtime::{account_summary, runtime_account, AccountSummaryInputs};
 use super::*;
-use crate::test_fixtures::pooled_source;
-use crate::{
-    config::Config,
-    store::{Store, Vault},
-};
+use crate::test_fixtures::{pooled_source, test_app_state};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 use zenith_relay_core::accounts::AccountAuthState;
@@ -16,10 +12,7 @@ use zenith_relay_core::{
 };
 
 fn snapshot_test_state(root: &TempDir) -> Arc<AppState> {
-    let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    AppState::new(config, store, vault).unwrap()
+    test_app_state(root.path())
 }
 
 fn snapshot_test_source(id: &str, model: &str) -> SourceRecord {
@@ -384,10 +377,8 @@ async fn rebuild_runtime_accepts_messages_sources_for_the_multi_protocol_system_
 #[tokio::test]
 async fn usage_writer_is_reused_and_flushes_before_shutdown() {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store.clone(), vault).unwrap();
+    let state = test_app_state(root.path());
+    let store = Arc::clone(&state.store);
     let first = state.usage_callback().unwrap();
     let second = state.usage_callback().unwrap();
     assert!(Arc::ptr_eq(&first, &second));

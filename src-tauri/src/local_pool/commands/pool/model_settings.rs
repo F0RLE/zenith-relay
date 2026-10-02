@@ -4,42 +4,15 @@ use crate::local_pool::{
     error::{ErrorCode, LocalPoolError},
     state::DesktopState,
 };
-use serde::Deserialize;
 use tauri::State;
 use zenith_relay_core::{
     protocol::complete_model_display_order, ApiModelPriceOverride, DefaultServiceTier,
 };
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelEnabledInput {
-    model_id: String,
-    enabled: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelPriceInput {
-    model_id: String,
-    input_micro_usd_per_million: Option<u64>,
-    cached_input_micro_usd_per_million: Option<u64>,
-    cache_write_5m_micro_usd_per_million: Option<u64>,
-    cache_write_1h_micro_usd_per_million: Option<u64>,
-    output_micro_usd_per_million: Option<u64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelServiceTierInput {
-    model_id: String,
-    service_tier: DefaultServiceTier,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelDisplayOrderInput {
-    model_ids: Vec<String>,
-}
+pub(super) use zenith_relay_core::protocol::{
+    SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput, SetModelPriceInput,
+    SetModelServiceTierInput,
+};
 
 pub(super) async fn set_local_model_enabled(
     input: SetModelEnabledInput,

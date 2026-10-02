@@ -76,7 +76,7 @@ async fn stats_readers_join_cache_and_project_without_a_second_provider_poll() {
     let good = first.await.unwrap().unwrap();
     assert_eq!(second.await.unwrap(), good);
     assert_eq!(good.balance_micro_usd, Some(12_340_000));
-    let inputs = state.runtime_inputs().await.unwrap();
+    let inputs = state.snapshot_inputs().await.unwrap();
     assert_eq!(inputs.source_refresh[&source.id].stats, Some(good.clone()));
     assert_eq!(
         inputs.source_refresh[&source.id].state.models,
@@ -97,7 +97,7 @@ async fn stats_readers_join_cache_and_project_without_a_second_provider_poll() {
     assert_eq!(stale.balance_micro_usd, good.balance_micro_usd);
     assert_eq!(stale.refresh_error, Some(SourceStatsStatus::RateLimited));
     assert!(stale.stale);
-    let stale_inputs = state.runtime_inputs().await.unwrap();
+    let stale_inputs = state.snapshot_inputs().await.unwrap();
     assert_eq!(
         stale_inputs.source_refresh[&source.id].stats,
         Some(stale.clone())
@@ -113,7 +113,7 @@ async fn stats_readers_join_cache_and_project_without_a_second_provider_poll() {
         .unwrap()
         .invalidate_source_refresh(&source.id)
         .unwrap();
-    let fresh_inputs = state.runtime_inputs().await.unwrap();
+    let fresh_inputs = state.snapshot_inputs().await.unwrap();
     assert!(
         fresh_inputs.source_refresh[&source.id].revision
             > inputs.source_refresh[&source.id].revision
@@ -281,7 +281,7 @@ async fn late_reads_do_not_cross_key_address_deletion_or_normalization_boundarie
             let saved = state.store().unwrap().source(&source.id).unwrap().clone();
             assert_eq!(saved.models, ["test"]);
             assert!(
-                state.runtime_inputs().await.unwrap().source_refresh[&source.id]
+                state.snapshot_inputs().await.unwrap().source_refresh[&source.id]
                     .stats
                     .is_none()
             );

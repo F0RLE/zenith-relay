@@ -93,15 +93,13 @@ impl MessagesStreamBridge {
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
-        let mut pending = std::mem::take(&mut self.pending);
-        crate::protocol::consume_sse_frames(
-            &mut pending,
+        self.pending = crate::protocol::push_pending_sse_frames(
+            std::mem::take(&mut self.pending),
             bytes,
             self,
             |bridge| bridge.terminal,
             |bridge, event| bridge.handle_event(event),
         );
-        self.pending = pending;
     }
 
     pub fn finish(&mut self) {

@@ -6,8 +6,8 @@ use crate::local_pool::{
 use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::ProxyMode;
 use zenith_relay_core::protocol::{
-    account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
-    QuotaWindowUsage, SourceSummary,
+    account_operational_state, AccountOperationalInput, AccountSummary, QuotaWindowUsage,
+    SourceSummary,
 };
 use zenith_relay_core::{
     ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
@@ -20,42 +20,14 @@ pub(super) fn local_source_summary(
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
 ) -> crate::local_pool::error::Result<SourceSummary> {
-    Ok(SourceSummary {
-        id: record.id.clone(),
-        name: record.name.clone(),
-        enabled: record.enabled,
-        in_pool: record.in_pool,
-        draining: record.draining,
-        operational_status: operational_status(
-            record.enabled,
-            false,
-            !record.draining && secret_available,
-            runtime_available,
-        ),
-        base_url: record.base_url.clone(),
-        pricing_provider: record.pricing_provider.clone(),
-        official_provider_family: record.official_provider_family.clone(),
-        wire_api: record.wire_api,
-        protocol_config: record
-            .protocol_config
-            .with_effective_capabilities(&record.base_url, &record.models),
-        protocol_bindings: record.protocol_bindings.clone(),
-        resolved_protocol_bindings: Some(record.effective_protocol_bindings().unwrap_or_default()),
-        models: record.models.clone(),
-        allowed_models: record.allowed_models.clone(),
-        excluded_models: record.excluded_models.clone(),
-        priority: record.priority,
-        weight: record.weight,
-        recovery_delay_seconds: record.recovery_delay_seconds,
-        model_price_overrides: record.model_price_overrides.clone(),
-        detected_model_prices: record.detected_model_prices.clone(),
-        api_equivalent,
+    Ok(SourceSummary::from_stored_source(
+        record,
         secret_available,
-        last_error_code: record.last_error.clone(),
+        runtime_available,
+        api_equivalent,
+        record.last_error.clone(),
         refresh_revision,
-        refresh_state: Default::default(),
-        provider_stats: None,
-    })
+    ))
 }
 
 pub(super) struct LocalAccountSummaryContext<'a> {
@@ -90,20 +62,13 @@ pub(super) fn local_account_summary(
         })
         .unwrap_or((ProxyMode::Direct, false));
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
-    let operational = account_operational_state(AccountOperationalInput {
-        enabled: record.account.enabled,
-        in_pool: record.account.in_pool,
-        draining: record.account.draining,
+    let operational = account_operational_state(AccountOperationalInput::from_source(
+        &record.account,
         secret_available,
         proxy_available,
-        auth_state: record.account.auth_state,
-        health: record.account.health,
-        subscription: &record.account.subscription,
-        quota: &record.account.quota,
-        last_error_code: record.account.last_error_code.as_deref(),
         now_ms,
         quota_stale_after_ms,
-    });
+    ));
     Ok(AccountSummary {
         id: record.account.id.clone(),
         label: record.account.label.clone(),
@@ -124,7 +89,7 @@ pub(super) fn local_account_summary(
         draining: record.account.draining,
         operational_status: operational.status.with_runtime_available(runtime_available),
         auth_state: record.account.auth_state,
-        health: format!("{:?}", record.account.health).to_ascii_lowercase(),
+        health: record.account.health.summary_label(),
         models: record.effective_models().to_vec(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),

@@ -1,6 +1,14 @@
 mod account;
 mod profile;
 
+use super::{LocalPoolError, Result};
+use serde::Serialize;
+
+pub(super) fn serialize_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String> {
+    let content = serde_json::to_string_pretty(value).map_err(LocalPoolError::invalid_state)?;
+    Ok(format!("{content}\n"))
+}
+
 pub(super) use account::{
     account_auth_content, account_auth_matches_snapshot, account_auth_matches_tokens,
     account_backup_for_profile, account_backup_path, account_backup_secret_ref,

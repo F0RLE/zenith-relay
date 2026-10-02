@@ -65,10 +65,7 @@ pub(in crate::diagnostics) fn record_event(
     }
     line.push(b'\n');
     let state = state();
-    let _guard = state
-        .write_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = zenith_relay_core::poison::mutex(&state.write_lock);
     let root = root_path();
     if !ensure_layout(&root) {
         return;
@@ -126,11 +123,7 @@ pub(in crate::diagnostics) fn write_panic_report(info: &PanicHookInfo<'_>) {
     let state = state();
     // A panic can happen while another diagnostic write is in progress.  Do
     // not wait for that mutex here: the panicking thread may own it.
-    let _guard = match state.write_lock.try_lock() {
-        Ok(guard) => Some(guard),
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-        Err(std::sync::TryLockError::WouldBlock) => None,
-    };
+    let _guard = zenith_relay_core::poison::try_mutex(&state.write_lock);
     let root = root_path();
     let directory = root.join(LOGS_DIRECTORY).join(CRASHES_DIRECTORY);
     if !ensure_layout(&root) || !ensure_real_directory(&directory) {
@@ -153,12 +146,9 @@ pub(in crate::diagnostics) fn write_panic_report(info: &PanicHookInfo<'_>) {
             format!("{file}:{}:{}", location.line(), location.column())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let breadcrumb = match state.breadcrumb.try_lock() {
-        Ok(value) => value.clone(),
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
-        Err(std::sync::TryLockError::WouldBlock) => None,
-    }
-    .or_else(|| read_latest_stage(&root));
+    let breadcrumb = zenith_relay_core::poison::try_mutex(&state.breadcrumb)
+        .and_then(|value| value.clone())
+        .or_else(|| read_latest_stage(&root));
     let mut report = String::new();
     report.push_str("Zenith Relay crash report\n");
     report.push_str("=========================\n");

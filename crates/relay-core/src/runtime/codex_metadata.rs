@@ -4,16 +4,11 @@ use std::collections::BTreeMap;
 
 impl GatewayRuntime {
     pub fn set_official_codex_ultra_models(&self, models: BTreeMap<String, Value>) {
-        *self
-            .official_codex_ultra
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = models;
+        *crate::poison::mutex(&self.official_codex_ultra) = models;
     }
 
     pub(crate) fn official_codex_ultra_model(&self, model: &str) -> Option<Value> {
-        self.official_codex_ultra
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.official_codex_ultra)
             .get(&crate::model_id_key(model))
             .cloned()
     }
@@ -24,10 +19,7 @@ impl GatewayRuntime {
         model: &str,
         enabled: bool,
     ) {
-        let mut models = self
-            .codex_responses_lite_models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut models = crate::poison::mutex(&self.codex_responses_lite_models);
         let key = (candidate_id.to_string(), crate::model_id_key(model));
         if enabled {
             models.insert(key);
@@ -38,9 +30,7 @@ impl GatewayRuntime {
 
     pub(crate) fn codex_model_responses_lite_candidates(&self, model: &str) -> Vec<String> {
         let model = crate::model_id_key(model);
-        self.codex_responses_lite_models
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.codex_responses_lite_models)
             .iter()
             .filter(|(_, candidate_model)| candidate_model == &model)
             .map(|(candidate_id, _)| candidate_id.clone())
@@ -57,10 +47,7 @@ impl GatewayRuntime {
         if scheduler.candidate(candidate_id).is_none() {
             return;
         }
-        self.model_metadata
-            .codex_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.model_metadata.codex_manifests)
             .insert(candidate_id.to_string(), CachedModelManifest { value });
     }
 
@@ -68,11 +55,7 @@ impl GatewayRuntime {
         &self,
         candidate_ids: impl IntoIterator<Item = &'a str>,
     ) -> Vec<(String, Value)> {
-        let manifests = self
-            .model_metadata
-            .codex_manifests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let manifests = crate::poison::mutex(&self.model_metadata.codex_manifests);
         candidate_ids
             .into_iter()
             .filter_map(|candidate_id| {

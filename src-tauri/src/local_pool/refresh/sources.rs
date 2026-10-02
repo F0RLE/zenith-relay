@@ -19,6 +19,7 @@ use zenith_relay_core::{
         refresh::{
             service::{RefreshRegistration, RefreshResult},
             source_stats_outcome, RefreshIdentity, RefreshKind, RefreshOutcome,
+            SourceStatsObservation,
         },
         source_member_key,
     },
@@ -197,13 +198,12 @@ pub(crate) fn cached_stats(
     fence: &SourceRefreshFence,
     base_url: &str,
 ) -> Option<SourceProviderStats> {
-    let (read, freshness) = state
-        .refresh
-        .cached_observation(&fence.identity(), RefreshKind::Balance)?;
-    match read.as_ref() {
-        Ok(RefreshRead::SourceStats(observation)) => observation.snapshot(base_url, freshness),
-        _ => None,
-    }
+    SourceStatsObservation::read_cached(
+        state
+            .refresh
+            .cached_observation(&fence.identity(), RefreshKind::Balance),
+        base_url,
+    )
 }
 
 fn ensure_stats_current(

@@ -372,8 +372,6 @@ impl<S> UsageStream<S> {
         else {
             return;
         };
-        *shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+        *crate::poison::mutex(&shared) = Some(response);
     }
 }

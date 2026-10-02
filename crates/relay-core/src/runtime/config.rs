@@ -285,6 +285,29 @@ pub struct ResponseAffinityBinding {
     pub expires_at_ms: u64,
 }
 
+impl ResponseAffinityBinding {
+    /// Builds a binding from a stored SQLite expiry.
+    /// A negative or overflowing value becomes zero, matching other counters.
+    pub fn from_stored_expiry(key: String, candidate_id: String, expires_at_ms: i64) -> Self {
+        Self {
+            key,
+            candidate_id,
+            expires_at_ms: crate::usage::sql_count_u64(expires_at_ms),
+        }
+    }
+}
+
+pub const RESPONSE_AFFINITY_DELETE_EXPIRED_SQL: &str =
+    "DELETE FROM response_affinity WHERE expires_at_ms <= ?1";
+pub const RESPONSE_AFFINITY_FIND_SQL: &str =
+    "SELECT response_key, candidate_id, expires_at_ms FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2";
+pub const RESPONSE_AFFINITY_UPSERT_SQL: &str =
+    "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(response_key) DO UPDATE SET candidate_id = excluded.candidate_id, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms";
+pub const RESPONSE_AFFINITY_DELETE_SQL: &str =
+    "DELETE FROM response_affinity WHERE response_key = ?1";
+pub const RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL: &str =
+    "DELETE FROM response_affinity WHERE candidate_id = ?1";
+
 pub trait ResponseAffinityStore: Send + Sync {
     fn load(&self, now_ms: u64) -> std::result::Result<Vec<ResponseAffinityBinding>, String>;
     fn find(

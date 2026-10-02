@@ -153,13 +153,21 @@ fn validate_secret(value: &str, name: &str) -> Result<(), ManagementError> {
     }
 }
 
-fn clean_label(value: &str, name: &str) -> Result<String, ManagementError> {
+pub(super) fn clean_text(
+    value: &str,
+    name: &str,
+    max_len: usize,
+) -> Result<String, ManagementError> {
     let value = value.trim();
-    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+    if value.is_empty() || value.len() > max_len || value.chars().any(char::is_control) {
         Err(validation_error(format!("{name} is invalid")))
     } else {
         Ok(value.to_string())
     }
+}
+
+fn clean_label(value: &str, name: &str) -> Result<String, ManagementError> {
+    clean_text(value, name, 128)
 }
 
 pub(super) use zenith_relay_core::normalize_model_ids as normalized_values;

@@ -38,10 +38,7 @@ impl TokenDispatchRevision {
     /// Retains the slot's exact in-memory incarnation until the guard is
     /// dropped. Do not hold this synchronous guard across an async wait.
     pub fn guard(&self) -> Option<TokenDispatchRevisionGuard<'_>> {
-        let guard = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = crate::poison::read(&self.state);
         (guard.active && guard.value == self.expected)
             .then_some(TokenDispatchRevisionGuard { _guard: guard })
     }

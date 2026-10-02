@@ -180,10 +180,6 @@ fn find_available_reset_credits(value: &Value) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::Config,
-        store::{Store, Vault},
-    };
     use tempfile::TempDir;
 
     #[test]
@@ -201,10 +197,7 @@ mod tests {
     #[test]
     fn reset_fence_rejects_newer_account_and_newer_quota_before_a_send() {
         let root = TempDir::new().unwrap();
-        let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-        let state = AppState::new(config, store, vault).unwrap();
+        let state = crate::test_fixtures::test_app_state(root.path());
         let observed: ServerAccountRecord = serde_json::from_value(serde_json::json!({
             "id": "synthetic", "label": "Synthetic", "identityHint": "synthetic",
             "enabled": false, "inPool": false, "draining": false, "sourceId": "openai_codex",

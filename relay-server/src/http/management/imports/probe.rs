@@ -187,12 +187,7 @@ pub(super) fn validate_account_responses_url(
 }
 
 pub(super) fn clean_identifier(value: &str, name: &str) -> Result<String, ManagementError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
-        Err(validation_error(format!("{name} is invalid")))
-    } else {
-        Ok(value.to_string())
-    }
+    super::super::clean_text(value, name, 512)
 }
 
 pub(super) fn nonempty(value: Option<String>) -> Option<String> {

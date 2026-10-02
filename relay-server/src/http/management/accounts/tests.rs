@@ -1,9 +1,5 @@
 use super::*;
-use crate::test_fixtures::pooled_source;
-use crate::{
-    config::Config,
-    store::{Store, Vault},
-};
+use crate::test_fixtures::{pooled_source, test_app_state};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 use zenith_relay_core::{
@@ -12,10 +8,7 @@ use zenith_relay_core::{
 };
 
 fn test_state(root: &TempDir) -> Arc<AppState> {
-    let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    AppState::new(config, store, vault).unwrap()
+    test_app_state(root.path())
 }
 
 fn test_account(id: &str) -> ServerAccountRecord {

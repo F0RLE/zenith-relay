@@ -58,3 +58,5 @@ impl AccountRecord {
             && self.health == AccountHealthState::Healthy
     }
 }
+
+crate::impl_account_operational_source!(AccountRecord);

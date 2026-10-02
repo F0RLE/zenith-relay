@@ -28,9 +28,9 @@ mod usage;
 
 use migrations::*;
 use usage::{
-    account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, rust_u64,
-    sql_u64, usage_buckets, usage_filter, usage_groups, usage_log_from_row,
-    usage_model_equivalents, usage_totals,
+    account_pricing_aggregates, apply_usage_totals_delta, is_unfiltered_all_time, sql_u64,
+    usage_buckets, usage_filter, usage_groups, usage_log_from_row, usage_model_equivalents,
+    usage_totals,
 };
 
 #[cfg(test)]
@@ -165,6 +165,14 @@ fn valid_performance_name(name: &str) -> bool {
     )
 }
 
+impl TelemetryDb {
+    fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))
+    }
+}
+
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::Io, "local database lock poisoned")
 }
@@ -174,7 +182,7 @@ fn db_error(error: rusqlite::Error) -> LocalPoolError {
 }
 
 fn io_error(error: std::io::Error) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error.to_string())
+    LocalPoolError::io(error)
 }
 
 #[cfg(test)]

@@ -151,10 +151,7 @@ impl Drop for ExecutionFence {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .end_execution_fence(&self.candidate_id, self.epoch);
+        crate::poison::mutex(&self.scheduler).end_execution_fence(&self.candidate_id, self.epoch);
         self.availability.notify_waiters();
     }
 }

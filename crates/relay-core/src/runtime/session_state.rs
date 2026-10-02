@@ -50,10 +50,7 @@ impl CodexTurnStateStore {
         let Some(key) = Self::key(scope, state, credential) else {
             return;
         };
-        let mut origins = self
-            .origins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut origins = crate::poison::mutex(&self.origins);
         origins.retain(|_, expires| *expires > now_ms);
         if origins.len() >= 4096 && !origins.contains_key(&key) {
             if let Some(oldest) = origins
@@ -77,10 +74,7 @@ impl CodexTurnStateStore {
         let Some(key) = Self::key(scope, state, credential) else {
             return false;
         };
-        let mut origins = self
-            .origins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut origins = crate::poison::mutex(&self.origins);
         let Some(expires) = origins.get(&key) else {
             return false;
         };
