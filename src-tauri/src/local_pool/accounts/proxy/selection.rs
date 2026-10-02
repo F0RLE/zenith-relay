@@ -77,6 +77,7 @@ pub struct ProxyRoute {
     pub bypass_common_proxy: bool,
 }
 
+#[cfg(test)]
 pub fn proxy_status(
     settings: &GatewaySettings,
     credentials: &StoredCodexCredentials,
