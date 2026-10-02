@@ -984,7 +984,6 @@ const relayRu = {
     currentRoute: "Работает сейчас",
     lastRoute: "Последний запрос",
     nextRoute: "Следующий кандидат",
-    rotationQueue: "Очередь: {{names}}",
     activeRoutes: "Активных маршрутов: {{count}}",
     activeRequests: "В работе ({{count}}): {{models}}",
     activeRequestsUnknown: "Активных запросов: {{count}}",

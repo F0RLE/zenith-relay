@@ -165,12 +165,6 @@ function compareRoutingRemainder(left: PoolMember, right: PoolMember) {
   return rightRemainder - leftRemainder;
 }
 
-/** Ready members in the order a new automatic request walks them. */
-export function automaticRoutingQueue(members: readonly PoolMember[], mode?: PoolRoutingMode | null) {
-  if (mode !== "automatic") return [];
-  return members.filter((member) => member.operationalStatus === "rotation" && memberCanRoute(member));
-}
-
 function savedMemberPositions(members: readonly { id: string }[] | undefined) {
   const positions = new Map<string, number>();
   for (const member of members ?? []) {

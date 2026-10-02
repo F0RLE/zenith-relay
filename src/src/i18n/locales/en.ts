@@ -984,7 +984,6 @@ const relayEn = {
     currentRoute: "Active now",
     lastRoute: "Last request",
     nextRoute: "Next candidate",
-    rotationQueue: "Queue: {{names}}",
     activeRoutes: "Active routes: {{count}}",
     activeRequests: "Active now ({{count}}): {{models}}",
     activeRequestsUnknown: "Active requests: {{count}}",

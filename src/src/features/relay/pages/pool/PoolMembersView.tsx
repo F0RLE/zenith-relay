@@ -29,7 +29,6 @@ import {
   poolMemberStatusCounts,
   poolProviderCreditsSummary,
   poolRoutingAvailability,
-  automaticRoutingQueue,
 } from "./poolMembersModel";
 
 type Member = PoolMember;
@@ -145,10 +144,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const nextRouteSummary = firstActiveMember && nextMember
     ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
     : null;
-  const routingQueue = automaticRoutingQueue(members, rotationMode);
-  const queueSummary = routingQueue.length > 1
-    ? t("pool.rotationQueue", { names: routingQueue.map((member) => memberName(member)).join(" → ") })
-    : null;
   const unavailableMembers = members.filter((member) => member.operationalStatus === "unavailable");
   const unavailableRouteErrors = [...new Set(unavailableMembers
     .map((member) => member.kind === "source" ? member.lastErrorCode?.trim() : currentAccountErrorCode(member))
@@ -256,7 +251,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           <div className="pool-runtime-strip">
             <div className="pool-route-summary">
               <strong className="pool-current-route" data-active={activeRequestTotal > 0}>{routingSummary}</strong>
-              {queueSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{queueSummary}</span></span> : nextRouteSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
+              {nextRouteSummary ? <span className="pool-next-route"><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
             </div>
             {activeRequestSummary ? (
               <span

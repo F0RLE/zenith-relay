@@ -11,7 +11,6 @@ import {
   poolMemberStatusCounts,
   poolProviderCreditsSummary,
   poolRoutingAvailability,
-  automaticRoutingQueue,
 } from "../src/features/relay/pages/pool/poolMembersModel";
 
 const member = (kind: "account" | "source", id: string, overrides: Record<string, unknown> = {}) => ({
@@ -198,12 +197,6 @@ describe("pool members model", () => {
     ];
     const saved = [{ id: "api" }, { id: "empty" }, { id: "lower" }, { id: "leader" }];
     expect(orderedPoolMembers(members, live, saved, "automatic").map((item) => item.id)).toEqual([
-      "leader",
-      "lower",
-      "empty",
-      "api",
-    ]);
-    expect(automaticRoutingQueue(orderedPoolMembers(members, live, saved, "automatic"), "automatic").map((item) => item.id)).toEqual([
       "leader",
       "lower",
       "empty",
