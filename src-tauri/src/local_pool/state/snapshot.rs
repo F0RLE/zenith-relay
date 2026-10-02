@@ -3,6 +3,7 @@ use crate::{
     local_pool::{
         accounts::{
             credentials::{CredentialStore, StoredCodexCredentials},
+            proxy::ProxyRoute,
             NativeSecretBackend,
         },
         error::{ErrorCode, LocalPoolError, Result},
@@ -102,6 +103,14 @@ impl AccountCredentialFacts {
 
     pub(crate) fn basis_points_available(self) -> bool {
         self.has_oauth && !self.agent_identity
+    }
+
+    pub(crate) fn proxy_route(self) -> ProxyRoute {
+        ProxyRoute {
+            has_account_proxy: self.has_account_proxy,
+            account_proxy_valid: self.account_proxy_valid,
+            bypass_common_proxy: self.bypass_common_proxy,
+        }
     }
 }
 

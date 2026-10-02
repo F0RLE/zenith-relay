@@ -1,4 +1,5 @@
 use crate::local_pool::{
+    accounts::proxy::{proxy_route_is_usable, proxy_route_status},
     models::{GatewaySettings, LocalAccountRecord, ProviderSourceRecord},
     state::AccountCredentialFacts,
 };
@@ -84,7 +85,9 @@ pub(super) fn local_account_summary(
     } = context;
     let secret_available = credentials.is_some();
     let (proxy_mode, proxy_available) = credentials
-        .map(|credentials| proxy_status_from_facts(settings, credentials, common_proxy_available))
+        .map(|credentials| {
+            proxy_route_status(settings, credentials.proxy_route(), common_proxy_available)
+        })
         .unwrap_or((ProxyMode::Direct, false));
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     let operational = account_operational_state(AccountOperationalInput {
@@ -174,7 +177,11 @@ pub(super) fn account_runtime_warning(
             error_codes::ACCOUNT_RUNTIME_PROVIDER_ACCOUNT_ID_MISSING
         }
         Some(credentials)
-            if account_proxy_route_invalid(settings, credentials, common_proxy_available) =>
+            if !proxy_route_is_usable(
+                settings,
+                credentials.proxy_route(),
+                common_proxy_available,
+            ) =>
         {
             error_codes::ACCOUNT_RUNTIME_PROXY_INVALID
         }
@@ -191,45 +198,12 @@ pub(super) fn account_runtime_warning(
     format!("{code}:{redacted}")
 }
 
-fn proxy_status_from_facts(
-    settings: &GatewaySettings,
-    facts: AccountCredentialFacts,
-    common_available: bool,
-) -> (ProxyMode, bool) {
-    if facts.has_account_proxy {
-        return (ProxyMode::Account, facts.account_proxy_valid);
-    }
-    if facts.bypass_common_proxy {
-        return (ProxyMode::Direct, !settings.account_proxy_required);
-    }
-    if settings.common_proxy_configured {
-        return (ProxyMode::Common, common_available);
-    }
-    (ProxyMode::Direct, !settings.account_proxy_required)
-}
-
-/// Same failure cases as `effective_proxy_config`, without reading the common
-/// proxy secret again. `common_available` is already the parsed common proxy.
-fn account_proxy_route_invalid(
-    settings: &GatewaySettings,
-    facts: AccountCredentialFacts,
-    common_available: bool,
-) -> bool {
-    if facts.has_account_proxy {
-        return !facts.account_proxy_valid;
-    }
-    if !facts.bypass_common_proxy && settings.common_proxy_configured {
-        return !common_available;
-    }
-    settings.account_proxy_required
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::local_pool::accounts::{
         credentials::StoredCodexCredentials,
-        proxy::{effective_proxy_config, proxy_status},
+        proxy::{effective_proxy_config, proxy_route_is_usable, proxy_route_status, proxy_status},
     };
 
     fn credentials() -> StoredCodexCredentials {
@@ -258,16 +232,20 @@ mod tests {
         let direct_facts = AccountCredentialFacts::from_stored(&direct);
         assert_eq!(
             proxy_status(&settings, &direct, false),
-            proxy_status_from_facts(&settings, direct_facts, false)
+            proxy_route_status(&settings, direct_facts.proxy_route(), false)
         );
         assert_eq!(
             effective_proxy_config(&settings, &direct).is_err(),
-            account_proxy_route_invalid(&settings, direct_facts, false)
+            !proxy_route_is_usable(&settings, direct_facts.proxy_route(), false)
         );
 
         let mut required = settings.clone();
         required.account_proxy_required = true;
-        assert!(account_proxy_route_invalid(&required, direct_facts, false));
+        assert!(!proxy_route_is_usable(
+            &required,
+            direct_facts.proxy_route(),
+            false
+        ));
         assert!(effective_proxy_config(&required, &direct).is_err());
 
         let account_proxy = direct
@@ -277,11 +255,11 @@ mod tests {
         let account_facts = AccountCredentialFacts::from_stored(&account_proxy);
         assert_eq!(
             proxy_status(&required, &account_proxy, false),
-            proxy_status_from_facts(&required, account_facts, false)
+            proxy_route_status(&required, account_facts.proxy_route(), false)
         );
-        assert!(!account_proxy_route_invalid(
+        assert!(proxy_route_is_usable(
             &required,
-            account_facts,
+            account_facts.proxy_route(),
             false
         ));
         assert!(effective_proxy_config(&required, &account_proxy).is_ok());
@@ -290,21 +268,33 @@ mod tests {
         let bypass_facts = AccountCredentialFacts::from_stored(&bypass);
         assert_eq!(
             proxy_status(&required, &bypass, true),
-            proxy_status_from_facts(&required, bypass_facts, true)
+            proxy_route_status(&required, bypass_facts.proxy_route(), true)
         );
-        assert!(account_proxy_route_invalid(&required, bypass_facts, true));
+        assert!(!proxy_route_is_usable(
+            &required,
+            bypass_facts.proxy_route(),
+            true
+        ));
 
         let mut common = settings.clone();
         common.common_proxy_configured = true;
         assert_eq!(
             proxy_status(&common, &direct, false),
-            proxy_status_from_facts(&common, direct_facts, false)
+            proxy_route_status(&common, direct_facts.proxy_route(), false)
         );
         assert_eq!(
             proxy_status(&common, &direct, true),
-            proxy_status_from_facts(&common, direct_facts, true)
+            proxy_route_status(&common, direct_facts.proxy_route(), true)
         );
-        assert!(account_proxy_route_invalid(&common, direct_facts, false));
-        assert!(!account_proxy_route_invalid(&common, direct_facts, true));
+        assert!(!proxy_route_is_usable(
+            &common,
+            direct_facts.proxy_route(),
+            false
+        ));
+        assert!(proxy_route_is_usable(
+            &common,
+            direct_facts.proxy_route(),
+            true
+        ));
     }
 }
