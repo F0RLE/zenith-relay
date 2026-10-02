@@ -17,14 +17,14 @@ for (const width of [1160, 840, 720, 600, 390, 360]) {
       await expect(row.locator(".model-rule-identity")).toBeInViewport();
       await expect(actions.getByRole("button")).toBeInViewport();
       await expect(actions.getByRole("checkbox")).toBeInViewport();
-      await expect(actions.locator(".pool-speed-control button.active span")).toBeVisible();
+      await expect(actions.locator(".pool-speed-control.icons-only button.active .sr-only")).toHaveCount(1);
       expect(await page.locator(".model-rules > .relay-table-wrap").evaluate((wrapper) => wrapper.scrollWidth <= wrapper.clientWidth + 1)).toBe(true);
       expect(await actions.locator(".pool-speed-control").evaluate((element) => {
         const control = element.getBoundingClientRect();
         const cell = element.closest("[data-column='actions']")!.getBoundingClientRect();
-        const span = element.querySelector("button.active span")!;
-        const labelFits = control.width < 199 || span.scrollWidth <= span.clientWidth + 1;
-        return labelFits && control.left >= cell.left - 1 && control.right <= cell.right + 1;
+        const widths = [...element.querySelectorAll("button")].map((button) => button.getBoundingClientRect().width);
+        const equalIcons = widths.length === 3 && widths.every((width) => Math.abs(width - widths[0]!) < 1);
+        return equalIcons && control.left >= cell.left - 1 && control.right <= cell.right + 1;
       })).toBe(true);
       expect(await actions.evaluate((cell) => {
         const rect = cell.getBoundingClientRect();

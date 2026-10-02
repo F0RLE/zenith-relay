@@ -96,6 +96,24 @@ export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSup
     .filter((level) => Boolean(level) && !seen.has(level) && seen.add(level));
 }
 
+/** Image generation has no effort selector. Other models show one only when levels exist. */
+export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "reasoningLevels" | "reasoningSupportedLevels" | "reasoningManualFallback">) {
+  if (isImageGenerationModel(model)) return false;
+  return (model.reasoningSupportedLevels?.length ?? 0) > 0
+    || (model.reasoningLevels?.length ?? 0) > 0
+    || model.reasoningManualFallback === true;
+}
+
+function isImageGenerationModel(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities">) {
+  const outputs = (model.catalogOutputModalities ?? []).map((item) => item.toLowerCase());
+  if (outputs.includes("image") && !outputs.includes("text")) return true;
+  const family = model.catalogFamily?.toLowerCase() ?? "";
+  const familyTokens = family.split(/[^a-z0-9]+/).filter(Boolean);
+  if (familyTokens.includes("image") || familyTokens.includes("dalle")) return true;
+  const id = model.id.toLowerCase();
+  return id.startsWith("gpt-image") || id.startsWith("dall-e") || id.startsWith("dalle");
+}
+
 /** Keep selected values in provider order and remove stale policy values. */
 export function normalizeReasoningSelection(supported: readonly string[], selected: readonly string[]) {
   const selectedSet = new Set(selected.map((level) => normalizeReasoningEffort(level)));

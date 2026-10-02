@@ -169,6 +169,18 @@
   background: var(--relay-warning-soft);
 }
 
+.pool-speed-control.icons-only {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.pool-speed-control.icons-only button,
+.pool-speed-control.icons-only button.active {
+  flex: 0 0 28px;
+  width: 28px;
+  padding: 0;
+}
+
 .pool-runtime-strip {
   display: flex;
   flex-wrap: wrap;

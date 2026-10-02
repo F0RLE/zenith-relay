@@ -15,6 +15,7 @@ import {
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
+  modelShowsReasoningControl,
   normalizeReasoningSelection,
   pendingModelEnabled,
   reconcilePendingModelEnabled,
@@ -184,7 +185,7 @@ export function ModelRulesView() {
                 const enabled = pendingModelEnabled(pendingEnabled, model);
                 const displayName = model.catalogName || model.codexDisplayName || model.id;
                 const toggleLabel = t(enabled ? "models.disable" : "models.enable", { model: model.id });
-                const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true;
+                const hasReasoningModes = modelShowsReasoningControl(model);
                 const canEditReasoning = Boolean(model.reasoningConfigurable);
                 const speedTiers = modelSpeedTiers(model);
                 const requestedTier = pendingSpeed[model.id] ?? model.speedTier ?? "standard";
@@ -221,15 +222,9 @@ export function ModelRulesView() {
                     </div>
                   </td>
                   <td data-column="actions"><div className="model-rule-actions">
-                    <IconButton
-                      data-model-reasoning-edit={model.id}
-                      label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
-                      icon={<BrainCircuit aria-hidden />}
-                      disabled={!hasReasoningModes}
-                      onClick={() => setReasoningModel(model)}
-                    />
                     {canEditSpeed ? <PoolSpeedControl
                       className="model-speed-toggle"
+                      iconsOnly
                       modelId={model.id}
                       value={speedTier}
                       tiers={speedTiers}
@@ -252,6 +247,12 @@ export function ModelRulesView() {
                           });
                         });
                       }} /> : null}
+                    {hasReasoningModes ? <IconButton
+                      data-model-reasoning-edit={model.id}
+                      label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
+                      icon={<BrainCircuit aria-hidden />}
+                      onClick={() => setReasoningModel(model)}
+                    /> : null}
                     <ToggleSwitch
                       data-model-toggle={model.id}
                       label={toggleLabel}

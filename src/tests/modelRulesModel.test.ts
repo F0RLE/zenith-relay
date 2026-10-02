@@ -4,6 +4,7 @@ import {
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
+  modelShowsReasoningControl,
   normalizeReasoningSelection,
   reorderById,
   reorderModelGroups,
@@ -48,6 +49,13 @@ describe("model rules model", () => {
     expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["standard"] }))).toEqual(["standard", "fast", "ultrafast"]);
     expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["fast", "standard"] }))).toEqual(["standard", "fast"]);
     expect(modelSpeedTiers(model("other", { speedSupported: false }))).toEqual(["standard"]);
+  });
+
+  test("hides reasoning when a model has no levels and never offers it for image generation", () => {
+    expect(modelShowsReasoningControl(model("gpt-5.4", { reasoningSupportedLevels: ["low", "high"] }))).toBe(true);
+    expect(modelShowsReasoningControl(model("gpt-reserve"))).toBe(false);
+    expect(modelShowsReasoningControl(model("gpt-image-2", { reasoningSupportedLevels: ["low", "high"], catalogFamily: "gpt-image" }))).toBe(false);
+    expect(modelShowsReasoningControl(model("vision", { catalogOutputModalities: ["text"], reasoningLevels: ["medium"] }))).toBe(true);
   });
 
   test("moves complete groups while preserving each group's model order", () => {
