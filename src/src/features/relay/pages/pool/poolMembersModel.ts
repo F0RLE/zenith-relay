@@ -1,5 +1,5 @@
-import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
-import { currentAccountErrorCode } from "../../accountStatus";
+import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../../api/types";
+import { compareOperationalStatus, currentAccountErrorCode } from "../../accountStatus";
 import { providerCreditsSummary, type ProviderCreditsSummary } from "../../providerCredits";
 import {
   activeModelCounts,
@@ -8,8 +8,9 @@ import {
   currentRuntimeActivities,
   routingOrderPositions,
   runtimeCandidateForMember,
+  compareRoutingOrder,
 } from "../../routingOrder";
-import { comparePoolMembers, type PoolMember } from "../../poolHelpers";
+import { comparePoolMembers, compareStableText, memberName, type PoolMember } from "../../poolHelpers";
 import { modelIdKey } from "../../modelGroups";
 
 export type PoolMemberStatusCounts = {
@@ -118,14 +119,56 @@ export function orderedPoolMembers(
   members: readonly PoolMember[],
   runtimeOrder: CandidateRuntimeSnapshot[],
   savedMembers?: readonly { id: string }[],
+  mode?: PoolRoutingMode | null,
 ) {
-  // The scheduler preview moves the active and next candidate to the front on
-  // every attempt. That is useful telemetry, but it makes the cards jump while
-  // a request is failing over. The saved member list is the order the user can
-  // actually edit. Live order is only the fallback before that list exists.
   const savedOrder = savedMemberPositions(savedMembers);
   const orderByMember = savedOrder.size > 0 ? savedOrder : routingOrderPositions(runtimeOrder);
-  return [...members].sort((left, right) => comparePoolMembers(left, right, orderByMember));
+  return [...members].sort((left, right) => compareDisplayedPoolMembers(left, right, orderByMember, mode));
+}
+
+function compareDisplayedPoolMembers(
+  left: PoolMember,
+  right: PoolMember,
+  order: Map<string, number>,
+  mode?: PoolRoutingMode | null,
+) {
+  const status = compareOperationalStatus(left.operationalStatus, right.operationalStatus);
+  if (status || mode !== "automatic") return status || comparePoolMembers(left, right, order);
+  return compareRoutingRemainder(left, right)
+    || compareRoutingOrder(left.id, right.id, order)
+    || compareStableText(memberName(left), memberName(right));
+}
+
+/**
+ * Known window remainder used only to place automatic cards.
+ * Credits keep an exhausted window behind every positive window.
+ * A source balance is not a routing remainder.
+ */
+export function memberRoutingRemainder(member: PoolMember): number | null {
+  if (member.kind !== "account") return null;
+  const windows = [member.quota?.primary, member.quota?.secondary]
+    .map((window) => window?.availableBasisPoints)
+    .filter((value): value is number => value != null);
+  const remaining = windows.length ? Math.min(...windows) : null;
+  if (member.quota?.providerCreditsAvailable) {
+    return remaining != null && remaining > 0 ? remaining : 1;
+  }
+  return remaining != null && remaining > 0 ? remaining : null;
+}
+
+function compareRoutingRemainder(left: PoolMember, right: PoolMember) {
+  const leftRemainder = memberRoutingRemainder(left);
+  const rightRemainder = memberRoutingRemainder(right);
+  if (leftRemainder == null && rightRemainder == null) return 0;
+  if (leftRemainder == null) return 1;
+  if (rightRemainder == null) return -1;
+  return rightRemainder - leftRemainder;
+}
+
+/** Ready members in the order a new automatic request walks them. */
+export function automaticRoutingQueue(members: readonly PoolMember[], mode?: PoolRoutingMode | null) {
+  if (mode !== "automatic") return [];
+  return members.filter((member) => member.operationalStatus === "rotation" && memberCanRoute(member));
 }
 
 function savedMemberPositions(members: readonly { id: string }[] | undefined) {
