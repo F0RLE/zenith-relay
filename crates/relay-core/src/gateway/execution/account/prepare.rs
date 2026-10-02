@@ -116,7 +116,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
             return step;
         }
     }
-    let route_responses_lite = account_responses_lite_header(
+    let route_responses_lite = super::super::responses_lite_header(
         responses_lite,
         automatic_responses_lite,
         runtime,
@@ -196,25 +196,6 @@ fn reject_account_basis_points(
     )?;
     *last_adapter_error = Some(error);
     Some(AccountPrepare::Continue)
-}
-
-fn account_responses_lite_header(
-    responses_lite: &Option<HeaderValue>,
-    automatic_responses_lite: bool,
-    runtime: &GatewayRuntime,
-    resolved_model: &str,
-    account_id: Option<&str>,
-) -> Option<HeaderValue> {
-    responses_lite.clone().or_else(|| {
-        (automatic_responses_lite
-            && account_id.is_some_and(|candidate_id| {
-                runtime
-                    .codex_model_responses_lite_candidates(resolved_model)
-                    .iter()
-                    .any(|id| id == candidate_id)
-            }))
-        .then(|| HeaderValue::from_static("true"))
-    })
 }
 
 fn account_upstream_url(

@@ -18,7 +18,7 @@ use super::super::{
     ContinuationReset, ResponsesItemPrefixRepairs,
 };
 use crate::error_codes;
-use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorRoute};
+use crate::runtime::{AccountTransport, AuthenticatedKey, CandidateLease, ExecutorRoute};
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
 use crate::{ErrorOrigin, GatewayRuntime};
 use axum::body::Body;
@@ -171,6 +171,27 @@ fn repair_classified_account_failure(
     input: &mut AccountStatusFailureInput<'_>,
     classified: &mut ClassifiedAccountFailure,
 ) -> Option<AccountStatusFailure> {
+    {
+        let request = &mut *input.request;
+        let tried = &mut *input.tried;
+        let candidate_id = input.route.candidate_id.as_str();
+        if input.route.account_transport == AccountTransport::ExcelBasisPoints
+            && repair_once(
+                &mut input.repairs.encrypted_context,
+                classified.failure.category == error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
+                tried,
+                candidate_id,
+                input.lease,
+                || super::super::basis_points::drop_foreign_encrypted_context(request),
+            )
+        {
+            emit_usage(input.runtime, classified.event.clone());
+            *input.last_failure = Some(classified.failure);
+            *input.last_failure_origin = input.selected_error_origin;
+            input.lease.settle_rotation_repair(now_ms());
+            return Some(AccountStatusFailure::Continue);
+        }
+    }
     if input.has_previous_response_id
         && recover_stale_tool_history(
             input.runtime,

@@ -7,15 +7,19 @@
 //! requests and responses.
 //!
 //! `catalog` reads the client tool list, `codec` owns the small JSON helpers,
-//! `history` rewrites prior calls, `prepare` builds the upstream request, and
-//! `response` turns the native tool relay back into the client protocol.
+//! `history` rewrites prior calls, `prepare` builds the upstream request,
+//! `attachments` uploads user images, and `response` turns the native tool relay back into the client protocol.
 
+mod attachments;
 mod catalog;
 mod codec;
 mod history;
 mod prepare;
 mod response;
 
+pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};
+
+pub(in crate::gateway::execution) use history::drop_foreign_encrypted_context;
 #[cfg(test)]
 pub(in crate::gateway::execution) use prepare::{add_tool_relay_retry_hint, prepare_request};
 pub(in crate::gateway::execution) use prepare::{prepare_upstream, take_tool_relay_retry};
@@ -23,6 +27,10 @@ pub(in crate::gateway::execution) use response::{synthetic_stream, translate_res
 
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";
 pub(super) const TRANSPORT_TOOL_ALIAS: &str = "functions.run_officejs";
+
+pub(super) fn is_transport_tool(name: &str) -> bool {
+    name == TRANSPORT_TOOL || name == TRANSPORT_TOOL_ALIAS
+}
 /// Function arguments and the outer `run_officejs` arguments are two JSON
 /// layers. The adapter's v0.2.8 instructions say this explicitly so a function
 /// `apply_patch` is not taught as raw custom text.

@@ -27,9 +27,32 @@ use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
 use crate::ErrorOrigin;
 use axum::body::Body;
-use axum::http::{Response, StatusCode};
+use axum::http::{HeaderValue, Response, StatusCode};
 use serde_json::Value;
 use std::collections::HashSet;
+
+/// Header shared by ordinary Responses routes and account execution.
+///
+/// The caller decides when the route is eligible. Ordinary routes pass this
+/// only for `WireApi::Responses`; account execution is already on that protocol.
+fn responses_lite_header(
+    responses_lite: &Option<HeaderValue>,
+    automatic_responses_lite: bool,
+    runtime: &GatewayRuntime,
+    resolved_model: &str,
+    account_id: Option<&str>,
+) -> Option<HeaderValue> {
+    responses_lite.clone().or_else(|| {
+        (automatic_responses_lite
+            && account_id.is_some_and(|candidate_id| {
+                runtime
+                    .codex_model_responses_lite_candidates(resolved_model)
+                    .iter()
+                    .any(|id| id == candidate_id)
+            }))
+        .then(|| HeaderValue::from_static("true"))
+    })
+}
 
 /// One-shot request repairs shared by ordinary and account execution.
 ///
@@ -45,6 +68,8 @@ pub(super) struct AttemptRepairs {
     pub(super) model_switch_reset: bool,
     pub(super) stale_tool_history: bool,
     pub(super) quota_yield: bool,
+    /// Basis Points rejected ciphertext from another model or account.
+    pub(super) encrypted_context: bool,
 }
 
 /// Records the one allowed model-switch reset and drops the opaque continuation binding.

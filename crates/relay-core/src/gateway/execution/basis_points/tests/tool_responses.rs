@@ -51,15 +51,15 @@ fn unknown_historical_tool_calls_are_restored_to_the_transport() {
     });
     let prepared = prepare_request(&request).unwrap();
     let input = prepared["input"].as_array().unwrap();
-    assert_eq!(input[2]["name"], TRANSPORT_TOOL);
-    assert_eq!(input[2]["call_id"], "native_1");
-    let arguments: Value = serde_json::from_str(input[2]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(input[1]["name"], TRANSPORT_TOOL);
+    assert_eq!(input[1]["call_id"], "native_1");
+    let arguments: Value = serde_json::from_str(input[1]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(arguments["references"], json!(["native_account_tool"]));
     assert_eq!(arguments["code"], "{\"value\":1}");
-    assert_eq!(input[3]["type"], "function_call_output");
-    assert_eq!(input[3]["output"], "native result");
-    assert!(input[3].get("name").is_none());
-    assert_eq!(input[4], request["input"][2]);
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["output"], "native result");
+    assert!(input[2].get("name").is_none());
+    assert_eq!(input[3], request["input"][2]);
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn namespaced_client_tool_calls_use_a_fully_qualified_reference() {
         "tools": [{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}]
     });
     let prepared = prepare_request(&request).unwrap();
-    let call = &prepared["input"][2];
+    let call = &prepared["input"][1];
     assert_eq!(call["name"], TRANSPORT_TOOL);
     let arguments: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(arguments["references"], json!(["functions.exec"]));
@@ -257,9 +257,9 @@ fn custom_tool_and_output_keep_the_client_call_contract() {
         "tools": [{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"text"}}]
     });
     let prepared = prepare_request(&request).unwrap();
-    assert_eq!(prepared["input"][2]["name"], TRANSPORT_TOOL);
-    assert_eq!(prepared["input"][3]["type"], "function_call_output");
-    assert_eq!(prepared["input"][3]["id"], "fc_call_1");
+    assert_eq!(prepared["input"][1]["name"], TRANSPORT_TOOL);
+    assert_eq!(prepared["input"][2]["type"], "function_call_output");
+    assert_eq!(prepared["input"][2]["id"], "fc_call_1");
 
     let body = json!({
         "id":"resp_1",

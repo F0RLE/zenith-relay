@@ -236,16 +236,13 @@ fn route_responses_lite_header(
 ) -> Option<HeaderValue> {
     (wire_api == WireApi::Responses)
         .then(|| {
-            responses_lite.clone().or_else(|| {
-                (automatic_responses_lite
-                    && account_id.is_some_and(|candidate_id| {
-                        runtime
-                            .codex_model_responses_lite_candidates(resolved_model)
-                            .iter()
-                            .any(|id| id == candidate_id)
-                    }))
-                .then(|| HeaderValue::from_static("true"))
-            })
+            super::super::responses_lite_header(
+                responses_lite,
+                automatic_responses_lite,
+                runtime,
+                resolved_model,
+                account_id,
+            )
         })
         .flatten()
 }

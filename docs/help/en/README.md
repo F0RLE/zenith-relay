@@ -521,8 +521,11 @@ The route shares the account's quota and rotation slot. Applications can use
 any of Relay's four supported request formats; client tool calls and results
 are translated into the calling format. If the application requests a stream,
 SSE events arrive after the provider completes the response, without
-incremental output during generation. Images and explicitly requested fast
-speeds cannot use this transport; they need another compatible route.
+incremental output during generation. An explicitly requested fast speed
+cannot use this transport and needs another compatible route. An image in a
+user message is uploaded to the Basis Points attachment endpoint: a data URL
+is replaced with file_id, and detail is not sent. A remote image URL is
+rejected.
 Ordinary speed labels `auto`, `default`, and `standard` are accepted and are
 not sent upstream. A structured `text.format` (`json_object` or `json_schema`)
 is rejected before generation instead of being ignored. Tool instructions

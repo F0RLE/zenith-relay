@@ -68,6 +68,34 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         last_failure,
         last_failure_origin,
     } = input;
+    let request_body = if basis_points_route {
+        match super::super::basis_points::attach_input_images(
+            runtime,
+            &route.candidate_id,
+            &route.upstream_url,
+            &route.upstream_headers,
+            request_body,
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
+                return RequestDispatch::Respond(attempt_error_response(
+                    failure,
+                    None,
+                    selected_error_origin,
+                    request_id,
+                ));
+            }
+            Err(super::super::basis_points::AttachmentFailure::Retry(failure)) => {
+                *last_failure = Some(failure);
+                *last_failure_origin = selected_error_origin;
+                return RequestDispatch::Continue;
+            }
+        }
+    } else {
+        request_body
+    };
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
     let client = runtime.request_client(&route.candidate_id);

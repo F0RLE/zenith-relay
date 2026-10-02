@@ -6,6 +6,18 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+<!-- relay-notes:en -->
+
+### Changed
+
+- Excel / Basis Points accepts an image in a user message. A data URL is uploaded with the account and replaced by `file_id`. A remote image URL is rejected, and `detail` is not forwarded.
+
+<!-- relay-notes:ru -->
+
+### Изменения
+
+- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на `file_id`. Внешняя ссылка отклоняется, поле `detail` не пересылается.
+
 ## [1.1.4] - 2026-10-01
 
 <!-- relay-notes:en -->
