@@ -331,7 +331,7 @@ for (const mode of ["local", "remote"] as const) {
       if (control.matches(".model-toggle")) return "enabled";
       if (control.matches(".model-speed-toggle")) return "speed";
       return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
-    }))).toEqual(["reasoning", "speed", "enabled"]);
+    }))).toEqual(["speed", "reasoning", "enabled"]);
     await expect(speed).toHaveAttribute("data-speed-tier", "standard");
     await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
     await speed.getByRole("radio", { name: "Fast", exact: true }).click();

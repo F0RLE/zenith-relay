@@ -1,6 +1,6 @@
 import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION } from "../../../platform/desktop";
 import type { PageId, RelayMode } from "../api/types";
@@ -10,14 +10,25 @@ import { ErrorDetailsDialog, IconButton } from "../components/Ui";
 import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
 import { UpdateDialog } from "./UpdateDialog";
 
-const ConnectionsPage = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ConnectionsPage }));
-const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ImportDialog")).ImportDialog }));
-const PoolPage = lazy(async () => ({ default: (await import("../pages/pool/PoolPage")).PoolPage }));
-const GatewayPage = lazy(async () => ({ default: (await import("../pages/gateway/GatewayPage")).GatewayPage }));
-const UsagePage = lazy(async () => ({ default: (await import("../pages/usage/UsagePage")).UsagePage }));
-const ProfilesPage = lazy(async () => ({ default: (await import("../pages/profiles/ProfilesPage")).ProfilesPage }));
-const SettingsPage = lazy(async () => ({ default: (await import("../pages/settings/SettingsPage")).SettingsPage }));
-const HelpCenter = lazy(async () => ({ default: (await import("../help/HelpCenter")).HelpCenter }));
+function lazyNamed<P>(load: () => Promise<ComponentType<P>>) {
+  let pending: Promise<{ default: ComponentType<P> }> | undefined;
+  const run = () => (pending ??= load().then((component) => ({ default: component })));
+  return {
+    Component: lazy(run),
+    preload: () => {
+      void run();
+    },
+  };
+}
+
+const connectionsPage = lazyNamed(async () => (await import("../pages/connections/ConnectionsPage")).ConnectionsPage);
+const importDialog = lazyNamed(async () => (await import("../pages/connections/ImportDialog")).ImportDialog);
+const poolPage = lazyNamed(async () => (await import("../pages/pool/PoolPage")).PoolPage);
+const gatewayPage = lazyNamed(async () => (await import("../pages/gateway/GatewayPage")).GatewayPage);
+const usagePage = lazyNamed(async () => (await import("../pages/usage/UsagePage")).UsagePage);
+const profilesPage = lazyNamed(async () => (await import("../pages/profiles/ProfilesPage")).ProfilesPage);
+const settingsPage = lazyNamed(async () => (await import("../pages/settings/SettingsPage")).SettingsPage);
+const helpCenter = lazyNamed(async () => (await import("../help/HelpCenter")).HelpCenter);
 
 const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "overview", icon: LayoutDashboard },
@@ -61,6 +72,20 @@ export function RelayShell() {
     setPage("connections");
     setImportRequest({ id: ++nextImportRequest.current, ...(paths ? { paths } : {}) });
   }, [mode, setMode, setPage]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      connectionsPage.preload();
+      importDialog.preload();
+      poolPage.preload();
+      gatewayPage.preload();
+      usagePage.preload();
+      profilesPage.preload();
+      settingsPage.preload();
+      helpCenter.preload();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
   useEffect(() => {
     if (contentRef.current) {
       contentRef.current.scrollTop = 0;
@@ -204,6 +229,10 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
+        {/* Remount the boundary per page: a retained boundary keeps the
+            previous page hidden in the DOM while the next lazy chunk loads,
+            so automation and assistive tech would still resolve the old
+            page's nodes after navigation. */}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : (
           <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}>
             <Page
@@ -224,7 +253,7 @@ export function RelayShell() {
       ) : null}
       {importRequest ? (
         <Suspense fallback={null}>
-          <ImportDialog
+          <importDialog.Component
             key={importRequest.id}
             {...(importRequest.paths ? { initialPaths: importRequest.paths } : {})}
             onClose={() => setImportRequest(null)}
@@ -294,11 +323,11 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {
   if (page === "overview") return <OverviewPage />;
-  if (page === "connections") return <ConnectionsPage onImport={onImport} />;
-  if (page === "pool") return <PoolPage />;
-  if (page === "gateway") return <GatewayPage />;
-  if (page === "usage") return <UsagePage />;
-  if (page === "profiles") return <ProfilesPage />;
-  if (page === "help") return <HelpCenter />;
-  return <SettingsPage updateCheckState={updateCheckState} updateVersion={updateVersion} onCheckUpdates={onCheckUpdates} />;
+  if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
+  if (page === "pool") return <poolPage.Component />;
+  if (page === "gateway") return <gatewayPage.Component />;
+  if (page === "usage") return <usagePage.Component />;
+  if (page === "profiles") return <profilesPage.Component />;
+  if (page === "help") return <helpCenter.Component />;
+  return <settingsPage.Component updateCheckState={updateCheckState} updateVersion={updateVersion} onCheckUpdates={onCheckUpdates} />;
 }

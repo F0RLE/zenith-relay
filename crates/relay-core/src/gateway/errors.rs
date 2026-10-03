@@ -173,12 +173,28 @@ pub(super) fn upstream_failure_message(category: &str) -> &'static str {
     error_codes::upstream_message(category)
 }
 
+pub(super) fn apply_degraded_route_policy(runtime: &GatewayRuntime, failure: &mut AttemptFailure) {
+    let category = runtime.effective_upstream_category(failure.category);
+    if category == failure.category {
+        return;
+    }
+    failure.category = category;
+    failure.status = canonical_upstream_status(failure.status, category);
+    failure.message = upstream_failure_message(category);
+}
+
 pub(super) fn upstream_failure_status(category: &str) -> StatusCode {
     StatusCode::from_u16(error_codes::upstream_status(category)).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
 pub(super) fn canonical_upstream_status(status: StatusCode, category: &str) -> StatusCode {
-    if category == error_codes::UPSTREAM_STATUS {
+    if category == error_codes::UPSTREAM_STATUS
+        || status == StatusCode::FORBIDDEN
+            && matches!(
+                category,
+                error_codes::UPSTREAM_CONTENT_POLICY | error_codes::UPSTREAM_MODEL_UNAVAILABLE
+            )
+    {
         status
     } else {
         upstream_failure_status(category)

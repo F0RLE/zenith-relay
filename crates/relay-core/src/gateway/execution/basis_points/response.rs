@@ -1,6 +1,7 @@
 use super::catalog::{client_tools, requires_tool_call, selected_tools, tool_spec};
 use super::codec::{json_text, parse_json_object};
-use super::{TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
+use super::history::fit_item_id;
+use super::is_transport_tool;
 use crate::protocol::AdapterError;
 use serde_json::{Map, Value};
 
@@ -15,7 +16,7 @@ pub(super) fn parse_transport_envelope(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_tool_output("output.run_officejs.name"))?;
-    if name != TRANSPORT_TOOL && name != TRANSPORT_TOOL_ALIAS {
+    if !is_transport_tool(name) {
         return Err(invalid_tool_output("output.run_officejs.name"));
     }
     let outer = parse_json_object(item.get("arguments"))
@@ -36,7 +37,7 @@ pub(super) fn parse_transport_envelope(
         let tool = references[0]
             .as_str()
             .filter(|name| !name.trim().is_empty())
-            .filter(|name| *name != TRANSPORT_TOOL && *name != TRANSPORT_TOOL_ALIAS)
+            .filter(|name| !is_transport_tool(name))
             .ok_or_else(|| invalid_tool_output("output.run_officejs.references"))?;
         let code = code
             .as_str()
@@ -54,7 +55,7 @@ pub(super) fn parse_transport_envelope(
         .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
     for _ in 0..2 {
         let inner_name = inner.get("name").and_then(Value::as_str);
-        if inner_name != Some(TRANSPORT_TOOL) && inner_name != Some(TRANSPORT_TOOL_ALIAS) {
+        if !inner_name.is_some_and(is_transport_tool) {
             break;
         }
         let nested_code = inner
@@ -121,11 +122,11 @@ pub(in crate::gateway::execution) fn translate_response(
         if !call_ids.insert(call_id.clone()) {
             return Err(invalid_tool_output("output.run_officejs.call_id"));
         }
-        let item_id = if tool.kind == "custom" {
+        let item_id = fit_item_id(&if tool.kind == "custom" {
             format!("ctc_{call_id}")
         } else {
             format!("fc_{call_id}")
-        };
+        });
         let args = inner.get("args").or_else(|| inner.get("arguments"));
         let mut translated = Map::new();
         translated.insert(

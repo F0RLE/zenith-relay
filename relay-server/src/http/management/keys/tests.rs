@@ -1,17 +1,10 @@
 use super::*;
-use crate::{
-    config::Config,
-    store::{Store, Vault},
-    test_fixtures::pooled_source,
-};
+use crate::test_fixtures::{pooled_source, test_app_state};
 use tempfile::TempDir;
 
 async fn fixture() -> (TempDir, Arc<AppState>, GatewayKeyRecord, GatewayKeyRecord) {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store, vault).unwrap();
+    let state = test_app_state(root.path());
     let source = pooled_source("key-source", "test-model");
     state.store.save_source(&source).unwrap();
     state

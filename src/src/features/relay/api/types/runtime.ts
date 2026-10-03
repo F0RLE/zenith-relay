@@ -36,6 +36,7 @@ export type RuntimeSnapshot = {
     codexBackgroundTasksEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
     chatgptRetryUntilAvailable?: boolean;
+    blockDegradedRoutesEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;

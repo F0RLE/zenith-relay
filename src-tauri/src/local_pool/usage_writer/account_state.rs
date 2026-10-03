@@ -5,7 +5,7 @@ use zenith_relay_core::{
         reduce_account_usage, AccountAccessState, AccountAuthState, AccountUsageObservation,
         AccountUsageState,
     },
-    UsageEvent,
+    error_codes, UsageEvent,
 };
 pub(super) fn expire_account_access<B: SecretBackend>(
     credentials: &CredentialStore<B>,
@@ -59,6 +59,14 @@ pub(in crate::local_pool) fn apply_account_usage_state(
             >= account.account.quota.updated_at_ms.unwrap_or_default()
     }) {
         account.account.quota = snapshot.clone();
+    } else if event.quota_snapshot.is_none()
+        && event.affects_account_state()
+        && event.error_category.as_deref() == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)
+    {
+        account
+            .account
+            .quota
+            .note_reported_window_exhaustion(observed_at_ms);
     }
     let update = reduce_account_usage(
         AccountUsageState {

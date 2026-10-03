@@ -129,37 +129,22 @@ pub(crate) async fn sync_managed_account_profile(
     // authority to keep the global lock order acyclic. A conditional register
     // prevents a just-finished automatic refresh from being rolled back.
     drop(profile_sync_guard);
-    let authority = state.token_authority();
-    if let Err(error) = authority
-        .register_if_newer(account_id, tokens.clone(), AccountAuthState::Active)
-        .await
-    {
-        return Err(crate::local_pool::commands::fail_closed(
-            state,
-            format!("failed to register managed ChatGPT tokens: {error}"),
-        )
-        .await);
-    }
-    let Some(authoritative_tokens) = authority.tokens(account_id).await else {
-        return Err(crate::local_pool::commands::fail_closed(
-            state,
-            "managed ChatGPT token state disappeared".to_string(),
-        )
-        .await);
-    };
-    let Some(authoritative_auth_state) = authority.auth_state(account_id).await else {
-        return Err(crate::local_pool::commands::fail_closed(
-            state,
-            "managed ChatGPT authentication state disappeared".to_string(),
-        )
-        .await);
-    };
+    let registered = super::register_active_authority(
+        state,
+        account_id,
+        tokens.clone(),
+        AccountAuthState::Active,
+        "failed to register managed ChatGPT tokens",
+        "managed ChatGPT token state disappeared",
+        "managed ChatGPT authentication state disappeared",
+    )
+    .await?;
     project_registered_account(
         state,
         account_id,
         &tokens,
-        &authoritative_tokens,
-        authoritative_auth_state,
+        &registered.tokens,
+        registered.auth_state,
         AccountProjectionErrors {
             persist: "newer managed ChatGPT state could not be persisted",
             missing: "managed ChatGPT account state disappeared",
@@ -186,14 +171,14 @@ pub(crate) async fn sync_managed_account_profile(
     codex::sync_account_bindings(
         &state.profile_backup_root(),
         account_id,
-        &authoritative_tokens,
+        &registered.tokens,
         &provider_account_id,
     )?;
     codex::sync_local_gateway_binding(
         &crate::platform::default_codex_home(),
         &state.profile_backup_root(),
         account_id,
-        &authoritative_tokens,
+        &registered.tokens,
         &provider_account_id,
     )?;
     Ok(true)

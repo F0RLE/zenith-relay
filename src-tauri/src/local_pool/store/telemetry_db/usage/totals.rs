@@ -147,11 +147,11 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
     let mut values = Vec::new();
     if let Some(value) = query.from_ms {
         clauses.push("created_at >= datetime(? / 1000, 'unixepoch')");
-        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+        values.push(SqlValue::Integer(super::sql_u64(value)));
     }
     if let Some(value) = query.to_ms {
         clauses.push("created_at <= datetime(? / 1000, 'unixepoch')");
-        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+        values.push(SqlValue::Integer(super::sql_u64(value)));
     }
     if let Some(value) = query.model_query.as_deref() {
         clauses.push("(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')");

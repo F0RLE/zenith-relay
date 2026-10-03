@@ -14,10 +14,7 @@ pub(super) struct RoutingCookies {
 impl RoutingCookies {
     pub(super) fn for_credential(&self, credential: &[u8]) -> Arc<RoutingCookieJar> {
         let owner: [u8; 32] = Sha256::digest(credential).into();
-        let mut current = self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = crate::poison::mutex(&self.current);
         if let Some((previous, jar)) = current.as_ref() {
             if *previous == owner {
                 return jar.clone();
@@ -47,10 +44,7 @@ impl RoutingCookieJar {
         if !allowed_url(url) {
             return;
         }
-        let store = self
-            .store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let store = crate::poison::mutex(&self.store);
         let value = store
             .get_request_values(url)
             .map(|(name, value)| format!("{name}={value}"))
@@ -68,10 +62,7 @@ impl RoutingCookieJar {
         if !allowed_url(url) {
             return;
         }
-        let mut store = self
-            .store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut store = crate::poison::mutex(&self.store);
         for value in headers.get_all(SET_COOKIE) {
             if value.as_bytes().len() > 4096 {
                 continue;

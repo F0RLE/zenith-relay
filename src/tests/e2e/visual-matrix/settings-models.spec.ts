@@ -100,7 +100,7 @@ test("model rules show backend reasoning but keep image pricing outside operatio
 
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-image-2"]');
   await expect(model).toBeVisible();
-  await expect(model.locator('[data-model-reasoning-edit="gpt-image-2"]')).toHaveCount(1);
+  await expect(model.locator('[data-model-reasoning-edit="gpt-image-2"]')).toHaveCount(0);
   await expect(model.locator(".model-image-price-summary")).toHaveCount(0);
   await expect(model.locator(".model-image-price-item")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/model-rules-image-pricing-ru-light-1268x720.png" });

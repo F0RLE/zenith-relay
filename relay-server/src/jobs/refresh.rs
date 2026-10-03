@@ -70,6 +70,17 @@ pub(crate) enum RefreshRead {
     SourceStats(zenith_relay_core::scheduler::refresh::SourceStatsObservation),
 }
 
+impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
+    fn source_stats(
+        &self,
+    ) -> Option<&zenith_relay_core::scheduler::refresh::SourceStatsObservation> {
+        match self {
+            Self::SourceStats(observation) => Some(observation),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) type RefreshReadResult = Result<RefreshRead, String>;
 
 #[derive(Clone)]

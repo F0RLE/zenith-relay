@@ -165,6 +165,51 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, order).map((item) => item.id)).toEqual(["account-1", "source-1"]);
   });
 
+  test("keeps the saved member order while a live request bubbles another card", () => {
+    const members = [
+      member("account", "first", { label: "First" }),
+      member("account", "second", { label: "Second" }),
+    ];
+    const live = [
+      candidate("second", { activeRequestCount: 1, nextForNewRequest: true }),
+      candidate("first"),
+    ];
+    expect(orderedPoolMembers(members, live).map((item) => item.id)).toEqual(["second", "first"]);
+    expect(orderedPoolMembers(members, live, [
+      { id: "first" },
+      { id: "second" },
+    ]).map((item) => item.id)).toEqual(["first", "second"]);
+  });
+
+  test("automatic mode places the largest remaining quota on the left and keeps an active card there", () => {
+    const window = (availableBasisPoints: number) => ({ availableBasisPoints });
+    const members = [
+      member("source", "api", { name: "Zenith API" }),
+      member("account", "empty", { label: "Empty", quota: { primary: window(0), providerCreditsAvailable: true } }),
+      member("account", "lower", { label: "Lower", quota: { primary: window(7_800), secondary: window(9_000) } }),
+      member("account", "leader", { label: "Leader", quota: { primary: window(8_300) } }),
+    ];
+    const live = [
+      candidate("lower", { activeRequestCount: 1, nextForNewRequest: true }),
+      candidate("leader"),
+      candidate("empty"),
+      candidate("api"),
+    ];
+    const saved = [{ id: "api" }, { id: "empty" }, { id: "lower" }, { id: "leader" }];
+    expect(orderedPoolMembers(members, live, saved, "automatic").map((item) => item.id)).toEqual([
+      "leader",
+      "lower",
+      "empty",
+      "api",
+    ]);
+    expect(orderedPoolMembers(members, live, saved, "in_order").map((item) => item.id)).toEqual([
+      "api",
+      "empty",
+      "lower",
+      "leader",
+    ]);
+  });
+
   test("derives active and last-used route state from runtime snapshots", () => {
     const members = [member("account", "active"), member("source", "source-last"), member("source", "source-next")];
     const order = [

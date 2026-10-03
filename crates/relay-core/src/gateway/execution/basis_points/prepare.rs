@@ -82,7 +82,8 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
          For a custom tool, code contains the exact raw input text, not JSON: preserve every quote, backslash, newline and space without another encoding layer. \
          The proxy parses function arguments but does not parse custom input. \
          Serialize the outer arguments object once. \
-         Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code. \
+         Do not put a tool/args wrapper, JavaScript, Markdown fence, or another {TRANSPORT_TOOL} envelope in code, and do not route references to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
+         Do not merely say you will act; make the tool call. \
          Historical calls may contain the old tool/args envelope; do not copy that format into new calls.{examples} \
          The proxy converts this native call into the real client tool call, then replays the original {TRANSPORT_TOOL} identity with the client tool result on the next request. \
          Interpret that result as the named client tool output. \
@@ -154,37 +155,6 @@ fn is_named_tool(tool: &ClientTool, bare: &str) -> bool {
     // is a different tool; the qualified key is not a name suffix.
     let suffix = format!("_{bare}");
     tool.name == bare || tool.name.ends_with(&suffix)
-}
-
-/// The adapter repeats the transport rule in its own developer message so it
-/// stays next to the conversation instead of only inside the long catalog.
-pub(super) fn tool_protocol_reminder(tools: &[ClientTool]) -> String {
-    if tools.is_empty() {
-        return String::new();
-    }
-    let mut ordered = tools.to_vec();
-    ordered.sort_by_key(ClientTool::key);
-    let names = ordered
-        .iter()
-        .map(ClientTool::key)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut reminder = format!(
-        "Reminder: use the outer native {TRANSPORT_TOOL} transport. \
-         Set references to an array containing exactly one catalog client tool name; put only that tool payload in code. \
-         Never put a tool/args wrapper in code or route to {TRANSPORT_TOOL} or {TRANSPORT_TOOL_ALIAS}. \
-         {FUNCTION_RELAY_ENCODING} \
-         Do not merely say you will act; make the tool call. \
-         Client tools: {names}. \
-         Other native tools are unavailable."
-    );
-    for tool in ordered.iter().filter(|tool| tool.kind == "custom") {
-        reminder.push_str(&format!(
-            " Custom tool {} takes raw input directly in code; do not JSON-encode that input.",
-            tool.key()
-        ));
-    }
-    reminder
 }
 
 fn tool_parameter_schema(tool: &ClientTool) -> Option<&Map<String, Value>> {
@@ -448,10 +418,6 @@ pub(in crate::gateway::execution) fn prepare_request(
         "input_text",
         tool_instructions(&callable, request),
     ));
-    let reminder = tool_protocol_reminder(&callable);
-    if !reminder.is_empty() {
-        prologue.push(text_message("developer", "input_text", reminder));
-    }
     input.splice(0..0, prologue);
     output.insert("input".to_string(), Value::Array(input));
 

@@ -213,6 +213,14 @@ impl Store {
         self.set_metadata_enabled("chatgpt_retry_until_available", enabled)
     }
 
+    pub fn block_degraded_routes_enabled(&self) -> Result<bool, String> {
+        self.metadata_enabled("block_degraded_routes_enabled", true)
+    }
+
+    pub fn set_block_degraded_routes_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.set_metadata_enabled("block_degraded_routes_enabled", enabled)
+    }
+
     fn metadata_enabled(&self, key: &str, default_enabled: bool) -> Result<bool, String> {
         Ok(match self.metadata(key)? {
             Some(value) => value == "true",

@@ -73,7 +73,7 @@ export function ImportDialog({
     closing.current = true;
     const sessionId = session?.sessionId ?? ownedSessionId;
     try {
-      if (mode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId));
+      if (mode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId), undefined, { backgroundRefresh: true });
     } finally {
       activeSessionId.current = null;
       if (mounted.current) onClose();
@@ -83,7 +83,7 @@ export function ImportDialog({
     if (mode === "local") {
       let startedSessionId: string | null = null;
       const captured = await captureOperationResult(
-        (work) => perform("import-preview", work),
+        (work) => perform("import-preview", work, undefined, { backgroundRefresh: true }),
         async () => {
           const started = await relayCommands.startImport(content);
           startedSessionId = started.sessionId;
@@ -111,7 +111,7 @@ export function ImportDialog({
       return;
     }
     const captured = await captureOperationResult(
-      (work) => perform("import-preview", work),
+      (work) => perform("import-preview", work, undefined, { backgroundRefresh: true }),
       async () => await relayCommands.remoteAction({ type: "preview_account_batch_import" }, { content }) as ImportSession,
     );
     if (!mounted.current) return;
@@ -124,7 +124,7 @@ export function ImportDialog({
     let createdSessionId: string | null = null;
     try {
       captured = await captureOperationResult(
-        (work) => perform("import-files", work),
+        (work) => perform("import-files", work, undefined, { backgroundRefresh: true }),
         async () => {
           const session = mode === "local"
             ? await relayCommands.previewImportFiles(paths)
@@ -171,7 +171,7 @@ export function ImportDialog({
         beginAccountImportConfirmation();
         try {
           captured = await captureOperationResult(
-            (work) => perform("import-confirm", work),
+            (work) => perform("import-confirm", work, undefined, { backgroundRefresh: true }),
             () => relayCommands.confirmImport(sessionId, selectedIds, addToPool),
           );
         } finally {
@@ -185,7 +185,7 @@ export function ImportDialog({
         }
         if (assignProxy && captured.value) {
           const accountIds = captured.value.results.flatMap((item) => item.status === "succeeded" && item.account ? [item.account.account.id] : []);
-          if (accountIds.length) await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds));
+          if (accountIds.length) await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds), undefined, { backgroundRefresh: true });
         }
         if (!mounted.current) return;
         // Clear the cleanup marker before notifying a parent. Onboarding may
@@ -195,7 +195,7 @@ export function ImportDialog({
         return;
       }
       const captured = await captureOperationResult(
-        (work) => perform("import-confirm", work, "feedback.accountAdded"),
+        (work) => perform("import-confirm", work, "feedback.accountAdded", { backgroundRefresh: true }),
         async () => await relayCommands.remoteAction(
           { type: "confirm_account_batch_import" },
           { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool },

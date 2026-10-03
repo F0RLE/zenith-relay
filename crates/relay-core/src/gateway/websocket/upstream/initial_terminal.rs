@@ -22,6 +22,14 @@ pub(super) fn handle_initial_terminal(
     if terminal.outcome != Some(EventTerminalOutcome::Failure) {
         return Ok(TerminalAction::Proceed);
     }
+    if initial_messages
+        .iter()
+        .any(|message| super::messages::initial_message_state(message).0)
+    {
+        // A failed response can still contain generated output. Let the bridge
+        // deliver and settle it; body repair must not execute that turn again.
+        return Ok(TerminalAction::Proceed);
+    }
     let terminal_body = initial_messages.last().and_then(|message| match message {
         UpstreamMessage::Text(text) => Some(text.as_bytes()),
         UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),

@@ -177,3 +177,81 @@ fn empty_incomplete_requires_explicit_zero_tokens_and_no_output() {
     assert!(!is_empty_responses_incomplete(&empty, true, 0));
     assert!(!is_empty_responses_incomplete(&empty, false, 1));
 }
+
+#[test]
+fn only_the_served_model_field_marks_a_degraded_route() {
+    assert!(served_model_is_degraded(&json!({
+        "type": "response.created",
+        "response": {"id": "resp_test", "model": "gpt-6-astra-degrade2-luna"}
+    })));
+    assert!(served_model_is_degraded(&json!({"model": "DEGRADE1"})));
+    assert!(!served_model_is_degraded(&json!({
+        "type": "response.created",
+        "response": {"model": "gpt-6-astra", "instructions": "mention degrade2"}
+    })));
+    assert!(!served_model_is_degraded(&json!({"model": "degrade"})));
+}
+
+#[test]
+fn served_model_identity_keeps_distinct_models_and_accepts_snapshots() {
+    for (served, expected, rejected) in [
+        ("gpt-5.6-luna", "gpt-6-astra", true),
+        ("gpt-5.6-sol-max", "gpt-5.6-sol", true),
+        ("gpt-6-astra-2026-09-04", "gpt-6-astra", false),
+        ("gpt-6-astra", "gpt-6-astra-20260904", false),
+        (" OPENAI/GPT-6-ASTRA ", "gpt-6-astra", false),
+        ("gpt-6-astra-preview", "gpt-6-astra", true),
+        ("", "gpt-6-astra", false),
+        ("gpt-6-astra", "", false),
+        ("degrade2", "", true),
+    ] {
+        for value in [
+            json!({"model": served}),
+            json!({"response": {"model": served}}),
+        ] {
+            assert_eq!(
+                served_model_is_rejected(&value, expected),
+                rejected,
+                "{served} vs {expected}"
+            );
+        }
+    }
+    assert!(!served_model_is_rejected(
+        &json!({"model": null}),
+        "gpt-6-astra"
+    ));
+    assert!(!served_model_is_rejected(
+        &json!({"delta": "gpt-5.6-luna degrade2"}),
+        "gpt-6-astra"
+    ));
+}
+#[test]
+fn provider_policy_rejection_is_not_reclassified_as_model_mismatch() {
+    let payload = serde_json::json!({
+        "type": "response.failed",
+        "response": {"model": "gpt-5.6-luna", "error": {
+            "code": "insufficient_quota", "message": "This request was blocked by our usage policy."
+        }}
+    });
+    assert!(!super::served_model_is_rejected(&payload, "gpt-6-astra"));
+}
+
+#[test]
+fn translated_errors_keep_the_original_code_in_each_client_protocol() {
+    let rejection = serde_json::json!({"error": {"code": "upstream_route_degraded", "message": "Upstream served a different model"}});
+    let preserved = super::preserved_stream_error(&rejection).unwrap();
+    for payload in [
+        serde_json::json!({"type": "response.failed", "response": {"error": {"code": "adapter_upstream_stream_invalid"}}}),
+        serde_json::json!({"type": "error", "error": {"code": "adapter_upstream_stream_invalid"}}),
+        serde_json::json!({"error": {"code": "adapter_upstream_stream_invalid"}}),
+    ] {
+        let bytes = format!("data: {payload}\n\n").into_bytes();
+        let result = super::rewrite_bridge_failure(bytes, Some(&preserved));
+        assert_eq!(
+            result.starts_with(b"event: "),
+            payload.get("type").is_some()
+        );
+        let terminal = super::parse_sse_event(&result);
+        assert_eq!(terminal.error_category, Some("upstream_route_degraded"));
+    }
+}

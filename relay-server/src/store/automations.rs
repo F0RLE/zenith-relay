@@ -167,27 +167,10 @@ mod tests {
     use super::*;
     use crate::store::test_support::test_root;
     use std::collections::BTreeSet;
-    use zenith_relay_core::{
-        automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTrigger},
-        quota::QuotaWindowKind,
-    };
+    use zenith_relay_core::{automations::AccountSelector, quota::QuotaWindowKind};
 
     fn task() -> WakeTask {
-        WakeTask {
-            id: "wake_test".into(),
-            name: "Test".into(),
-            enabled: true,
-            account_selector: AccountSelector::AllEligible,
-            window_kinds: BTreeSet::from([QuotaWindowKind::Primary]),
-            model_policy: WakeModelPolicy::LightestSupported,
-            trigger: WakeTrigger::QuotaFull,
-            fallback_schedule: None,
-            execution_policy: WakeExecutionPolicy::Automatic,
-            jitter_seconds: 0,
-            max_attempts_per_cycle: 1,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        }
+        crate::test_fixtures::wake_task()
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub(super) fn repair_collected_rejection(
         native_replay: native_replay_attempted,
         stale_tool_history: stale_tool_history_recovered,
         model_switch_reset: model_switch_reset_attempted,
+        encrypted_context: encrypted_context_attempted,
+        ..
     } = repairs;
     if try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
         request,
@@ -92,29 +94,13 @@ pub(super) fn repair_collected_rejection(
         lease.settle_rotation_repair(now_ms());
         return AfterRepair::Step(FailureStep::Continue);
     }
-    let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+    let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+    super::super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
     *last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
     let upstream_error =
         crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
     event.upstream_error = Some(upstream_error.clone());
     event.error_category = Some(failure.category.to_string());
-    if wire_api == WireApi::Responses
-        && adapter_is_passthrough
-        && is_deferred_tool_search_compatibility_error(status, &upstream_error)
-        && tool_policy.prepare_deferred_fallback()
-    {
-        // An older or non-OpenAI Responses endpoint may reject the
-        // standard tool-search fields. Retry once without changing
-        // the selected policy, and only before output.
-        event.tool_use.policy_fallback = true;
-        emit_usage(runtime, event.clone());
-        tried.remove(&route.candidate_id);
-        lease.allow_rotation_repair();
-        *last_failure = Some(failure);
-        *last_failure_origin = selected_error_origin;
-        lease.settle_rotation_repair(now_ms());
-        return AfterRepair::Step(FailureStep::Continue);
-    }
     if wire_api == WireApi::Responses
         && adapter_is_passthrough
         && has_previous_response_id
@@ -198,6 +184,26 @@ pub(super) fn repair_collected_rejection(
             &key.id,
             request,
             resolved_model,
+        )
+    {
+        emit_usage(runtime, event.clone());
+        *last_failure = Some(failure);
+        *last_failure_origin = selected_error_origin;
+        lease.settle_rotation_repair(now_ms());
+        return AfterRepair::Step(FailureStep::Continue);
+    }
+    // Basis Points cannot decrypt reasoning or compaction ciphertext that
+    // belongs to another model or account. Drop those items and retry this
+    // candidate once. The first attempt already forwarded the ciphertext, so
+    // a real continuation on the same account is unchanged.
+    if route.account_transport == AccountTransport::ExcelBasisPoints
+        && super::super::super::repair_once(
+            encrypted_context_attempted,
+            failure.category == error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
+            tried,
+            &route.candidate_id,
+            lease,
+            || super::super::super::basis_points::drop_foreign_encrypted_context(request),
         )
     {
         emit_usage(runtime, event.clone());

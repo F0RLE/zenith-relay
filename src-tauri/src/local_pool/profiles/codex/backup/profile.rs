@@ -18,8 +18,7 @@ pub(in crate::local_pool::profiles::codex) fn parse_backup_snapshot(
 pub(in crate::local_pool::profiles::codex) fn serialize_backup(
     backup: &ProfileBackup,
 ) -> Result<String> {
-    let content = serde_json::to_string_pretty(backup).map_err(LocalPoolError::invalid_state)?;
-    Ok(format!("{content}\n"))
+    super::serialize_pretty(backup)
 }
 
 pub(in crate::local_pool::profiles::codex) fn rollback_backup(

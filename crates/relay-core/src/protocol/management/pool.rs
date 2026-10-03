@@ -1,4 +1,16 @@
 use super::*;
+use serde::Deserialize;
+
+/// Pool membership body shared by the desktop command and the management API.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PoolMembershipInput {
+    #[serde(default)]
+    pub account_ids: Vec<String>,
+    #[serde(default)]
+    pub source_ids: Vec<String>,
+    pub in_pool: bool,
+}
 
 #[cfg(test)]
 pub fn pool_model_summaries(

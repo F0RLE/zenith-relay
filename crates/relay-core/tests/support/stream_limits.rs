@@ -105,6 +105,11 @@ async fn oversized_non_stream_response_is_rejected_and_recorded() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["error"]["code"], "upstream_error");
+    assert_eq!(body["error"]["message"], "upstream response is too large");
+    assert_eq!(
+        body["error"]["zenith_relay"]["category"],
+        "upstream_body_too_large"
+    );
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(!events[0].success);

@@ -29,10 +29,7 @@ impl GatewayRuntime {
             let reserved = {
                 // Queue -> budget/scope -> scheduler is the only admission
                 // lock order. Never invoke a host callback under this lock.
-                let mut queue = self
-                    .admission
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut queue = crate::poison::mutex(&self.admission);
                 // When every physical capacity is occupied, scanning every
                 // queued waiter cannot find a ready turn. Check the incoming
                 // route under the same scheduler lock: unsupported requests
@@ -173,10 +170,7 @@ impl GatewayRuntime {
             budget: budget.clone(),
         };
         let _waiter = {
-            let mut queue = self
-                .admission
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut queue = crate::poison::mutex(&self.admission);
             let Some(waiter) = self.register_waiter(&mut queue, &request, false) else {
                 return false;
             };

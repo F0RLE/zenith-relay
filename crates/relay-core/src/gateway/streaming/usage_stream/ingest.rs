@@ -1,3 +1,4 @@
+use super::super::fast_delta::{fast_response_delta, FastResponseDelta};
 use super::*;
 
 impl<S> UsageStream<S> {
@@ -121,17 +122,90 @@ impl<S> UsageStream<S> {
         true
     }
 
+    fn consume_aligned_response_deltas<'a>(&mut self, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let Some(end) = crate::protocol::sse_event_end(&bytes[offset..]) else {
+                return Some(&bytes[offset..]);
+            };
+            let frame = &bytes[offset..offset + end];
+            let Some(delta) = fast_response_delta(frame) else {
+                return Some(&bytes[offset..]);
+            };
+            self.apply_fast_response_delta(delta);
+            offset += end;
+        }
+        None
+    }
+
+    fn apply_fast_response_delta(&mut self, delta: FastResponseDelta) {
+        if self.native_response.is_some() {
+            self.native_replay_capture
+                .observe_response_delta(delta.output_index);
+        }
+        if delta.nonempty_text
+            && self
+                .event
+                .as_ref()
+                .is_some_and(|event| event.ttft_ms.is_none())
+        {
+            if let Some(current) = self.event.as_mut() {
+                current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
+            }
+        }
+    }
+
     pub(in crate::gateway::streaming) fn ingest_sse(&mut self, bytes: &[u8]) -> (bool, usize) {
-        if !self.accept_sse_bytes(bytes) {
+        if self.terminated {
             return (false, 0);
         }
+        if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
+            self.sse_pending.clear();
+            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
+            return (false, 0);
+        }
+        let pending = if self.sse_pending.is_empty() {
+            match self.consume_aligned_response_deltas(bytes) {
+                None => return (true, bytes.len()),
+                Some(rest) => rest,
+            }
+        } else {
+            bytes
+        };
+        self.sse_pending.extend_from_slice(pending);
         while let Some(event) = crate::protocol::take_sse_event(&mut self.sse_pending) {
+            if let Some(delta) = fast_response_delta(&event) {
+                self.apply_fast_response_delta(delta);
+                continue;
+            }
             if event.len() > MAX_SSE_EVENT_BYTES {
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
                 return (false, 0);
             }
             let terminal = parse_sse_event(&event);
+            // Reported consumption remains real even when identity validation
+            // rejects the response before it can reach the client.
+            if let Some(usage) = terminal.usage {
+                if let Some(current) = self.event.as_mut() {
+                    apply_usage(current, &usage);
+                }
+            }
+            if let Some(service_tier) = terminal.applied_service_tier {
+                if let Some(current) = self.event.as_mut() {
+                    current.applied_service_tier = Some(service_tier);
+                }
+            }
+            if self.expected_model.as_deref().is_some_and(|expected| {
+                terminal
+                    .payload
+                    .as_ref()
+                    .is_some_and(|value| served_model_is_rejected(value, expected))
+            }) {
+                self.sse_pending.clear();
+                self.fail_stream(error_codes::UPSTREAM_ROUTE_DEGRADED);
+                return (false, 0);
+            }
             if terminal.has_data && !terminal.valid {
                 self.set_upstream_error(terminal.upstream_error);
                 self.sse_pending.clear();
@@ -179,16 +253,6 @@ impl<S> UsageStream<S> {
             {
                 if let Some(current) = self.event.as_mut() {
                     current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
-                }
-            }
-            if let Some(usage) = terminal.usage {
-                if let Some(current) = self.event.as_mut() {
-                    apply_usage(current, &usage);
-                }
-            }
-            if let Some(service_tier) = terminal.applied_service_tier {
-                if let Some(current) = self.event.as_mut() {
-                    current.applied_service_tier = Some(service_tier);
                 }
             }
             if terminal.response_id.is_some() {
@@ -320,8 +384,6 @@ impl<S> UsageStream<S> {
         else {
             return;
         };
-        *shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+        *crate::poison::mutex(shared) = Some(response);
     }
 }

@@ -46,17 +46,17 @@ export function PoolPage() {
     launchAfterConnect,
   );
   const connectOpenCode = async (launchAfterConnect: boolean) => {
-    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved");
-    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched");
+    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
+    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true });
   };
   const running = Boolean(runtime?.gateway.running);
-  const exportConfiguration = () => perform("configuration-preset-export", mode === "local" ? relayCommands.exportLocalConfigurationPreset : relayCommands.exportRemoteConfigurationPreset);
+  const exportConfiguration = () => perform("configuration-preset-export", mode === "local" ? relayCommands.exportLocalConfigurationPreset : relayCommands.exportRemoteConfigurationPreset, undefined, { backgroundRefresh: true });
   const previewConfiguration = () => perform("configuration-preset-preview", async () => {
     const preview = mode === "local"
       ? await relayCommands.previewLocalConfigurationPreset()
       : await relayCommands.previewRemoteConfigurationPreset();
     if (preview) setConfigurationPreview(preview);
-  });
+  }, undefined, { backgroundRefresh: true });
   const action = <div className="pool-header-actions">
     {view === "members" ? (
       <Button
@@ -75,10 +75,10 @@ export function PoolPage() {
         className="pool-header-icon"
         label={t("models.resetOrder")}
         icon={busy === "model-order-reset" ? <Loader2 className="spin" aria-hidden /> : <RotateCcw aria-hidden />}
-        disabled={Boolean(busy) || !runtime?.gateway.models?.length}
+        disabled={busy === "model-order" || busy === "model-order-reset" || !runtime?.gateway.models?.length}
         onClick={() => void perform("model-order-reset", () => mode === "local"
           ? relayCommands.setModelDisplayOrder([])
-          : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved")}
+          : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved", { backgroundRefresh: true })}
       />
     ) : null}
     {mode === "local" ? (
@@ -98,7 +98,7 @@ export function PoolPage() {
     {canSaveConfigurationPreset ? <ActionMenu className="pool-preset-menu" label={t("pool.configurationPreset")}>
       <ActionMenuItem
         icon={busy === "configuration-preset-export" ? <Loader2 className="spin" aria-hidden /> : <Download aria-hidden />}
-        disabled={Boolean(busy)}
+        disabled={busy === "configuration-preset-export"}
         onClick={() => void exportConfiguration()}
       >
         {t("pool.exportConfiguration")}
@@ -106,7 +106,7 @@ export function PoolPage() {
       {supportsConfigurationPresets ? (
         <ActionMenuItem
           icon={busy === "configuration-preset-preview" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}
-          disabled={Boolean(busy)}
+          disabled={busy === "configuration-preset-preview"}
           onClick={() => void previewConfiguration()}
         >
           {t("pool.importConfiguration")}
@@ -154,7 +154,7 @@ function ConfigurationPresetDialog({ preview, mode, onClose }: { preview: Config
   const apply = async () => {
     if (!preview.changes.length) return onClose();
     const applyPreset = mode === "local" ? relayCommands.applyLocalConfigurationPreset : relayCommands.applyRemoteConfigurationPreset;
-    if (await perform("configuration-preset-apply", () => applyPreset(preview), "feedback.saved")) onClose();
+    if (await perform("configuration-preset-apply", () => applyPreset(preview), "feedback.saved", { backgroundRefresh: true })) onClose();
   };
   return (
     <Dialog

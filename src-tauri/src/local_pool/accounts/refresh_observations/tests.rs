@@ -4,7 +4,8 @@ use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
     providers::chatgpt::ModelDiscoveryFailureCode,
     quota::{
-        QuotaRefreshData, QuotaRefreshResult, QuotaWindowInput, QuotaWindowKind, SubscriptionInput,
+        QuotaRefreshData, QuotaRefreshResult, QuotaWindow, QuotaWindowInput, QuotaWindowKind,
+        ResetTime, SubscriptionInput,
     },
 };
 
@@ -247,9 +248,72 @@ fn model_failure_does_not_overwrite_a_newer_authentication_failure() {
 }
 
 #[test]
+fn timer_only_quota_movement_keeps_the_complete_refresh() {
+    with_store(|store, scope| {
+        let mut baseline = scope.before.clone();
+        baseline.account.quota.primary = Some(
+            QuotaWindow::normalize(
+                QuotaWindowInput {
+                    kind: QuotaWindowKind::Primary,
+                    available_percent: Some(80.0),
+                    explicitly_full: None,
+                    reset: Some(ResetTime::AbsoluteUnixMilliseconds(5_000)),
+                    window_minutes: Some(300),
+                    provider_cycle_id: None,
+                    observed_at_ms: 50,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        baseline.account.quota.updated_at_ms = Some(50);
+        let mut current = baseline.clone();
+        current.account.quota.updated_at_ms = Some(200);
+        current.account.quota.primary.as_mut().unwrap().reset_at_ms = Some(9_000);
+        current
+            .account
+            .quota
+            .primary
+            .as_mut()
+            .unwrap()
+            .observed_at_ms = 80;
+        store.upsert_account(current).unwrap();
+        let shifted = AccountRefreshScope {
+            before: baseline,
+            fence: scope.fence.clone(),
+            started_at_ms: scope.started_at_ms,
+        };
+        let applied = apply_quota_read(
+            store,
+            &shifted,
+            quota(20.0, 100),
+            Subscription::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            applied.value.outcome,
+            AccountQuotaOutcome::Updated { .. }
+        ));
+        assert!(applied.value.exhaustion_transitions.is_empty());
+        assert_eq!(
+            applied
+                .account
+                .account
+                .quota
+                .primary
+                .unwrap()
+                .available_basis_points,
+            Some(2_000)
+        );
+    });
+}
+
+#[test]
 fn superseded_quota_does_not_prevent_an_independent_model_result() {
     with_store(|store, scope| {
         let mut current = scope.before.clone();
+        current.account.quota.limit_reached = true;
         current.account.quota.updated_at_ms = Some(200);
         store.upsert_account(current.clone()).unwrap();
         let applied = apply_quota_read(
@@ -311,4 +375,32 @@ async fn scope_capture_waits_for_setup_transaction_and_late_errors_are_discarded
     );
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn local_model_refresh_failure_keeps_a_provider_catalog_error() {
+    with_store(|store, scope| {
+        let mut current = scope.before.clone();
+        current.account.health = AccountHealthState::Degraded;
+        current.account.last_error_code = Some("models_transport".into());
+        store.upsert_account(current.clone()).unwrap();
+
+        apply_read_error(
+            store,
+            scope,
+            RefreshReadKind::Models,
+            &LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "synthetic local preparation failure",
+            ),
+        )
+        .unwrap();
+
+        let account = store.account("test-account").unwrap();
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("models_transport")
+        );
+        assert_eq!(account.account.health, AccountHealthState::Degraded);
+    });
 }

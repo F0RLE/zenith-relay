@@ -77,8 +77,8 @@ fn occupied_oauth_account_remains_eligible_for_text_selection() {
 
     let selected = select(&mut scheduler, &HashSet::new()).unwrap();
 
-    assert_eq!(selected.candidate_id, "free");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
+    assert_eq!(selected.candidate_id, "busy");
+    assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
 }
 #[test]
 fn one_oauth_account_accepts_parallel_text_requests() {
@@ -102,7 +102,7 @@ fn one_oauth_account_accepts_parallel_text_requests() {
     assert!(scheduler.release("only"));
 }
 #[test]
-fn concurrent_requests_fill_each_oauth_account_once() {
+fn concurrent_requests_stay_on_the_largest_quota() {
     let mut scheduler = PoolScheduler::new();
     for (id, quota) in [
         ("sixty-three", 6_300),
@@ -122,16 +122,7 @@ fn concurrent_requests_fill_each_oauth_account_once() {
         *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
     }
 
-    assert_eq!(
-        counts,
-        [
-            ("sixty-three".into(), 50),
-            ("fifty-four".into(), 50),
-            ("fifty-two".into(), 50),
-            ("fifty-one".into(), 50),
-        ]
-        .into()
-    );
+    assert_eq!(counts, [("sixty-three".into(), 200),].into());
     for (id, count) in counts {
         for _ in 0..count {
             assert!(scheduler.release(&id));

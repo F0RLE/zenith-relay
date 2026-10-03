@@ -117,16 +117,10 @@ fn load_state_from_values<T: DeserializeOwned>(
     values: &std::collections::HashMap<String, String>,
     key: &str,
 ) -> Result<T> {
-    let content = values.get(key).ok_or_else(|| {
+    load_optional_state_from_values(values, key)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("local database state '{key}' is missing"),
-        )
-    })?;
-    serde_json::from_str(content).map_err(|error| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!("local database state '{key}' is invalid: {error}"),
         )
     })
 }

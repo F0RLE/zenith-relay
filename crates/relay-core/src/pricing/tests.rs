@@ -194,7 +194,7 @@ fn explicit_provider_is_required_for_provider_specific_exact_prices() {
 fn qualified_exact_match_cannot_cross_provider_namespaces() {
     let catalog = PricingCatalog::from_litellm_payload(
         &json!({
-            "openrouter/gpt-test": {
+            "openrouter/router-test": {
                 "litellm_provider": "openai",
                 "input_cost_per_token": 1e-6,
                 "output_cost_per_token": 2e-6
@@ -206,8 +206,141 @@ fn qualified_exact_match_cannot_cross_provider_namespaces() {
     )
     .unwrap();
 
-    let resolved = catalog.resolve_source("gpt-test", Some("openrouter"), None, None, None);
+    let resolved = catalog.resolve_source("router-test", Some("openrouter"), None, None, None);
     assert_eq!(resolved.source, PriceSource::Unpriced);
+}
+
+#[test]
+fn known_model_family_uses_the_official_catalog_without_source_identity() {
+    let catalog = PricingCatalog::from_litellm_payload(
+        &json!({
+            "xai/grok-4.7": {
+                "litellm_provider": "xai",
+                "input_cost_per_token": 2e-6,
+                "cache_read_input_token_cost": 5e-7,
+                "output_cost_per_token": 6e-6
+            },
+            "xai/grok-9": {
+                "litellm_provider": "xai",
+                "input_cost_per_token": 4e-6,
+                "output_cost_per_token": 8e-6
+            },
+            "openrouter/x-ai/grok-9": {
+                "litellm_provider": "openrouter",
+                "input_cost_per_token": 9e-6,
+                "output_cost_per_token": 9e-6
+            },
+            "claude-opus-9": {
+                "litellm_provider": "anthropic",
+                "input_cost_per_token": 5e-6,
+                "output_cost_per_token": 25e-6
+            },
+            "gemini/gemini-9-pro": {
+                "litellm_provider": "gemini",
+                "input_cost_per_token": 2e-6,
+                "output_cost_per_token": 12e-6
+            },
+            "codex-9": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": 3e-6,
+                "output_cost_per_token": 12e-6
+            }
+        }),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    let grok = catalog.resolve_source("grok-4.7", None, None, None, None);
+    assert_eq!(grok.source, PriceSource::LiteLlmCanonical);
+    assert_eq!(grok.quote.unwrap().input, 2_000_000);
+    assert_eq!(grok.quote.unwrap().cache_read, Some(500_000));
+    let qualified = catalog.resolve_source("xai/grok-4.7", None, Some("openai"), None, None);
+    assert_eq!(qualified.quote.unwrap().input, 2_000_000);
+    let future = catalog.resolve_source("grok-9", None, None, None, None);
+    assert_eq!(future.source, PriceSource::LiteLlmCanonical);
+    assert_eq!(future.quote.unwrap().input, 4_000_000);
+    assert_eq!(
+        catalog
+            .resolve_source("claude-opus-9", None, None, None, None)
+            .quote
+            .unwrap()
+            .input,
+        5_000_000
+    );
+    assert_eq!(
+        catalog
+            .resolve_source("gemini-9-pro", None, None, None, None)
+            .quote
+            .unwrap()
+            .input,
+        2_000_000
+    );
+    assert_eq!(
+        catalog
+            .resolve_source("codex-9", None, None, None, None)
+            .quote
+            .unwrap()
+            .input,
+        3_000_000
+    );
+}
+
+#[test]
+fn provider_price_replaces_the_official_model_family_price() {
+    let catalog = PricingCatalog::from_litellm_payload(
+        &json!({
+            "xai/grok-4.7": {
+                "litellm_provider": "xai",
+                "input_cost_per_token": 2e-6,
+                "output_cost_per_token": 6e-6
+            }
+        }),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let provider = TokenPrice {
+        input: 100_000,
+        cache_read: Some(20_000),
+        cache_write_5m: None,
+        cache_write_1h: None,
+        output: 200_000,
+    };
+    let resolved = catalog.resolve_source("grok-4.7", None, None, Some(provider), None);
+    assert_eq!(resolved.source, PriceSource::Provider);
+    assert_eq!(resolved.quote, Some(provider));
+}
+
+#[test]
+fn unknown_model_keeps_an_explicit_family_and_then_manual_price() {
+    let catalog = PricingCatalog::from_litellm_payload(
+        &json!({
+            "openai/private-model": {
+                "litellm_provider": "openai",
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 2e-6
+            }
+        }),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let manual = TokenPrice {
+        input: 9,
+        cache_read: None,
+        cache_write_5m: None,
+        cache_write_1h: None,
+        output: 9,
+    };
+    let declared =
+        catalog.resolve_source("private-model", None, Some("openai"), None, Some(manual));
+    assert_eq!(declared.source, PriceSource::LiteLlmCanonical);
+    let unresolved = catalog.resolve_source("private-model", None, None, None, Some(manual));
+    assert_eq!(unresolved.source, PriceSource::Manual);
 }
 
 #[test]

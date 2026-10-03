@@ -212,6 +212,11 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
             "/gateway/chatgpt-retry-until-available".to_string(),
             true,
         ),
+        RemoteServerAction::SetBlockDegradedRoutes => (
+            Method::POST,
+            "/gateway/block-degraded-routes".to_string(),
+            true,
+        ),
         RemoteServerAction::SetCodexWebsockets => {
             (Method::POST, "/gateway/codex-websockets".to_string(), true)
         }
@@ -233,12 +238,7 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
 }
 
 pub(super) fn object_path(collection: &str, id: &str) -> Result<String, CommandError> {
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !zenith_relay_core::is_ascii_token(id, 128) {
         return Err(
             LocalPoolError::new(ErrorCode::InvalidState, "remote object id is invalid").into(),
         );

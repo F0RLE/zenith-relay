@@ -3,8 +3,8 @@ use crate::local_pool::accounts::quota_refresh::AccountQuotaOutcome;
 use crate::local_pool::accounts::quota_service::{apply_quota_failure, apply_quota_success};
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::accounts::{
+    accept_discovered_models,
     apply_model_discovery_failure as apply_account_model_discovery_failure,
-    recover_model_discovery_state,
 };
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome};
@@ -68,18 +68,17 @@ pub(in crate::local_pool::accounts) fn apply_model_discovery(
     let previous_models = account.effective_models().to_vec();
     match result {
         Ok(models) => {
-            let models = crate::local_pool::models::normalized_values(models);
-            if account.models.is_empty() && !models.is_empty() {
-                account.models = models.clone();
-            }
-            account.discovered_models = Some(models);
-            account.normalize();
             let state = &mut account.account;
-            recover_model_discovery_state(
+            if accept_discovered_models(
+                &mut account.models,
+                &mut account.discovered_models,
                 &mut state.auth_state,
                 &mut state.health,
                 &mut state.last_error_code,
-            );
+                crate::local_pool::models::normalized_values(models),
+            ) {
+                account.normalize();
+            }
         }
         Err(error) => {
             // Keep the last good catalog for routing, but retain the model

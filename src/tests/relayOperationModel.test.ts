@@ -142,4 +142,47 @@ describe("relay operation policy", () => {
     });
     expect(missed).toEqual({ ok: false, value: undefined });
   });
+
+  test("unlocks a background refresh before the snapshot returns", async () => {
+    const events: string[] = [];
+    let releaseRefresh = () => undefined;
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const result = await runRelayOperation({
+      work: async () => { events.push("work"); },
+      refresh: async () => {
+        events.push("refresh-start");
+        await refreshGate;
+        events.push("refresh-end");
+      },
+      isCurrent: () => true,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    expect(events).toEqual(["work", "success:feedback.saved", "settled", "refresh-start"]);
+    releaseRefresh();
+    await refreshGate;
+    await Promise.resolve();
+    expect(events).toEqual(["work", "success:feedback.saved", "settled", "refresh-start", "refresh-end"]);
+  });
+
+  test("reports a background refresh failure without treating the command as unsent", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("work"); },
+      refresh: async () => { throw new Error("refresh failed"); },
+      isCurrent: () => true,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    for (let step = 0; step < 4; step += 1) await Promise.resolve();
+    expect(events).toEqual(["work", "success:feedback.saved", "settled", "error:errors.general"]);
+  });
 });

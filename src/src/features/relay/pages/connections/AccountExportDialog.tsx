@@ -62,7 +62,7 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
         if (!result.content) throw new Error("account export content is missing");
         await copyText(result.content);
       }
-    }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded");
+    }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded", { backgroundRefresh: true });
     if (ok) onClose();
   };
   return <Dialog

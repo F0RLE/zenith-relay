@@ -163,14 +163,7 @@ pub(super) fn prepare_request_attempt(input: RequestPrepareInput<'_>) -> Request
     if account_route {
         normalize_prepared_account_body(&mut adapter_request, route_responses_lite.is_some());
     }
-    if let Some(step) = apply_prepared_tool_policy(
-        tool_policy,
-        &mut adapter_request,
-        wire_api,
-        route.wire_api,
-        route.adapter.is_passthrough(),
-        basis_points_route,
-    ) {
+    if let Some(step) = apply_prepared_tool_policy(tool_policy, &mut adapter_request) {
         return step;
     }
     let basis_points_request = basis_points_route.then(|| adapter_request.upstream_body().clone());
@@ -243,16 +236,13 @@ fn route_responses_lite_header(
 ) -> Option<HeaderValue> {
     (wire_api == WireApi::Responses)
         .then(|| {
-            responses_lite.clone().or_else(|| {
-                (automatic_responses_lite
-                    && account_id.is_some_and(|candidate_id| {
-                        runtime
-                            .codex_model_responses_lite_candidates(resolved_model)
-                            .iter()
-                            .any(|id| id == candidate_id)
-                    }))
-                .then(|| HeaderValue::from_static("true"))
-            })
+            super::super::responses_lite_header(
+                responses_lite,
+                automatic_responses_lite,
+                runtime,
+                resolved_model,
+                account_id,
+            )
         })
         .flatten()
 }
@@ -358,17 +348,9 @@ fn normalize_prepared_account_body(
 fn apply_prepared_tool_policy(
     tool_policy: &mut RequestToolPolicy,
     adapter_request: &mut PreparedAdapterRequest,
-    client_wire_api: WireApi,
-    route_wire_api: WireApi,
-    passthrough: bool,
-    basis_points_route: bool,
 ) -> Option<RequestPrepare> {
-    let allow_deferred_tool_search = client_wire_api == WireApi::Responses
-        && route_wire_api == WireApi::Responses
-        && passthrough
-        && !basis_points_route;
     tool_policy
-        .apply_adapter(adapter_request, allow_deferred_tool_search)
+        .apply_adapter(adapter_request)
         .err()
         .map(|message| {
             RequestPrepare::Respond(api_error(

@@ -43,8 +43,11 @@ mod bridge;
 mod completion;
 mod diagnostics;
 mod events;
+mod fast_delta;
 mod replay;
 mod upstream_usage;
+
+pub(in crate::gateway) use fast_delta::{fast_response_delta_json, FastResponseDelta};
 
 use bridge::{bridge_adapter_stream, bridge_gemini_stream, bridge_messages_stream};
 
@@ -52,12 +55,15 @@ pub(super) use replay::NativeReplayCapture;
 
 pub(super) use events::{
     has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
-    is_known_non_output_event, parse_sse_event, preserved_stream_error, rewrite_bridge_failure,
-    TerminalEvent, TerminalOutcome,
+    is_known_non_output_event, is_responses_output_delta_type, parse_sse_event,
+    preserved_stream_error, rewrite_bridge_failure, served_model_is_rejected, TerminalEvent,
+    TerminalOutcome,
 };
 
 mod bootstrap;
-pub(super) use bootstrap::{bootstrap_stream, StreamBootstrapFailure};
+pub(super) use bootstrap::{
+    bootstrap_stream, degraded_route_stream_failure, StreamBootstrapFailure,
+};
 
 /// Owns the work after an upstream stream has emitted client-visible output.
 /// From this point the response is committed and no fallback is legal.
@@ -105,6 +111,9 @@ impl StreamExecution {
             started,
         } = self;
         let adapter_is_passthrough = adapter_request.is_passthrough();
+        let expected_model = (route.account_id.is_some()
+            && runtime.block_degraded_routes_enabled())
+        .then_some(source_model.clone());
         let initial_event = usage_event(
             UsageAttempt {
                 request_id: &request_id,
@@ -120,20 +129,19 @@ impl StreamExecution {
             None,
             0,
         );
+        let mut first = first;
         let upstream_usage = (!adapter_is_passthrough).then(|| {
-            let mut capture = upstream_usage::UpstreamUsage::new(initial_event.clone());
-            capture.observe(&first);
+            let mut capture =
+                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone());
+            first = capture.forward(std::mem::take(&mut first));
             Arc::new(Mutex::new(capture))
         });
         let capture_stream = upstream_usage.clone();
-        let remaining: UpstreamStream = Box::pin(remaining.inspect(move |chunk| {
-            if let (Some(capture), Ok(bytes)) = (&capture_stream, chunk) {
-                capture
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .observe(bytes);
-            }
-        }));
+        let remaining: UpstreamStream =
+            Box::pin(remaining.map(move |chunk| match (&capture_stream, chunk) {
+                (Some(capture), Ok(bytes)) => Ok(crate::poison::mutex(capture).forward(bytes)),
+                (_, chunk) => chunk,
+            }));
         let completion_runtime = runtime.clone();
         let completion_source = route.candidate_id.clone();
         let completion_model = source_model.clone();
@@ -187,7 +195,7 @@ impl StreamExecution {
                     stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining),
                 ),
             };
-        let usage_stream = UsageStream::with_runtime(
+        let mut usage_stream = UsageStream::with_runtime(
             combined,
             runtime,
             initial_event,
@@ -195,6 +203,7 @@ impl StreamExecution {
             completion,
             completion_native_response,
         );
+        usage_stream.expected_model = adapter_is_passthrough.then_some(expected_model).flatten();
         let origin = route_error_origin(&route);
         let mut response = proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
         attach_stream_diagnostics(&mut response, origin, &request_id);

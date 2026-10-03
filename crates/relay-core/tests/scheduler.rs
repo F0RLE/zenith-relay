@@ -10,8 +10,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
     DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey,
@@ -35,6 +33,10 @@ mod pre_output_fallback;
 mod protocol_routes;
 #[path = "support/stream_safety.rs"]
 mod stream_safety;
+
+#[path = "support/local_server.rs"]
+mod local_server;
+use local_server::{spawn, TestServer};
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -76,17 +78,6 @@ struct UpstreamState {
     key: String,
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
-}
-
-struct TestServer {
-    base_url: String,
-    task: JoinHandle<()>,
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 fn source(
@@ -215,18 +206,6 @@ async fn spawn_upstream(key: &str, replies: Vec<Reply>) -> (TestServer, Upstream
         .route("/v1/messages", post(upstream))
         .with_state(state.clone());
     (spawn(router).await, state)
-}
-
-async fn spawn(app: Router) -> TestServer {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    TestServer {
-        base_url: format!("http://{address}"),
-        task,
-    }
 }
 
 async fn upstream(

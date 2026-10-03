@@ -163,30 +163,17 @@ impl ResponseAffinityStore for RecordedResponseAffinityStore {
         key: &str,
         _now_ms: u64,
     ) -> std::result::Result<Option<ResponseAffinityBinding>, String> {
-        self.found
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(key.to_string());
-        Ok(self
-            .restored_binding
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone())
+        crate::poison::mutex(&self.found).push(key.to_string());
+        Ok(crate::poison::mutex(&self.restored_binding).clone())
     }
 
     fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String> {
-        self.upserts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(binding.clone());
+        crate::poison::mutex(&self.upserts).push(binding.clone());
         Ok(())
     }
 
     fn delete(&self, key: &str) -> std::result::Result<(), String> {
-        self.deletes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(key.to_string());
+        crate::poison::mutex(&self.deletes).push(key.to_string());
         Ok(())
     }
 

@@ -116,7 +116,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
             return step;
         }
     }
-    let route_responses_lite = account_responses_lite_header(
+    let route_responses_lite = super::super::responses_lite_header(
         responses_lite,
         automatic_responses_lite,
         runtime,
@@ -140,14 +140,9 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         Ok(body) => body,
         Err(step) => return step,
     };
-    // Only the native Responses wake path has the provider contract for
-    // `tool_search`. Compact and alpha/search are separate account endpoints
-    // and must keep their ordinary full catalog.
-    if let Some(step) = apply_account_tool_policy(
-        tool_policy,
-        &mut upstream_body,
-        endpoint == AccountEndpoint::Wake && !basis_points_route,
-    ) {
+    // Saved tool optimization is not applied. Wake, compact, and alpha/search
+    // all keep the catalog the client sent.
+    if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body) {
         return step;
     }
     if basis_points_route {
@@ -201,25 +196,6 @@ fn reject_account_basis_points(
     )?;
     *last_adapter_error = Some(error);
     Some(AccountPrepare::Continue)
-}
-
-fn account_responses_lite_header(
-    responses_lite: &Option<HeaderValue>,
-    automatic_responses_lite: bool,
-    runtime: &GatewayRuntime,
-    resolved_model: &str,
-    account_id: Option<&str>,
-) -> Option<HeaderValue> {
-    responses_lite.clone().or_else(|| {
-        (automatic_responses_lite
-            && account_id.is_some_and(|candidate_id| {
-                runtime
-                    .codex_model_responses_lite_candidates(resolved_model)
-                    .iter()
-                    .any(|id| id == candidate_id)
-            }))
-        .then(|| HeaderValue::from_static("true"))
-    })
 }
 
 fn account_upstream_url(
@@ -281,18 +257,14 @@ fn prepare_account_upstream_body(
 fn apply_account_tool_policy(
     tool_policy: &mut RequestToolPolicy,
     upstream_body: &mut Value,
-    allow_deferred_tool_search: bool,
 ) -> Option<AccountPrepare> {
-    tool_policy
-        .apply_value(upstream_body, allow_deferred_tool_search)
-        .err()
-        .map(|message| {
-            AccountPrepare::Respond(api_error(
-                StatusCode::BAD_REQUEST,
-                message,
-                error_codes::INVALID_REQUEST,
-            ))
-        })
+    tool_policy.apply_value(upstream_body).err().map(|message| {
+        AccountPrepare::Respond(api_error(
+            StatusCode::BAD_REQUEST,
+            message,
+            error_codes::INVALID_REQUEST,
+        ))
+    })
 }
 
 #[allow(clippy::result_large_err)]

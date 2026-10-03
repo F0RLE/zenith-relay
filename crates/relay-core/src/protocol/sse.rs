@@ -74,6 +74,19 @@ pub(crate) fn consume_frames<T>(
     }
 }
 
+/// Feeds `bytes` through an SSE buffer that cannot be borrowed with its owner.
+/// The caller moves the buffer out and stores the returned tail.
+pub(crate) fn push_pending_frames<T>(
+    mut pending: Vec<u8>,
+    bytes: &[u8],
+    state: &mut T,
+    stop: impl Fn(&T) -> bool,
+    handle: impl FnMut(&mut T, &[u8]),
+) -> Vec<u8> {
+    consume_frames(&mut pending, bytes, state, stop, handle);
+    pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::{consume_frames, data, event_end, lines};

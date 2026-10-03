@@ -9,6 +9,7 @@ use super::retry::{
 use super::translate::{
     translate_basis_points_completed, translate_completed_response, CompletedBasisPointsResponse,
 };
+use crate::gateway::errors::current_failure_state;
 
 pub(super) enum CompletionStep {
     Continue,
@@ -361,48 +362,34 @@ async fn read_completed_body(
     read: &mut CompletedBodyRead<'_>,
     usage: &impl Fn(bool, u16, Option<String>) -> UsageEvent,
 ) -> Result<Vec<u8>, CompletionStep> {
-    let bytes = match crate::transport::collect_limited(
+    match collect_upstream_response(
         upstream,
-        crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+        read.account_route,
+        (read.account_route && read.runtime.block_degraded_routes_enabled())
+            .then_some(read.route.source_model.as_str()),
     )
     .await
     {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            read.lease.settle_rotation_unknown(now_ms());
-            let too_large = matches!(error, Error::UpstreamBodyTooLarge);
-            let failure = AttemptFailure::body();
-            let state =
-                current_failure_state(read.runtime, &read.route.candidate_id, read.source_model);
-            let mut event = usage(
-                false,
-                StatusCode::BAD_GATEWAY.as_u16(),
-                Some(if too_large {
-                    error_codes::UPSTREAM_BODY_TOO_LARGE.to_string()
-                } else {
-                    error_codes::UPSTREAM_BODY.to_string()
-                }),
-            );
-            apply_failure_state(&mut event, state);
-            emit_usage(read.runtime, event);
-            *read.last_failure = Some(failure);
-            *read.last_failure_origin = read.selected_error_origin;
-            return Err(CompletionStep::Continue);
-        }
-    };
-    match completed_upstream_response(&bytes, read.account_route) {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
             let mut failure = upstream_failure.failure;
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
-            let state = Some(settle_attempt_failure(
-                read.runtime,
-                read.lease,
-                read.source_model,
-                &failure,
-                read.response_headers,
-            ));
+            let state = if matches!(
+                failure.category,
+                error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE
+            ) {
+                read.lease.settle_rotation_unknown(now_ms());
+                current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
+            } else {
+                settle_attempt_failure(
+                    read.runtime,
+                    read.lease,
+                    read.source_model,
+                    &failure,
+                    read.response_headers,
+                )
+            };
             let mut event = usage(
                 false,
                 failure.status.as_u16(),
@@ -413,6 +400,7 @@ async fn read_completed_body(
                 details
             });
             if read.wire_api == WireApi::Responses
+                && failure.execution.certainty == ExecutionCertainty::NotSent
                 && read.response_affinity_hit
                 && read.has_previous_response_id
                 && !*read.native_replay_attempted
@@ -447,11 +435,11 @@ async fn read_completed_body(
                     }
                 }
             }
-            if let Some(state) = state {
-                apply_failure_state(&mut event, state);
-            }
+            apply_failure_state(&mut event, state);
             emit_usage(read.runtime, event);
-            if failure_category_is_request_terminal(failure.category) {
+            if failure_category_is_request_terminal(failure.category)
+                || failure.execution.certainty != ExecutionCertainty::NotSent
+            {
                 return Err(CompletionStep::Respond(attempt_error_response(
                     failure,
                     read.last_preserved_upstream_error.as_ref(),

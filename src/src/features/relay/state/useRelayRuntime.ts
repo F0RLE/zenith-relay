@@ -61,11 +61,14 @@ export function useRelayRuntime({
   const runtimeActivityOverlay = useRef(new Map<string, RuntimeActivitySnapshot>());
   const runtimeActivityRuntimeId = useRef(0);
   const runtimeSnapshotRef = useRef<RuntimeSnapshot | null>(null);
+  const visibleRuntimeRef = useRef<RuntimeSnapshot | null>(null);
+  const snapshotsByMode = useRef<Partial<Record<RelayMode, RuntimeSnapshot>>>({});
   // Keep the scheduler order separate from the activity facts. The map also
   // retains the latest zero-count event: a routing poll can finish while a
   // request is in flight, and that stale snapshot must not resurrect the
   // candidate after its release event arrives.
   const runtimeRoutingOrderBase = useRef<RuntimeRoutingOrder>([]);
+  visibleRuntimeRef.current = runtime;
   const runtimeRoutingSupported = mode !== "remote"
     || Boolean(runtime?.capabilities.features.includes("runtime_routing"));
 
@@ -87,6 +90,8 @@ export function useRelayRuntime({
 
   const setMode = useCallback((next: RelayMode) => {
     if (modeRef.current === next) return;
+    if (visibleRuntimeRef.current) snapshotsByMode.current[modeRef.current] = visibleRuntimeRef.current;
+    const cached = snapshotsByMode.current[next] ?? null;
     invalidateRefreshes();
     modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
     modeRef.current = next;
@@ -94,10 +99,11 @@ export function useRelayRuntime({
     runtimeActivityOverlay.current.clear();
     runtimeActivityRuntimeId.current = 0;
     runtimeRoutingOrderBase.current = [];
-    runtimeSnapshotRef.current = null;
+    runtimeSnapshotRef.current = cached;
     setRuntimeActivity({ revision: 0, lastCandidateId: null, candidates: {} });
     writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
-    setRuntime(null);
+    setRuntime(cached);
+    setLoading(cached === null);
     resetUsage();
     setModeState(next);
     setPage("overview");
@@ -132,6 +138,7 @@ export function useRelayRuntime({
           }
           : loaded.snapshot;
         runtimeSnapshotRef.current = snapshot;
+        if (snapshot) snapshotsByMode.current[requestedMode] = snapshot;
         setRuntime(snapshot);
         clearInactiveUsage(requestedMode);
         refreshedRevision.current = requestedRevision;
@@ -213,7 +220,7 @@ export function useRelayRuntime({
           });
       }, delay);
     };
-    setLoading(true);
+    if (runtimeSnapshotRef.current === null) setLoading(true);
     refresh()
       .then(scheduleStartupRetry)
       .catch((error) => active && reportErrorFeedback(error, "feedback.refreshFailed", "refresh_failed"))

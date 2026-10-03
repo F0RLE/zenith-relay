@@ -5,7 +5,9 @@ use crate::local_pool::{
             credential_local_error as credential_error, CredentialStore, StoredCodexCredentials,
         },
         proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
-        quota_refresh::{AccountQuotaOutcome, AccountQuotaRefreshResponse},
+        quota_refresh::{
+            register_active_authority, AccountQuotaOutcome, AccountQuotaRefreshResponse,
+        },
         quota_service::{apply_quota_failure, apply_quota_success},
         records::new_account_record,
         NativeSecretBackend,
@@ -179,10 +181,7 @@ async fn prepare_oauth_completion(
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
-    let model_discovery_succeeded = model_issue.is_none();
-    if model_discovery_succeeded {
-        // Preserve an explicit empty discovery result. It is different from
-        // a failed probe and must suppress an older configured catalog.
+    if model_issue.is_none() && !record.models.is_empty() {
         record.discovered_models = Some(record.models.clone());
     }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
@@ -471,35 +470,18 @@ async fn commit_oauth_completion(
     }
     drop(commit_guard);
 
-    let authority = state.token_authority();
-    if let Err(error) = authority
-        .register_if_newer(
-            &local_account_id,
-            authority_tokens.clone(),
-            record.account.auth_state,
-        )
-        .await
-    {
-        return Err(super::super::fail_closed(
-            state,
-            format!("failed to register OAuth account credentials: {error}"),
-        )
-        .await);
-    }
-    let Some(authoritative_tokens) = authority.tokens(&local_account_id).await else {
-        return Err(super::super::fail_closed(
-            state,
-            "OAuth account token state disappeared".to_string(),
-        )
-        .await);
-    };
-    let Some(authoritative_auth_state) = authority.auth_state(&local_account_id).await else {
-        return Err(super::super::fail_closed(
-            state,
-            "OAuth account authentication state disappeared".to_string(),
-        )
-        .await);
-    };
+    let registered = register_active_authority(
+        state,
+        &local_account_id,
+        authority_tokens.clone(),
+        record.account.auth_state,
+        "failed to register OAuth account credentials",
+        "OAuth account token state disappeared",
+        "OAuth account authentication state disappeared",
+    )
+    .await?;
+    let authoritative_tokens = registered.tokens;
+    let authoritative_auth_state = registered.auth_state;
     let authority_state_changed = authoritative_tokens != authority_tokens
         || authoritative_auth_state != record.account.auth_state;
     if authority_state_changed

@@ -6,6 +6,74 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+<!-- relay-notes:en -->
+
+<!-- relay-notes:ru -->
+
+## [1.1.4] - 2026-10-03
+
+<!-- relay-notes:en -->
+
+Zenith Relay 1.1.4 improves quota-based rotation, checks the model reported by ChatGPT account routes, adds images to Basis Points, and makes launcher controls more responsive.
+
+### Changed
+
+- Automatic rotation picks the member with the largest fresh quota remainder. One point is enough to switch. Load is compared only when the remainder is equal. A chat stays on its member when the saved history cannot be resent to a member with more quota left.
+- OpenAI models stay in the order Astra, Sol, Terra, then Luna. Anthropic models stay in the order Fable, Opus, Sonnet, then Haiku. A newer version of the same family keeps that place.
+- An API price uses the provider price first. If the provider does not send one, Relay uses the official family price: GPT, ChatGPT, and Codex use OpenAI; Claude uses Anthropic; Gemini uses Google; Grok uses xAI. A manual price is used only when neither exists.
+- The API tab can block a ChatGPT account route when it reports an internal degrade id or a different model. Relay checks response.created, subsequent SSE events, buffered responses, and WebSocket turns, including reused connections. A rejection before generation can select another member; a mismatch after generation stops the response without replaying it. This checks reported identity, not the model's intelligence.
+- The tool-optimization switch is removed. Tool lists leave Relay exactly as the client sent them. A previously saved optimized mode no longer changes new requests.
+- Switching an account keeps the official ChatGPT catalog and its official models. A direct API connection uses the models reported by that provider. Known reasoning levels come from the catalog parser and are connected directly, without the pool rewriting them.
+- The pool picker filters working, cooldown, unavailable, disabled, and server connections. The status color matches the account card. The automatic queue is the left-to-right order of the cards, not a text list.
+- Model speed is shown as icons. A reasoning control appears only for a text model that has reasoning levels, and it sits after the speed icons.
+- On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right.
+- A model switch saves without waiting for a full snapshot. Other switches keep their new value while a background refresh runs, so the rest of the window stays usable.
+- ChatGPT account requests use current Chrome headers. Quota rejection keeps the account recoverable and applies to the open primary window instead of marking the account broken.
+- Excel / Basis Points accepts an image inside a user message. A data URL is uploaded with the account and replaced by file_id. A remote image URL is rejected, and detail is not forwarded. One encrypted-content failure drops the foreign ciphertext and retries the same account.
+- Excel / Basis Points keeps long history identifiers within the upstream limit, so a tool call still matches its output. A visible reasoning summary stays even without ciphertext. Maximum reasoning is sent as the extra-high level this route supports.
+- A blank ChatGPT model-catalog response no longer removes models the account already reported. A failed model-list refresh says that the list could not be refreshed, and a later local failure does not hide the provider error already recorded for that account.
+- Basis Points model-access and usage-policy refusals keep their original 403 status. A model-access refusal pauses that model on the affected member; it does not ban the whole account. A usage-policy refusal ends the request without marking quota exhausted or trying other accounts to bypass it.
+- Identity checks run before protocol conversion, so an adapter cannot hide a different upstream model by writing the requested name into its response. Error codes and safe explanations survive conversion to the client's protocol.
+- Buffered account streams finish as soon as the terminal response arrives, even when the provider keeps the connection open. Split SSE events are inspected together, and oversized uninspectable events stop the stream.
+- A failed terminal response that already contains generated output cannot trigger history repair or another model execution. Unknown disconnects also stay failures instead of being silently replayed.
+- The SSE text-delta path recognizes ordinary deltas without building full JSON trees. Terminal usage, reasoning tokens, cache counters, and provider-reported service tier still pass through the normal accounting path.
+- Pool card order reflects eligibility for the selected model before quota ranking. An account that cannot serve that model does not appear ahead of a usable API source just because its general account status is healthy.
+- Failed setting changes roll the switch back and release its busy state, including when saving throws before returning a promise. Tabs and other controls remain usable during independent background operations.
+- Launcher keyboard focus no longer adds the unwanted outlines or inset shadows. Change notifications keep their compact box without an extra border or shadow.
+- Runtime snapshots reuse account facts and shared projections instead of repeatedly copying credentials and rebuilding the same state. Desktop and Relay Server use the same core definitions for account status and source summaries.
+- Both Help languages explain route mismatch, model-access refusals, usage-policy blocks, continuation failures, and the corresponding recovery steps. These release notes are included in the in-app updater in English or Russian according to the selected language.
+
+<!-- relay-notes:ru -->
+
+Zenith Relay 1.1.4 улучшает ротацию по квоте, проверяет модель в ответах аккаунтов ChatGPT, добавляет изображения в Basis Points и ускоряет реакцию элементов лаунчера.
+
+### Изменения
+
+- Автоматическая ротация выбирает участника с наибольшим свежим остатком квоты. Одного пункта достаточно для переключения. Нагрузка сравнивается только при равном остатке. Чат остаётся на своём участнике, если сохранённую историю нельзя переслать участнику с большим остатком.
+- Модели OpenAI остаются в порядке Astra, Sol, Terra, затем Luna. Модели Anthropic остаются в порядке Fable, Opus, Sonnet, затем Haiku. Новая версия того же семейства занимает это же место.
+- Цена API сначала берётся у провайдера. Если провайдер её не прислал, Relay использует официальную цену семейства: GPT, ChatGPT и Codex относятся к OpenAI, Claude к Anthropic, Gemini к Google, Grok к xAI. Ручная цена нужна только когда обеих нет.
+- На вкладке API можно блокировать маршрут аккаунта ChatGPT, если он сообщает внутренний degrade-id или другую модель. Проверяются response.created, последующие события SSE, собранные ответы и ходы WebSocket, в том числе на повторно используемом соединении. Отказ до генерации позволяет выбрать другого участника; подмена после генерации останавливает ответ без повторного выполнения. Проверяется заявленная модель, а не её интеллект.
+- Переключатель оптимизации инструментов убран. Список инструментов уходит так, как его прислал клиент. Сохранённый оптимизированный режим больше не меняет новые запросы.
+- Переключение аккаунта сохраняет официальный каталог ChatGPT и его официальные модели. Прямое API-подключение берёт модели, которые сообщил этот провайдер. Известные уровни размышления берутся из разбора каталога и подключаются напрямую, без переписывания пулом.
+- При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта. Автоматическая очередь видна порядком карточек слева направо, а не текстовым списком.
+- Скорость модели показана иконками. Выбор размышления появляется только у текстовой модели, у которой есть уровни, и стоит после иконок скорости.
+- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа.
+- Переключение модели сохраняется без ожидания полного снимка. Остальные переключатели сохраняют новое значение, пока идёт фоновое обновление, поэтому остальным окном можно пользоваться.
+- Запросы аккаунта ChatGPT отправляются с актуальными заголовками Chrome. Отказ по квоте оставляет аккаунт восстановимым и применяется к открытому основному окну, а не помечает аккаунт сломанным.
+- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на file_id. Внешняя ссылка отклоняется, поле detail не пересылается. Одна ошибка зашифрованного содержимого убирает чужой шифротекст и повторяет запрос тем же аккаунтом.
+- Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе, поэтому вызов инструмента по-прежнему совпадает со своим ответом. Видимое краткое содержание размышления сохраняется даже без шифротекста. Максимальное размышление отправляется как экстра-высокий уровень, который поддерживает этот маршрут.
+- Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил. Ошибка обновления списка моделей говорит, что список не удалось обновить, а поздняя локальная ошибка не скрывает уже записанную ошибку провайдера.
+- Отказы Basis Points по доступу к модели и правилам использования сохраняют исходный статус 403. Отказ доступа временно приостанавливает эту модель у конкретного участника, а не блокирует весь аккаунт. Отказ по правилам использования завершает запрос, не обнуляет квоту и не перебирает другие аккаунты для обхода ограничения.
+- Модель проверяется до преобразования протокола: адаптер не может скрыть другую модель провайдера, записав в ответ запрошенное имя. Код ошибки и безопасное объяснение сохраняются в протоколе клиента.
+- Сборка ответа аккаунта заканчивается сразу после завершающего события, даже если провайдер держит соединение открытым. Разбитые на части события SSE проверяются целиком; слишком большое событие, которое нельзя проверить, останавливает поток.
+- Ошибка завершения, в которой уже есть сгенерированный ответ, не запускает восстановление истории с повторной генерацией. Обрыв с неизвестным результатом также остаётся ошибкой, а не скрытым повтором запроса.
+- Быстрый путь текстовых SSE-дельт распознаёт обычные события без построения полного JSON-дерева. Итоговое использование, токены размышления, счётчики кеша и сообщённый провайдером класс обслуживания по-прежнему учитываются обычным способом.
+- Порядок карточек сначала учитывает доступность выбранной модели, затем квоту. Аккаунт без этой модели не оказывается впереди подходящего API-провайдера только потому, что в целом он исправен.
+- Если настройку не удалось сохранить, переключатель возвращается назад и перестаёт висеть в загрузке — в том числе при мгновенной ошибке команды. Вкладки и остальные элементы остаются доступны во время независимых фоновых операций.
+- Фокус с клавиатуры больше не добавляет нежелательные обводки и внутренние тени в лаунчере. Уведомления об изменениях сохраняют компактный блок без дополнительной рамки и тени.
+- Снимки состояния повторно используют сведения об аккаунтах и общие представления вместо лишнего копирования учётных данных и одинаковых вычислений. Desktop и Relay Server используют общие определения статусов аккаунтов и сводок провайдеров.
+- В справке на обоих языках описаны несовпадение модели, отказы доступа, блокировки по правилам использования, ошибки продолжения и способы восстановления. Описание этой версии попадает во встроенное обновление на русском или английском согласно выбранному языку.
+
 ## [1.1.3] - 2026-09-30
 
 <!-- relay-notes:en -->
@@ -1289,7 +1357,8 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.4...HEAD
+[1.1.4]: https://github.com/F0RLE/zenith-relay/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.2
 [1.1.1]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.1

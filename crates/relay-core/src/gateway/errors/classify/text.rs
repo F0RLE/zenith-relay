@@ -32,6 +32,10 @@ impl Rule {
 
 const RULES: &[Rule] = &[
     Rule::Phrases(
+        &[error_codes::UPSTREAM_ROUTE_DEGRADED],
+        error_codes::UPSTREAM_ROUTE_DEGRADED,
+    ),
+    Rule::Phrases(
         &[
             error_codes::RESPONSE_CONTINUATION_UNAVAILABLE,
             "responses continuation route is unknown",
@@ -113,6 +117,16 @@ const RULES: &[Rule] = &[
         ],
         error_codes::UPSTREAM_USAGE_NOT_INCLUDED,
     ),
+    // Some hosts wrap these 403 responses in `insufficient_quota`.
+    // The specific provider refusal takes precedence over that wrapper.
+    Rule::Phrases(
+        &["blocked by our usage policy"],
+        error_codes::UPSTREAM_CONTENT_POLICY,
+    ),
+    Rule::Phrases(
+        &["model access has changed"],
+        error_codes::UPSTREAM_MODEL_UNAVAILABLE,
+    ),
     Rule::Custom(quota_exhausted),
     Rule::Custom(unauthorized),
     Rule::Phrases(
@@ -169,6 +183,7 @@ const RULES: &[Rule] = &[
         &["model_not_available"],
         error_codes::UPSTREAM_MODEL_UNAVAILABLE,
     ),
+    Rule::Custom(degraded_route_model),
     Rule::Phrases(
         &[error_codes::MODEL_NOT_FOUND],
         error_codes::UPSTREAM_MODEL_NOT_FOUND,
@@ -242,6 +257,10 @@ fn tool_call_mismatch(_status: StatusCode, text: &str) -> Option<&'static str> {
         ],
     ) || super::super::failure::responses_call_id_is_missing_text(text))
     .then_some(error_codes::UPSTREAM_TOOL_CALL_MISMATCH)
+}
+
+fn degraded_route_model(_status: StatusCode, text: &str) -> Option<&'static str> {
+    crate::is_degraded_route_model(text).then_some(error_codes::UPSTREAM_ROUTE_DEGRADED)
 }
 
 fn context_too_large(_status: StatusCode, text: &str) -> Option<&'static str> {

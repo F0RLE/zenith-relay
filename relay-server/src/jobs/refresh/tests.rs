@@ -1,8 +1,4 @@
 use super::*;
-use crate::{
-    config::Config,
-    store::{Store, Vault},
-};
 use tempfile::TempDir;
 use zenith_relay_core::protocol::RefreshStatus;
 use zenith_relay_core::quota::{QuotaWindow, QuotaWindowKind};
@@ -11,10 +7,8 @@ use zenith_relay_core::CandidateHealth;
 
 fn fixture() -> (TempDir, Arc<AppState>) {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    (root, AppState::new(config, store, vault).unwrap())
+    let state = crate::test_fixtures::test_app_state(root.path());
+    (root, state)
 }
 
 #[tokio::test]

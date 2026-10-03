@@ -67,15 +67,17 @@ fn model_refresh_keeps_baseline_and_last_good_effective_list() {
 }
 
 #[test]
-fn successful_empty_model_refresh_is_authoritative() {
+fn empty_model_refresh_does_not_replace_a_live_list() {
     let mut record = account(&["gpt-old"]);
+    record.health = AccountHealthState::Degraded;
+    record.last_error_code = Some("models_transport".into());
 
     apply_discovered_models(&mut record, Ok(Vec::new()));
 
-    assert_eq!(record.discovered_models, Some(Vec::new()));
-    assert!(record.effective_models().is_empty());
-    assert!(record.last_error_code.is_none());
-    assert_eq!(record.health, AccountHealthState::Healthy);
+    assert!(record.discovered_models.is_none());
+    assert_eq!(record.effective_models(), ["gpt-old"]);
+    assert_eq!(record.last_error_code.as_deref(), Some("models_transport"));
+    assert_eq!(record.health, AccountHealthState::Degraded);
 }
 
 #[test]

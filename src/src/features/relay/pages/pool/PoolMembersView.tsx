@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, CheckCheck, CircleAlert, CircleCheck, CirclePause, Clock3, Coins, Cpu, DollarSign, Loader2, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -45,6 +45,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
   const [pendingServiceTier, setPendingServiceTier] = useState<DefaultServiceTier | null>(null);
   const serviceTier = pendingServiceTier ?? runtime?.gateway.defaultServiceTier ?? "standard";
+  useEffect(() => {
+    if (pendingServiceTier !== null && pendingServiceTier === runtime?.gateway.defaultServiceTier) {
+      setPendingServiceTier(null);
+    }
+  }, [pendingServiceTier, runtime?.gateway.defaultServiceTier]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
@@ -57,7 +62,12 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     () => poolMemberRuntimeStates(poolMembers, runtimeOrder, runtimeActivity),
     [poolMembers, runtimeActivity, runtimeOrder],
   );
-  const members = useMemo(() => orderedPoolMembers(poolMembers, runtimeOrder), [poolMembers, runtimeOrder]);
+  const savedRoutingMembers = runtime?.gateway.poolRouting?.members;
+  const rotationMode = runtime?.gateway.poolRouting?.version === 2 ? runtime.gateway.poolRouting.mode : null;
+  const members = useMemo(
+    () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers, rotationMode),
+    [poolMembers, rotationMode, runtimeOrder, savedRoutingMembers],
+  );
   const providerCredits = useMemo(() => poolProviderCreditsSummary(members), [members]);
   const providerCreditsValue = providerCredits == null
     ? null
@@ -66,7 +76,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       : formatNumber(providerCredits.availableCredits, i18n.resolvedLanguage ?? i18n.language, { maximumFractionDigits: 1 });
   const visibleModelIds = runtime?.gateway.visibleModelIds ?? EMPTY_VISIBLE_MODELS;
   const sourceMembers = members.filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source");
-  const rotationMode = runtime?.gateway.poolRouting?.version === 2 ? runtime.gateway.poolRouting.mode : null;
   const { stats: sourceStats, refresh: readSourceStats } = useSourceStats(mode, sourceMembers);
   const memberTimestamps = useMemo(() => members.flatMap((member) => [
     ...(member.kind === "account" ? [
@@ -85,7 +94,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       const refreshModels = () => relayCommands.refreshSourceData(sourceId);
       if (operationManaged) {
         try { await refreshModels(); } catch (error) { modelRefreshError = error; }
-      } else await perform(`source-data-refresh-${sourceId}`, refreshModels, "feedback.refreshed");
+      } else await perform(`source-data-refresh-${sourceId}`, refreshModels, "feedback.refreshed", { backgroundRefresh: true });
     }
     await readSourceStats(sourceId, refreshModels || operationManaged);
     if (modelRefreshError) throw modelRefreshError;
@@ -172,7 +181,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       accountIds: member.kind === "account" ? [member.id] : [],
       sourceIds: member.kind === "source" ? [member.id] : [],
       inPool: false,
-    }), "feedback.saved");
+    }), "feedback.saved", { backgroundRefresh: true });
     if (ok) setSelectedId(null);
   };
   const confirmRemove = async (member: Member) => {
@@ -191,20 +200,17 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     const ok = await perform("pool-quota-refresh", async () => {
       if (quotaAccountCount) report = await refreshAllAccountQuotas(mode);
       await Promise.all(refreshableSourceIds.map((sourceId) => refreshSourceStats(sourceId, mode === "local", true)));
-    });
+    }, undefined, { backgroundRefresh: true });
     if (ok && report) setQuotaReport(report);
   };
   const updateServiceTier = async (defaultServiceTier: DefaultServiceTier) => {
     if (defaultServiceTier === serviceTier) return;
     setPendingServiceTier(defaultServiceTier);
-    try {
-      await perform("pool-service-tier", () => persistRoutingPolicy(mode, {
-        maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
-        defaultServiceTier,
-      }));
-    } finally {
-      setPendingServiceTier(null);
-    }
+    const ok = await perform("pool-service-tier", () => persistRoutingPolicy(mode, {
+      maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
+      defaultServiceTier,
+    }), "feedback.saved", { backgroundRefresh: true, uiLock: false });
+    if (!ok) setPendingServiceTier((current) => current === defaultServiceTier ? null : current);
   };
   if (!members.length) {
     return (
@@ -241,7 +247,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       </div>
       <div className="pool-member-toolbar">
         <div className="pool-priority-context">
-          <div className="pool-priority-label" data-relay-tooltip={t("pool.priorityHint")}><h2>{t("pool.priorityTitle")}</h2></div>
+          <div className="pool-priority-label" data-relay-tooltip={t(rotationMode === "automatic" ? "pool.priorityHintAutomatic" : "pool.priorityHint")}><h2>{t("pool.priorityTitle")}</h2></div>
           <div className="pool-runtime-strip">
             <div className="pool-route-summary">
               <strong className="pool-current-route" data-active={activeRequestTotal > 0}>{routingSummary}</strong>

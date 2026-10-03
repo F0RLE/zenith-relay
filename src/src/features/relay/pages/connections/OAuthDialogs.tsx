@@ -31,7 +31,7 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
     void onCancel();
   };
   const reopen = async () => {
-    const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId));
+    const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId), undefined, { backgroundRefresh: true });
     if (opened) setReopenAt(Date.now() + 3_000);
   };
   const copyLink = async () => {
@@ -161,7 +161,7 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
     const ok = await perform("oauth-setup", async () => {
       if (addToPool) await relayCommands.setPoolMembership([accountId], [], true);
       if (assignStoredProxy) await relayCommands.assignAutomaticProxies([accountId]);
-    }, "feedback.saved");
+    }, "feedback.saved", { backgroundRefresh: true });
     if (ok) onClose();
   };
   return <Dialog

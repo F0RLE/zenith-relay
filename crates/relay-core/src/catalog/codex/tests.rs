@@ -27,12 +27,19 @@ fn relay_aliases_are_exact_and_media_models_stay_out_of_codex() {
     assert_eq!(codex_model_display_name(model), "Claude Opus 4.8");
     assert!(codex_model_is_picker_eligible(model));
     assert!(!codex_model_is_picker_eligible("gpt-image-2"));
+    assert!(!codex_model_is_picker_eligible(
+        "gpt-6-astra-degrade2-luna-1p-codexswic-ev3"
+    ));
+    assert!(codex_model_is_picker_eligible_for(
+        "gpt-6-astra-degrade2-luna-1p-codexswic-ev3",
+        false
+    ));
     assert!(decode_codex_model_alias("zenith/not-base64!").is_none());
 }
 
 #[test]
 fn generated_picker_order_preserves_discovery_order_without_metadata() {
-    let models = crate::canonicalize_model_ids([
+    let models = crate::normalize_model_ids([
         "vendor/glm-5.2",
         "vendor/grok-4.5",
         "vendor/gemini-3.6-flash",
@@ -88,10 +95,12 @@ fn routed_models_strip_native_only_selectors_from_template() {
     let entry =
         routed_codex_catalog_entry(template.as_object(), "vendor/claude-fable-5", 1_000, None);
 
-    assert_eq!(
-        entry["base_instructions"],
-        "You are a coding agent. Follow the user's instructions and use the available tools."
-    );
+    let instructions = entry["base_instructions"].as_str().unwrap();
+    assert_eq!(instructions, super::entry::ROUTED_CODEX_BASE_INSTRUCTIONS);
+    assert!(instructions.contains("apply_patch"));
+    assert!(instructions.contains("PowerShell"));
+    assert!(instructions.contains("macOS and Linux"));
+    assert!(!instructions.contains("native Codex instructions"));
     assert!(entry.get("model_messages").is_none());
     assert!(entry.get("tool_mode").is_none());
     assert!(entry.get("multi_agent_version").is_none());

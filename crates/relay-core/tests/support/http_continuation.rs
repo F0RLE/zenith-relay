@@ -177,10 +177,16 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 
 #[tokio::test]
 async fn model_switch_uses_materialized_http_history_before_selection() {
-    let (old_model_upstream, old_state) =
-        spawn_upstream(vec![success_reply("old-model-response")]).await;
-    let (new_model_upstream, new_state) =
-        spawn_upstream(vec![success_reply("new-model-response")]).await;
+    let (old_model_upstream, old_state) = spawn_upstream(vec![success_reply_for_model(
+        "old-model-response",
+        "old-model",
+    )])
+    .await;
+    let (new_model_upstream, new_state) = spawn_upstream(vec![success_reply_for_model(
+        "new-model-response",
+        "new-model",
+    )])
+    .await;
     let authority = Arc::new(TokenAuthority::new(2).unwrap());
     register_ready(&authority, "old-model-account", "old-model-access").await;
     register_ready(&authority, "new-model-account", "new-model-access").await;
@@ -741,4 +747,331 @@ async fn prompt_cache_key_keeps_sequential_http_requests_on_the_same_account() {
         events[1].routing.as_ref().map(|routing| routing.reason),
         Some(SelectionReason::PromptCacheAffinity)
     );
+}
+
+fn fresh_quota(remaining: u16, observed_at_ms: u64) -> zenith_relay_core::quota::QuotaSnapshot {
+    zenith_relay_core::quota::QuotaSnapshot {
+        primary: Some(zenith_relay_core::quota::QuotaWindow {
+            kind: zenith_relay_core::quota::QuotaWindowKind::Primary,
+            provider_cycle_id: None,
+            window_start_ms: None,
+            available_basis_points: Some(remaining),
+            explicitly_full: None,
+            reset_at_ms: Some(observed_at_ms.saturating_add(3_600_000)),
+            window_minutes: Some(300),
+            observed_at_ms,
+            full_transition_fingerprint: None,
+            exhaustion_transition_fingerprint: None,
+        }),
+        updated_at_ms: Some(observed_at_ms),
+        ..Default::default()
+    }
+}
+
+fn set_account_remainder(runtime: &GatewayRuntime, account_id: &str, remaining: u16) {
+    let observed_at_ms = current_time_ms();
+    assert!(runtime.sync_account_availability_with_quota(
+        account_id,
+        true,
+        CandidateHealth::Healthy,
+        &fresh_quota(remaining, observed_at_ms),
+        observed_at_ms,
+    ));
+}
+
+fn reply_without_saved_history(id: &str) -> Reply {
+    Reply::Json(
+        StatusCode::OK,
+        json!({
+            "id": id,
+            "object": "response",
+            "model": MODEL,
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }),
+    )
+}
+
+#[tokio::test]
+async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() {
+    let (owner_upstream, owner_state) = spawn_upstream(vec![
+        success_reply("owner-compact"),
+        success_reply("owner-stays"),
+        success_reply("owner-after-shrink"),
+    ])
+    .await;
+    let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-compact")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-account", "owner-access").await;
+    register_ready(&authority, "other-account", "other-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("owner-account", "provider-owner", &owner_upstream, 100),
+            account("other-account", "provider-other", &other_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+    set_account_remainder(&runtime, "owner-account", 9_800);
+    set_account_remainder(&runtime, "other-account", 3_300);
+    let client = reqwest::Client::new();
+
+    let first: Value = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "first"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["id"], "owner-compact");
+
+    let stayed: Value = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "second",
+            "previous_response_id": first["id"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stayed["id"], "owner-stays");
+    assert_eq!(
+        owner_state.requests.lock().unwrap()[1]
+            .body
+            .get("previous_response_id")
+            .and_then(Value::as_str),
+        Some("owner-compact")
+    );
+    assert!(other_state.requests.lock().unwrap().is_empty());
+
+    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "other-account", 9_800);
+    let moved = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "third",
+            "previous_response_id": stayed["id"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(moved.status(), StatusCode::OK);
+    let moved: Value = moved.json().await.unwrap();
+    assert_eq!(moved["id"], "other-compact");
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    let other_requests = other_state.requests.lock().unwrap();
+    assert_eq!(other_requests.len(), 1);
+    assert_eq!(other_requests[0].path, "/v1/responses/compact");
+    assert_eq!(
+        other_requests[0].chatgpt_account_id.as_deref(),
+        Some("provider-other")
+    );
+    assert!(other_requests[0].body.get("previous_response_id").is_none());
+    assert_eq!(
+        other_requests[0].body["input"][0]["content"][0]["text"],
+        "first"
+    );
+    assert_eq!(
+        other_requests[0].body["input"][1]["content"][0]["text"],
+        "second"
+    );
+    assert_eq!(
+        other_requests[0].body["input"][2]["content"][0]["text"],
+        "third"
+    );
+}
+
+#[tokio::test]
+async fn account_continuation_without_saved_history_stays_on_its_owner() {
+    let (owner_upstream, owner_state) = spawn_upstream(vec![
+        reply_without_saved_history("owner-opaque"),
+        success_reply("owner-follow-up"),
+    ])
+    .await;
+    let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-unused")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-account", "owner-access").await;
+    register_ready(&authority, "other-account", "other-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("owner-account", "provider-owner", &owner_upstream, 100),
+            account("other-account", "provider-other", &other_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+    set_account_remainder(&runtime, "owner-account", 9_800);
+    set_account_remainder(&runtime, "other-account", 3_300);
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "first"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["id"], "owner-opaque");
+
+    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "other-account", 9_800);
+    let stayed: Value = client
+        .post(format!("{}/v1/alpha/search", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "second",
+            "previous_response_id": first["id"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stayed["id"], "owner-follow-up");
+    let owner_requests = owner_state.requests.lock().unwrap();
+    assert_eq!(owner_requests.len(), 2);
+    assert_eq!(owner_requests[1].path, "/v1/alpha/search");
+    assert_eq!(
+        owner_requests[1]
+            .body
+            .get("previous_response_id")
+            .and_then(Value::as_str),
+        Some("owner-opaque")
+    );
+    drop(owner_requests);
+    assert!(other_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn account_search_continuation_moves_when_another_account_has_more_quota() {
+    let (owner_upstream, owner_state) = spawn_upstream(vec![success_reply("owner-response")]).await;
+    let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-search")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-account", "owner-access").await;
+    register_ready(&authority, "other-account", "other-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("owner-account", "provider-owner", &owner_upstream, 100),
+            account("other-account", "provider-other", &other_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+    set_account_remainder(&runtime, "owner-account", 9_800);
+    set_account_remainder(&runtime, "other-account", 3_300);
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "first", "stream": false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["id"], "owner-response");
+
+    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "other-account", 9_800);
+    let moved: Value = client
+        .post(format!("{}/v1/alpha/search", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "second",
+            "previous_response_id": first["id"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(moved["id"], "other-search");
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+    let other_requests = other_state.requests.lock().unwrap();
+    assert_eq!(other_requests.len(), 1);
+    assert_eq!(other_requests[0].path, "/v1/alpha/search");
+    assert!(other_requests[0].body.get("previous_response_id").is_none());
+    assert_eq!(
+        other_requests[0].body["input"][0]["content"][0]["text"],
+        "first"
+    );
+    assert_eq!(
+        other_requests[0].body["input"][1]["content"][0]["text"],
+        "second"
+    );
+}
+
+#[tokio::test]
+async fn account_wake_stays_on_its_account_when_another_has_more_quota() {
+    let (owner_upstream, owner_state) = spawn_upstream(vec![success_reply("wake-response")]).await;
+    let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-unused")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-account", "owner-access").await;
+    register_ready(&authority, "other-account", "other-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("owner-account", "provider-owner", &owner_upstream, 100),
+            account("other-account", "provider-other", &other_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "other-account", 9_800);
+
+    let response = gateway::execute_account_wake(
+        runtime,
+        gateway::AccountWakeRequest {
+            local_key_id: "system-gateway-key".into(),
+            account_id: "owner-account".into(),
+            model_id: MODEL.into(),
+            output_token_cap: 8,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let owner_requests = owner_state.requests.lock().unwrap();
+    assert_eq!(owner_requests.len(), 1);
+    assert_eq!(
+        owner_requests[0].chatgpt_account_id.as_deref(),
+        Some("provider-owner")
+    );
+    drop(owner_requests);
+    assert!(other_state.requests.lock().unwrap().is_empty());
 }

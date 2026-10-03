@@ -150,7 +150,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
 }
 
 #[test]
-fn tool_reminder_is_separate_and_examples_follow_the_bare_name() {
+fn tool_catalog_is_one_message_and_examples_follow_the_bare_name() {
     let request = json!({
         "model": "gpt-6-astra",
         "input": "edit",
@@ -195,8 +195,7 @@ fn tool_reminder_is_separate_and_examples_follow_the_bare_name() {
     let prepared = prepare_request(&request).unwrap();
     let input = prepared["input"].as_array().unwrap();
     let instructions = input[0]["content"][0]["text"].as_str().unwrap();
-    let reminder = input[1]["content"][0]["text"].as_str().unwrap();
-    assert_eq!(input[1]["role"], "developer");
+    assert_eq!(input[0]["role"], "developer");
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
     assert!(
         instructions.contains("Example outer arguments for mcp__fixture._apply_patch (function)")
@@ -209,14 +208,16 @@ fn tool_reminder_is_separate_and_examples_follow_the_bare_name() {
         !instructions.contains("zeta_tool (custom). It receives raw text in input. Input format")
     );
     assert!(instructions.contains("Input format: {\"type\":\"grammar\"}"));
-    assert!(reminder.starts_with("Reminder: use the outer native run_officejs transport."));
-    assert!(reminder.contains("Client tools: apply_patch, exec_command, mcp__fixture._apply_patch, my.exec_command, zeta_tool."));
-    assert!(reminder.contains("do not JSON-encode that input"));
-    let apply = reminder.find("Custom tool apply_patch").unwrap();
-    let zeta = reminder.find("Custom tool zeta_tool").unwrap();
+    assert!(instructions.contains("not JSON"));
+    assert!(
+        instructions.contains("do not route references to run_officejs or functions.run_officejs")
+    );
+    let apply = instructions.find("apply_patch (custom)").unwrap();
+    let zeta = instructions.find("zeta_tool (custom)").unwrap();
     assert!(apply < zeta);
-    assert!(!reminder.contains("Custom tool exec_command"));
-    assert_eq!(input[2]["role"], "user");
+    assert!(!instructions.contains("Reminder:"));
+    assert_eq!(input.len(), 2);
+    assert_eq!(input[1]["role"], "user");
 }
 
 #[test]
@@ -353,4 +354,58 @@ fn unsupported_opaque_continuation_is_not_silently_dropped() {
     request["previous_response_id"] = json!("resp_previous");
     let error = prepare_request(&request).unwrap_err();
     assert_eq!(error.parameter(), Some("previous_response_id"));
+}
+
+#[test]
+fn foreign_encrypted_context_is_kept_until_the_provider_rejects_it() {
+    let mut request = json!({
+        "model": "gpt-6-luna",
+        "input": [
+            {"id":"rs_foreign","type":"reasoning","encrypted_content":"foreign-reasoning","summary":[{"type":"summary_text","text":"old"}]},
+            {"id":"cmp_foreign","type":"compaction","encrypted_content":"foreign-compaction"},
+            {"id":"cmp_summary","type":"compaction_summary","encrypted_content":"foreign-summary"},
+            {"id":"rs_nested","encrypted_content":{"blob":"foreign-nested"}},
+            {"id":"cmp_plain","type":"compaction","summary":[]},
+            {"id":"rs_empty","type":"reasoning","encrypted_content":"  ","summary":[]},
+            {"role":"assistant","content":[{"type":"output_text","text":"previous answer"}]},
+            {"type":"function_call","call_id":"call_1","name":"exec_command","arguments":"{\"cmd\":\"printf\"}"},
+            {"role":"user","content":[
+                {"type":"input_text","text":"Generate an SVG of a pelican riding a bicycle"},
+                {"type":"input_image","image_url":"data:image/png;base64,aaaa"}
+            ]}
+        ]
+    });
+    let first = prepare_request(&request).unwrap().to_string();
+    assert!(first.contains("foreign-reasoning"));
+    assert!(first.contains("foreign-compaction"));
+    assert!(first.contains("foreign-summary"));
+    assert!(first.contains("foreign-nested"));
+    assert!(first.contains("cmp_plain"));
+    assert!(!first.contains("rs_empty"));
+    assert!(first.contains("previous answer"));
+    assert!(first.contains("pelican"));
+    assert!(first.contains("input_image"));
+    assert!(first.contains("exec_command"));
+
+    assert!(drop_foreign_encrypted_context(&mut request));
+    assert!(!drop_foreign_encrypted_context(&mut request));
+    let kept = request["input"].as_array().unwrap();
+    assert!(kept.iter().any(|item| item["id"] == "cmp_plain"));
+    assert!(kept.iter().any(|item| item["id"] == "rs_empty"));
+    assert!(kept.iter().all(|item| {
+        item.get("encrypted_content")
+            .and_then(|value| value.as_str())
+            .is_none_or(|value| value.trim().is_empty())
+    }));
+
+    let second = prepare_request(&request).unwrap().to_string();
+    assert!(!second.contains("foreign-reasoning"));
+    assert!(!second.contains("foreign-compaction"));
+    assert!(!second.contains("foreign-summary"));
+    assert!(!second.contains("foreign-nested"));
+    assert!(second.contains("cmp_plain"));
+    assert!(second.contains("previous answer"));
+    assert!(second.contains("pelican"));
+    assert!(second.contains("input_image"));
+    assert!(second.contains("exec_command"));
 }

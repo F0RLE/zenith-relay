@@ -105,7 +105,7 @@ async fn stream_parser_rejects_deferred_then_accepts_original(
 }
 
 #[tokio::test]
-async fn automatic_native_responses_uses_provider_deferred_tool_search_and_records_usage() {
+async fn saved_automatic_policy_forwards_the_original_catalog_and_records_usage() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn(
         Router::new()
@@ -148,9 +148,9 @@ async fn automatic_native_responses_uses_provider_deferred_tool_search_and_recor
     let captured = bodies.lock().unwrap();
     assert_eq!(captured.len(), 1);
     let tools = captured[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 74);
-    assert!(tools[..73].iter().all(|tool| tool["defer_loading"] == true));
-    assert_eq!(tools[73], json!({"type":"tool_search"}));
+    assert_eq!(tools.len(), 73);
+    assert!(!has_deferred_tool_search(&captured[0]));
+    assert_eq!(tools[72]["name"], "tool_72");
     drop(captured);
 
     let events = events.lock().unwrap();
@@ -162,15 +162,18 @@ async fn automatic_native_responses_uses_provider_deferred_tool_search_and_recor
     assert_eq!(diagnostics.filtered_tool_count, 0);
     assert_eq!(
         diagnostics.policy_outcome,
-        Some(ToolPolicyOutcome::Deferred)
+        Some(ToolPolicyOutcome::PassThrough)
     );
-    assert!(diagnostics.deferred_tool_search);
+    assert!(!diagnostics.deferred_tool_search);
     assert!(!diagnostics.policy_fallback);
-    assert!(diagnostics.client_schema_bytes < diagnostics.forwarded_schema_bytes);
+    assert_eq!(
+        diagnostics.client_schema_bytes,
+        diagnostics.forwarded_schema_bytes
+    );
 }
 
 #[tokio::test]
-async fn deferred_tool_search_rejection_retries_without_deferred_fields_and_keeps_full_catalog() {
+async fn saved_automatic_policy_does_not_retry_for_deferred_tool_search() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn(
         Router::new()
@@ -211,31 +214,23 @@ async fn deferred_tool_search_rejection_retries_without_deferred_fields_and_keep
     assert_eq!(response.status(), StatusCode::OK);
 
     let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2);
-    let first_tools = bodies[0]["tools"].as_array().unwrap();
-    assert!(has_deferred_tool_search(&bodies[0]));
-    assert_eq!(first_tools.len(), 74);
-    let second_tools = bodies[1]["tools"].as_array().unwrap();
-    assert!(!has_deferred_tool_search(&bodies[1]));
-    assert_eq!(second_tools.len(), 73);
-    assert_eq!(second_tools[72]["name"], "tool_72");
+    assert_eq!(bodies.len(), 1);
+    assert!(!has_deferred_tool_search(&bodies[0]));
+    assert_eq!(bodies[0]["tools"].as_array().unwrap().len(), 73);
+    assert_eq!(bodies[0]["tools"][72]["name"], "tool_72");
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
-    assert!(!events[0].success);
-    assert!(events[0].tool_use.deferred_tool_search);
-    assert!(events[0].tool_use.policy_fallback);
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+    assert!(!events[0].tool_use.deferred_tool_search);
+    assert!(!events[0].tool_use.policy_fallback);
+    assert_eq!(events[0].tool_use.forwarded_tool_count, 73);
     assert_eq!(events[0].tool_use.filtered_tool_count, 0);
-    assert!(events[1].success);
-    assert!(!events[1].tool_use.deferred_tool_search);
-    assert!(events[1].tool_use.policy_fallback);
-    assert_eq!(events[1].tool_use.forwarded_tool_count, 73);
-    assert_eq!(events[1].tool_use.filtered_tool_count, 0);
 }
 
 #[tokio::test]
-async fn deferred_tool_search_parser_failure_does_not_replay_unknown_execution() {
+async fn saved_automatic_policy_streams_the_original_catalog_once() {
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let upstream = spawn(
         Router::new()
@@ -278,19 +273,18 @@ async fn deferred_tool_search_parser_failure_does_not_replay_unknown_execution()
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert!(!response.text().await.unwrap().contains("resp_stream_retry"));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("resp_stream_retry"));
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
-    assert!(has_deferred_tool_search(&bodies[0]));
+    assert!(!has_deferred_tool_search(&bodies[0]));
     drop(bodies);
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
-    assert!(!events[0].success);
-    assert_eq!(events[0].error_category.as_deref(), Some("stream_invalid"));
-    assert!(events[0].tool_use.deferred_tool_search);
+    assert!(events[0].success);
+    assert!(!events[0].tool_use.deferred_tool_search);
     assert!(!events[0].tool_use.policy_fallback);
 }
 
@@ -406,8 +400,8 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
         }
     }
 
-    // A hot update enables provider-native optimization without restarting the
-    // listener. The complete catalog remains available on the wire.
+    // A hot update to the retired automatic mode does not rewrite the catalog
+    // or require restarting the listener.
     runtime.set_tool_policy(automatic_policy()).unwrap();
     assert!(client
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -421,8 +415,8 @@ async fn tool_policy_forwards_the_complete_catalog_across_http_sse_and_websocket
     {
         let captured = bodies.lock().unwrap();
         let body = captured.last().unwrap();
-        assert!(has_deferred_tool_search(body));
-        assert_eq!(body["tools"].as_array().unwrap().len(), 74);
+        assert!(!has_deferred_tool_search(body));
+        assert_eq!(body["tools"].as_array().unwrap().len(), 73);
     }
     runtime.set_tool_policy(ToolPolicy::default()).unwrap();
     assert!(client

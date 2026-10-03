@@ -16,9 +16,10 @@ use std::{
     path::Path,
 };
 use zenith_relay_core::{
-    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible_for,
+    decode_codex_model_alias, normalize_codex_catalog_priorities,
+    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
+    routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
 };
 
 pub(super) fn collect_native_catalog_template(
@@ -222,7 +223,8 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
         } else {
             slug.to_string()
         };
-        if !codex_model_is_picker_eligible(&model) {
+        // The Relay catalog already applied the downgrade-id policy.
+        if !codex_model_is_picker_eligible_for(&model, false) {
             continue;
         }
         accepted += 1;

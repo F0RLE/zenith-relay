@@ -19,6 +19,7 @@ use super::errors::{
 use super::now_ms;
 use super::request::response_tool_call_ids;
 use super::response::response_id_from_bytes;
+use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids,
@@ -27,9 +28,32 @@ use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
 use crate::ErrorOrigin;
 use axum::body::Body;
-use axum::http::{Response, StatusCode};
+use axum::http::{HeaderValue, Response, StatusCode};
 use serde_json::Value;
 use std::collections::HashSet;
+
+/// Header shared by ordinary Responses routes and account execution.
+///
+/// The caller decides when the route is eligible. Ordinary routes pass this
+/// only for `WireApi::Responses`; account execution is already on that protocol.
+fn responses_lite_header(
+    responses_lite: &Option<HeaderValue>,
+    automatic_responses_lite: bool,
+    runtime: &GatewayRuntime,
+    resolved_model: &str,
+    account_id: Option<&str>,
+) -> Option<HeaderValue> {
+    responses_lite.clone().or_else(|| {
+        (automatic_responses_lite
+            && account_id.is_some_and(|candidate_id| {
+                runtime
+                    .codex_model_responses_lite_candidates(resolved_model)
+                    .iter()
+                    .any(|id| id == candidate_id)
+            }))
+        .then(|| HeaderValue::from_static("true"))
+    })
+}
 
 /// One-shot request repairs shared by ordinary and account execution.
 ///
@@ -44,6 +68,9 @@ pub(super) struct AttemptRepairs {
     pub(super) legacy_call_id: bool,
     pub(super) model_switch_reset: bool,
     pub(super) stale_tool_history: bool,
+    pub(super) quota_yield: bool,
+    /// Basis Points rejected ciphertext from another model or account.
+    pub(super) encrypted_context: bool,
 }
 
 /// Records the one allowed model-switch reset and drops the opaque continuation binding.
@@ -257,9 +284,24 @@ pub(super) fn attempt_error_response(
             Some(request_id),
         );
     }
-    api_error_with_origin(
+    let code = match failure.category {
+        error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE => {
+            error_codes::UPSTREAM_ERROR
+        }
+        _ => {
+            return api_error_with_origin(
+                failure.status,
+                failure.message,
+                failure.category,
+                failure_origin,
+                Some(request_id),
+            );
+        }
+    };
+    api_error_with_origin_and_category(
         failure.status,
         failure.message,
+        code,
         failure.category,
         failure_origin,
         Some(request_id),

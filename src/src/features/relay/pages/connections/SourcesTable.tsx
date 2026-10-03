@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -25,8 +25,17 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
   const [sort, setSort] = useState<{ key: SourceSortKey; direction: SourceSortDirection }>({ key: "runtime", direction: "asc" });
+  const [pendingPool, setPendingPool] = useState<Record<string, boolean>>({});
+  const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
   const [launchSourceId, setLaunchSourceId] = useState<string | null>(null);
   const sourcesSnapshot = runtime?.sources ?? EMPTY_SOURCES;
+  const membershipSignature = sourcesSnapshot.map((source) => `${source.id}:${source.inPool}:${source.enabled}`).join("|");
+  useEffect(() => {
+    const savedPool = new Map(sourcesSnapshot.map((source) => [source.id, source.inPool]));
+    const savedEnabled = new Map(sourcesSnapshot.map((source) => [source.id, source.enabled]));
+    setPendingPool((current) => dropConfirmedFlags(current, savedPool));
+    setPendingEnabled((current) => dropConfirmedFlags(current, savedEnabled));
+  }, [membershipSignature]);
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
   const retryTimestamps = useMemo(() => runtimeOrder
     .flatMap((candidate) => candidate.kind === "api_source" ? [candidate.nextRetryAtMs] : []), [runtimeOrder]);
@@ -63,11 +72,49 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
       </button>
     );
   };
-  const updateParticipation = (source: SourceSummary, inPool: boolean) => perform(
-    `source-pool-${source.id}`,
-    () => updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool }),
-    "feedback.saved",
-  );
+  const rememberFlag = (
+    setFlag: (update: (current: Record<string, boolean>) => Record<string, boolean>) => void,
+    id: string,
+    value: boolean,
+  ) => {
+    setFlag((current) => ({ ...current, [id]: value }));
+  };
+  const rollbackFlag = (
+    setFlag: (update: (current: Record<string, boolean>) => Record<string, boolean>) => void,
+    id: string,
+    value: boolean,
+  ) => {
+    setFlag((current) => {
+      if (current[id] !== value) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+  };
+  const updateParticipation = (source: SourceSummary, inPool: boolean) => {
+    rememberFlag(setPendingPool, source.id, inPool);
+    void perform(
+      `source-pool-${source.id}`,
+      () => updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool }),
+      "feedback.saved",
+      { backgroundRefresh: true, uiLock: false },
+    ).then((ok) => {
+      if (!ok) rollbackFlag(setPendingPool, source.id, inPool);
+    });
+  };
+  const updateEnabled = (source: SourceSummary, enabled: boolean) => {
+    rememberFlag(setPendingEnabled, source.id, enabled);
+    void perform(
+      `toggle-${source.id}`,
+      () => localSource
+        ? relayCommands.setSourceEnabled(source.id, enabled)
+        : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled }),
+      "feedback.saved",
+      { backgroundRefresh: true, uiLock: false },
+    ).then((ok) => {
+      if (!ok) rollbackFlag(setPendingEnabled, source.id, enabled);
+    });
+  };
   return (
     <div className="relay-table-wrap connection-list-wrap relay-compact-content">
       <table className="relay-table source-table connection-table">
@@ -100,17 +147,19 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
           <th><span className="sr-only">{t("common.actions")}</span></th>
         </tr></thead>
         <tbody>{sources.map((source) => {
+          const inPool = pendingPool[source.id] ?? source.inPool;
+          const enabled = pendingEnabled[source.id] ?? source.enabled;
           const launchBusy = busy === `launch-source-${source.id}`;
           const supportsNative = sourceSupportsNativeProtocol(source);
-          const launchDisabled = !localSource || !supportsNative || !source.enabled || !source.secretAvailable || launchBusy;
+          const launchDisabled = !localSource || !supportsNative || !enabled || !source.secretAvailable || launchBusy;
           const launchTitle = !localSource
             ? t("sources.launchLocalOnly")
             : !supportsNative
               ? t("sources.launchNativeOnly")
-              : !source.enabled || !source.secretAvailable
+              : !enabled || !source.secretAvailable
                 ? t("sources.launchUnavailable")
                 : t("sources.launch");
-          const runtimeState = source.inPool
+          const runtimeState = inPool
              ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi)
             : undefined;
           const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
@@ -138,7 +187,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
             : runtimeTone ?? operationalStatusTone(source.operationalStatus);
           return <tr key={source.id} data-source-id={source.id}>
             <td><div className="connection-status"><StatusIcon status={indicatorTone} label={indicatorLabel} /><span>{statusLabel}</span></div></td>
-            <td><div className="connection-identity"><strong>{source.name}</strong>{mode !== "zenith" ? <small>{t(source.inPool ? "sources.inPoolLabel" : "sources.notInPoolLabel")}</small> : null}</div></td>
+            <td><div className="connection-identity"><strong>{source.name}</strong>{mode !== "zenith" ? <small>{t(inPool ? "sources.inPoolLabel" : "sources.notInPoolLabel")}</small> : null}</div></td>
             <td><code className="connection-host" data-relay-tooltip={source.baseUrl}>{sourceHost(source.baseUrl)}</code></td>
             <td><span className="connection-model-count">{source.models.length}</span></td>
             <td className="row-actions-cell">
@@ -146,31 +195,24 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                 <ActionMenu>
                   <ActionMenuItem
                     icon={busy === `source-refresh-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />}
-                    disabled={Boolean(busy)}
+                    disabled={busy === `source-refresh-${source.id}`}
                     onClick={() => onRefresh(source.id)}
                   >
                     {t("sources.refreshData")}
                   </ActionMenuItem>
                   {mode !== "zenith" ? (
                     <ActionMenuItem
-                      icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
-                      disabled={busy === `source-pool-${source.id}`}
-                      onClick={() => void updateParticipation(source, !source.inPool)}
+                      icon={inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
+                      onClick={() => void updateParticipation(source, !inPool)}
                     >
-                      {t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}
+                      {t(inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}
                     </ActionMenuItem>
                   ) : null}
                   <ActionMenuItem
                     icon={<Power aria-hidden />}
-                    onClick={() => perform(
-                      `toggle-${source.id}`,
-                      () => localSource
-                        ? relayCommands.setSourceEnabled(source.id, !source.enabled)
-                        : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }),
-                      "feedback.saved",
-                    )}
+                    onClick={() => void updateEnabled(source, !enabled)}
                   >
-                    {source.enabled ? t("common.disable") : t("common.enable")}
+                    {enabled ? t("common.disable") : t("common.enable")}
                   </ActionMenuItem>
                   <ActionMenuItem
                     danger
@@ -181,6 +223,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                         ? relayCommands.deleteSource(source.id)
                         : relayCommands.remoteAction({ type: "delete_source", id: source.id }),
                       "feedback.deleted",
+                      { backgroundRefresh: true },
                     ))}
                   >
                     {t("common.delete")}
@@ -210,10 +253,22 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
             .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", launchSource.id); });
         }}
         onOpenCode={() => {
-          void perform(`launch-source-${launchSource.id}`, () => relayCommands.launchOpenCodeSource(launchSource.id), "feedback.launched")
+          void perform(`launch-source-${launchSource.id}`, () => relayCommands.launchOpenCodeSource(launchSource.id), "feedback.launched", { backgroundRefresh: true })
             .then((launched) => { if (launched) localStorage.setItem("relay.directSourceId", launchSource.id); });
         }}
       /> : null}
     </div>
   );
+}
+
+function dropConfirmedFlags(pending: Record<string, boolean>, saved: ReadonlyMap<string, boolean>) {
+  let changed = false;
+  const next = { ...pending };
+  for (const [id, value] of Object.entries(pending)) {
+    if (saved.get(id) === value) {
+      delete next[id];
+      changed = true;
+    }
+  }
+  return changed ? next : pending;
 }

@@ -26,7 +26,7 @@ pub(crate) async fn build_local_runtime_state(
     state: &DesktopState,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let started = Instant::now();
-    let inputs = state.runtime_inputs().await?;
+    let inputs = state.snapshot_inputs().await?;
     let running = inputs.running;
     let runtime = state.gateway.runtime().await;
     let routing_order = runtime
@@ -57,7 +57,12 @@ pub(crate) async fn build_local_runtime_state(
     )?;
     let mut inputs = inputs;
     let mut warnings = std::mem::take(&mut inputs.warnings);
-    append_missing_runtime_warnings(&mut warnings, &inputs, &routing_order);
+    append_missing_runtime_warnings(
+        &mut warnings,
+        &inputs,
+        &routing_order,
+        common_proxy_available,
+    );
     let mut models = pool_model_summaries_with_pricing(
         &source_summaries,
         &account_summaries,
@@ -152,6 +157,7 @@ pub(crate) async fn build_local_runtime_state(
             codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
             codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
             chatgpt_retry_until_available: inputs.gateway.chatgpt_retry_until_available,
+            block_degraded_routes_enabled: inputs.gateway.block_degraded_routes_enabled,
             routing_order,
         },
         platform: platform::platform_name().to_string(),

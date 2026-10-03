@@ -125,11 +125,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       confirmLabel: t("profiles.switchBackupAction"),
     })) return false;
     return perform(id, work, launchAfter ? "feedback.launched" : "feedback.profileAttached",
-      launchAfter ? { afterWork: relayCommands.launchManagedCodex } : undefined);
+      { backgroundRefresh: true, ...(launchAfter ? { afterWork: relayCommands.launchManagedCodex } : {}) });
   }, [confirm, perform, profileSwitchBackupPrompt, t]);
 
   const launchCodexProfile = useCallback(async (_binding: ProfileBinding) => {
     return perform("profile-launch", relayCommands.stopManagedCodex, "feedback.launched", {
+      backgroundRefresh: true,
       afterWork: relayCommands.launchManagedCodex,
     });
   }, [perform]);
@@ -142,6 +143,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         ? () => relayCommands.setRemoteCodexBackgroundTasks(enabled)
         : () => Promise.reject(new Error(t("errors.chatgpt_background_tasks_unavailable"))),
     "feedback.saved",
+    { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
 
   const restartManagedCodexIfRunning = useCallback(async () => {
@@ -176,6 +178,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         }
         : () => Promise.reject(new Error(t("errors.chatgpt_websockets_unavailable"))),
     "feedback.saved",
+    { backgroundRefresh: true, uiLock: false },
   ), [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
 
   const setRouteRecoveryEnabled = useCallback((enabled: boolean) => perform(
@@ -186,6 +189,18 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         ? () => relayCommands.setRemoteChatgptRetryUntilAvailable(enabled)
         : () => Promise.reject(new Error(t("errors.chatgpt_retry_until_available_unavailable"))),
     "feedback.saved",
+    { backgroundRefresh: true, uiLock: false },
+  ), [mode, perform, t]);
+
+  const setBlockDegradedRoutesEnabled = useCallback((enabled: boolean) => perform(
+    "block-degraded-routes",
+    mode === "local"
+      ? () => relayCommands.setBlockDegradedRoutes(enabled)
+      : mode === "remote"
+        ? () => relayCommands.setRemoteBlockDegradedRoutes(enabled)
+        : () => Promise.reject(new Error(t("errors.block_degraded_routes_unavailable"))),
+    "feedback.saved",
+    { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
 
   useEffect(() => {
@@ -255,6 +270,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     codexWebsocketsEnabled: displayRuntime?.gateway.codexWebsocketsEnabled ?? true,
     routeRecoveryEnabled: displayRuntime?.gateway.chatgptRetryUntilAvailable ?? false,
     setRouteRecoveryEnabled,
+    blockDegradedRoutesEnabled: displayRuntime?.gateway.blockDegradedRoutesEnabled ?? true,
+    setBlockDegradedRoutesEnabled,
   }), [
     mode,
     setMode,
@@ -290,6 +307,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCodexBackgroundTasksEnabled,
     setCodexWebsocketsEnabled,
     setRouteRecoveryEnabled,
+    setBlockDegradedRoutesEnabled,
   ]);
 
   const usage = useMemo<RelayUsageContextValue>(() => ({

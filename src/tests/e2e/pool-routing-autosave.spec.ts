@@ -1,18 +1,13 @@
-import { expect, test, type Page } from "../bun-playwright";
+import { expect, test } from "../bun-playwright";
 import type { RuntimeSnapshot } from "../../src/features/relay/api/types";
 import { installTauriMock } from "./tauri-mock";
-
-async function openRotation(page: Page) {
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-  return page.getByRole("dialog", { name: "Pool rotation", exact: true });
-}
+import { openPoolRotation } from "./pool-rotation";
 
 for (const mode of ["local", "remote"] as const) {
   test(`${mode} rotation rebases a racing save on current membership and settings`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 2 });
     await page.goto("/");
-    const dialog = await openRotation(page);
+    const dialog = await openPoolRotation(page);
     await page.evaluate((mode) => {
       const scope = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: any) => Promise<any> }; __routingAttempts: number };
       const invoke = scope.__TAURI_INTERNALS__.invoke;
@@ -52,7 +47,7 @@ for (const mode of ["local", "remote"] as const) {
 test("rotation serializes rapid edits, preserves numeric focus and waits before closing", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  const dialog = await openRotation(page);
+  const dialog = await openPoolRotation(page);
   await page.evaluate(() => {
     const scope = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: any) => Promise<any> }; __releaseRouting?: () => void; __routingPeak: number };
     const invoke = scope.__TAURI_INTERNALS__.invoke;
@@ -92,7 +87,7 @@ test("rotation serializes rapid edits, preserves numeric focus and waits before 
 test("rotation rolls back a failed save and accepts the next edit", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  const dialog = await openRotation(page);
+  const dialog = await openPoolRotation(page);
   await page.evaluate(() => {
     const scope = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: any) => Promise<any> } };
     const invoke = scope.__TAURI_INTERNALS__.invoke;
@@ -114,7 +109,7 @@ test("rotation rolls back a failed save and accepts the next edit", async ({ pag
 test("pointer drag highlights the target and Escape cancels without saving", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  const dialog = await openRotation(page);
+  const dialog = await openPoolRotation(page);
   await dialog.getByRole("radio", { name: "In order", exact: true }).click();
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   const ids = () => dialog.getByRole("listitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-member-id")));
@@ -140,7 +135,7 @@ test("pointer drag highlights the target and Escape cancels without saving", asy
 test("repeated routing conflicts stop after three attempts and restore stored values", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  const dialog = await openRotation(page);
+  const dialog = await openPoolRotation(page);
   await page.evaluate(() => {
     const scope = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: any) => Promise<any> }; __routingAttempts: number };
     const invoke = scope.__TAURI_INTERNALS__.invoke;

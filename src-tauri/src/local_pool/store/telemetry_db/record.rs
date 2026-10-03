@@ -59,10 +59,7 @@ impl TelemetryDb {
             .effective_reasoning_effort
             .as_deref()
             .and_then(zenith_relay_core::normalize_reasoning_effort);
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
@@ -187,9 +184,7 @@ impl TelemetryDb {
     }
 
     pub fn clear(&self) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+        self.lock_connection()?
             .execute_batch("DELETE FROM request_logs; DELETE FROM usage_candidate_rollups;")
             .map_err(db_error)?;
         self.clear_cached_usage_totals()?;

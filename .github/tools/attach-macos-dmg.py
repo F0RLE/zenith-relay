@@ -12,8 +12,11 @@ import select
 import signal
 import struct
 import sys
+
 import termios
 import time
+
+sys.dont_write_bytecode = True
 
 
 def configure_terminal(fd: int) -> None:

@@ -70,6 +70,28 @@ pub fn reduce_account_usage(
     let failure_category = observation
         .error_category
         .filter(|category| *category != error_codes::UPSTREAM_STATUS);
+    // A quota rejection asks for a fresh window read. It is not an account
+    // outage: the windows themselves decide rotation, and a stale copy of this
+    // code must not keep a recoverable account looking broken.
+    if failure_category == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED) {
+        let owns_quota_error =
+            state.last_error_code.as_deref() == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED);
+        let cleared = if owns_quota_error && state.health == AccountHealthState::Degraded {
+            state.health = AccountHealthState::Healthy;
+            state.last_error_code = None;
+            true
+        } else if owns_quota_error && state.health == AccountHealthState::Healthy {
+            state.last_error_code = None;
+            true
+        } else {
+            false
+        };
+        return AccountUsageUpdate {
+            state,
+            reset_runtime_failures: cleared,
+            refresh_quota: true,
+        };
+    }
     match observation.http_status {
         401 => match access_state {
             Some(AccountAccessState::Refreshable) => {
@@ -145,9 +167,7 @@ pub fn reduce_account_usage(
         reset_runtime_failures: true,
         refresh_quota: observation.http_status == 429
             || (observation.http_status == 401
-                && access_state == Some(AccountAccessState::Refreshable))
-            || (observation.http_status == 403
-                && failure_category == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)),
+                && access_state == Some(AccountAccessState::Refreshable)),
     }
 }
 

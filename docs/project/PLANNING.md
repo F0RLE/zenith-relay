@@ -176,12 +176,13 @@ complete file into memory.
 Backend ordering places OpenAI, Anthropic, Google,
 then xAI first, followed by other companies alphabetically. Within a company,
 stable provider family precedence is used where the provider has a canonical
-product-tier order (Anthropic is Fable, Opus, Sonnet, then Haiku); unknown
-families follow the catalog fallback. Families that share the same numbered
-model generation form a cohort and use the newest release in that cohort, then
-normalized family IDs; this keeps sibling variants together instead of letting
-a later launch date outrank another variant. Release/update dates order
-versions within a family. Missing families follow known families; missing dates
+product-tier order: OpenAI is Astra, Sol, Terra, then Luna; Anthropic is Fable,
+Opus, Sonnet, then Haiku. A later release does not move a lower tier ahead of a
+higher one, and a new version inherits its place from the catalog family label
+rather than a model-ID list. Unknown families follow known families. Families
+that share the same numbered model generation and have no canonical tier form a
+cohort and use the newest release in that cohort, then normalized family IDs.
+Release/update dates order versions within a family. Missing families follow known families; missing dates
 follow dated versions in the same family. Equal dates use normalized family and
 model IDs as deterministic tie-breakers, so provider inventory order cannot
 change catalog ranking. Company/family ordering comes from validated catalog
@@ -270,11 +271,18 @@ The host-refresh and remaining acceptance gates in
 [ROADMAP.md](ROADMAP.md) remain open. The design is a target, not proof of
 full acceptance.
 
-Automatic selection compares normalized local load (`in_flight / effective
-capacity`) among eligible physical members, then uses weights among equal-load
-members. It does not score quota percentages, balance, recent latency or money.
-Unknown and stale quota are neutral; confirmed exhaustion remains a block.
-Soft affinity only breaks a tie among equally eligible automatic winners.
+Automatic selection ranks eligible physical members by the freshest known
+remaining quota. A one-point difference is enough: that member is used until
+its remainder falls below another known remainder. Normalized load
+(`in_flight / effective capacity`) and request share apply only inside an
+equal-remainder group. Unknown quota and observations older than the stale
+window do not outrank a known remainder. Balance, recent latency and money
+still do not rank. Confirmed exhaustion remains a block. Soft cache affinity
+only breaks a tie inside the current automatic group. In every mode, an opaque
+response owner stays put unless Automatic mode can replay saved local history
+onto a member with a strictly larger known remainder. A foreign response id is
+never sent to another member.
+
 In order selects the first ready member in the saved order; busy or blocked
 members do not prevent trying the next one. Round robin uses smooth weighted
 rotation and ignores soft affinity. Hard response ownership applies in every
@@ -683,6 +691,7 @@ Per-file and file-count bounds, snapshot validation and rollback remain enforced
 Native account catalog reads run with at most four concurrent requests and a
 shared twelve-second budget; completed results retain account ranking and
 unreachable accounts keep their own last known transport metadata.
+A successful blank model-catalog response is not a catalog. Desktop and server keep the models the account already reported and do not clear a prior discovery error from that blank response.
 
 ChatGPT account HTTP and WebSocket handshakes retain only the infrastructure
 cookie `__oailb`, in memory, per account executor and credential. The store is
@@ -694,8 +703,17 @@ and no cookie values enter storage, diagnostics, or client responses.
 The optional Excel / Basis Points transport is configured in API as
 **Use Basis Points** and identified in Usage. It sends ChatGPT account requests
 through Excel instead of Responses. It may help a degraded account generate,
-but Relay does not guarantee that and cannot verify the model running at the
-provider.
+without guaranteeing quality. The ChatGPT-only degraded-route guard compares
+the reported `model`/`response.model` with the selected upstream model, allowing
+provider qualification and dated snapshots of the same identity. It rejects
+substitutions and internal degrade ids in JSON, SSE and WebSocket, including
+buffered Basis Points preambles and reused sockets. Only a pre-output rejection
+can rotate; generated, unknown or committed attempts are never replayed.
+Reported identity is not independent proof of the actual model or its quality.
+Basis Points `Model access has changed` pauses only the member's model (shared
+by its native and Excel transports). `blocked by our usage policy` is a
+request-terminal policy refusal, including when wrapped as insufficient_quota;
+it neither exhausts quota nor rotates members. Their original HTTP 403 is kept.
 The API control uses the existing shared routing setting and saves immediately.
 There are no switches in Connections, Pool or account cards.
 The control appears when a compatible account exists, even before it joins
@@ -710,7 +728,7 @@ request no longer includes their catalog. A declared tool excluded by
 `tool_choice` is rejected as a choice error, not as a missing tool. Encrypted
 `agent_message` content is rejected before dispatch. The upstream returns
 completed JSON, so requested SSE is buffered and emitted only after completion.
-Images and explicit nonstandard service tiers are incompatible with this route. `auto`, `default`, and `standard` are ordinary tiers and are omitted from the upstream body. Structured `text.format` is rejected rather than dropped. Developer instructions follow the v0.2.8 adapter: examples are generated only for tools allowed in the request and match the declared function or custom shape, including the two JSON layers of a function payload. A second developer message repeats the transport reminder and tells each custom tool to keep its input raw. The one malformed-relay retry hint is appended after that prepared input, before a compaction trigger.
+A user input image is uploaded to the account attachment endpoint and sent as file_id. Item identifiers longer than 64 characters keep their namespace prefix and a stable hash of the original value, so a call and its output stay paired. Ciphertext-bound ids are left unchanged. A reasoning summary without ciphertext stays in history. Requested maximum reasoning is sent as the supported extra-high level; ultra stays ultra. Remote image URLs and explicit nonstandard service tiers are incompatible with this route. `auto`, `default`, and `standard` are ordinary tiers and are omitted from the upstream body. Structured `text.format` is rejected rather than dropped. Developer instructions follow the v0.2.8 adapter: examples are generated only for tools allowed in the request and match the declared function or custom shape, including the two JSON layers of a function payload. A second developer message repeats the transport reminder and tells each custom tool to keep its input raw. The one malformed-relay retry hint is appended after that prepared input, before a compaction trigger.
 opaque `previous_response_id` continuation is rejected before dispatch rather
 than silently removed. Completed and incomplete buffered responses retain
 their respective terminal status in JSON and synthesized SSE.
@@ -799,32 +817,18 @@ misattributed lane event. Do not claim full WebSocket multiplexing support.
 
 ## Tool catalog policy
 
-The shared Rust runtime owns two opt-in modes: `pass_through` (default) sends
-the complete catalog unchanged, and `automatic` enables provider-native
-deferred schema loading on every eligible request. Relay does not select, hide, or
-rename tools by name and does not perform local semantic relevance search.
-The complete trusted catalog remains available to the provider; the provider
-performs its own tool search and loading. Catalog size does not affect whether
-automatic mode is applied.
+Relay forwards each tool catalog unchanged. It does not add `defer_loading` or
+`tool_search`, hide or rename tools, or run a local relevance search. A saved
+`automatic` policy is ignored for new requests, including retries and
+HTTP/WebSocket fallback. Desktop and server may still store that old value;
+it no longer changes the wire catalog.
 
-Automatic mode uses the provider-native Responses `tool_search` contract only
-for tools on OpenAI models, and only on native Responses routes with automatic
-or unspecified `tool_choice`.
-Converted protocols, explicit tool choices, and WebSocket payloads keep the
-ordinary full catalog path. If a compatible native endpoint rejects the
-deferred fields, Relay retries once before output without optimization. This
-fallback is compatibility behavior, not a second policy mode.
-
-Each request captures an immutable policy through retries and HTTP/WebSocket
-fallback. Desktop and server persist compare-and-set updates and hot-apply
-them to new requests without restarting the listener. A single UI switch saves
-the selected mode immediately; remote editing requires `tool_policy_v1`.
-Usage stores aggregate input/forwarded counts and catalog JSON bytes, mode,
-outcome, compatibility fallback and whether provider-hosted deferred tool
-search was used, not schemas or tool names. Bytes are not token/billing
-savings; provider-reported usage remains the source of truth, and changes to
-catalog serialization can affect prompt-cache reuse. This is not an execution
-authorization boundary.
+Usage keeps aggregate input and forwarded counts, catalog JSON bytes, mode,
+outcome, compatibility fallback, and whether an older request used
+provider-hosted deferred tool search. Those fields describe history, not tool
+names or schemas. Bytes are not token or billing savings; provider-reported
+usage remains the source of truth. This is not an execution authorization
+boundary.
 
 ## Usage and prices
 
@@ -834,8 +838,10 @@ entitlement, provider debit, Zenith customer billing, or a routing input.
 
 Subscription usage uses the exact LiteLLM record in its declared official
 family or remains unpriced. API sources resolve provider evidence, exact
-LiteLLM provider/model, explicitly declared-family canonical price, then manual
-price. Endpoint/protocol changes invalidate stale source evidence. Input,
+LiteLLM provider/model, the official catalog price for a known model family, an
+explicitly declared family for any other model, then manual price. Known families
+are GPT, ChatGPT, and Codex to OpenAI, Claude to Anthropic, Gemini to Google, and
+Grok to xAI. The family comes from the model id, never from a source label or URL. Endpoint/protocol changes invalidate stale source evidence. Input,
 cached input, cache writes, output, and request/image prices remain distinct;
 missing required counters/prices are unknown, not `$0`. Adapters follow the
 actual upstream cache contract without borrowing another protocol's semantics.

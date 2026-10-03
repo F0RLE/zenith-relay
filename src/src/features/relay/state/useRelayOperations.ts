@@ -19,6 +19,7 @@ export function useRelayOperations() {
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const operationRevision = useRef(0);
+  const operationEpoch = useRef(0);
 
   const performOperation = useCallback((
     id: string,
@@ -27,13 +28,18 @@ export function useRelayOperations() {
     successKey?: string,
     options?: PerformOptions,
   ) => {
-    const revision = ++operationRevision.current;
-    setBusy(id);
-    setFeedback(null);
+    const locksInterface = options?.uiLock !== false;
+    const epoch = operationEpoch.current;
+    const revision = locksInterface ? ++operationRevision.current : operationRevision.current;
+    if (locksInterface) {
+      setBusy(id);
+      setFeedback(null);
+    }
     return runRelayOperation({
       work,
       refresh,
-      isCurrent: () => revision === operationRevision.current,
+      isCurrent: () => operationEpoch.current === epoch
+        && (!locksInterface || revision === operationRevision.current),
       ...(successKey !== undefined ? { successKey } : {}),
       options: {
         ...options,
@@ -62,11 +68,18 @@ export function useRelayOperations() {
         return { key, error: sanitizeFeedbackError(cause, code, t(key)) };
       },
       setFeedback,
-      settle: () => setBusy(null),
+      settle: () => {
+        if (
+          locksInterface
+          && operationEpoch.current === epoch
+          && revision === operationRevision.current
+        ) setBusy(null);
+      },
     });
   }, [i18n, t]);
 
   const cancelOperations = useCallback(() => {
+    operationEpoch.current += 1;
     operationRevision.current += 1;
     setBusy(null);
     setFeedback(null);

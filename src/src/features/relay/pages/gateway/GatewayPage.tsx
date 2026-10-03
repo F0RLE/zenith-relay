@@ -7,6 +7,7 @@ import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader,
 import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTasksControl";
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { usePendingFlag, useSavedChoice } from "../../state/usePendingFlag";
 import { GatewayApiTab } from "./GatewayApiTab";
 
 type GatewayTab = "api" | "chatgpt" | "opencode";
@@ -15,7 +16,8 @@ export function GatewayPage() {
   const { t } = useTranslation();
   const { mode, runtime, readyState, busy, perform } = useRelayState();
   const [activeTab, setActiveTab] = useState<GatewayTab>("api");
-  const running = mode === "zenith" ? Boolean(readyState?.providerActive) : Boolean(runtime?.gateway.running);
+  const gatewayRunning = useSavedChoice(mode === "zenith" ? Boolean(readyState?.providerActive) : Boolean(runtime?.gateway.running));
+  const running = gatewayRunning.value;
   const endpoint = mode === "zenith" ? "https://api.zenithmarket.dev/v1" : runtime?.gateway.baseUrl ?? "";
   const canManage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("local_gateway"));
   const tabs: Array<{ id: GatewayTab; label: string }> = mode === "zenith"
@@ -37,7 +39,7 @@ export function GatewayPage() {
       await relayCommands.remoteAction({ type: "stop_gateway" });
       await relayCommands.remoteAction({ type: "start_gateway" });
     }
-  }, "feedback.restarted");
+  }, "feedback.restarted", { backgroundRefresh: true });
 
   const apiActions = mode === "zenith" ? null : <>
     <ActionMenu>
@@ -51,13 +53,21 @@ export function GatewayPage() {
       disabled={!canManage}
       title={!canManage ? t("common.unsupported") : undefined}
       icon={running ? <Square aria-hidden /> : <Play aria-hidden />}
-      onClick={() => perform(
-        "gateway-toggle",
-        () => mode === "local"
-          ? (running ? relayCommands.stopGateway() : relayCommands.startGateway())
-          : relayCommands.remoteAction({ type: running ? "stop_gateway" : "start_gateway" }),
-        running ? "feedback.stopped" : "feedback.started",
-      )}
+      onClick={() => {
+        const next = !running;
+        void perform(
+          "gateway-toggle",
+          async () => {
+            if (mode === "local") {
+              if (next) await relayCommands.startGateway();
+              else await relayCommands.stopGateway();
+            } else await relayCommands.remoteAction({ type: next ? "start_gateway" : "stop_gateway" });
+            gatewayRunning.confirm(next);
+          },
+          next ? "feedback.started" : "feedback.stopped",
+          { backgroundRefresh: true },
+        );
+      }}
     >
       {running ? t("gateway.stop") : t("gateway.start")}
     </Button>
@@ -69,7 +79,7 @@ export function GatewayPage() {
     disabled={!running}
     title={!running ? t("gateway.start") : undefined}
     icon={<Play aria-hidden />}
-    onClick={() => perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched")}
+    onClick={() => perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true })}
   >
     {t("gateway.launchChatGPT")}
   </Button> : null;
@@ -80,7 +90,7 @@ export function GatewayPage() {
     disabled={!running}
     title={!running ? t("gateway.start") : undefined}
     icon={<Play aria-hidden />}
-    onClick={() => perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched")}
+    onClick={() => perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true })}
   >
     {t("gateway.launchOpenCode")}
   </Button> : null;
@@ -134,6 +144,7 @@ function ChatGPTSetup() {
     .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
   const eligibleAccountIds = eligibleAccounts.map((account) => account.id).join("\0");
   const reserveEnabled = (runtime?.gateway.chatgptInterfaceQuotaReserveBasisPoints ?? 100) > 0;
+  const reserve = usePendingFlag(reserveEnabled);
 
   useEffect(() => {
     if (!runtime || mode !== "local" || codexPoolOauthSelection === "none" || codexPoolOauthSelection === "auto") return;
@@ -211,13 +222,13 @@ function ChatGPTSetup() {
         className="oauth-binding-reserve-toggle"
         label={t("gateway.oauthBindingReserve")}
         description={t("gateway.oauthBindingReserveHint")}
-        checked={reserveEnabled}
-        disabled={busy === "chatgpt-quota-reserve"}
-        onChange={(checked) => void perform(
+        checked={reserve.checked}
+        onChange={(checked) => reserve.select(checked, () => perform(
           "chatgpt-quota-reserve",
           () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0),
           "feedback.saved",
-        )}
+          { backgroundRefresh: true, uiLock: false },
+        ))}
       />
     ) : null}
   </section>;

@@ -9,6 +9,8 @@ pub use gateway::GatewaySettings;
 pub use ownership::{
     OwnershipOperationKind, OwnershipOperationPhase, OwnershipOperationRecord, RemoteTargetRecord,
 };
+#[cfg(test)]
+pub(crate) use participant::synthetic_responses_source;
 pub use participant::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord,
 };

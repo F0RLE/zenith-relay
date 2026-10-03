@@ -49,10 +49,7 @@ impl TelemetryDb {
         {
             return Ok(cached.value.clone());
         }
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let connection = self.lock_connection()?;
         let mut statement = connection
             .prepare(
                 "SELECT candidate_kind, candidate_id, model,

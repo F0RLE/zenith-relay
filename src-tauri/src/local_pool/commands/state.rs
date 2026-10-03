@@ -126,6 +126,7 @@ mod parity_tests {
                 codex_background_tasks_enabled: true,
                 codex_websockets_enabled: true,
                 chatgpt_retry_until_available: false,
+                block_degraded_routes_enabled: true,
                 routing_order: Vec::new(),
             },
             platform: "test".into(),

@@ -878,17 +878,15 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
     }
 }
 #[test]
-fn oauth_account_attach_uses_native_catalog_instead_of_foreign_managed_catalog() {
+fn account_switch_keeps_the_current_catalog_unless_it_belongs_to_relay() {
     let (root, home, backups) = profile_dirs("oauth-account-native-catalog");
-    fs::write(
-        home.join(CONFIG_FILE),
-        format!(
-            "model_provider = \"{PROVIDER_ID}\"\nmodel_catalog_json = \"foreign-catalog.json\"\n\n[model_providers.{PROVIDER_ID}]\nname = \"Relay\"\n"
-        ),
-    )
-    .unwrap();
     let secrets = MemorySecrets::default();
     let tokens = TokenSet::new("access", Some("refresh".into()), None, None, 1, 1).unwrap();
+    fs::write(
+        home.join(CONFIG_FILE),
+        "model = \"gpt-5.6-sol\"\nmodel_provider = \"openai\"\nmodel_catalog_json = \"official-catalog.json\"\n",
+    )
+    .unwrap();
 
     attach_account_with(
         &home,
@@ -901,15 +899,11 @@ fn oauth_account_attach_uses_native_catalog_instead_of_foreign_managed_catalog()
     .unwrap();
 
     let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert!(root_model_catalog_json(&attached).is_none());
-    assert!(root_model_provider(&attached).is_none());
-    assert!(!document_has_provider(&attached));
-    restore_account_with(&home, &backups, &secrets).unwrap();
-    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(root_model_provider(&restored).as_deref(), Some(PROVIDER_ID));
+    assert_eq!(attached["model"].as_str(), Some("gpt-5.6-sol"));
+    assert_eq!(root_model_provider(&attached).as_deref(), Some("openai"));
     assert_eq!(
-        root_model_catalog_json(&restored).as_deref(),
-        Some("foreign-catalog.json")
+        root_model_catalog_json(&attached).as_deref(),
+        Some("official-catalog.json")
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -940,6 +934,15 @@ fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context
     );
     assert_eq!(value["models"][1]["supported_reasoning_levels"], json!([]));
     assert!(value["models"][1].get("context_window").is_none());
+    let image = direct_source_model_catalog(
+        &home,
+        &["gpt-image-2".into(), "vendor/degrade2-model".into()],
+    )
+    .unwrap()
+    .expect("image and degraded ids stay in a direct catalog");
+    let image: Value = serde_json::from_str(&image).unwrap();
+    assert_eq!(image["models"][0]["slug"], "gpt-image-2");
+    assert_eq!(image["models"][1]["slug"], "vendor/degrade2-model");
     let managed = catalog::build_managed_model_catalog(&home, None, None, &catalog).unwrap();
     let managed: Value = serde_json::from_str(&managed).unwrap();
     assert_eq!(managed["models"], value["models"]);

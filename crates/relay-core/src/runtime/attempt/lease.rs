@@ -64,10 +64,7 @@ impl CandidateLease {
             if charge_wire && !request_budget.can_start_wire() {
                 return Err(RotationDispatchStartError::BudgetExhausted);
             }
-            let scope = self
-                .principal_scope
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let scope = crate::poison::read(&self.principal_scope);
             if self.principal_scope_revision.0.load(Ordering::Acquire)
                 != self.principal_scope_revision.1
             {
@@ -78,14 +75,8 @@ impl CandidateLease {
             // authorization validation and the generation start.
             let _authorization =
                 guard_authorization().ok_or(RotationDispatchStartError::CandidateChanged)?;
-            let mut scheduler = self
-                .scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let hidden = self
-                .hidden_models
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut scheduler = crate::poison::mutex(&self.scheduler);
+            let hidden = crate::poison::read(&self.hidden_models);
             if hidden.contains(&crate::model_id_key(&self.model)) {
                 return Err(RotationDispatchStartError::CandidateChanged);
             }
@@ -162,10 +153,7 @@ impl CandidateLease {
                 return Ok(None);
             }
             request_budget.observe_execution(observation.execution);
-            let mut scheduler = self
-                .scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut scheduler = crate::poison::mutex(&self.scheduler);
             let settlement = scheduler.settle_rotation(
                 self.reservation_id,
                 observation,
@@ -261,10 +249,7 @@ impl CandidateLease {
             let budget = &self.rotation_budget;
             if !self.rotation_settled.swap(true, Ordering::AcqRel) {
                 budget.with_budget(|request_budget| {
-                    let mut scheduler = self
-                        .scheduler
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut scheduler = crate::poison::mutex(&self.scheduler);
                     if self.rotation_started.load(Ordering::Acquire) {
                         request_budget.observe_execution(RotationExecutionObservation::unknown());
                         let _ = scheduler.cancel_rotation(
@@ -279,10 +264,7 @@ impl CandidateLease {
             }
         }
         let activity = {
-            let mut scheduler = self
-                .scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut scheduler = crate::poison::mutex(&self.scheduler);
             let released = scheduler.release_reservation(self.reservation_id);
             if !released {
                 None

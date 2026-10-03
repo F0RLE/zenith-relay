@@ -1,8 +1,4 @@
 use super::*;
-use crate::{
-    config::Config,
-    store::{Store, Vault},
-};
 use axum::{routing::get, Json, Router};
 use serde_json::json;
 use tempfile::TempDir;
@@ -11,10 +7,7 @@ use zenith_relay_core::{protocol::RefreshStatus, SourceStatsStatus};
 #[tokio::test]
 async fn source_catalog_commit_waits_for_runtime_build_before_changing_routes() {
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store, vault).unwrap();
+    let state = crate::test_fixtures::test_app_state(root.path());
     let (started, mut requests) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Notify::new());
     let handler_release = release.clone();
@@ -81,10 +74,7 @@ async fn source_catalog_commit_waits_for_runtime_build_before_changing_routes() 
 async fn late_models_cannot_overwrite_a_changed_source() {
     for mutation in ["none", "policy", "key", "address", "delete"] {
         let root = TempDir::new().unwrap();
-        let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-        let state = AppState::new(config, store, vault).unwrap();
+        let state = crate::test_fixtures::test_app_state(root.path());
         let (started, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Notify::new());
         let handler_release = release.clone();
@@ -173,10 +163,7 @@ async fn balance_reads_cache_last_good_until_forced_and_retain_a_stale_warning()
     use axum::http::StatusCode;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let root = TempDir::new().unwrap();
-    let config = Config::for_test(root.path().into(), "127.0.0.1:0".parse().unwrap());
-    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
-    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
-    let state = AppState::new(config, store, vault).unwrap();
+    let state = crate::test_fixtures::test_app_state(root.path());
     let reads = Arc::new(AtomicUsize::new(0));
     let seen = reads.clone();
     let app = Router::new().route(

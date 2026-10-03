@@ -92,7 +92,7 @@ pub(in crate::gateway::images) fn translate_account_response(
         .get("created_at")
         .or_else(|| completed.get("created"))
         .and_then(Value::as_i64)
-        .unwrap_or_else(|| (now_ms() / 1_000).min(i64::MAX as u64) as i64);
+        .unwrap_or_else(|| crate::usage::sql_u64(now_ms() / 1_000));
     let usage = completed
         .pointer("/tool_usage/image_gen")
         .or_else(|| completed.get("usage"))

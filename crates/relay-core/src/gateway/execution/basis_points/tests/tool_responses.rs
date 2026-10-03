@@ -51,15 +51,15 @@ fn unknown_historical_tool_calls_are_restored_to_the_transport() {
     });
     let prepared = prepare_request(&request).unwrap();
     let input = prepared["input"].as_array().unwrap();
-    assert_eq!(input[2]["name"], TRANSPORT_TOOL);
-    assert_eq!(input[2]["call_id"], "native_1");
-    let arguments: Value = serde_json::from_str(input[2]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(input[1]["name"], TRANSPORT_TOOL);
+    assert_eq!(input[1]["call_id"], "native_1");
+    let arguments: Value = serde_json::from_str(input[1]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(arguments["references"], json!(["native_account_tool"]));
     assert_eq!(arguments["code"], "{\"value\":1}");
-    assert_eq!(input[3]["type"], "function_call_output");
-    assert_eq!(input[3]["output"], "native result");
-    assert!(input[3].get("name").is_none());
-    assert_eq!(input[4], request["input"][2]);
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["output"], "native result");
+    assert!(input[2].get("name").is_none());
+    assert_eq!(input[3], request["input"][2]);
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn namespaced_client_tool_calls_use_a_fully_qualified_reference() {
         "tools": [{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}]
     });
     let prepared = prepare_request(&request).unwrap();
-    let call = &prepared["input"][2];
+    let call = &prepared["input"][1];
     assert_eq!(call["name"], TRANSPORT_TOOL);
     let arguments: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(arguments["references"], json!(["functions.exec"]));
@@ -257,9 +257,9 @@ fn custom_tool_and_output_keep_the_client_call_contract() {
         "tools": [{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"text"}}]
     });
     let prepared = prepare_request(&request).unwrap();
-    assert_eq!(prepared["input"][2]["name"], TRANSPORT_TOOL);
-    assert_eq!(prepared["input"][3]["type"], "function_call_output");
-    assert_eq!(prepared["input"][3]["id"], "fc_call_1");
+    assert_eq!(prepared["input"][1]["name"], TRANSPORT_TOOL);
+    assert_eq!(prepared["input"][2]["type"], "function_call_output");
+    assert_eq!(prepared["input"][2]["id"], "fc_call_1");
 
     let body = json!({
         "id":"resp_1",
@@ -339,4 +339,186 @@ fn incomplete_response_is_not_reported_as_completed() {
     ] {
         assert!(translate_response(&serde_json::to_vec(&response).unwrap(), &request).is_err());
     }
+}
+
+#[test]
+fn model_switch_shrinks_history_ids_without_splitting_tool_pairs() {
+    let call_id = "g".repeat(81);
+    let message_id = format!("msg_{}", "m".repeat(80));
+    assert_eq!(format!("fc_{call_id}").len(), 84);
+    assert!(message_id.len() > 64);
+    let request = json!({
+        "model": "gpt-6-luna",
+        "input": [
+            {
+                "type": "message",
+                "id": message_id,
+                "role": "user",
+                "content": [{"type": "input_text", "text": "earlier"}]
+            },
+            {
+                "type": "function_call",
+                "id": format!("fc_{call_id}"),
+                "call_id": call_id,
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": "ok"
+            }
+        ],
+        "tools": [{
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command",
+            "parameters": {"type": "object"}
+        }]
+    });
+    let prepared = prepare_request(&request).unwrap();
+    let items = prepared["input"].as_array().unwrap();
+    for item in items {
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            assert!(id.len() <= 64, "{id}");
+        }
+        if let Some(id) = item.get("call_id").and_then(Value::as_str) {
+            assert!(id.len() <= 64, "{id}");
+        }
+    }
+    let call = items
+        .iter()
+        .find(|item| item["type"] == "function_call" && item["name"] == TRANSPORT_TOOL)
+        .unwrap();
+    let output = items
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(call["call_id"], output["call_id"]);
+    assert_eq!(call["id"], output["id"]);
+    assert!(call["id"].as_str().unwrap().starts_with("fc_"));
+    assert_ne!(call["call_id"], call_id);
+    let message = items
+        .iter()
+        .find(|item| item["role"] == "user" && item["content"][0]["text"] == "earlier")
+        .unwrap();
+    assert!(message["id"].as_str().unwrap().starts_with("msg_"));
+    assert_ne!(message["id"], message_id);
+
+    let again = prepare_request(&request).unwrap();
+    let again_call = again["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call" && item["name"] == TRANSPORT_TOOL)
+        .unwrap();
+    assert_eq!(call["id"], again_call["id"]);
+    assert_eq!(call["call_id"], again_call["call_id"]);
+}
+
+#[test]
+fn web_search_ids_keep_the_ws_prefix_when_history_is_shrunk() {
+    let long_native = format!("ws_{}", "w".repeat(80));
+    let long_foreign = "x".repeat(80);
+    let bare_hash = "4b6dcef06ba031e395d715dca0989454";
+    let request = json!({
+        "model": "gpt-6-luna",
+        "input": [
+            {"type": "web_search_call", "id": long_native, "status": "completed"},
+            {"type": "web_search_call", "id": long_foreign, "status": "completed"},
+            {"type": "web_search_call", "id": bare_hash, "status": "completed"}
+        ]
+    });
+    let prepared = prepare_request(&request).unwrap();
+    let ids: Vec<&str> = prepared["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "web_search_call")
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    for id in &ids {
+        assert!(id.starts_with("ws_"), "{id}");
+        assert!(id.len() <= 64, "{id}");
+        assert_ne!(*id, bare_hash);
+    }
+    assert_ne!(ids[0], long_native);
+    assert_ne!(ids[1], long_foreign);
+    let again = prepare_request(&request).unwrap();
+    let again_ids: Vec<&str> = again["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "web_search_call")
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, again_ids);
+}
+
+#[test]
+fn maximum_reasoning_stays_on_the_first_basis_points_attempt() {
+    let request = json!({
+        "model": "gpt-6-luna",
+        "reasoning": {"effort": "max"},
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            {
+                "type": "reasoning",
+                "id": "rs_31297b9f6a839c76b27b068f1efb7bd2",
+                "encrypted_content": "synthetic-ciphertext",
+                "summary": [{"type": "summary_text", "text": "Checked the previous result."}]
+            }
+        ]
+    });
+    let prepared = prepare_request(&request).unwrap();
+    assert_eq!(prepared["reasoning_effort"], "xhigh");
+    let reasoning = prepared["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .unwrap();
+    assert_eq!(reasoning["encrypted_content"], "synthetic-ciphertext");
+    assert_eq!(reasoning["id"], "rs_31297b9f6a839c76b27b068f1efb7bd2");
+    assert_eq!(
+        reasoning["summary"][0]["text"],
+        "Checked the previous result."
+    );
+
+    let mut retry = request;
+    assert!(drop_foreign_encrypted_context(&mut retry));
+    let retried = prepare_request(&retry).unwrap();
+    assert_eq!(retried["reasoning_effort"], "xhigh");
+    assert!(retried["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["type"] != "reasoning"));
+}
+
+#[test]
+fn reasoning_summary_without_ciphertext_stays_in_history() {
+    let request = json!({
+        "model": "gpt-6-luna",
+        "reasoning": {"effort": "ultra"},
+        "input": [{
+            "type": "reasoning",
+            "id": "rs_visible",
+            "summary": [{"type": "summary_text", "text": "The file was already checked."}]
+        }]
+    });
+    let prepared = prepare_request(&request).unwrap();
+    assert_eq!(prepared["reasoning_effort"], "ultra");
+    let reasoning = prepared["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .unwrap();
+    assert!(reasoning.get("encrypted_content").is_none());
+    assert_eq!(
+        reasoning["summary"][0]["text"],
+        "The file was already checked."
+    );
 }

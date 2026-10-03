@@ -2,24 +2,53 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, CheckCheck, Layers, Plus, Search, Server, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { AccountPlanBadge, Button, Dialog, EmptyState, OptionMenu } from "../../components/Ui";
+import { AccountPlanBadge, Button, Dialog, EmptyState, OptionMenu, accountErrorLabel } from "../../components/Ui";
 import { accountPlanOption, compareAccountPlans } from "../../accountPlans";
+import { accountQuotaRefreshState, currentAccountErrorCode } from "../../accountStatus";
 import { compareStableText, toggle } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { accountPickerTone, compareMemberPickerHealth, MEMBER_PICKER_HEALTH_ORDER, memberPickerHealth, sourcePickerTone, type MemberPickerHealth } from "./memberPickerStatus";
+import type { AccountSummary, SourceSummary } from "../../api/types";
+import type { TFunction } from "i18next";
 
 type MemberView = "all" | "accounts" | "sources" | "selected";
+type SurfaceTone = "ready" | "warning" | "error" | "info" | "disabled";
+type HealthFilter = "all" | MemberPickerHealth;
 
-function MemberOption({ name, detail, icon, badge, checked, disabled, onChange }: {
-  name: string; detail?: string; icon: ReactNode; badge?: ReactNode;
+function MemberOption({ name, detail, status, statusLabel, icon, badge, checked, disabled, onChange }: {
+  name: string; detail?: string; status: SurfaceTone; statusLabel: string; icon: ReactNode; badge?: ReactNode;
   checked: boolean; disabled: boolean; onChange: () => void;
 }) {
   return <label className="pool-picker-option" data-selected={checked}>
-    <span className="pool-picker-avatar" aria-hidden>{icon}</span>
-    <span className="pool-member-option-copy"><strong>{name}</strong>{detail ? <small>{detail}</small> : null}</span>
+    <span className="pool-picker-avatar" data-status={status} data-relay-tooltip={statusLabel} aria-hidden>{icon}</span>
+    <span className="pool-member-option-copy">
+      <strong>{name}</strong>
+      <small className="pool-picker-status" data-status={status}>{statusLabel}</small>
+      {detail ? <small>{detail}</small> : null}
+    </span>
     {badge}
-    <input type="checkbox" aria-label={name} checked={checked} disabled={disabled} onChange={onChange} />
+    <input type="checkbox" aria-label={`${name}, ${statusLabel}`} checked={checked} disabled={disabled} onChange={onChange} />
   </label>;
+}
+
+function accountPickerStatus(account: AccountSummary, onServer: boolean, t: TFunction): { status: SurfaceTone; statusLabel: string } {
+  const status = accountPickerTone(account, onServer);
+  const operationalLabel = t(`pool.memberStatus.${account.operationalStatus}`);
+  if (onServer) return { status, statusLabel: t("accounts.onServerHint") };
+  const quotaStatus = accountQuotaRefreshState(account);
+  const errorCode = quotaStatus === "refreshing" ? null : currentAccountErrorCode(account);
+  if (errorCode) return { status, statusLabel: accountErrorLabel(errorCode, t) };
+  if (quotaStatus !== "updated") return { status, statusLabel: `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}` };
+  if (account.clientAuthStatus === "login_required") return { status, statusLabel: `${t("accounts.clientAuthWarning")} · ${operationalLabel}` };
+  return { status, statusLabel: operationalLabel };
+}
+
+function sourcePickerStatus(source: SourceSummary, t: TFunction): { status: SurfaceTone; statusLabel: string } {
+  const status = sourcePickerTone(source);
+  const errorCode = source.lastErrorCode?.trim();
+  if (errorCode) return { status, statusLabel: t("pool.runtimeError", { code: errorCode }) };
+  return { status, statusLabel: t(`pool.memberStatus.${source.operationalStatus}`) };
 }
 
 export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
@@ -31,6 +60,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const [query, setQuery] = useState("");
   const [view, setView] = useState<MemberView>("all");
   const [planFilter, setPlanFilter] = useState("all");
+  const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const listRef = useRef<HTMLDivElement>(null);
   const allAccounts = (runtime?.accounts ?? []).filter((account) => !account.inPool);
   const allSources = (runtime?.sources ?? []).filter((source) => !source.inPool);
@@ -44,14 +74,41 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const activePlan = view !== "accounts" || !planOptions.has(planFilter) ? "all" : planFilter;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matches = (...values: Array<string | null | undefined>) => !normalizedQuery || values.some((value) => value?.toLocaleLowerCase().includes(normalizedQuery));
-  const accounts = allAccounts
+  const accountOnServer = (account: AccountSummary) => mode === "local" && Boolean(account.remoteLocation);
+  const listedAccounts = allAccounts
     .filter((account) => view !== "sources" && (view !== "selected" || accountIds.includes(account.id)))
     .filter((account) => activePlan === "all" || accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan)
-    .filter((account) => matches(account.identityHint, account.label, account.subscription.planType))
-    .sort((left, right) => compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareStableText(left.label, right.label));
-  const sources = allSources
-    .filter((source) => view !== "accounts" && (view !== "selected" || sourceIds.includes(source.id)) && matches(source.name, source.baseUrl))
-    .sort((left, right) => compareStableText(left.name, right.name));
+    .filter((account) => matches(account.identityHint, account.label, account.subscription.planType));
+  const listedSources = allSources
+    .filter((source) => view !== "accounts" && (view !== "selected" || sourceIds.includes(source.id)) && matches(source.name, source.baseUrl));
+  const healthCounts = new Map<MemberPickerHealth, number>();
+  const countHealth = (health: MemberPickerHealth) => healthCounts.set(health, (healthCounts.get(health) ?? 0) + 1);
+  const rankedAccounts = listedAccounts.map((account) => ({
+    account,
+    health: memberPickerHealth(accountPickerTone(account, accountOnServer(account))),
+  }));
+  const rankedSources = listedSources.map((source) => ({
+    source,
+    health: memberPickerHealth(sourcePickerTone(source)),
+  }));
+  for (const item of rankedAccounts) countHealth(item.health);
+  for (const item of rankedSources) countHealth(item.health);
+  const healthOptions = MEMBER_PICKER_HEALTH_ORDER
+    .filter((health) => (healthCounts.get(health) ?? 0) > 0)
+    .map((health) => ({ health, count: healthCounts.get(health) ?? 0 }));
+  const availableHealth = healthOptions.map((option) => option.health).join("\n");
+  const activeHealth: HealthFilter = healthFilter !== "all" && healthOptions.some((option) => option.health === healthFilter) ? healthFilter : "all";
+  const matchesHealth = (health: MemberPickerHealth) => activeHealth === "all" || health === activeHealth;
+  const accounts = rankedAccounts
+    .filter((item) => matchesHealth(item.health))
+    .sort((left, right) => compareMemberPickerHealth(left.health, right.health)
+      || compareAccountPlans(accountPlanOption(left.account.subscription.planType, t("common.unknown")), accountPlanOption(right.account.subscription.planType, t("common.unknown")))
+      || compareStableText(left.account.label, right.account.label))
+    .map((item) => item.account);
+  const sources = rankedSources
+    .filter((item) => matchesHealth(item.health))
+    .sort((left, right) => compareMemberPickerHealth(left.health, right.health) || compareStableText(left.source.name, right.source.name))
+    .map((item) => item.source);
   // Do not submit members that were removed or added elsewhere during a refresh.
   const selectedAccounts = accountIds.filter((id) => allAccounts.some((account) => account.id === id));
   const selectedSources = sourceIds.filter((id) => allSources.some((source) => source.id === id));
@@ -67,9 +124,12 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
     setAccountIds((current) => update(current, accounts.map((account) => account.id)));
     setSourceIds((current) => update(current, sources.map((source) => source.id)));
   };
-  useEffect(() => { listRef.current?.scrollTo({ top: 0 }); }, [view, query, activePlan]);
+  useEffect(() => { listRef.current?.scrollTo({ top: 0 }); }, [view, query, activePlan, activeHealth]);
+  useEffect(() => {
+    if (healthFilter !== "all" && !availableHealth.split("\n").includes(healthFilter)) setHealthFilter("all");
+  }, [availableHealth, healthFilter]);
   const add = async () => {
-    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: selectedAccounts, sourceIds: selectedSources, inPool: true }), "feedback.saved");
+    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: selectedAccounts, sourceIds: selectedSources, inPool: true }), "feedback.saved", { backgroundRefresh: true });
     if (ok) onClose();
   };
   const saving = busy === "pool-add-members";
@@ -134,6 +194,18 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
             { value: "all", label: t("accounts.allPlans") },
             ...plans.map((plan) => ({ value: plan.id, label: plan.label })),
           ]} onChange={setPlanFilter} /> : null}
+          {healthOptions.length > 1 ? <div className="pool-picker-health" role="group" aria-label={t("pool.healthFilter")}>
+            <button type="button" aria-pressed={activeHealth === "all"} data-health="all" onClick={() => setHealthFilter("all")}>
+              <span>{t("pool.healthFilters.all")}</span>
+              <small>{listedAccounts.length + listedSources.length}</small>
+            </button>
+            {healthOptions.map((option) => (
+              <button key={option.health} type="button" aria-pressed={activeHealth === option.health} data-health={option.health} onClick={() => setHealthFilter(option.health)}>
+                <span>{t(`pool.healthFilters.${option.health}`)}</span>
+                <small>{option.count}</small>
+              </button>
+            ))}
+          </div> : null}
         </div>
         <div className="pool-picker-selection">
           <label>
@@ -153,6 +225,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
             {accounts.map((account) => (
               <MemberOption
                 key={account.id}
+                {...accountPickerStatus(account, mode === "local" && Boolean(account.remoteLocation), t)}
                 name={account.label}
                 icon={<UserRound />}
                 badge={<AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} />}
@@ -166,6 +239,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
             {sources.map((source) => (
               <MemberOption
                 key={source.id}
+                {...sourcePickerStatus(source, t)}
                 name={source.name}
                 detail={source.baseUrl}
                 icon={<Server />}

@@ -149,7 +149,8 @@ fn create_with(
     };
     let metadata = serde_json::to_string_pretty(&record).map_err(io::invalid_data)?;
     let path = io::metadata_path(backup_root, &id)?;
-    if let Err(error) = atomic_write(&path, &format!("{metadata}\n")).map_err(io::io_error_message)
+    if let Err(error) =
+        atomic_write(&path, &format!("{metadata}\n")).map_err(super::io_error_message)
     {
         return Err(io::with_cleanup(error, secrets.delete(&payload_secret_ref)));
     }
@@ -201,7 +202,7 @@ fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> 
     }
     fs::remove_file(&path).map_err(io::io_error)?;
     if let Err(error) = secrets.delete(&record.payload_secret_ref) {
-        let rollback = atomic_write(&path, content).map_err(io::io_error_message);
+        let rollback = atomic_write(&path, content).map_err(super::io_error_message);
         return Err(io::with_cleanup(error, rollback));
     }
     Ok(())

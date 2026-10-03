@@ -5,7 +5,7 @@ mod output;
 use output::is_opaque_compaction_event;
 pub(in crate::gateway) use output::{
     has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
-    is_known_non_output_event,
+    is_known_non_output_event, is_responses_output_delta_type,
 };
 
 pub(in crate::gateway) fn preserved_stream_error(value: &Value) -> Option<PreservedUpstreamError> {
@@ -36,7 +36,13 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
     let Some(error) = terminal
         .payload
         .as_mut()
-        .and_then(|payload| payload.pointer_mut("/response/error"))
+        .and_then(|payload| {
+            if payload.pointer("/response/error").is_some() {
+                payload.pointer_mut("/response/error")
+            } else {
+                payload.get_mut("error")
+            }
+        })
         .and_then(Value::as_object_mut)
     else {
         return bytes;
@@ -59,17 +65,17 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
     let Some(payload) = terminal.payload else {
         return bytes;
     };
-    let event_name = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("response.failed");
+    let event_name = payload.get("type").and_then(Value::as_str);
     let Ok(payload) = serde_json::to_vec(&payload) else {
         return bytes;
     };
-    let mut frame = Vec::with_capacity(payload.len() + event_name.len() + 16);
-    frame.extend_from_slice(b"event: ");
-    frame.extend_from_slice(event_name.as_bytes());
-    frame.extend_from_slice(b"\ndata: ");
+    let mut frame = Vec::with_capacity(payload.len() + event_name.map_or(0, str::len) + 16);
+    if let Some(event_name) = event_name {
+        frame.extend_from_slice(b"event: ");
+        frame.extend_from_slice(event_name.as_bytes());
+        frame.push(b'\n');
+    }
+    frame.extend_from_slice(b"data: ");
     frame.extend_from_slice(&payload);
     frame.extend_from_slice(b"\n\n");
     frame
@@ -110,6 +116,49 @@ pub(in crate::gateway) enum TerminalOutcome {
     Success,
     Incomplete,
     Failure,
+}
+
+/// OpenAI names the model it actually served on `model` or `response.model`.
+/// Only those fields count: a `degradeN` token anywhere else can be user text.
+pub(in crate::gateway) fn served_model_is_degraded(value: &Value) -> bool {
+    [value.get("model"), value.pointer("/response/model")]
+        .into_iter()
+        .filter_map(|model| model.and_then(Value::as_str))
+        .any(crate::is_degraded_route_model)
+}
+
+/// Compare upstream identity, never the public alias or text inside the output.
+/// Provider qualification and dated snapshots do not change model identity.
+pub(in crate::gateway) fn served_model_is_rejected(value: &Value, expected: &str) -> bool {
+    // A provider rejection owns its meaning. In particular, a policy 403
+    // must not become a model mismatch that permits account rotation.
+    if upstream_event_failure_category(value.get("type").and_then(Value::as_str), value).is_some() {
+        return false;
+    }
+    if served_model_is_degraded(value) {
+        return true;
+    }
+    let expected = model_identity(expected);
+    !expected.is_empty()
+        && [value.get("model"), value.pointer("/response/model")]
+            .into_iter()
+            .filter_map(|model| model.and_then(Value::as_str))
+            .map(model_identity)
+            .any(|served| !served.is_empty() && served != expected)
+}
+
+fn model_identity(model: &str) -> String {
+    let model = model.trim().rsplit('/').next().unwrap_or_default().trim();
+    let suffix_start = [11, 9].into_iter().find_map(|length| {
+        let start = model.len().checked_sub(length)?;
+        let suffix = model.get(start..)?;
+        let digits = suffix.strip_prefix('-')?.replace('-', "");
+        let valid_shape =
+            length == 9 || (suffix.as_bytes()[5] == b'-' && suffix.as_bytes()[8] == b'-');
+        (valid_shape && digits.len() == 8 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(start)
+    });
+    model[..suffix_start.unwrap_or(model.len())].to_ascii_lowercase()
 }
 
 pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {

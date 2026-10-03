@@ -492,3 +492,91 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
         .unwrap();
     assert!(snapshot.available);
 }
+
+#[test]
+fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_limit() {
+    use crate::quota::{QuotaWindow, QuotaWindowKind};
+
+    let observed_at_ms = crate::unix_time_ms();
+    let window = |kind, available| QuotaWindow {
+        kind,
+        provider_cycle_id: None,
+        window_start_ms: None,
+        available_basis_points: Some(available),
+        explicitly_full: None,
+        reset_at_ms: Some(observed_at_ms.saturating_add(60_000)),
+        window_minutes: Some(300),
+        observed_at_ms,
+        full_transition_fingerprint: None,
+        exhaustion_transition_fingerprint: None,
+    };
+    let runtime = quota_runtime(QuotaSnapshot {
+        primary: Some(window(QuotaWindowKind::Primary, 900)),
+        secondary: Some(window(QuotaWindowKind::Secondary, 2_900)),
+        updated_at_ms: Some(observed_at_ms),
+        ..QuotaSnapshot::default()
+    });
+    runtime.apply_usage_event(
+        &UsageEvent {
+            request_id: "request".into(),
+            attempt: 1,
+            local_key_id: "key-1".into(),
+            source_id: "openai-codex".into(),
+            candidate_id: Some("account-1".into()),
+            account_id: Some("account-1".into()),
+            account_token_generation: None,
+            client_context_id: None,
+            routing: None,
+            requested_model: Some("gpt-test".into()),
+            resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: false,
+            http_status: reqwest::StatusCode::FORBIDDEN.as_u16(),
+            error_category: Some("upstream_quota_exhausted".into()),
+            tool_use: ToolUseDiagnostics::default(),
+            cooldown_scope: Some("*".into()),
+            retry_at_ms: Some(observed_at_ms.saturating_add(1_000)),
+            consecutive_failures: Some(1),
+            latency_ms: 1,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            cache_write_ttl: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            upstream_error: None,
+            quota_snapshot: None,
+        },
+        observed_at_ms,
+    );
+
+    let persisted = runtime
+        .take_passive_quota_snapshot("account-1", observed_at_ms)
+        .expect("reported primary exhaustion should persist immediately");
+    assert_eq!(
+        persisted.primary.as_ref().unwrap().available_basis_points,
+        Some(0)
+    );
+    assert_eq!(
+        persisted.secondary.as_ref().unwrap().available_basis_points,
+        Some(2_900)
+    );
+    assert!(!persisted.limit_reached);
+    assert_eq!(
+        CandidateQuota::from_snapshot(&persisted, observed_at_ms, QUOTA_STALE_AFTER_MS),
+        CandidateQuota::Exhausted
+    );
+    let snapshot = runtime
+        .candidate_runtime_order()
+        .into_iter()
+        .find(|candidate| candidate.candidate_id == "account-1")
+        .unwrap();
+    assert!(!snapshot.available);
+}

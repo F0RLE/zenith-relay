@@ -6,6 +6,25 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Stored source fields needed to build one UI summary.
+/// Desktop and server records keep their own error and revision columns.
+pub trait SourceSummaryRecord: SourceProtocolResolution {
+    fn summary_id(&self) -> &str;
+    fn summary_name(&self) -> &str;
+    fn summary_enabled(&self) -> bool;
+    fn summary_in_pool(&self) -> bool;
+    fn summary_draining(&self) -> bool;
+    fn summary_pricing_provider(&self) -> Option<&str>;
+    fn summary_official_provider_family(&self) -> Option<&str>;
+    fn summary_priority(&self) -> i32;
+    fn summary_weight(&self) -> u32;
+    fn summary_recovery_delay_seconds(&self) -> u64;
+    fn summary_allowed_models(&self) -> &[String];
+    fn summary_excluded_models(&self) -> &[String];
+    fn summary_model_price_overrides(&self) -> &BTreeMap<String, ApiModelPriceOverride>;
+    fn summary_detected_model_prices(&self) -> &BTreeMap<String, ApiModelPriceOverride>;
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceRefreshState {
@@ -98,26 +117,59 @@ impl SourceSummary {
             SourceProtocolResolution::resolved_protocol_bindings(self).unwrap_or_default(),
         )
     }
+
+    /// Builds the shared summary fields from a stored source record.
+    /// `last_error_code` and `refresh_revision` stay with the caller because
+    /// the desktop and server records do not use the same column names.
+    pub fn from_stored_source(
+        record: &impl SourceSummaryRecord,
+        secret_available: bool,
+        runtime_available: Option<bool>,
+        api_equivalent: ApiEquivalentSummary,
+        last_error_code: Option<String>,
+        refresh_revision: Option<u64>,
+    ) -> Self {
+        Self {
+            id: record.summary_id().to_string(),
+            name: record.summary_name().to_string(),
+            enabled: record.summary_enabled(),
+            in_pool: record.summary_in_pool(),
+            draining: record.summary_draining(),
+            operational_status: super::super::operational_status(
+                record.summary_enabled(),
+                false,
+                !record.summary_draining() && secret_available,
+                runtime_available,
+            ),
+            base_url: record.protocol_base_url().to_string(),
+            pricing_provider: record.summary_pricing_provider().map(str::to_string),
+            official_provider_family: record
+                .summary_official_provider_family()
+                .map(str::to_string),
+            wire_api: record.protocol_fallback(),
+            protocol_config: record
+                .source_protocol_config()
+                .with_effective_capabilities(record.protocol_base_url(), record.protocol_models()),
+            protocol_bindings: record.stored_protocol_bindings().to_vec(),
+            resolved_protocol_bindings: Some(
+                record.resolved_protocol_bindings().unwrap_or_default(),
+            ),
+            models: record.protocol_models().to_vec(),
+            allowed_models: record.summary_allowed_models().to_vec(),
+            excluded_models: record.summary_excluded_models().to_vec(),
+            priority: record.summary_priority(),
+            weight: record.summary_weight(),
+            recovery_delay_seconds: record.summary_recovery_delay_seconds(),
+            model_price_overrides: record.summary_model_price_overrides().clone(),
+            detected_model_prices: record.summary_detected_model_prices().clone(),
+            api_equivalent,
+            secret_available,
+            last_error_code,
+            refresh_revision,
+            refresh_state: Default::default(),
+            provider_stats: None,
+        }
+    }
 }
 
-impl SourceProtocolResolution for SourceSummary {
-    fn protocol_base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn protocol_models(&self) -> &[String] {
-        &self.models
-    }
-
-    fn stored_protocol_bindings(&self) -> &[SourceProtocolBinding] {
-        &self.protocol_bindings
-    }
-
-    fn protocol_fallback(&self) -> WireApi {
-        self.wire_api
-    }
-
-    fn source_protocol_config(&self) -> &SourceProtocolConfig {
-        &self.protocol_config
-    }
-}
+crate::impl_source_protocol_resolution!(SourceSummary);

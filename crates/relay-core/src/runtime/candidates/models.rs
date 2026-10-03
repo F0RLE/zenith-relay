@@ -43,10 +43,7 @@ impl GatewayRuntime {
         candidate.models = candidate_models;
         // Never publish a model that the executor cannot resolve. Hold the
         // scheduler lock until all three views name the same inventory.
-        let mut inventory = account
-            .model_inventory
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inventory = crate::poison::write(&account.model_inventory);
         let changed = inventory.configured_models != configured_models;
         let image_bridge_changed = inventory.image_main_model != image_main_model;
         *inventory = AccountModelInventory {
@@ -59,22 +56,13 @@ impl GatewayRuntime {
             // underlying Responses model changes. Revoke pending old leases.
             account.image_bridge_revision.fetch_add(1, Ordering::AcqRel);
         }
-        self.registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(account_id, published_models.iter());
+        crate::poison::mutex(&self.registry).replace(account_id, published_models.iter());
         scheduler.upsert(candidate);
         if changed {
             // Transport cards and Lite support describe the old inventory.
             // A removed and later reintroduced slug needs fresh evidence.
-            self.model_metadata
-                .codex_manifests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(account_id);
-            self.codex_responses_lite_models
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            crate::poison::mutex(&self.model_metadata.codex_manifests).remove(account_id);
+            crate::poison::mutex(&self.codex_responses_lite_models)
                 .retain(|(id, _)| id != account_id);
         }
         drop(scheduler);

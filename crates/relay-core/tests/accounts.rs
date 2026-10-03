@@ -84,6 +84,8 @@ mod http_continuation;
 mod http_rejection;
 #[path = "support/lite_and_wake.rs"]
 mod lite_and_wake;
+#[path = "support/model_identity.rs"]
+mod model_identity;
 #[path = "support/route_capacity.rs"]
 mod route_capacity;
 #[path = "support/route_fallback.rs"]
@@ -656,8 +658,12 @@ async fn upstream(
         .lock()
         .unwrap()
         .pop_front()
-        .unwrap_or_else(|| success_reply("default-response"))
-    {
+        .unwrap_or_else(|| {
+            success_reply_for_model(
+                "default-response",
+                body_value["model"].as_str().unwrap_or(MODEL),
+            )
+        }) {
         Reply::Json(status, body) => Response::builder()
             .status(status)
             .header(CONTENT_TYPE, "application/json")
@@ -686,6 +692,7 @@ async fn upstream(
             });
             Response::builder()
                 .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
                 .body(Body::from_stream(chunks))
                 .unwrap()
         }
@@ -1097,12 +1104,16 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn success_reply(id: &str) -> Reply {
+    success_reply_for_model(id, MODEL)
+}
+
+fn success_reply_for_model(id: &str, model: &str) -> Reply {
     Reply::Json(
         StatusCode::OK,
         json!({
             "id": id,
             "object": "response",
-            "model": MODEL,
+            "model": model,
             "output": [],
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         }),

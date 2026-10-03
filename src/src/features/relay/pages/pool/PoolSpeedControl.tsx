@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Gauge, Loader2, Rocket, Zap } from "lucide-react";
+import { Gauge, Rocket, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { DefaultServiceTier } from "../../api/types";
 
@@ -9,7 +9,16 @@ const SPEED_MODES = [
   { tier: "ultrafast", icon: Rocket },
 ] as const;
 
-export function PoolSpeedControl({ value, disabled, saving, onChange, className = "", modelId, tiers }: {
+export function PoolSpeedControl({
+  value,
+  disabled,
+  saving,
+  onChange,
+  className = "",
+  modelId,
+  tiers,
+  iconsOnly = false,
+}: {
   value: DefaultServiceTier;
   disabled: boolean;
   saving: boolean;
@@ -17,6 +26,7 @@ export function PoolSpeedControl({ value, disabled, saving, onChange, className 
   className?: string;
   modelId?: string;
   tiers?: readonly DefaultServiceTier[];
+  iconsOnly?: boolean;
 }) {
   const { t } = useTranslation();
   const groupRef = useRef<HTMLDivElement>(null);
@@ -24,7 +34,7 @@ export function PoolSpeedControl({ value, disabled, saving, onChange, className 
   const available = modes.length ? modes : SPEED_MODES;
   const selected = available.some(({ tier }) => tier === value) ? value : available[0]!.tier;
   const selectTier = (tier: DefaultServiceTier) => {
-    if (tier !== selected && !disabled && !saving) onChange(tier);
+    if (tier !== selected && !disabled) onChange(tier);
   };
   useEffect(() => {
     const group = groupRef.current;
@@ -39,7 +49,7 @@ export function PoolSpeedControl({ value, disabled, saving, onChange, className 
 
   return <div
     ref={groupRef}
-    className={`pool-speed-control${className ? ` ${className}` : ""}`}
+    className={`pool-speed-control${iconsOnly ? " icons-only" : ""}${className ? ` ${className}` : ""}`}
     role="radiogroup"
     aria-label={t("pool.serviceTier")}
     data-speed-tier={selected}
@@ -62,12 +72,12 @@ export function PoolSpeedControl({ value, disabled, saving, onChange, className 
         className={active ? "active" : ""}
         aria-checked={active}
         tabIndex={active ? 0 : -1}
-        disabled={disabled || saving}
+        disabled={disabled}
         data-relay-tooltip={label}
         onClick={() => selectTier(tier)}
       >
-        {saving && active ? <Loader2 className="spin" aria-hidden /> : <Icon aria-hidden />}
-        <span className={active ? undefined : "sr-only"}>{label}</span>
+        <Icon aria-hidden />
+        <span className={active && !iconsOnly ? undefined : "sr-only"}>{label}</span>
       </button>;
     })}
   </div>;

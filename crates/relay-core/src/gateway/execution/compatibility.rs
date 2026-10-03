@@ -134,8 +134,8 @@ pub(super) fn incompatible_routes(
 }
 
 pub(super) fn basis_points_route_error(
-    request: &Value,
-    stream: bool,
+    _request: &Value,
+    _stream: bool,
     tier_policy: &ServiceTierPolicy,
     selected_tier: DefaultServiceTier,
 ) -> Option<AdapterError> {
@@ -143,11 +143,6 @@ pub(super) fn basis_points_route_error(
         || selected_tier != DefaultServiceTier::Standard
     {
         return Some(AdapterError::parameter_unsupported_for("service_tier"));
-    }
-
-    let features = requested_features(request, stream);
-    if features.contains(&ProtocolFeature::Images) {
-        return Some(AdapterError::parameter_unsupported_for("input.image"));
     }
     None
 }
@@ -286,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn basis_points_rejects_unverified_speed_and_images_but_keeps_tool_bridge_eligible() {
+    fn basis_points_rejects_unverified_speed_but_keeps_images_and_tool_bridge_eligible() {
         let implicit = ServiceTierPolicy::pool_owned(&json!({}));
         assert!(basis_points_route_error(
             &json!({"input": "hello"}),
@@ -330,18 +325,15 @@ mod tests {
             .and_then(|error| error.parameter()),
             Some("service_tier")
         );
-        assert_eq!(
-            basis_points_route_error(
-                &json!({
-                    "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}]}]
-                }),
-                false,
-                &implicit,
-                DefaultServiceTier::Standard,
-            )
-            .and_then(|error| error.parameter()),
-            Some("input.image")
-        );
+        assert!(basis_points_route_error(
+            &json!({
+                "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}]}]
+            }),
+            false,
+            &implicit,
+            DefaultServiceTier::Standard,
+        )
+        .is_none());
         assert!(basis_points_route_error(
             &json!({"tools": [{"type": "function", "name": "lookup"}]}),
             false,

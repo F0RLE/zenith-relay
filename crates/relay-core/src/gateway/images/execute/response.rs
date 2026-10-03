@@ -35,7 +35,8 @@ pub(super) fn handle_collected_image(
     if !status.is_success() {
         let upstream_error =
             crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
-        let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
         if retryable_failure(status, failure.category, false) || capability_failure {
             let state = if capability_failure {

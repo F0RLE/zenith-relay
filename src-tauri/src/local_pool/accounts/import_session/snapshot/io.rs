@@ -101,14 +101,7 @@ pub(in crate::local_pool::accounts::import_session) fn ensure_import_dir(
 pub(in crate::local_pool::accounts::import_session) fn remove_snapshot_file(
     path: &Path,
 ) -> Result<(), ()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            fs::remove_file(path).map_err(|_| ())
-        }
-        Ok(_) => Err(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(()),
-    }
+    crate::files::remove_regular_file(path)
 }
 
 pub(in crate::local_pool::accounts::import_session) fn snapshot_path(

@@ -115,6 +115,34 @@ async fn generic_failure_preserves_provider_retry_after() {
 }
 
 #[tokio::test]
+async fn model_access_403_only_cools_the_requested_model() {
+    for (category, expected_scope) in [
+        (error_codes::UPSTREAM_MODEL_UNAVAILABLE, Some("model-a")),
+        (error_codes::UPSTREAM_FORBIDDEN, Some("*")),
+        (error_codes::UPSTREAM_CONTENT_POLICY, None),
+    ] {
+        let runtime = runtime(5);
+        let lease = reserve(&runtime).await;
+        let state = settle_classified_failure(
+            &runtime,
+            &lease,
+            "model-a",
+            StatusCode::FORBIDDEN,
+            category,
+            &reqwest::header::HeaderMap::new(),
+            RateLimitBodyHint::default(),
+        );
+        assert_eq!(state.cooldown_scope.as_deref(), expected_scope);
+        assert_eq!(
+            current_failure_state(&runtime, "source", "model-b")
+                .retry_at_ms
+                .is_some(),
+            expected_scope == Some("*")
+        );
+    }
+}
+
+#[tokio::test]
 async fn global_retry_scope_survives_an_equal_circuit_deadline_after_dispatch() {
     let runtime = runtime(5);
     let lease = reserve(&runtime).await;
@@ -169,4 +197,60 @@ async fn model_failures_without_retry_hints_keep_their_recovery_policy() {
             assert_eq!(failure.cooldown_scope.as_deref(), Some("model-a"));
         }
     }
+}
+
+#[tokio::test]
+async fn degraded_route_pauses_the_whole_account() {
+    let runtime = runtime(5);
+    let started = now_ms();
+    let lease = reserve(&runtime).await;
+    let failure = settle_classified_failure(
+        &runtime,
+        &lease,
+        "model-a",
+        StatusCode::NOT_FOUND,
+        error_codes::UPSTREAM_ROUTE_DEGRADED,
+        &reqwest::header::HeaderMap::new(),
+        RateLimitBodyHint::default(),
+    );
+    let retry_at = failure.retry_at_ms.expect("degraded route cooldown");
+    assert!(retry_at >= started + 30 * 60_000);
+    assert_eq!(failure.cooldown_scope.as_deref(), Some("*"));
+    assert_eq!(
+        current_failure_state(&runtime, "source", "model-b").retry_at_ms,
+        Some(retry_at)
+    );
+}
+
+#[tokio::test]
+async fn disabled_degraded_route_policy_does_not_pause_the_account() {
+    let runtime = runtime(5);
+    runtime.set_block_degraded_routes_enabled(false);
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer test-local-key")))
+        .unwrap();
+    assert!(runtime
+        .resolve_model(&key, "gpt-6-astra-degrade2-luna-1p")
+        .is_some());
+    runtime.set_block_degraded_routes_enabled(true);
+    assert!(runtime
+        .resolve_model(&key, "gpt-6-astra-degrade2-luna-1p")
+        .is_none());
+    runtime.set_block_degraded_routes_enabled(false);
+
+    let lease = reserve(&runtime).await;
+    let failure = settle_classified_failure(
+        &runtime,
+        &lease,
+        "model-a",
+        StatusCode::NOT_FOUND,
+        error_codes::UPSTREAM_ROUTE_DEGRADED,
+        &reqwest::header::HeaderMap::new(),
+        RateLimitBodyHint::default(),
+    );
+    assert_eq!(failure.cooldown_scope.as_deref(), Some("model-a"));
+    assert_eq!(
+        current_failure_state(&runtime, "source", "model-b").retry_at_ms,
+        None
+    );
 }

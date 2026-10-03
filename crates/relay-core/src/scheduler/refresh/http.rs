@@ -174,10 +174,7 @@ impl ManagementHttpGate {
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut state = crate::poison::mutex(&self.state);
                 if Instant::now() >= deadline {
                     return Err(HttpAdmissionError::TimedOut);
                 }
@@ -304,11 +301,7 @@ impl Drop for Waiting {
         if !self.active {
             return;
         }
-        let mut state = self
-            .gate
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = crate::poison::mutex(&self.gate.state);
         state.waiters.retain(|entry| entry.id != self.id);
         drop(state);
         self.gate.changed.notify_waiters();
@@ -317,11 +310,7 @@ impl Drop for Waiting {
 
 impl Drop for HttpPermit {
     fn drop(&mut self) {
-        let mut state = self
-            .gate
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = crate::poison::mutex(&self.gate.state);
         state.total -= 1;
         if self.class == HttpClass::Ordinary {
             state.ordinary -= 1;

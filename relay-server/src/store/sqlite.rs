@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 pub(super) use zenith_relay_core::unix_time_ms;
+pub(super) use zenith_relay_core::usage::sql_optional_u64 as optional_u64;
 
 pub struct Store {
     connection: Mutex<Connection>,
@@ -178,27 +179,10 @@ pub(super) fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> 
     serde_json::from_str(value).map_err(|_| "stored record is invalid".to_string())
 }
 
-pub(super) fn optional_u64(value: Option<i64>) -> Option<u64> {
-    value.and_then(|value| u64::try_from(value).ok())
-}
-
 pub(super) fn db_error(error: rusqlite::Error) -> String {
     format!("SQLite operation failed: {error}")
 }
 
 pub(super) fn io_error(error: std::io::Error) -> String {
     format!("store I/O failed: {error}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::optional_u64;
-
-    #[test]
-    fn null_and_negative_measurements_stay_absent() {
-        assert_eq!(optional_u64(None), None);
-        assert_eq!(optional_u64(Some(-1)), None);
-        assert_eq!(optional_u64(Some(0)), Some(0));
-        assert_eq!(optional_u64(Some(12)), Some(12));
-    }
 }

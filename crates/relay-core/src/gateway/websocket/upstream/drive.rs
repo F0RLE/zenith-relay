@@ -8,6 +8,7 @@ use super::open::{open_upgraded_socket, OpenedSocket};
 use super::telemetry::record_connect_failure;
 use super::upgrade_reject::{handle_upgrade_rejection, UpgradeAction};
 use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected};
+use crate::runtime::AccountTransport;
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum DrivenConnect {
@@ -70,12 +71,26 @@ pub(super) async fn drive_selected_candidate(
     if route.wire_api != WireApi::Responses {
         return Ok(DrivenConnect::Continue(request));
     }
-    if !route.adapter.is_passthrough() {
-        runtime.mark_websocket_http_only(&route.candidate_id, &request.resolved_model, now_ms());
+    // Basis Points speaks HTTP on its responses URL. Upgrading that URL as a
+    // native Responses socket is rejected with 502 Invalid request body, so
+    // this client socket must go through the HTTP executor instead.
+    let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
+    if basis_points || !route.adapter.is_passthrough() {
+        if !basis_points {
+            runtime.mark_websocket_http_only(
+                &route.candidate_id,
+                &request.resolved_model,
+                now_ms(),
+            );
+        }
         drop(lease);
         *websocket_http_fallback_origin = Some(source_error_origin);
         *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
-        return Ok(DrivenConnect::Continue(request));
+        return Ok(if basis_points {
+            DrivenConnect::Break(request)
+        } else {
+            DrivenConnect::Continue(request)
+        });
     }
     if runtime.websocket_is_http_only(&route.candidate_id, &request.resolved_model, now_ms()) {
         drop(lease);

@@ -1,7 +1,7 @@
 use rusqlite::Error as RusqliteError;
-use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+pub(super) use zenith_relay_core::path_with_suffix as sibling_path;
 
 pub(super) fn canonical_child(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let canonical = portable_canonicalize(path)?;
@@ -40,12 +40,6 @@ pub(super) fn validate_id(value: &str, prefix: &str) -> Result<(), String> {
     } else {
         Err("repair identifier is invalid".to_string())
     }
-}
-
-pub(super) fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = OsString::from(path.as_os_str());
-    value.push(suffix);
-    PathBuf::from(value)
 }
 
 pub(super) fn path_string(path: &Path) -> String {

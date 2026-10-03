@@ -19,7 +19,7 @@ use crate::local_pool::{
 use zenith_relay_core::{
     error_codes,
     providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome},
-    quota::{QuotaRefreshFailure, QuotaTransition, Subscription},
+    quota::{QuotaRefreshFailure, QuotaSnapshot, QuotaTransition, QuotaWindow, Subscription},
 };
 
 pub(in crate::local_pool) struct AccountRefreshScope {
@@ -165,7 +165,9 @@ pub(in crate::local_pool) fn apply_read_error(
                 }
             }
             RefreshReadKind::Models => {
-                if let Some((code, retryable)) = model_refresh_error_kind(error.code) {
+                if let Some((incoming, retryable)) = model_refresh_error_kind(error.code) {
+                    let current = account.account.last_error_code.clone();
+                    let code = prefer_model_refresh_error(current.as_deref(), incoming);
                     if !account.account.auth_state.requires_fresh_login()
                         || code != error_codes::MODELS_PREPARE
                     {
@@ -181,17 +183,51 @@ pub(in crate::local_pool) fn apply_read_error(
 }
 
 fn quota_is_newer(account: &LocalAccountRecord, scope: &AccountRefreshScope) -> bool {
-    let quota = &account.account.quota;
-    let observed_at_ms = quota
-        .updated_at_ms
-        .into_iter()
-        .chain(quota.error.as_ref().map(|error| error.occurred_at_ms))
-        .max();
-    // A host wall-clock correction must not make a concurrently persisted
-    // observation look older than the read. The captured snapshot is also a
-    // fence, not only its provider timestamp.
-    quota != &scope.before.account.quota
-        || observed_at_ms.is_some_and(|at| at > scope.started_at_ms)
+    // Passive headers move reset timers while a full /wham/usage read is in
+    // flight. That clock shift is not a newer remainder, so it must not discard
+    // the complete response. A changed remainder, limit, credit ledger, or
+    // supplemental window still wins over the late read.
+    QuotaSchedulingEvidence::from_snapshot(&account.account.quota)
+        != QuotaSchedulingEvidence::from_snapshot(&scope.before.account.quota)
+}
+
+/// The quota fields that make an in-flight refresh stale. Reset timers are
+/// intentionally absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuotaSchedulingEvidence {
+    primary_remaining: Option<u16>,
+    secondary_remaining: Option<u16>,
+    limit_reached: bool,
+    reset_credits_available: Option<u32>,
+    available_credits_micro_units: Option<u64>,
+    provider_credits_available: bool,
+    provider_credits_unlimited: bool,
+    direct_balance_micro_usd: Option<u64>,
+    supplemental: Vec<(String, Option<u16>)>,
+}
+
+impl QuotaSchedulingEvidence {
+    fn from_snapshot(quota: &QuotaSnapshot) -> Self {
+        Self {
+            primary_remaining: window_remaining(quota.primary.as_ref()),
+            secondary_remaining: window_remaining(quota.secondary.as_ref()),
+            limit_reached: quota.limit_reached,
+            reset_credits_available: quota.reset_credits_available,
+            available_credits_micro_units: quota.available_credits_micro_units,
+            provider_credits_available: quota.provider_credits_available,
+            provider_credits_unlimited: quota.provider_credits_unlimited,
+            direct_balance_micro_usd: quota.direct_balance_micro_usd,
+            supplemental: quota
+                .supplemental
+                .iter()
+                .map(|window| (window.id.clone(), window.window.available_basis_points))
+                .collect(),
+        }
+    }
+}
+
+fn window_remaining(window: Option<&QuotaWindow>) -> Option<u16> {
+    window.and_then(|window| window.available_basis_points)
 }
 
 fn quota_refresh_error_kind(code: ErrorCode) -> Option<&'static str> {
@@ -222,6 +258,35 @@ pub(in crate::local_pool) fn model_refresh_error_kind(
         ErrorCode::ProfileRestoreBlocked => (error_codes::MODELS_PROFILE_RESTORE, false),
         ErrorCode::NotFound | ErrorCode::SourceProbeStale => return None,
     })
+}
+
+/// A local refresh failure is not a ChatGPT catalog response. It must not
+/// replace a provider code such as `models_transport` or `models_unauthorized`.
+pub(in crate::local_pool) fn prefer_model_refresh_error<'a>(
+    current: Option<&'a str>,
+    incoming: &'a str,
+) -> &'a str {
+    let current_is_provider =
+        current.is_some_and(|code| code.starts_with("models_") && model_code_is_provider(code));
+    let incoming_is_local = !model_code_is_provider(incoming);
+    if current_is_provider && incoming_is_local {
+        current.unwrap_or(incoming)
+    } else {
+        incoming
+    }
+}
+
+fn model_code_is_provider(code: &str) -> bool {
+    !matches!(
+        code,
+        error_codes::MODELS_PREPARE
+            | error_codes::MODELS_SECRET_STORE
+            | error_codes::MODELS_STORAGE
+            | error_codes::MODELS_ACCOUNT_LOCATION
+            | error_codes::MODELS_PROFILE_RESTORE
+            | error_codes::MODELS_PROXY_UNAVAILABLE
+            | error_codes::MODELS_CLIENT_INIT
+    )
 }
 
 #[cfg(test)]

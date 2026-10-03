@@ -23,9 +23,7 @@ impl GatewayRuntime {
         model: &str,
         now_ms: u64,
     ) -> bool {
-        self.websocket_http_only
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.websocket_http_only)
             .get(&(candidate_id.to_string(), model.to_string()))
             .is_some_and(|observed_at| {
                 now_ms.saturating_sub(*observed_at) < WEBSOCKET_CAPABILITY_TTL_MS
@@ -33,16 +31,12 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn mark_websocket_supported(&self, candidate_id: &str, model: &str) {
-        self.websocket_http_only
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.websocket_http_only)
             .remove(&(candidate_id.to_string(), model.to_string()));
     }
 
     pub(crate) fn mark_websocket_http_only(&self, candidate_id: &str, model: &str, now_ms: u64) {
-        self.websocket_http_only
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.websocket_http_only)
             .insert((candidate_id.to_string(), model.to_string()), now_ms);
     }
 

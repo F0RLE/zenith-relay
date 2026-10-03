@@ -6,10 +6,7 @@ use std::sync::atomic::Ordering;
 impl TelemetryDb {
     #[cfg(test)]
     pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let connection = self.lock_connection()?;
         let mut statement = connection
             .prepare(
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
@@ -90,10 +87,7 @@ impl TelemetryDb {
             return Ok(cached.value.clone());
         }
         let aggregates = {
-            let connection = self
-                .connection
-                .lock()
-                .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+            let connection = self.lock_connection()?;
             windows
                 .iter()
                 .map(|(account_id, from_ms, to_ms)| {
@@ -137,10 +131,7 @@ impl TelemetryDb {
         resolver: &CatalogPriceResolver<'_>,
     ) -> Result<LocalUsagePage> {
         let (page, page_size) = query.normalized_page();
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let connection = self.lock_connection()?;
         let (where_sql, values) = usage_filter(query);
         let use_all_time_rollups = is_unfiltered_all_time(query);
         let mut totals = self.cached_usage_totals(&connection, query, &where_sql, &values)?;
@@ -206,7 +197,7 @@ impl TelemetryDb {
             let mut statement = connection.prepare(&sql).map_err(db_error)?;
             let mut page_values = values;
             page_values.push(SqlValue::Integer(i64::from(page_size)));
-            page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
+            page_values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
             let events = statement
                 .query_map(params_from_iter(page_values.iter()), usage_log_from_row)
                 .map_err(db_error)?

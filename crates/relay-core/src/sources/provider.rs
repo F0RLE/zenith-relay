@@ -48,7 +48,7 @@ impl fmt::Debug for ProviderSource {
             .debug_struct("ProviderSource")
             .field("id", &self.id)
             .field("name", &self.name)
-            .field("base_url", &redacted_base_url(&self.base_url))
+            .field("base_url", &redact_url(&self.base_url))
             .field("api_key", &"[redacted]")
             .field("wire_api", &self.wire_api)
             .field("models", &self.models)
@@ -181,7 +181,8 @@ pub fn url_has_userinfo(url: &Url) -> bool {
     !url.username().is_empty() || url.password().is_some()
 }
 
-fn redacted_base_url(value: &str) -> String {
+/// Drops credentials, query, and fragment before a URL is written to diagnostics.
+pub(crate) fn redact_url(value: &str) -> String {
     let Ok(mut url) = Url::parse(value) else {
         return "[invalid]".to_string();
     };

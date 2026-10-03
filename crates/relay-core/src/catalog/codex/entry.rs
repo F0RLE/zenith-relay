@@ -11,6 +11,12 @@ use super::{
 };
 use serde_json::{json, Map, Value};
 
+pub(super) const ROUTED_CODEX_BASE_INSTRUCTIONS: &str = concat!(
+    "You are a coding agent. Follow the user's instructions and use the available tools. ",
+    "Edit files with apply_patch, not the shell or Python. ",
+    "Run commands in PowerShell on Windows, and in the user's shell on macOS and Linux."
+);
+
 pub fn routed_codex_catalog_entry(
     template: Option<&Map<String, Value>>,
     model: &str,
@@ -54,10 +60,7 @@ pub fn routed_codex_catalog_entry(
     );
     entry.insert(
         "base_instructions".into(),
-        Value::String(
-            "You are a coding agent. Follow the user's instructions and use the available tools."
-                .into(),
-        ),
+        Value::String(ROUTED_CODEX_BASE_INSTRUCTIONS.into()),
     );
     entry.remove("default_reasoning_level");
     entry.insert("supported_reasoning_levels".into(), json!([]));

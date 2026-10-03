@@ -7,10 +7,7 @@ impl TelemetryDb {
     /// reported retention stay available even when they fall outside the
     /// period or the selected account.
     pub fn cache_sessions(&self, query: &UsageQuery) -> Result<Vec<CacheSession>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let connection = self.lock_connection()?;
         let mut clauses = vec![
             "client_context_id IS NOT NULL".to_string(),
             "(COALESCE(cached_input_tokens, 0) > 0 OR COALESCE(cache_write_input_tokens, 0) > 0)"
@@ -19,11 +16,11 @@ impl TelemetryDb {
         let mut values = Vec::new();
         if let Some(value) = query.from_ms {
             clauses.push("created_at >= datetime(? / 1000, 'unixepoch')".to_string());
-            values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+            values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(value)));
         }
         if let Some(value) = query.to_ms {
             clauses.push("created_at <= datetime(? / 1000, 'unixepoch')".to_string());
-            values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+            values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(value)));
         }
         if let Some(account_id) = query
             .source_or_account_query

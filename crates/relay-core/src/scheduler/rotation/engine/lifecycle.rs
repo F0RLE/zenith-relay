@@ -73,7 +73,7 @@ impl RotationEngine {
             return Err(AdmissionError::CandidateChanged);
         }
         let (ready, ordinary_alternatives) = self.selection_candidates(request, now_ms);
-        let group = self.selection_group(&ready);
+        let group = self.selection_group(&ready, now_ms);
         let selected = self
             .choose_for_request(request, &group)
             .ok_or(AdmissionError::NoEligibleCandidate)?;

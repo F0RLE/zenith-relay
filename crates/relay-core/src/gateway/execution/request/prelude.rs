@@ -4,27 +4,25 @@ pub(super) use super::super::super::continuation::{
     RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
 pub(super) use super::super::super::errors::{
-    api_error, apply_failure_state, cooldown_error, current_failure_state,
-    failure_category_is_request_terminal, failure_category_requires_cooldown,
-    preserved_upstream_error, previous_response_not_found, previous_response_requires_websocket,
-    prompt_cache_write_rejected, recoverable_response_affinity_miss,
-    recoverable_response_model_switch, responses_function_call_output_has_invalid_call_id,
-    responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
-    responses_tool_call_links_rejected, retryable_failure, retryable_status,
-    settle_attempt_failure, settle_status_failure, zenith_gateway_invalid_request, AttemptFailure,
-    PreservedUpstreamError,
+    api_error, apply_failure_state, cooldown_error, failure_category_is_request_terminal,
+    failure_category_requires_cooldown, preserved_upstream_error, previous_response_not_found,
+    previous_response_requires_websocket, prompt_cache_write_rejected,
+    recoverable_response_affinity_miss, recoverable_response_model_switch,
+    responses_function_call_output_has_invalid_call_id, responses_tool_call_is_missing_output,
+    responses_tool_call_is_missing_output_message, responses_tool_call_links_rejected,
+    retryable_failure, retryable_status, settle_attempt_failure, settle_status_failure,
+    zenith_gateway_invalid_request, AttemptFailure, PreservedUpstreamError,
 };
 pub(super) use super::super::super::now_ms;
 pub(super) use super::super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
-    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers,
-    is_deferred_tool_search_compatibility_error, normalize_account_request,
+    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, normalize_account_request,
     normalize_responses_lite_request, repair_legacy_responses_call_ids,
     responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, RequestToolPolicy,
     CODEX_RESPONSES_LITE_HEADER,
 };
 pub(super) use super::super::super::response::{
-    completed_upstream_response, emit_usage, populate_tokens, proxy_error_response,
+    collect_upstream_response, emit_usage, populate_tokens, proxy_error_response,
     proxy_json_response, proxy_response, proxy_sse_response, route_error_origin,
     upstream_body_error_response, usage_event, UsageAttempt,
 };
@@ -50,7 +48,7 @@ pub(super) use crate::runtime::{
 pub(super) use crate::scheduler::rotation::ExecutionCertainty;
 pub(super) use crate::scheduler::rotation::SharedRequestBudget;
 pub(super) use crate::usage::{ReasoningEffortDiagnostics, UsageEvent};
-pub(super) use crate::{Error, ErrorOrigin, GatewayRuntime, WireApi};
+pub(super) use crate::{ErrorOrigin, GatewayRuntime, WireApi};
 pub(super) use axum::body::Body;
 pub(super) use axum::http::header::{ACCEPT, CONTENT_TYPE};
 pub(super) use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};

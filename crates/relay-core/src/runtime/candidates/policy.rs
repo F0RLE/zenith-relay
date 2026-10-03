@@ -78,10 +78,7 @@ impl GatewayRuntime {
         }
         drop(scheduler);
 
-        let mut recovery_delays = self
-            .source_recovery_delays_ms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut recovery_delays = crate::poison::mutex(&self.source_recovery_delays_ms);
         for (candidate_id, recovery_delay_seconds) in recovery_updates {
             if recovery_delay_seconds == 0 {
                 recovery_delays.remove(&candidate_id);
@@ -121,10 +118,7 @@ impl GatewayRuntime {
         let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == key_id) else {
             return false;
         };
-        let mut current = key
-            .scope
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = crate::poison::write(&key.scope);
         if *current == scope {
             return true;
         }

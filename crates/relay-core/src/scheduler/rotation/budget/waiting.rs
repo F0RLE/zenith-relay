@@ -25,41 +25,27 @@ impl SharedRequestBudget {
     /// Conservative retained-envelope accounting. Repairs may grow it, but a
     /// driver/transport change cannot shrink or reset an existing charge.
     pub(crate) fn retain_input_bytes(&self, bytes: usize) {
-        let mut waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waiting = crate::poison::mutex(&self.waiting);
         waiting.retained_bytes = waiting.retained_bytes.max(bytes);
     }
 
     pub(crate) fn retained_input_bytes(&self) -> usize {
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retained_bytes
+        crate::poison::mutex(&self.waiting).retained_bytes
     }
 
     pub(crate) fn admission_stop_reason(&self) -> Option<AdmissionStopReason> {
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .stopped
+        crate::poison::mutex(&self.waiting).stopped
     }
 
     pub(crate) fn stop_admission(&self, reason: AdmissionStopReason) {
         self.with_budget(|budget| budget.admission_stopped = true);
-        self.waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.waiting)
             .stopped
             .get_or_insert(reason);
     }
 
     pub(crate) fn begin_queue_wait(&self) -> bool {
-        let mut waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waiting = crate::poison::mutex(&self.waiting);
         if waiting.started.is_some() || waiting.stopped.is_some() {
             return false;
         }
@@ -68,10 +54,7 @@ impl SharedRequestBudget {
     }
 
     pub(crate) fn finish_queue_wait(&self) {
-        let mut waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waiting = crate::poison::mutex(&self.waiting);
         if let Some(started) = waiting.started.take() {
             waiting.elapsed = waiting.elapsed.saturating_add(started.elapsed());
         }
@@ -79,10 +62,7 @@ impl SharedRequestBudget {
 
     pub(crate) fn queue_deadline(&self, persistent_enabled: bool) -> Option<Instant> {
         let retry_deadline = self.with_budget(|budget| budget.retry_deadline);
-        let waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let waiting = crate::poison::mutex(&self.waiting);
         let queue_deadline = (!(waiting.persistent && persistent_enabled)).then(|| {
             waiting.started.unwrap_or_else(Instant::now)
                 + MAX_ACCUMULATED_WAIT.saturating_sub(waiting.elapsed)

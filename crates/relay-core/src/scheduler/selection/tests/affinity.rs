@@ -1,14 +1,45 @@
 use super::*;
 
 #[test]
-fn prompt_cache_affinity_wins_over_a_large_quota_difference() {
+fn prompt_cache_affinity_does_not_keep_a_smaller_quota() {
     let mut scheduler = PoolScheduler::new();
     let mut cached = oauth_candidate("cached");
     cached.quota = CandidateQuota::Available(1_000);
+    cached.quota_updated_at_ms = Some(1);
     scheduler.upsert(cached);
     let mut fullest = oauth_candidate("fullest");
     fullest.quota = CandidateQuota::Available(9_000);
+    fullest.quota_updated_at_ms = Some(1);
     scheduler.upsert(fullest);
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "cached", 0));
+
+    let selected = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(selected.candidate_id, "fullest");
+    assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
+}
+
+#[test]
+fn prompt_cache_affinity_breaks_an_equal_quota_tie() {
+    let mut scheduler = PoolScheduler::new();
+    let mut cached = oauth_candidate("cached");
+    cached.quota = CandidateQuota::Available(9_000);
+    cached.quota_updated_at_ms = Some(1);
+    scheduler.upsert(cached);
+    let mut other = oauth_candidate("other");
+    other.quota = CandidateQuota::Available(9_000);
+    other.quota_updated_at_ms = Some(1);
+    scheduler.upsert(other);
     assert!(scheduler.bind_prompt_affinity("cache:thread", "cached", 0));
 
     let selected = scheduler

@@ -95,12 +95,23 @@ impl PoolScheduler {
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
-        // Preview is a read-only projection: neither weighted credits nor
-        // capacity, circuit epochs or recovery permits can advance here.
-        let mut projection = self.clone();
-        projection.sync_all_rotation_candidates();
-        let next = projection.preview_new_request_candidate(scope, models, protocols, now_ms);
-        let mut snapshots = projection
+        self.clone()
+            .into_runtime_order(scope, models, protocols, now_ms)
+    }
+
+    /// Own a cloned scheduler so the live lock can be released before preview.
+    /// Preview must not advance credits, circuits, or recovery on the scheduler
+    /// that is serving requests.
+    pub(crate) fn into_runtime_order(
+        mut self,
+        scope: &CandidateScope,
+        models: &crate::ModelRules,
+        protocols: &[WireApi],
+        now_ms: u64,
+    ) -> Vec<CandidateRuntimeSnapshot> {
+        self.sync_all_rotation_candidates();
+        let next = self.preview_new_request_candidate(scope, models, protocols, now_ms);
+        let mut snapshots = self
             .candidates
             .values()
             .map(|candidate| {
@@ -109,30 +120,27 @@ impl PoolScheduler {
                 let mut retries = BTreeMap::<String, u64>::new();
                 for model in &candidate.models {
                     if !models.allows(model)
-                        || !projection.rotation_visible(candidate, model, protocols, scope, now_ms)
+                        || !self.rotation_visible(candidate, model, protocols, scope, now_ms)
                     {
                         continue;
                     }
                     let operation = Self::model_operation(model);
-                    let request = projection.rotation_request(
+                    let request = self.rotation_request(
                         None,
                         Some(&candidate.id),
                         model,
                         operation,
                         BTreeSet::from([candidate.id.clone()]),
                     );
-                    let circuit = projection
-                        .rotation
-                        .circuit(&candidate.id, &request.route_key);
+                    let circuit = self.rotation.circuit(&candidate.id, &request.route_key);
                     half_open |= circuit.state == super::super::rotation::CircuitState::HalfOpen;
-                    match projection.rotation.candidate_availability(
-                        &request,
-                        &candidate.id,
-                        now_ms,
-                    ) {
+                    match self
+                        .rotation
+                        .candidate_availability(&request, &candidate.id, now_ms)
+                    {
                         super::super::rotation::CandidateAvailability::Ready { .. } => {
                             available |= operation != RotationOperation::Image
-                                || projection.lane_allows(candidate, InFlightLane::Image);
+                                || self.lane_allows(candidate, InFlightLane::Image);
                         }
                         super::super::rotation::CandidateAvailability::WaitUntil {
                             at_ms, ..
@@ -157,14 +165,14 @@ impl PoolScheduler {
                     next_for_new_request: next.as_deref() == Some(candidate.id.as_str()),
                     activity_revision: 0,
                     runtime_id: 0,
-                    in_flight: projection.in_flight_count(&candidate.id, InFlightLane::Text),
-                    active_request_count: projection.active_request_count(&candidate.id),
-                    active_models: projection.active_models_for(&candidate.id),
+                    in_flight: self.in_flight_count(&candidate.id, InFlightLane::Text),
+                    active_request_count: self.active_request_count(&candidate.id),
+                    active_models: self.active_models_for(&candidate.id),
                     next_retry_at_ms: model_retries.first().map(|retry| retry.retry_at_ms),
                     model_retries,
                     last_used_at_ms: candidate.last_used_at,
                     half_open,
-                    dispatches: projection.dispatch_count(&candidate.id, InFlightLane::Text),
+                    dispatches: self.dispatch_count(&candidate.id, InFlightLane::Text),
                 }
             })
             .collect::<Vec<_>>();
@@ -173,8 +181,7 @@ impl PoolScheduler {
                 !entry.active_request_count.gt(&0),
                 !entry.available,
                 !entry.next_for_new_request,
-                projection
-                    .member_policy(&projection.candidates[&entry.candidate_id])
+                self.member_policy(&self.candidates[&entry.candidate_id])
                     .map_or(usize::MAX, |(rank, _)| rank),
                 entry.candidate_id.clone(),
             )

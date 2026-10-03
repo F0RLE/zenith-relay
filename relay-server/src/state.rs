@@ -188,10 +188,7 @@ impl AppState {
     }
 
     pub(crate) fn quota_reset_lock(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .quota_reset_locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut locks = zenith_relay_core::poison::mutex(&self.quota_reset_locks);
         locks
             .entry(account_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))

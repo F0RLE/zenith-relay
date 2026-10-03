@@ -3,6 +3,7 @@ use super::super::*;
 pub(super) async fn initial_application_messages(
     upstream: &mut UpstreamWebSocket,
     origin: ErrorOrigin,
+    expected_model: Option<&str>,
 ) -> Result<Vec<UpstreamMessage>, GatewayFailure> {
     let mut messages = Vec::new();
     let mut buffered_bytes = 0_usize;
@@ -16,6 +17,20 @@ pub(super) async fn initial_application_messages(
         buffered_bytes = buffered_bytes.saturating_add(message_bytes);
         if buffered_bytes > MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2) {
             return Err(GatewayFailure::message_too_large(origin));
+        }
+        if expected_model.is_some_and(|expected| message_serves_rejected_model(&message, expected))
+        {
+            // A terminal response may be the first frame and already contain
+            // generated output. Its rejection must not authorize replay.
+            if initial_message_state(&message).0 {
+                messages.push(message);
+                return Ok(messages);
+            }
+            return Err(GatewayFailure::classified(
+                StatusCode::NOT_FOUND,
+                error_codes::UPSTREAM_ROUTE_DEGRADED,
+                origin,
+            ));
         }
         let (has_output, terminal) = initial_message_state(&message);
         let committed = has_output || terminal.outcome.is_some();
@@ -71,7 +86,21 @@ pub(in crate::gateway::websocket) fn first_message_terminal(
     Some(initial_message_state(message).1)
 }
 
-fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTerminal) {
+pub(in crate::gateway::websocket) fn message_serves_rejected_model(
+    message: &UpstreamMessage,
+    expected: &str,
+) -> bool {
+    let payload = match message {
+        UpstreamMessage::Text(text) => text.as_bytes(),
+        UpstreamMessage::Binary(bytes) => bytes.as_ref(),
+        _ => return false,
+    };
+    serde_json::from_slice::<Value>(payload).is_ok_and(|value| {
+        super::super::super::streaming::served_model_is_rejected(&value, expected)
+    })
+}
+
+pub(super) fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTerminal) {
     let payload = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),

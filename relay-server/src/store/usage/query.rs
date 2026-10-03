@@ -1,6 +1,7 @@
 use super::super::sqlite::db_error;
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use std::collections::HashMap;
+use zenith_relay_core::usage::sql_count_u64;
 use zenith_relay_core::CatalogPriceResolver;
 use zenith_relay_core::{
     pricing::PriceSource,
@@ -22,11 +23,11 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     let mut values = Vec::new();
     if let Some(value) = query.from_ms {
         clauses.push("created_at_ms >= ?");
-        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+        values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(value)));
     }
     if let Some(value) = query.to_ms {
         clauses.push("created_at_ms <= ?");
-        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+        values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(value)));
     }
     if let Some(value) = query.model_query.as_deref() {
         clauses.push("(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')");
@@ -144,8 +145,8 @@ pub(super) fn candidate_window_usage(
         .map_err(db_error)?;
     let values = [
         SqlValue::Text(candidate_hint.to_string()),
-        SqlValue::Integer(from_ms.min(i64::MAX as u64) as i64),
-        SqlValue::Integer(to_ms.min(i64::MAX as u64) as i64),
+        SqlValue::Integer(zenith_relay_core::usage::sql_u64(from_ms)),
+        SqlValue::Integer(zenith_relay_core::usage::sql_u64(to_ms)),
     ];
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
@@ -179,8 +180,8 @@ pub(super) fn usage_buckets(
         return Ok(Vec::new());
     };
     let start_ms = query.from_ms.unwrap_or_default();
-    let start = SqlValue::Integer(start_ms.min(i64::MAX as u64) as i64);
-    let bucket = SqlValue::Integer(bucket_ms.min(i64::MAX as u64) as i64);
+    let start = SqlValue::Integer(zenith_relay_core::usage::sql_u64(start_ms));
+    let bucket = SqlValue::Integer(zenith_relay_core::usage::sql_u64(bucket_ms));
     let bucket_sql = "? + ((created_at_ms - ?) / ?) * ?";
     let sql = format!(
         "SELECT {bucket_sql}, {USAGE_TOTAL_COLUMNS} \
@@ -193,7 +194,7 @@ pub(super) fn usage_buckets(
         let rows = statement
             .query_map(params_from_iter(parameters.iter()), |row| {
                 Ok(UsageBucket {
-                    start_ms: nonnegative_u64(row.get(0)?),
+                    start_ms: sql_count_u64(row.get(0)?),
                     totals: usage_totals_from_row(row, 1)?,
                 })
             })
@@ -212,7 +213,7 @@ pub(super) fn usage_buckets(
             let kind = row.get::<_, String>(1)?;
             let candidate_id = row.get::<_, String>(2)?;
             let model = row.get::<_, Option<String>>(3)?;
-            let start_ms = nonnegative_u64(row.get(0)?);
+            let start_ms = sql_count_u64(row.get(0)?);
             Ok((
                 start_ms,
                 resolver.estimate(
@@ -231,8 +232,4 @@ pub(super) fn usage_buckets(
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
     UsageTotals::from_sql_counts(|column| row.get(offset + column))
-}
-
-fn nonnegative_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or_default()
 }

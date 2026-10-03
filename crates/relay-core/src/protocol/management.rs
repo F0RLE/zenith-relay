@@ -21,7 +21,7 @@ mod usage;
 pub use account::{
     api_equivalent_projection_window, model_has_native_account_route, AccountRefreshState,
     AccountSummary, QuotaWindowUsage, RefreshStatus, RemoteAccountLocation,
-    RevealedAccountIdentity, SourceRefreshState, SourceSummary,
+    RevealedAccountIdentity, SourceRefreshState, SourceSummary, SourceSummaryRecord,
 };
 pub use model::{
     apply_member_model_display_order, apply_model_display_order,
@@ -29,6 +29,8 @@ pub use model::{
     apply_model_speed_summary, apply_pool_model_configuration, member_model_catalog,
     model_has_api_source_route, pool_candidate_count, pooled_source_runtime_available,
     source_runtime_available, GatewaySummary, ModelCatalogIdentity, ModelSummary,
+    SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput,
+    SetModelServiceTierInput,
 };
 pub use model_policy::{
     canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
@@ -39,8 +41,9 @@ pub use model_protocols::{
 };
 pub use routing::{
     account_candidate_enabled, account_operational_state, operational_status, pool_routing_summary,
-    quota_refresh_status, AccountOperationalInput, AccountOperationalState,
-    AccountRoutingBlockReason, OperationalStatus, ProxyMode, QuotaRefreshStatus,
+    quota_refresh_status, AccountOperationalInput, AccountOperationalSource,
+    AccountOperationalState, AccountRoutingBlockReason, OperationalStatus, ProxyMode,
+    QuotaRefreshStatus,
 };
 pub use usage::{
     assign_bucket_equivalents, merge_model_equivalents, UsageBucket, UsageGroup, UsagePage,
@@ -64,7 +67,9 @@ pub use health::{
 };
 #[cfg(test)]
 pub use pool::pool_model_summaries;
-pub use pool::{pool_model_summaries_with_pricing, pool_pricing_source_summary};
+pub use pool::{
+    pool_model_summaries_with_pricing, pool_pricing_source_summary, PoolMembershipInput,
+};
 pub use presets::{
     max_retry_candidates_in_range, merge_configuration_preset_settings,
     normalize_configuration_preset, quota_request_timeout_in_range,

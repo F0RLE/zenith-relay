@@ -1,6 +1,65 @@
 use super::*;
 
 #[tokio::test]
+async fn failed_initial_websocket_response_with_output_is_not_retried() {
+    let failure = json!({
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]
+        }
+    });
+    let (first, first_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+            failure.clone()
+        ])))
+        .await;
+    let (second, second_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
+            "type": "response.completed",
+            "response": {"id": "must-not-replay", "model": MODEL, "output": []}
+        })])))
+        .await;
+    let authority = ready_authority("first", "synthetic-first").await;
+    register_ready(&authority, "second", "synthetic-second").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first", "first", &first, 9000),
+            account("second", "second", &second, 3000),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create", "model": MODEL, "input": "synthetic request"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receive_websocket_json(&mut socket).await, failure);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+    assert!(second_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn websocket_upgrade_refreshes_once_on_unauthorized() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let (upstream, state) = spawn_websocket_upstream_with_behavior(

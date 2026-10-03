@@ -5,9 +5,9 @@ import { relayCommands } from "../../api/commands";
 import { ActionMenu, ActionMenuItem, CopyButton, EmptyState, IconButton, copyText, useConfirm } from "../../components/Ui";
 import { sourcePort } from "../../sourceUrl";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { ToolPolicyControl } from "./ToolPolicyControl";
 import { ModelProtectionControl } from "./ModelProtectionControl";
 import { RouteRecoveryControl } from "./RouteRecoveryControl";
+import { DegradedRoutesControl } from "./DegradedRoutesControl";
 
 export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: string }) {
   const { t } = useTranslation();
@@ -27,7 +27,7 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
   const savingPort = busy === "gateway-port";
   const canSavePort = portValid && portChanged && !savingPort;
   const savePort = () => {
-    if (canSavePort) void perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved");
+    if (canSavePort) void perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved", { backgroundRefresh: true });
   };
   const canCopyApiKey = mode === "local" || (mode === "remote" && running && Boolean(runtime?.capabilities.features.includes("profile_attach")));
   const canRotateApiKey = mode === "local" || (canCopyApiKey && Boolean(runtime?.capabilities.features.includes("profile_key_rotation")));
@@ -43,7 +43,7 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
     await copyText(mode === "local"
       ? await relayCommands.revealLocalGatewayApiKey()
       : await relayCommands.revealRemoteGatewayApiKey());
-  }, "feedback.copied");
+  }, "feedback.copied", { backgroundRefresh: true });
   const rotateApiKey = async () => {
     if (!await confirm(t("gateway.regenerateApiKeyConfirm"), {
       title: t("gateway.regenerateApiKey"),
@@ -54,7 +54,7 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
       await copyText(mode === "local"
         ? await relayCommands.rotateLocalGatewayApiKey()
         : await relayCommands.rotateRemoteGatewayApiKey());
-    }, "feedback.copied");
+    }, "feedback.copied", { backgroundRefresh: true });
   };
 
   return <section className="gateway-tab-panel gateway-api-tab" role="tabpanel" aria-label={t("gateway.tabs.api")}>
@@ -108,8 +108,8 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
             <IconButton type="submit" icon={<Save aria-hidden />} label={running ? t("gateway.applyRestart") : t("common.save")} disabled={!canSavePort} busy={savingPort} />
           </div>
         </form> : null}
-        <ToolPolicyControl />
         <ModelProtectionControl />
+        <DegradedRoutesControl />
         <RouteRecoveryControl />
       </div>
     </div>

@@ -1,11 +1,18 @@
 use super::super::*;
 
 pub(in crate::local_pool::profiles::codex) fn attach_account_config(document: &mut DocumentMut) {
-    // A direct OAuth account must use Codex's native catalog. A catalog path
-    // left by Relay or another integration makes the official picker show
-    // routed/user-defined models after an account switch. The projection
-    // snapshot restores the user's previous path when switching away.
-    restore_config(document, PROVIDER_ID, None, None);
+    // The login changes here. An official ChatGPT catalog stays untouched.
+    // Relay and any other selected provider are removed so the account uses
+    // the native ChatGPT route; a saved external catalog path is kept.
+    let official = matches!(
+        root_model_provider(document).as_deref(),
+        None | Some("openai")
+    );
+    remove_managed_provider(document, PROVIDER_ID);
+    if !official {
+        let catalog = root_model_catalog_json(document);
+        restore_config(document, PROVIDER_ID, None, catalog.as_deref());
+    }
     document.remove("openai_base_url");
 }
 
@@ -63,13 +70,11 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_content(
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .unwrap_or_else(Utc::now)
         .to_rfc3339_opts(SecondsFormat::Millis, true);
-    let content = serde_json::to_string_pretty(&serde_json::json!({
+    super::serialize_pretty(&serde_json::json!({
         "OPENAI_API_KEY": null,
         "last_refresh": last_refresh,
         "tokens": token_values,
     }))
-    .map_err(LocalPoolError::invalid_state)?;
-    Ok(format!("{content}\n"))
 }
 
 pub(in crate::local_pool::profiles::codex) fn auth_snapshot_json(
@@ -274,8 +279,7 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
 pub(in crate::local_pool::profiles::codex) fn serialize_account_backup(
     backup: &AccountProfileBackup,
 ) -> Result<String> {
-    let content = serde_json::to_string_pretty(backup).map_err(LocalPoolError::invalid_state)?;
-    Ok(format!("{content}\n"))
+    super::serialize_pretty(backup)
 }
 
 pub(in crate::local_pool::profiles::codex) fn binding_from_backup(

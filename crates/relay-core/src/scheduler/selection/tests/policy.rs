@@ -225,16 +225,18 @@ fn smart_does_not_keep_preferring_quota_that_aged_without_a_refresh() {
 }
 
 #[test]
-fn smart_cache_affinity_does_not_compare_unrelated_quota_percentages() {
+fn automatic_quota_outranks_prompt_cache_affinity() {
     let mut scheduler = mixed(PoolRoutingMode::Automatic);
     for (id, remaining) in [("account", 10_000), ("api-a", 8_000), ("api-b", 6_000)] {
-        scheduler.candidates.get_mut(id).unwrap().quota = CandidateQuota::Available(remaining);
+        let member = scheduler.candidates.get_mut(id).unwrap();
+        member.quota = CandidateQuota::Available(remaining);
+        member.quota_updated_at_ms = Some(100);
     }
     scheduler.bind_prompt_affinity("cache:prompt", "api-b", 100);
     for _ in 0..12 {
         assert_eq!(
             rotation::dispatch(&mut scheduler, 100, Some("cache:prompt")),
-            "api-b"
+            "account"
         );
     }
 }

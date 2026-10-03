@@ -16,10 +16,7 @@ impl GatewayRuntime {
             return false;
         };
         {
-            let mut recent = self
-                .chatgpt_team_breaker_recent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut recent = crate::poison::mutex(&self.chatgpt_team_breaker_recent);
             if recent.get(&team_key).is_some_and(|until| *until > now_ms) {
                 return false;
             }

@@ -54,8 +54,16 @@ impl RotationEngine {
 
     pub fn select(&self, request: &RotationRequest, now_ms: u64) -> Option<RotationSelection> {
         let (ready, _) = self.selection_candidates(request, now_ms);
-        let group = self.selection_group(&ready);
+        let group = self.selection_group(&ready, now_ms);
         let selected = self.choose_for_request(request, &group)?;
+        let selected_quota = self.fresh_quota_remaining(&selected.id, now_ms);
+        let quota_decided = request.owner.is_none()
+            && !selected.recovery
+            && self.mode == RotationMode::Automatic
+            && selected_quota.is_some()
+            && ready.iter().any(|candidate| {
+                self.fresh_quota_remaining(&candidate.id, now_ms) != selected_quota
+            });
         let reason = if request.owner.is_some() {
             RotationSelectionReason::HardOwner
         } else if selected.recovery {
@@ -64,6 +72,8 @@ impl RotationEngine {
             RotationSelectionReason::OnlyEligible
         } else if self.mode == RotationMode::InOrder {
             RotationSelectionReason::PrimaryFirst
+        } else if quota_decided {
+            RotationSelectionReason::QuotaHeadroom
         } else if group.len() < ready.len() && self.mode == RotationMode::Automatic {
             RotationSelectionReason::LeastLoaded
         } else {
@@ -109,7 +119,45 @@ impl RotationEngine {
         self.choose_weighted(&request.route_key, group)
     }
 
-    pub(super) fn selection_group(&self, ready: &[ReadyCandidate]) -> Vec<ReadyCandidate> {
+    pub(crate) fn fresh_quota_remaining(&self, candidate_id: &str, now_ms: u64) -> Option<u64> {
+        let runtime = self.candidates.get(candidate_id)?;
+        if runtime.candidate.quota != QuotaState::Available {
+            return None;
+        }
+        let remaining = runtime
+            .candidate
+            .quota_remaining_basis_points
+            .filter(|remaining| *remaining > 0)?;
+        if runtime
+            .candidate
+            .quota_observed_at_ms
+            .is_some_and(|observed_at_ms| {
+                now_ms.saturating_sub(observed_at_ms) > self.quota_stale_after_ms
+            })
+        {
+            return None;
+        }
+        Some(remaining)
+    }
+
+    pub(crate) fn best_other_ordinary_fresh_quota(
+        &self,
+        request: &RotationRequest,
+        owner_id: &str,
+        now_ms: u64,
+    ) -> Option<u64> {
+        self.ready_candidates(request, now_ms)
+            .into_iter()
+            .filter(|candidate| !candidate.recovery && candidate.id != owner_id)
+            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+            .max()
+    }
+
+    pub(super) fn selection_group(
+        &self,
+        ready: &[ReadyCandidate],
+        now_ms: u64,
+    ) -> Vec<ReadyCandidate> {
         // Exploration is arbitrated across the runtime, not separately for
         // each priority/model. A lower-priority due source must not starve.
         let recovery = ready
@@ -133,15 +181,31 @@ impl RotationEngine {
                 .collect(),
             RotationMode::RoundRobin => ready.to_vec(),
             RotationMode::Automatic => {
+                let best_quota = ready
+                    .iter()
+                    .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+                    .max();
+                let quota_group = match best_quota {
+                    Some(best_quota) => ready
+                        .iter()
+                        .filter(|candidate| {
+                            self.fresh_quota_remaining(&candidate.id, now_ms) == Some(best_quota)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    None => ready.to_vec(),
+                };
                 let compare_load = |left: &ReadyCandidate, right: &ReadyCandidate| {
                     (u64::from(left.in_flight) * u64::from(right.effective_capacity))
                         .cmp(&(u64::from(right.in_flight) * u64::from(left.effective_capacity)))
                 };
-                let Some(best) = ready.iter().min_by(|left, right| compare_load(left, right))
+                let Some(best) = quota_group
+                    .iter()
+                    .min_by(|left, right| compare_load(left, right))
                 else {
                     return Vec::new();
                 };
-                ready
+                quota_group
                     .iter()
                     .filter(|candidate| compare_load(candidate, best).is_eq())
                     .cloned()

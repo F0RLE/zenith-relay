@@ -180,14 +180,7 @@ fn ensure_regular_or_missing(path: &Path) -> Result<(), OAuthFlowError> {
 }
 
 pub(super) fn remove_snapshot(path: &Path) -> Result<(), ()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            fs::remove_file(path).map_err(|_| ())
-        }
-        Ok(_) => Err(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(()),
-    }
+    crate::files::remove_regular_file(path)
 }
 
 pub(super) fn snapshot_path(root: &Path, login_id: &str) -> Result<PathBuf, OAuthFlowError> {
@@ -199,7 +192,7 @@ pub(super) fn pending_directory(root: &Path) -> PathBuf {
     root.join("oauth_pending")
 }
 
-pub(super) fn callback_secret_ref(login_id: &str) -> String {
+pub(crate) fn callback_secret_ref(login_id: &str) -> String {
     format!("oauth-callback:{login_id}")
 }
 

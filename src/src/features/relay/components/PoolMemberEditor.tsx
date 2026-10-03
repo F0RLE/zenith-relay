@@ -60,7 +60,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
     };
-    const ok = await perform(`member-${member.id}`, persist, "feedback.saved");
+    const ok = await perform(`member-${member.id}`, persist, "feedback.saved", { backgroundRefresh: true });
     if (ok) onClose();
   };
   return (

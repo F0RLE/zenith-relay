@@ -48,5 +48,5 @@ update callers when its contract changes, and run the relevant `CONTRIBUTING.md`
 checks. Do not commit, push, create PRs, merge, deploy, or publish without
 explicit current authorization.
 
-Develop on `release/1.1.3` by default. Leave `main` untouched unless the user
+Develop on `release/1.1.4` by default. Leave `main` untouched unless the user
 explicitly directs otherwise.

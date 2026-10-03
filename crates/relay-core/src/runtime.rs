@@ -68,6 +68,8 @@ pub use config::{
     GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
     ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey,
     RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
+    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
+    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
 };
 
 pub(crate) use attempt::CandidateLease;
@@ -170,16 +172,11 @@ pub(crate) struct AuthenticatedKey {
 
 impl AuthenticatedKey {
     pub(crate) fn scope_snapshot(&self) -> CandidateScope {
-        self.scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        crate::poison::read(&self.scope).clone()
     }
 
     fn scope_read(&self) -> std::sync::RwLockReadGuard<'_, CandidateScope> {
-        self.scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::read(&self.scope)
     }
 }
 
@@ -336,9 +333,7 @@ impl GatewayRuntime {
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
-        self.scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::mutex(&self.scheduler)
     }
 }
 
@@ -350,9 +345,7 @@ pub(crate) enum AccountTransport {
 
 impl ChatGptAccountExecutor {
     fn canonical_model(&self, model: &str) -> Option<String> {
-        self.model_inventory
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::poison::read(&self.model_inventory)
             .configured_models
             .iter()
             .find(|candidate| candidate.eq_ignore_ascii_case(model))

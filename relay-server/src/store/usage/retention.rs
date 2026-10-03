@@ -93,8 +93,8 @@ impl Store {
                         total_samples=total_samples + excluded.total_samples"
                 ),
                 params![
-                    raw_cutoff_ms.min(i64::MAX as u64) as i64,
-                    max_raw_events.min(i64::MAX as u64) as i64,
+                    zenith_relay_core::usage::sql_u64(raw_cutoff_ms),
+                    zenith_relay_core::usage::sql_u64(max_raw_events),
                 ],
             )
             .map_err(db_error)?;
@@ -119,8 +119,8 @@ impl Store {
                 .execute(
                     &sql,
                     params![
-                        raw_cutoff_ms.min(i64::MAX as u64) as i64,
-                        max_raw_events.min(i64::MAX as u64) as i64,
+                        zenith_relay_core::usage::sql_u64(raw_cutoff_ms),
+                        zenith_relay_core::usage::sql_u64(max_raw_events),
                     ],
                 )
                 .map_err(db_error)?;
@@ -135,8 +135,8 @@ impl Store {
                         archived_at_ms = MAX(usage_request_tombstones.archived_at_ms, excluded.archived_at_ms)"
                 ),
                 params![
-                    raw_cutoff_ms.min(i64::MAX as u64) as i64,
-                    max_raw_events.min(i64::MAX as u64) as i64,
+                    zenith_relay_core::usage::sql_u64(raw_cutoff_ms),
+                    zenith_relay_core::usage::sql_u64(max_raw_events),
                 ],
             )
             .map_err(db_error)?;
@@ -144,21 +144,21 @@ impl Store {
             .execute(
                 &format!("DELETE FROM usage_events WHERE {USAGE_PRUNE_PREDICATE}"),
                 params![
-                    raw_cutoff_ms.min(i64::MAX as u64) as i64,
-                    max_raw_events.min(i64::MAX as u64) as i64,
+                    zenith_relay_core::usage::sql_u64(raw_cutoff_ms),
+                    zenith_relay_core::usage::sql_u64(max_raw_events),
                 ],
             )
             .map_err(db_error)?;
         transaction
             .execute(
                 "DELETE FROM usage_key_rollups WHERE period_start_ms >= 0 AND period_start_ms < ?1",
-                [daily_rollup_cutoff_ms.min(i64::MAX as u64) as i64],
+                [zenith_relay_core::usage::sql_u64(daily_rollup_cutoff_ms)],
             )
             .map_err(db_error)?;
         transaction
             .execute(
                 "DELETE FROM usage_request_tombstones WHERE archived_at_ms < ?1",
-                [daily_rollup_cutoff_ms.min(i64::MAX as u64) as i64],
+                [zenith_relay_core::usage::sql_u64(daily_rollup_cutoff_ms)],
             )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;

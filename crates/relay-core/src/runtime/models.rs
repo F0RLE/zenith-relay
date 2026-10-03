@@ -15,15 +15,14 @@ impl GatewayRuntime {
             Some(prefix) => strip_prefix_ignore_ascii_case(model, &format!("{prefix}/"))?,
             None => model,
         };
+        if self.degraded_route_blocked(model) {
+            return None;
+        }
         (key.model_rules.allows(model) && self.model_enabled(model)).then(|| model.to_string())
     }
 
     pub(super) fn model_enabled(&self, model: &str) -> bool {
-        !self
-            .hidden_models
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&crate::model_id_key(model))
+        !crate::poison::read(&self.hidden_models).contains(&crate::model_id_key(model))
     }
 
     /// Apply global visibility without replacing the scheduler or interrupting
@@ -34,10 +33,7 @@ impl GatewayRuntime {
             .map(|model| crate::model_id_key(model))
             .filter(|model| !model.is_empty())
             .collect();
-        *self
-            .hidden_models
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = hidden;
+        *crate::poison::write(&self.hidden_models) = hidden;
         self.candidate_availability.notify_waiters();
         self.admission_changed.notify_waiters();
     }
@@ -124,18 +120,16 @@ impl GatewayRuntime {
     ) -> Vec<String> {
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
-        let mut models = self
-            .registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let mut models = crate::poison::mutex(&self.registry)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
-            .filter(|model| key.model_rules.allows(model) && self.model_enabled(model))
+            .filter(|model| {
+                !self.degraded_route_blocked(model)
+                    && key.model_rules.allows(model)
+                    && self.model_enabled(model)
+            })
             .collect::<Vec<_>>();
-        let order = self
-            .model_display_order
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let order = crate::poison::mutex(&self.model_display_order);
         models = self.model_metadata_catalog.as_ref().map_or_else(
             || crate::normalize_model_ids(models.iter()),
             |catalog| {
@@ -165,10 +159,7 @@ impl GatewayRuntime {
                 .values()
                 .filter_map(|account| {
                     let candidate = scheduler.candidate(&account.id)?;
-                    let inventory = account
-                        .model_inventory
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let inventory = crate::poison::read(&account.model_inventory);
                     let visible_models = inventory
                         .configured_models
                         .iter()

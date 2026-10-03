@@ -68,6 +68,7 @@ export type MockOptions = {
   basisPointsAvailable?: boolean;
   basisPointsEnabled?: boolean;
   chatgptRetryUntilAvailable?: boolean;
+  blockDegradedRoutesEnabled?: boolean;
   poolMembers?: boolean;
   proxyCount?: number;
   accountProxyRequired?: boolean;
@@ -366,7 +367,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: input.rotationVersion ?? 2, mode: input.rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", basisPointsEnabled: input.basisPointsEnabled ?? false, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: input.rotationVersion ?? 2, mode: input.rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", basisPointsEnabled: input.basisPointsEnabled ?? false, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
       capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "rotation_v2", "source_protocols_v1"], supportedWireApis: ["responses", "chat_completions", "messages", "gemini"] as Array<"responses" | "chat_completions" | "messages" | "gemini"> },
       sources: populated ? sources : [],
@@ -825,6 +826,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_local_chatgpt_retry_until_available": {
             const request = args.input as { enabled: boolean };
             localRuntime.gateway.chatgptRetryUntilAvailable = request.enabled;
+            return structuredClone(localRuntime);
+          }
+          case "set_local_block_degraded_routes": {
+            const request = args.input as { enabled: boolean };
+            localRuntime.gateway.blockDegradedRoutesEnabled = request.enabled;
             return structuredClone(localRuntime);
           }
         case "update_local_routing": {
@@ -1364,6 +1370,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }
       if (type === "set_chatgpt_retry_until_available") {
         remoteRuntime.gateway.chatgptRetryUntilAvailable = Boolean(input.payload?.enabled);
+        return structuredClone(remoteRuntime);
+      }
+      if (type === "set_block_degraded_routes") {
+        remoteRuntime.gateway.blockDegradedRoutesEnabled = Boolean(input.payload?.enabled);
         return structuredClone(remoteRuntime);
       }
       if (type === "set_account_proxy") {

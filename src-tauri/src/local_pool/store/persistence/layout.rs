@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use zenith_relay_core::path_with_suffix as companion_path;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -278,12 +279,6 @@ fn regular_file_if_present(path: &Path, description: &str) -> Result<Option<Path
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(legacy_io_error(error)),
     }
-}
-
-fn companion_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
 }
 
 fn legacy_io_error(error: std::io::Error) -> LocalPoolError {

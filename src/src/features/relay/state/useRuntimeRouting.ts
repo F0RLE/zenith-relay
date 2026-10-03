@@ -1,7 +1,7 @@
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { relayCommands } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
-import { preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
+import { preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../routingOrder";
 import { ROUTING_REFRESH_INTERVAL_MS } from "./refreshPolicy";
 import { visibleLocalRoutingOrder } from "./useRuntimeEvents";
 
@@ -44,10 +44,13 @@ export function useRuntimeRouting({
         const visibleRoutingOrder = mode === "local"
           ? visibleLocalRoutingOrder(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current)
           : routingOrder;
-        setRuntime((snapshot) => snapshot ? {
-          ...snapshot,
-          gateway: { ...snapshot.gateway, routingOrder: visibleRoutingOrder },
-        } : snapshot);
+        setRuntime((snapshot) => {
+          if (!snapshot || sameRuntimeOrder(snapshot.gateway.routingOrder ?? [], visibleRoutingOrder)) return snapshot;
+          return {
+            ...snapshot,
+            gateway: { ...snapshot.gateway, routingOrder: visibleRoutingOrder },
+          };
+        });
       } catch {
         // The full refresh keeps the last known order if the lightweight probe fails.
       } finally {

@@ -4,10 +4,14 @@ import {
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
+  modelShowsReasoningControl,
   normalizeReasoningSelection,
   reorderById,
   reorderModelGroups,
   supportedReasoningLevels,
+  pendingModelEnabled,
+  reconcilePendingModelEnabled,
+  clearPendingModelEnabled,
   type ModelRuleGroup,
 } from "../src/features/relay/pages/pool/modelRulesModel";
 
@@ -45,6 +49,13 @@ describe("model rules model", () => {
     expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["standard"] }))).toEqual(["standard", "fast", "ultrafast"]);
     expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["fast", "standard"] }))).toEqual(["standard", "fast"]);
     expect(modelSpeedTiers(model("other", { speedSupported: false }))).toEqual(["standard"]);
+  });
+
+  test("hides reasoning when a model has no levels and never offers it for image generation", () => {
+    expect(modelShowsReasoningControl(model("gpt-5.4", { reasoningSupportedLevels: ["low", "high"] }))).toBe(true);
+    expect(modelShowsReasoningControl(model("gpt-reserve"))).toBe(false);
+    expect(modelShowsReasoningControl(model("gpt-image-2", { reasoningSupportedLevels: ["low", "high"], catalogFamily: "gpt-image" }))).toBe(false);
+    expect(modelShowsReasoningControl(model("vision", { catalogOutputModalities: ["text"], reasoningLevels: ["medium"] }))).toBe(true);
   });
 
   test("moves complete groups while preserving each group's model order", () => {
@@ -86,3 +97,27 @@ describe("model rules model", () => {
     }))).toEqual([]);
   });
 });
+
+describe("optimistic model switches", () => {
+  test("shows the pending value and clears it only after the runtime agrees", () => {
+    const pending = { "gpt-5.4": false, "gpt-5.5": true };
+    expect(pendingModelEnabled(pending, { id: "gpt-5.4", enabled: true })).toBeFalse();
+    expect(pendingModelEnabled(pending, { id: "other", enabled: true })).toBeTrue();
+    const waiting = reconcilePendingModelEnabled(pending, [
+      { id: "gpt-5.4", enabled: true },
+      { id: "gpt-5.5", enabled: false },
+    ]);
+    expect(waiting).toBe(pending);
+    expect(reconcilePendingModelEnabled(pending, [
+      { id: "gpt-5.4", enabled: false },
+      { id: "gpt-5.5", enabled: false },
+    ])).toEqual({ "gpt-5.5": true });
+  });
+
+  test("rolls back only the failed attempt", () => {
+    const pending = { "gpt-5.4": false, "gpt-5.5": true };
+    expect(clearPendingModelEnabled(pending, "gpt-5.4", true)).toBe(pending);
+    expect(clearPendingModelEnabled(pending, "gpt-5.4", false)).toEqual({ "gpt-5.5": true });
+  });
+});
+

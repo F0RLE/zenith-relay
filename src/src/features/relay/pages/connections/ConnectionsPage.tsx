@@ -122,7 +122,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       return;
     }
     if (view === "remote" && runtime) {
-      void perform("remote-refresh", relayCommands.refreshRemoteCapabilities, "feedback.refreshed");
+      void perform("remote-refresh", relayCommands.refreshRemoteCapabilities, "feedback.refreshed", { backgroundRefresh: true });
       return;
     }
     setEditingSource(null);
@@ -177,7 +177,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
         </label>
         {sourceRefreshReport ? <span className="table-toolbar-result" role="status">{t("sources.refreshResult", sourceRefreshReport)}</span> : null}
-        <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={refreshSourceData} />
+        <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={busy === "sources-refresh-all"} onClick={refreshSourceData} />
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} /> : null}

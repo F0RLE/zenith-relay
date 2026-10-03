@@ -1,3 +1,4 @@
+use super::super::io_error_message;
 use super::{atomic_write, ErrorCode, LocalPoolError, Result};
 use std::{fs, path::Path};
 
@@ -127,7 +128,7 @@ pub(super) fn profile_changed_at(path: &Path) -> LocalPoolError {
 }
 
 pub(super) fn io_error(error: std::io::Error) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error.to_string())
+    LocalPoolError::io(error)
 }
 
 pub(super) fn io_error_at(path: &Path, error: std::io::Error) -> LocalPoolError {
@@ -135,8 +136,4 @@ pub(super) fn io_error_at(path: &Path, error: std::io::Error) -> LocalPoolError 
         ErrorCode::Io,
         format!("failed to access {}: {error}", path.display()),
     )
-}
-
-pub(super) fn io_error_message(error: String) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error)
 }

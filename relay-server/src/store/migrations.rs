@@ -2,10 +2,9 @@ use super::sqlite::{db_error, io_error, unix_time_ms};
 use crate::state::SERVER_SCHEMA_VERSION;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
-    ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 mod catalog;
@@ -64,7 +63,7 @@ pub(super) fn apply_migrations(
                     params![
                         i64::from(migration.version),
                         migration.name,
-                        unix_time_ms().min(i64::MAX as u64) as i64
+                        zenith_relay_core::usage::sql_u64(unix_time_ms())
                     ],
                 )
                 .map_err(db_error)?;
@@ -221,11 +220,7 @@ fn restore_database_file(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = OsString::from(path.as_os_str());
-    value.push(suffix);
-    PathBuf::from(value)
-}
+pub(super) use zenith_relay_core::path_with_suffix as sibling_path;
 
 #[cfg(test)]
 mod tests;

@@ -239,6 +239,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::gateway::settings::set_local_codex_background_tasks,
         local_pool::commands::gateway::settings::set_local_tool_policy,
         local_pool::commands::gateway::settings::set_local_chatgpt_retry_until_available,
+        local_pool::commands::gateway::settings::set_local_block_degraded_routes,
         local_pool::commands::gateway::settings::set_local_codex_websockets,
         local_pool::commands::gateway::settings::set_codex_profile_websockets,
         local_pool::commands::gateway::diagnostics::diagnose_local_gateway,

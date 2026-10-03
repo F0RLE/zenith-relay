@@ -69,26 +69,58 @@ pub fn common_proxy_config(settings: &GatewaySettings) -> Result<Option<ProxyCon
         .transpose()
 }
 
+/// The proxy choice already known without reading the common-proxy secret.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProxyRoute {
+    pub has_account_proxy: bool,
+    pub account_proxy_valid: bool,
+    pub bypass_common_proxy: bool,
+}
+
+#[cfg(test)]
 pub fn proxy_status(
     settings: &GatewaySettings,
     credentials: &StoredCodexCredentials,
     common_available: bool,
 ) -> (ProxyMode, bool) {
-    if credentials.proxy_url().is_some() {
-        return (
-            ProxyMode::Account,
-            credentials
-                .proxy_url()
+    let account_proxy = credentials.proxy_url();
+    proxy_route_status(
+        settings,
+        ProxyRoute {
+            has_account_proxy: account_proxy.is_some(),
+            account_proxy_valid: account_proxy
                 .is_some_and(|value| ProxyConfig::parse(value).is_ok()),
-        );
+            bypass_common_proxy: credentials.bypass_common_proxy(),
+        },
+        common_available,
+    )
+}
+
+/// One route decision for both a live credential and a snapshot fact.
+/// The second value is whether that route can carry account traffic.
+pub fn proxy_route_status(
+    settings: &GatewaySettings,
+    route: ProxyRoute,
+    common_available: bool,
+) -> (ProxyMode, bool) {
+    if route.has_account_proxy {
+        return (ProxyMode::Account, route.account_proxy_valid);
     }
-    if credentials.bypass_common_proxy() {
+    if route.bypass_common_proxy {
         return (ProxyMode::Direct, !settings.account_proxy_required);
     }
     if settings.common_proxy_configured {
         return (ProxyMode::Common, common_available);
     }
     (ProxyMode::Direct, !settings.account_proxy_required)
+}
+
+pub fn proxy_route_is_usable(
+    settings: &GatewaySettings,
+    route: ProxyRoute,
+    common_available: bool,
+) -> bool {
+    proxy_route_status(settings, route, common_available).1
 }
 
 pub fn ensure_account_proxy<T>(settings: &GatewaySettings, proxy: Option<T>) -> Result<()> {

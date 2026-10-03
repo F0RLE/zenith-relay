@@ -12,10 +12,7 @@ use super::layout::{ensure_layout, ensure_real_directory, prune_files, root_path
 /// the next launch when `session.active` indicates an interrupted run.
 pub(in crate::diagnostics) fn persist_last_stage(value: &Breadcrumb) {
     let state = state();
-    let _guard = state
-        .write_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = zenith_relay_core::poison::mutex(&state.write_lock);
     let root = root_path();
     persist_last_stage_at(&root, value);
 }

@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub use auth::{
-    apply_model_discovery_failure, automatic_quota_monitoring_eligible, clear_false_upstream_block,
-    provider_account_failure, recover_model_discovery_state, AccountAuthMode, AccountAuthState,
-    AccountHealthState, ProviderAccountFailure, ReauthReason,
+    accept_discovered_models, apply_model_discovery_failure, automatic_quota_monitoring_eligible,
+    clear_false_upstream_block, provider_account_failure, recover_model_discovery_state,
+    AccountAuthMode, AccountAuthState, AccountHealthState, ProviderAccountFailure, ReauthReason,
 };
 pub use identity::AccountIdentity;
 pub use usage::{
@@ -58,3 +58,5 @@ impl AccountRecord {
             && self.health == AccountHealthState::Healthy
     }
 }
+
+crate::impl_account_operational_source!(AccountRecord);

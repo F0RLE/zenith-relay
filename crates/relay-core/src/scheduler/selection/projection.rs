@@ -76,6 +76,8 @@ impl PoolScheduler {
     }
 
     pub(super) fn sync_all_rotation_candidates(&mut self) {
+        self.rotation
+            .set_quota_stale_after_ms(self.quota_stale_after_ms);
         let current_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
         let stale_ids = self
             .rotation_leases
@@ -96,16 +98,25 @@ impl PoolScheduler {
             } else {
                 RotationAuthState::Blocked
             };
-            let quota = match self.routing_quota(candidate) {
-                CandidateQuota::Unknown => RotationQuotaState::Unknown,
-                CandidateQuota::Available(0) => RotationQuotaState::Exhausted {
-                    reset_at_ms: candidate.quota_reset_at_ms,
-                },
-                CandidateQuota::Available(_) => RotationQuotaState::Available,
-                CandidateQuota::Stale => RotationQuotaState::Stale,
-                CandidateQuota::Exhausted => RotationQuotaState::Exhausted {
-                    reset_at_ms: candidate.quota_reset_at_ms,
-                },
+            let routing_quota = self.routing_quota(candidate);
+            let (quota, remaining) = match routing_quota {
+                CandidateQuota::Unknown => (RotationQuotaState::Unknown, None),
+                CandidateQuota::Available(0) => (
+                    RotationQuotaState::Exhausted {
+                        reset_at_ms: candidate.quota_reset_at_ms,
+                    },
+                    None,
+                ),
+                CandidateQuota::Available(remaining) => {
+                    (RotationQuotaState::Available, Some(remaining))
+                }
+                CandidateQuota::Stale => (RotationQuotaState::Stale, None),
+                CandidateQuota::Exhausted => (
+                    RotationQuotaState::Exhausted {
+                        reset_at_ms: candidate.quota_reset_at_ms,
+                    },
+                    None,
+                ),
             };
             let global_not_before_ms = candidate.cooldowns.get("*").copied().filter(|_| {
                 self.cooldown_reasons.get(&(id.clone(), "*".into()))
@@ -122,6 +133,9 @@ impl PoolScheduler {
                 quota,
                 rate,
             );
+            let _ =
+                self.rotation
+                    .set_quota_remaining(&id, remaining, candidate.quota_updated_at_ms);
             for model in &candidate.models {
                 let not_before_ms = candidate
                     .cooldowns

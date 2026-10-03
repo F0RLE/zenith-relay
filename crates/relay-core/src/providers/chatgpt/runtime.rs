@@ -47,7 +47,10 @@ impl fmt::Debug for RuntimeChatGptAccount {
             .field("id", &self.id)
             .field("source_id", &self.source_id)
             .field("chatgpt_account_id", &"[redacted]")
-            .field("responses_url", &redacted_url(&self.responses_url))
+            .field(
+                "responses_url",
+                &crate::sources::redact_url(&self.responses_url),
+            )
             .field("basis_points_enabled", &self.basis_points_enabled)
             .field("models", &self.models)
             .field("enabled", &self.enabled)
@@ -82,15 +85,4 @@ pub struct RuntimeChatGptAuth {
     pub persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
     pub refresh_skew_ms: u64,
     pub agent_identities: HashMap<String, AgentIdentityCredential>,
-}
-
-fn redacted_url(value: &str) -> String {
-    let Ok(mut url) = url::Url::parse(value) else {
-        return "[invalid]".to_string();
-    };
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
 }

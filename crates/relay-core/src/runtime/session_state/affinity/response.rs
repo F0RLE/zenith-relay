@@ -13,10 +13,12 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> crate::AdapterResult<crate::MessagesBridgeState> {
-        self.messages_bridge_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(local_key_id, response_id, candidate_id, now_ms)
+        crate::poison::mutex(&self.messages_bridge_store).get(
+            local_key_id,
+            response_id,
+            candidate_id,
+            now_ms,
+        )
     }
 
     pub(crate) fn save_messages_bridge_response(
@@ -26,17 +28,13 @@ impl GatewayRuntime {
         response: &crate::MessagesBridgeResponse,
         now_ms: u64,
     ) {
-        let stored = self
-            .messages_bridge_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert_if_stored(
-                local_key_id,
-                &response.response_id,
-                candidate_id,
-                response.continuation.clone(),
-                now_ms,
-            );
+        let stored = crate::poison::mutex(&self.messages_bridge_store).insert_if_stored(
+            local_key_id,
+            &response.response_id,
+            candidate_id,
+            response.continuation.clone(),
+            now_ms,
+        );
         if stored {
             self.bind_response_affinity(Some(&response.response_id), candidate_id, now_ms);
         }
@@ -49,10 +47,12 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> Option<NativeResponsesReplayState> {
-        self.native_responses_replay_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(local_key_id, response_id, candidate_id, now_ms)
+        crate::poison::mutex(&self.native_responses_replay_store).get(
+            local_key_id,
+            response_id,
+            candidate_id,
+            now_ms,
+        )
     }
 
     /// Captures a completed native Responses turn as a bounded, materialized
@@ -95,10 +95,13 @@ impl GatewayRuntime {
         else {
             return;
         };
-        self.native_responses_replay_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(local_key_id, &response_id, candidate_id, state, now_ms);
+        crate::poison::mutex(&self.native_responses_replay_store).insert(
+            local_key_id,
+            &response_id,
+            candidate_id,
+            state,
+            now_ms,
+        );
     }
 
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {

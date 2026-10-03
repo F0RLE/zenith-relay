@@ -43,7 +43,7 @@ type CommandResult<T> = std::result::Result<T, CommandError>;
 pub async fn set_local_model_reasoning(
     input: SetModelReasoningInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     reasoning::set_local_model_reasoning(input, state).await
 }
 
@@ -120,15 +120,7 @@ pub struct UpdateRoutingInput {
     default_service_tier: DefaultServiceTier,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PoolMembershipInput {
-    #[serde(default)]
-    pub(super) account_ids: Vec<String>,
-    #[serde(default)]
-    pub(super) source_ids: Vec<String>,
-    pub(super) in_pool: bool,
-}
+pub(crate) use zenith_relay_core::protocol::PoolMembershipInput;
 
 use model_settings::{
     SetModelDisplayOrderInput, SetModelEnabledInput, SetModelPriceInput, SetModelServiceTierInput,
@@ -138,7 +130,7 @@ use model_settings::{
 pub async fn set_local_model_enabled(
     input: SetModelEnabledInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     model_settings::set_local_model_enabled(input, state).await
 }
 
@@ -146,7 +138,7 @@ pub async fn set_local_model_enabled(
 pub async fn set_local_model_price(
     input: SetModelPriceInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     model_settings::set_local_model_price(input, state).await
 }
 
@@ -154,7 +146,7 @@ pub async fn set_local_model_price(
 pub async fn set_local_model_service_tier(
     input: SetModelServiceTierInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     model_settings::set_local_model_service_tier(input, state).await
 }
 
@@ -162,7 +154,7 @@ pub async fn set_local_model_service_tier(
 pub async fn set_local_model_display_order(
     input: SetModelDisplayOrderInput,
     state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
+) -> CommandResult<()> {
     model_settings::set_local_model_display_order(input, state).await
 }
 

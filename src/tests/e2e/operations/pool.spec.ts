@@ -62,7 +62,7 @@ test("pool places unavailable accounts after ready members", async ({ page }) =>
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Backup account");
   await expect(page.locator(".pool-member-card").last()).toHaveAttribute("data-member-label", "Personal Plus");
 });
 
@@ -226,11 +226,11 @@ test("pool preserves scheduler priority within availability groups", async ({ pa
   await expect(priority).toContainText("Active now: Pro account");
   await expect(priority.locator("[data-active-models]")).toHaveAttribute("data-active-models", "gpt-5.4:1");
   await expect(priority.locator("[data-active-models]")).toHaveText("Active now (1): gpt-5.4");
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
-  const current = page.locator(".pool-member-card").first();
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Backup account");
+  const current = page.locator('[data-member-label="Pro account"]');
   await expect(current).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
-  expect(await names()).toEqual(["Pro account", "Business Workspace", "Example compatible API", "Backup account", "Personal Plus"]);
+  expect(await names()).toEqual(["Backup account", "Pro account", "Business Workspace", "Example compatible API", "Personal Plus"]);
   await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
 });
 
@@ -438,9 +438,13 @@ test("pool member picker lists individual accounts instead of subscription group
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   const accountRows = dialog.getByRole("region", { name: "Accounts", exact: true }).locator(":scope > label");
   await expect(accountRows).toHaveCount(4);
-  await expect(accountRows.locator("strong")).toHaveText(["Personal Plus", "Pro account", "Business Workspace", "Backup account"]);
-  await expect(accountRows.locator("small")).toHaveCount(0);
-  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Plus", "Pro", "Business", "Free"]);
+  await expect(accountRows.locator("strong")).toHaveText(["Pro account", "Business Workspace", "Personal Plus", "Backup account"]);
+  // One account per row with its own routing status. A subscription group would
+  // instead add a second, unnamed line describing the group.
+  await expect(accountRows.locator("small")).toHaveCount(4);
+  await expect(accountRows.locator("small.pool-picker-status")).toHaveCount(4);
+  await expect(accountRows.nth(2).locator("small.pool-picker-status")).toContainText("Waiting for quota");
+  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Pro", "Business", "Plus", "Free"]);
 
   await dialog.getByRole("navigation").getByRole("button", { name: "Accounts", exact: true }).click();
   await chooseOption(page, dialog, "Filter by plan", "business");

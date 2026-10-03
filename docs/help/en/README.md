@@ -184,7 +184,7 @@ It is different from a pool preset, which contains settings only.
 On the computer, a late quota/model refresh does not overwrite an account after
 you sign in again, change its proxy, or remove and re-add it. Newer quota data
 received with a model request also takes precedence over an older background read.
-Quota and model lists refresh independently. A manual refresh joins any matching
+A blank model-catalog response does not replace models the account already reported. Quota and model lists refresh independently. A manual refresh joins any matching
 read already in progress; closing its waiting view does not cancel shared work.
 Provider-requested pauses still apply, including to repeated manual refreshes.
 
@@ -296,11 +296,13 @@ Older configuration presets are converted on import without adding permissions.
 
 **Pool rotation** has three modes:
 
-- **Automatic** chooses the eligible members with the lowest share of occupied
-  local capacity. Request shares break ties between equally loaded members.
-  Manual order, balance and quota percentages do not rank them; confirmed
-  quota or access blocks still exclude a member. Cache affinity only applies
-  within the same eligible, equally loaded group.
+- **Automatic** chooses the member with the greatest fresh quota remainder.
+  A one-point difference is enough: requests stay there until that remainder
+  falls below another known remainder. Load and request share are compared
+  only when the remainder is equal. Unknown or stale remainders do not outrank
+  anyone. Balance, latency and money do not rank members. Confirmed quota or
+  access blocks still exclude a member. Cache affinity applies only inside
+  that same group.
 - **In order** chooses the first eligible member with a free slot in your
   list. If it is unavailable or at its concurrency cap, Relay checks the next
   members. New requests return to it when it recovers. Only this mode lets
@@ -309,8 +311,10 @@ Older configuration presets are converted on import without adding permissions.
   according to their request shares. Equal shares alternate; unavailable
   members and those at their concurrency cap are skipped.
 
-In every mode, a chat continuation may need its previous member. Rotation does
-not promise a different account for every message in the same conversation.
+In every mode, a continuation that carries another member's response id stays
+on that member. Automatic mode can move it to a member with a larger known
+remainder only when Relay has saved history it can resend. Without that
+history, the continuation stays put.
 
 Mode, order, request share and concurrency changes save immediately. Drag a
 member by its handle or use the arrows in **In order**. **Close** waits for
@@ -320,7 +324,7 @@ if saving fails, an error appears and the stored values are shown again.
 **Request share** is a ratio for Automatic and Round robin. For example, 2 and 1
 give roughly two parts of traffic to the first member and one to the second
 when they are equally available. In Automatic mode this ratio applies only to
-members with equal normalized load, not to all traffic. It is not a percentage,
+members with the same known quota remainder and equal load, not to all traffic. It is not a percentage,
 requests per second, or extra quota. **Concurrent requests** limits how many requests one member
 can serve at a time, across its models and formats. A value of 2 allows two
 simultaneous requests. **Unlimited** removes the member-specific cap; runtime safety and provider
@@ -403,11 +407,16 @@ limited by client compatibility.
 
 **Reset model order** in the pool toolbar clears manual model and group positions.
 Companies start with OpenAI, Anthropic, Google and xAI, followed by the others
-alphabetically. Within each company, catalog families stay together,
-ordered by their newest release; versions within a family run newest first.
-Version ties use the update date, then discovery order. Models without a family
-follow known families; undated versions follow dated versions in their family.
-Newly discovered models and families follow these rules automatically.
+alphabetically. Within each company, known families keep a fixed order: OpenAI
+is Astra, Sol, Terra, then Luna; Anthropic is Fable, Opus, Sonnet, then Haiku.
+A new version joins its catalog family without a separate model-ID list. A later
+release does not move a lower family above a higher one. Other families stay
+after that lineup. When they share one numbered generation, they use that
+generation's newest release, then the family name. Versions within a family run
+newest first. If the release dates match, the update date is used, then the
+model ID. Models without a family follow known families; undated versions follow
+dated versions in their family. Newly discovered models and families follow
+these rules automatically.
 Reset leaves model switches, prices, reasoning and rotation settings intact.
 On a remote pool, the button requires a server supporting order reset.
 
@@ -432,8 +441,7 @@ a participant's declared price is used when available.
 ### Prices and additional settings
 
 API prices are in **Pool member policy → Pricing** and in the source editor
-under **Connections**. Estimates use provider prices first, then matching
-catalog prices, then manual prices if neither is available. A manual price
+under **Connections**. Estimates use a provider price first. Otherwise they use the official catalog price for the model family: GPT, ChatGPT, and Codex use OpenAI, Claude uses Anthropic, Gemini uses Google, and Grok uses xAI. A manual price is used only when neither is available. A manual price
 does not change the provider's tariff or unconditionally override other prices.
 
 Token prices are in USD per million tokens. A manual set requires input and
@@ -504,8 +512,9 @@ WebSocket, audio/video conversion and server-side tool emulation are not offered
 
 **Use Basis Points** is available in the **API** tab. For ChatGPT accounts in
 the pool it sends requests through Excel instead of Responses. It may help a
-degraded account generate, but Relay does not guarantee that and cannot verify
-which model actually runs the request at OpenAI. Changes save immediately and
+degraded account generate, without a guarantee. **Degraded routes** checks the
+model identity reported by the upstream; it cannot measure generation quality
+or independently prove which model ran. Changes save immediately and
 apply to every compatible ChatGPT account. The route used is still shown in
 request details under **Usage**.
 
@@ -513,8 +522,11 @@ The route shares the account's quota and rotation slot. Applications can use
 any of Relay's four supported request formats; client tool calls and results
 are translated into the calling format. If the application requests a stream,
 SSE events arrive after the provider completes the response, without
-incremental output during generation. Images and explicitly requested fast
-speeds cannot use this transport; they need another compatible route.
+incremental output during generation. An explicitly requested fast speed
+cannot use this transport and needs another compatible route. An image in a
+user message is uploaded to the Basis Points attachment endpoint: a data URL
+is replaced with file_id, and detail is not sent. A remote image URL is
+rejected.
 Ordinary speed labels `auto`, `default`, and `standard` are accepted and are
 not sent upstream. A structured `text.format` (`json_object` or `json_schema`)
 is rejected before generation instead of being ignored. Tool instructions
@@ -531,58 +543,6 @@ Relay does not execute that call and regenerates the response once with a short
 format hint. If the retry is malformed again, Relay returns a terminal 502 and
 does not cool down the account. Share the error code and request ID, if
 available, for diagnosis; do not share tool arguments.
-
-### Tool optimization
-
-The switch is on the **API** tab and applies to tools on OpenAI models.
-While it is off, the tool list is sent as the application provided it. When it
-is on, a normal Responses route opens schemas only when they are needed and
-does not cut the list. Excel, other models, and converted routes still send
-the full list. This is not permission to run or block an action.
-
-#### Setup
-
-1. Open **API → Tool optimization** in **Computer** mode or on a compatible
-   **On your server** connection. Older servers may not offer this setting.
-2. Turn the switch on or off. The choice saves immediately and applies to new
-   requests without restarting the API. In-flight requests keep their original
-   setting, including retries.
-
-#### Modes
-
-- **Standard** (`pass_through`) is the default. Relay forwards the complete
-  catalog without changes.
-- **Optimized** (`automatic`) enables the provider's hosted `tool_search` and
-  deferred function-schema loading for every eligible native Responses request.
-  The provider chooses which schemas to load, while all original definitions
-  remain available to it. Catalog size does not affect whether optimization is
-  applied. Other protocols, converted routes and explicit tool choices keep the
-  normal catalog behavior; Relay does not guess relevance from prompt text or
-  truncate the list.
-
-Provider-native deferred loading is used only for tools on OpenAI models,
-where the selected route is native Responses and the request uses automatic or
-unspecified `tool_choice`.
-Individual flat functions still expose their names and descriptions; namespaces
-provide larger context savings because their parameter schemas stay out of the
-initial model context. Relay does not invent namespaces or perform local
-semantic search. If an endpoint rejects the standard `defer_loading` fields, Relay
-retries once before output without deferred loading. Client/provider deferred
-or tool-search catalogs are not narrowed by Relay.
-
-#### Limits and results
-
-Deferred loading adds only the standard provider hint; it does not rename tools
-or rewrite their schemas. Built-in provider tools and unknown tool kinds are
-preserved. This setting is not an execution-permission boundary: use the
-application's own permission settings to control which actions may run.
-
-**Usage → request details → Tools** shows input/forwarded counts, whether
-provider deferred loading was used, a compatibility retry when applicable, and
-**List size (bytes)** before and after forwarding. The size measures compact
-catalog JSON, not tokens or guaranteed monetary savings; provider-reported
-usage is the source of truth. Diagnostics store aggregates only, not tool names
-or schemas. A standard request keeps the before/after counts and sizes equal.
 
 ### ChatGPT
 
@@ -757,7 +717,8 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
 | `upstream_edge_challenge`, `edge_security_challenge` | An edge security check replaced the API response. | Verify the API address, service status, and network configuration. Ask the provider for supported API access; signing in to Relay again cannot resolve its edge challenge. |
 | `upstream_model_not_found` · provider `model_not_found` | This provider does not expose the requested model ID. | Refresh this source's models and verify key access. Remove an obsolete permission or select an actual available ID. |
-| `upstream_model_unavailable`, `model_not_available` · 503 | This provider cannot serve the model temporarily. | Relay pauses this model on the failed route and tries another compatible member. Recovery observes the provider delay. |
+| `upstream_route_degraded`, `route_degraded` | The ChatGPT response reports a different model or an internal downgrade id such as `degrade2`. | With Degraded routes enabled in API, Relay rejects it in JSON, SSE (including response.created) and WebSocket. A pre-generation refusal can rotate; generated or delivered output is never replayed. Dated snapshots of the same model are allowed. The account pauses briefly. This checks reported identity, not quality. |
+| `upstream_model_unavailable`, `model_not_available` · 403/503 | The model is temporarily unavailable, including Basis Points `Model access has changed`. | Only this model on the member pauses; other models remain available. Relay can try another compatible member. Basis Points access can differ between accounts and from native Responses; the model pause currently covers both account transports. This is not exhausted quota. |
 | `upstream_model_unsupported`, `model_not_supported` | The selected provider path does not support this model. | Refresh the source catalog and verify the model ID, API address, key permissions, and provider support. Relay will use another compatible member when one is available. |
 | `upstream_model_capacity`, `model_at_capacity` | The model is temporarily overloaded. | Wait or use another compatible source. Signing in again does not increase provider capacity. |
 
@@ -774,7 +735,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `compaction_response_invalid` · 502 | Context compaction did not finish with a valid encrypted result. | Keep the existing conversation history and retry explicitly after checking the upstream connection. Relay does not replay this generation or fabricate a summary. |
 | `upstream_instructions_required`, `missing_required_parameter` | A required field, including instructions, is absent. | Supply the field named by the provider or update the client generating it. Retrying the same body does not fix it. |
 | `upstream_unsupported_request`, `unsupported_request` | A parameter or capability is unsupported. | Disable the named parameter, tool, or mode and use a compatible format. |
-| `upstream_content_policy`, `content_policy_violation` | Provider content rules rejected the request. | Revise the request according to the service rules. Rotating members is not a correction for that request. |
+| `upstream_content_policy`, `content_policy_violation` | Provider policy rejected the request, including `This request was blocked by our usage policy`. | A real HTTP 403 stays 403, even if a host labels it insufficient_quota. Relay does not zero quota, pause the account or rotate members for this refusal. Check the provider's rules and route access; headers do not establish permission. |
 | `response_continuation_unavailable`, `response_affinity_miss` | The response owner is unavailable and full replay history is missing. | Restore the original account/API or resend complete history from the client. Start a new conversation if history is lost. A rotation mode change cannot restore context. |
 | `upstream_previous_response_not_found`, `previous_response_not_found` | The provider no longer knows the previous response. | Resend full history without the stale response reference, or start a new conversation. Do not transfer just a response ID to another API. |
 | `upstream_tool_call_mismatch`, `tool_call_not_found` | A tool result has no matching call, or a call has no result. | Relay retries once when the complete pair proves a missing or confused call identifier. It never removes results or guesses between parallel calls. If the error remains, update the client and resend the complete call/result pair, or start a new conversation if the missing history cannot be recovered. |
@@ -854,7 +815,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `models_invalid_client_version`, `models_invalid_endpoint`, `models_client_init`, `subscription_configuration`, `quota_policy_invalid` | Monitoring parameters are unsupported. | Update Relay and check saved connection settings; report the code if already correct. |
 | `quota_proxy_unavailable`, `models_proxy_unavailable`, `account_runtime_proxy_invalid` | The account proxy is invalid or unavailable. | Correct its URL/credentials and assignment in **Connections**, then check again. |
 | `quota_account_location`, `models_account_location`, `remote_missing` | The account belongs to another environment or was removed from the server. | Select its owning environment. Refresh your server state and explicitly transfer again when needed. |
-| `quota_authorization_prepare`, `quota_token_prepare`, `quota_token_refresh`, `quota_prepare`, `models_prepare`, `token_authority_failed` | Monitoring authorization could not be prepared. | Inspect the nested cause and restore sign-in, storage, or proxy access before checking again. |
+| `quota_authorization_prepare`, `quota_token_prepare`, `quota_token_refresh`, `quota_prepare`, `models_prepare`, `models_authorization_prepare`, `token_authority_failed` | Monitoring could not prepare the local sign-in, token, or model check. The account itself may still be usable. | Refresh the account again. If it remains, sign in again or check the account proxy. This is not a provider rejection of the account. |
 | `quota_secret_load`, `quota_secret_store`, `models_secret_store` | Monitoring cannot access protected credentials. | Restore the OS user's secret store and restart Relay. Sign in again if the secret is lost. |
 | `quota_storage`, `models_storage`, `quota_queue_failed` | The check cannot be queued or its result persisted. | Wait for current operations, check disk space/data permissions, and inspect **Settings → Diagnostics** if persistent. |
 | `models_profile_restore` | An unfinished profile restoration prevents refresh. | Finish ChatGPT recovery and refresh models again. |

@@ -535,11 +535,18 @@ async fn account_response(request: Request) -> Response {
     assert_eq!(body["stream"], true);
     assert_eq!(body["store"], false);
     assert!(body["input"].is_array());
+    let terminal = json!({
+        "type": "response.completed",
+        "response": {"id": "account-response-test", "object": "response",
+            "model": body["model"], "output": [],
+            "usage": {"input_tokens":1,"input_tokens_details":{"cached_tokens":1},"output_tokens":1,"total_tokens":2}}
+    });
     Response::builder()
         .status(StatusCode::OK)
-        .body(Body::from(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response-test\",\"object\":\"response\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
-        ))
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}}\n\ndata: {{\"type\":\"response.output_item.done\",\"item\":{{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}}}\n\ndata: {terminal}\n\n"
+        )))
         .unwrap()
 }
 

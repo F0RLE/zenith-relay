@@ -40,10 +40,7 @@ pub(crate) fn is_debug_enabled() -> bool {
 /// `create_new` so a symlink or other unexpected file can never be followed.
 pub(crate) fn set_debug_enabled(enabled: bool) -> Result<(), String> {
     let state = persist::state();
-    let _guard = state
-        .write_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = zenith_relay_core::poison::mutex(&state.write_lock);
     let root = persist::root_path();
     if !persist::ensure_layout(&root) {
         return Err("diagnostic log directory is unavailable".to_string());

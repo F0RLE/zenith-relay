@@ -3,13 +3,15 @@ use crate::state::{AppState, ServerAccountRecord, SourceRecord};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     protocol::{
         canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
         update_model_reasoning_policy, ModelPolicyError, RuntimeStateSnapshot,
+        SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput,
+        SetModelServiceTierInput,
     },
     ApiModelPriceOverride, DefaultServiceTier,
 };
@@ -54,13 +56,6 @@ pub async fn models(
     Ok(Json(ModelList { data: models }))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelEnabledInput {
-    model_id: String,
-    enabled: bool,
-}
-
 pub async fn set_model_enabled(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelEnabledInput>,
@@ -87,17 +82,6 @@ pub async fn set_model_enabled(
         runtime.set_hidden_models(hidden);
     }
     state.snapshot().map(Json).map_err(store_error)
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelPriceInput {
-    model_id: String,
-    input_micro_usd_per_million: Option<u64>,
-    cached_input_micro_usd_per_million: Option<u64>,
-    cache_write_5m_micro_usd_per_million: Option<u64>,
-    cache_write_1h_micro_usd_per_million: Option<u64>,
-    output_micro_usd_per_million: Option<u64>,
 }
 
 pub async fn set_model_price(
@@ -129,27 +113,6 @@ pub async fn set_model_price(
             .map_err(store_error)?;
     }
     state.snapshot().map(Json).map_err(store_error)
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelReasoningInput {
-    model_id: String,
-    #[serde(default)]
-    allowed_levels: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelServiceTierInput {
-    model_id: String,
-    service_tier: DefaultServiceTier,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetModelOrderInput {
-    model_ids: Vec<String>,
 }
 
 pub async fn set_model_service_tier(

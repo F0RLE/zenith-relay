@@ -19,6 +19,21 @@ export function operationalStatusTone(status: OperationalStatus): "ready" | "war
   return "disabled";
 }
 
+/** Same icon color as the account card, without live pool-runtime hints. */
+export function accountSurfaceTone(account: AccountSummary, onServer = false): "ready" | "warning" | "error" | "info" | "disabled" {
+  if (onServer) return "info";
+  const quotaStatus = accountQuotaRefreshState(account);
+  const displayedError = quotaStatus === "refreshing" ? null : currentAccountErrorCode(account);
+  if (displayedError) return "error";
+  if (account.operationalStatus === "unavailable" || account.operationalStatus === "disabled") {
+    return operationalStatusTone(account.operationalStatus);
+  }
+  if (quotaStatus === "refreshing" || quotaStatus === "pending") return "disabled";
+  if (quotaStatus === "failed" || quotaStatus === "requires_reauth") return "error";
+  if (account.clientAuthStatus === "login_required") return "warning";
+  return operationalStatusTone(account.operationalStatus);
+}
+
 export function transientCandidateTone(
   candidate: CandidateRuntimeSnapshot | undefined,
   nowMs: number,
@@ -88,6 +103,7 @@ export function accountErrorTranslationKey(code: string) {
   const endpointPermission = normalized === "quota_forbidden" || normalized === "subscription_forbidden";
   if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
+  if (normalized.startsWith("models_")) return "accounts.errors.models";
   if (/transport|timeout|network|connect/.test(normalized)) return "accounts.errors.connection";
   if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";
   if (/quota/.test(normalized)) return "accounts.errors.quota";

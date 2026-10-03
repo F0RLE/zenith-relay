@@ -10,8 +10,8 @@ use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
 use crate::runtime::AuthenticatedKey;
 use crate::{
-    codex_model_is_picker_eligible, is_valid_model_id, routed_codex_catalog_entry, GatewayRuntime,
-    WireApi,
+    codex_model_is_picker_eligible_for, is_valid_model_id, routed_codex_catalog_entry,
+    GatewayRuntime, WireApi,
 };
 use axum::body::Body;
 use axum::extract::State;

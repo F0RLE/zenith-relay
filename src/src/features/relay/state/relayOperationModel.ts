@@ -5,6 +5,10 @@ export type Feedback = { kind: "success" | "error"; key: string; error?: Feedbac
 export type PerformOptions = {
   /** Finish a dependent step before refreshing, only while the operation is current. */
   afterWork?: () => Promise<unknown>;
+  /** Report the command result immediately. The snapshot refreshes afterwards and cannot undo that result. */
+  backgroundRefresh?: boolean;
+  /** Keep other controls usable. The command still runs and reports its own result. */
+  uiLock?: boolean;
   /** Keep an operation error local to the surface that initiated it. */
   reportError?: boolean;
   onError?: (error: FeedbackError, key: string) => void;
@@ -47,6 +51,26 @@ export async function runRelayOperation({
     if (options?.afterWork) {
       await options.afterWork();
       if (!isCurrent()) return false;
+    }
+    if (options?.backgroundRefresh) {
+      if (successKey) setFeedback({ kind: "success", key: successKey });
+      // The command result must not wait for the snapshot. A failed refresh
+      // is reported separately and does not undo a command that already ran.
+      if (isCurrent()) {
+        void Promise.resolve().then(() => refresh()).then(() => undefined, (cause: unknown) => {
+          if (!isCurrent()) return;
+          const resolved = resolveError(cause);
+          try {
+            options.onError?.(resolved.error, resolved.key);
+          } catch {
+            // Optional UI callbacks cannot change the command result.
+          }
+          if (options.reportError !== false) {
+            setFeedback({ kind: "error", key: resolved.key, error: resolved.error });
+          }
+        });
+      }
+      return true;
     }
     await refresh();
     if (!isCurrent()) return false;

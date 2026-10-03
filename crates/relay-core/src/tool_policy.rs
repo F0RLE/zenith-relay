@@ -1,12 +1,9 @@
-//! Opt-in provider-native tool-catalog optimization.
+//! Tool catalogs are forwarded unchanged.
 //!
-//! Relay deliberately has only two catalog modes:
-//! - `pass_through` keeps the request unchanged;
-//! - `automatic` lets a compatible native Responses provider defer function
-//!   schemas and choose what to load.
-//!
-//! Relay does not infer relevance locally, remove tools by name, or turn this
-//! setting into an execution permission boundary.
+//! `automatic` remains readable in saved settings and old usage rows, but new
+//! requests always use `pass_through`. Relay does not add `defer_loading` or
+//! `tool_search`, infer relevance, remove tools, or treat catalog handling as
+//! an execution permission boundary.
 mod catalog;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -114,9 +111,7 @@ pub(crate) struct ToolPolicyResult {
     pub outcome: ToolPolicyOutcome,
 }
 
-/// Applies the non-destructive part of the policy. No tool declaration is
-/// removed or rewritten here; native Responses deferred loading is enabled at
-/// the final route boundary after adapter preparation.
+/// Records catalog size. The request itself is never rewritten.
 pub(crate) fn apply_tool_policy(
     request: &mut Value,
     policy: &ToolPolicy,
@@ -131,20 +126,6 @@ pub(crate) fn apply_tool_policy(
         after: stats,
         outcome,
     })
-}
-
-/// Enables hosted provider-native tool search for every eligible automatic
-/// request. This does not infer relevance from prompt text: the provider/model
-/// performs the search while Relay keeps the complete trusted catalog
-/// available for loading.
-pub(crate) fn enable_deferred_tool_search(request: &mut Value, policy: &ToolPolicy) -> bool {
-    if policy.mode != ToolPolicyMode::Automatic {
-        return false;
-    }
-    if catalog::has_deferred_tools(request) {
-        return false;
-    }
-    catalog::enable_deferred_tool_search(request)
 }
 
 #[cfg(test)]

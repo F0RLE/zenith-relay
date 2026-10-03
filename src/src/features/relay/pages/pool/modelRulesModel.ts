@@ -96,6 +96,24 @@ export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSup
     .filter((level) => Boolean(level) && !seen.has(level) && seen.add(level));
 }
 
+/** Image generation has no effort selector. Other models show one only when levels exist. */
+export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "reasoningLevels" | "reasoningSupportedLevels" | "reasoningManualFallback">) {
+  if (isImageGenerationModel(model)) return false;
+  return (model.reasoningSupportedLevels?.length ?? 0) > 0
+    || (model.reasoningLevels?.length ?? 0) > 0
+    || model.reasoningManualFallback === true;
+}
+
+function isImageGenerationModel(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities">) {
+  const outputs = (model.catalogOutputModalities ?? []).map((item) => item.toLowerCase());
+  if (outputs.includes("image") && !outputs.includes("text")) return true;
+  const family = model.catalogFamily?.toLowerCase() ?? "";
+  const familyTokens = family.split(/[^a-z0-9]+/).filter(Boolean);
+  if (familyTokens.includes("image") || familyTokens.includes("dalle")) return true;
+  const id = model.id.toLowerCase();
+  return id.startsWith("gpt-image") || id.startsWith("dall-e") || id.startsWith("dalle");
+}
+
 /** Keep selected values in provider order and remove stale policy values. */
 export function normalizeReasoningSelection(supported: readonly string[], selected: readonly string[]) {
   const selectedSet = new Set(selected.map((level) => normalizeReasoningEffort(level)));
@@ -110,4 +128,42 @@ export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "sp
   const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
   if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
   return ordered.length ? [...ordered] : ["standard"];
+}
+
+/** Shown switch state: the pending click wins until the runtime snapshot confirms it. */
+export function pendingModelEnabled(
+  pending: Readonly<Record<string, boolean>>,
+  model: { id: string; enabled: boolean },
+) {
+  return pending[model.id] ?? model.enabled;
+}
+
+/** Drop pending switches once the runtime reports the same value. */
+export function reconcilePendingModelEnabled(
+  pending: Readonly<Record<string, boolean>>,
+  models: readonly { id: string; enabled: boolean }[],
+) {
+  const confirmed = new Map(models.map((model) => [model.id, model.enabled]));
+  let changed = false;
+  const next: Record<string, boolean> = {};
+  for (const [id, enabled] of Object.entries(pending)) {
+    if (confirmed.get(id) === enabled) {
+      changed = true;
+      continue;
+    }
+    next[id] = enabled;
+  }
+  return changed ? next : pending;
+}
+
+/** Remove one pending value only when it is still the failed attempt. */
+export function clearPendingModelEnabled(
+  pending: Readonly<Record<string, boolean>>,
+  id: string,
+  enabled: boolean,
+) {
+  if (pending[id] !== enabled) return pending;
+  const next = { ...pending };
+  delete next[id];
+  return next;
 }

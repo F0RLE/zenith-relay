@@ -80,13 +80,12 @@ pub(crate) fn cached_stats(
     fence: &SourceRefreshFence,
     base_url: &str,
 ) -> Option<SourceProviderStats> {
-    let (read, freshness) = state
-        .refresh
-        .cached_observation(&fence.identity(), RefreshKind::Balance)?;
-    match read.as_ref() {
-        Ok(RefreshRead::SourceStats(observation)) => observation.snapshot(base_url, freshness),
-        _ => None,
-    }
+    SourceStatsObservation::read_cached(
+        state
+            .refresh
+            .cached_observation(&fence.identity(), RefreshKind::Balance),
+        base_url,
+    )
 }
 
 pub(super) async fn execute(

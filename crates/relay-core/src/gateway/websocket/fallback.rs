@@ -138,7 +138,7 @@ async fn serve_http_fallback_request(
         });
     let response = await_while_client_connected(
         downstream,
-        execute_client_request(runtime, http_request, WireApi::Responses),
+        execute_client_request(Arc::clone(&runtime), http_request, WireApi::Responses),
     )
     .await?;
     // The HTTP executor already knows whether the selected route belongs to an
@@ -154,11 +154,10 @@ async fn serve_http_fallback_request(
         )
         .await?
         .ok();
-        return Err(GatewayFailure::upstream_status(
-            status,
-            body.as_deref(),
-            response_origin,
-        ));
+        return Err(
+            GatewayFailure::upstream_status(status, body.as_deref(), response_origin)
+                .apply_degraded_route_policy(&runtime),
+        );
     }
 
     let stream_origin = response_origin;

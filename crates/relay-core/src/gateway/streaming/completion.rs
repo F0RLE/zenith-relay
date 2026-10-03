@@ -30,10 +30,7 @@ impl StreamCompletionSettlement {
         hint: crate::gateway::errors::RateLimitBodyHint,
     ) {
         if let Some(capture) = &self.upstream_usage {
-            capture
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .apply_to(event);
+            crate::poison::mutex(capture).apply_to(event);
         }
         if event.success {
             self.lease.settle_rotation_success(now_ms());
@@ -101,11 +98,7 @@ impl StreamCompletionSettlement {
                     .bind_response_affinity(response_id, &self.source, now_ms());
             }
             if let Some(shared) = self.bridge_state.as_ref() {
-                if let Some(response) = shared
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
+                if let Some(response) = crate::poison::mutex(shared).take() {
                     self.runtime.save_messages_bridge_response(
                         &self.local_key,
                         &self.source,
@@ -115,11 +108,7 @@ impl StreamCompletionSettlement {
                 }
             }
             if let Some(shared) = self.native_response.as_ref() {
-                if let Some(response) = shared
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
+                if let Some(response) = crate::poison::mutex(shared).take() {
                     for call_id in response_tool_call_ids(&response) {
                         self.runtime.bind_tool_call_affinity(
                             &self.local_key,

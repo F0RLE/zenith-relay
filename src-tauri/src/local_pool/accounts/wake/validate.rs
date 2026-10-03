@@ -38,12 +38,7 @@ pub(super) fn validate_secret(
 
 pub(super) fn validate_request(request: &WakeExecutionRequest) -> Result<(), WakeExecutionFailure> {
     let account_id = request.account_id.trim();
-    if account_id.is_empty()
-        || account_id.len() > MAX_LOCAL_ACCOUNT_ID_BYTES
-        || !account_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !zenith_relay_core::is_ascii_token(account_id, MAX_LOCAL_ACCOUNT_ID_BYTES) {
         return Err(WakeExecutionFailure::invalid(
             WakeExecutionErrorCode::InvalidRequest,
         ));

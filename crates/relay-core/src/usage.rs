@@ -37,6 +37,37 @@ pub fn sql_like_contains_pattern(value: &str) -> String {
     escaped
 }
 
+/// Stores a counter in SQLite. A value that does not fit in `i64` stays at the top.
+pub fn sql_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// Reads a stored counter. A negative or overflowing value becomes zero.
+pub fn sql_count_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or_default()
+}
+
+/// `NULL` and a negative stored integer are both absent. Zero stays zero.
+pub fn sql_optional_u64(value: Option<i64>) -> Option<u64> {
+    value.and_then(|value| u64::try_from(value).ok())
+}
+
+pub const DELETE_ACCOUNT_CANDIDATE_ROLLUPS_SQL: &str =
+    "DELETE FROM usage_candidate_rollups WHERE candidate_kind = 'account' AND candidate_id = ?1";
+
+#[cfg(test)]
+mod sql_int_tests {
+    use super::sql_optional_u64;
+
+    #[test]
+    fn null_and_negative_measurements_stay_absent() {
+        assert_eq!(sql_optional_u64(None), None);
+        assert_eq!(sql_optional_u64(Some(-1)), None);
+        assert_eq!(sql_optional_u64(Some(0)), Some(0));
+        assert_eq!(sql_optional_u64(Some(12)), Some(12));
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

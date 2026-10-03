@@ -41,6 +41,7 @@ import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { upcomingModelRetries } from "../../routingOrder";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { usePendingFlag } from "../../state/usePendingFlag";
 import { accountParticipates } from "./accountTableModel";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
 
@@ -77,7 +78,10 @@ export function AccountCard({
   const [notesOpen, setNotesOpen] = useState(false);
   const confirm = useConfirm();
   const { mode, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
-  const participates = accountParticipates(account);
+  const participation = usePendingFlag(accountParticipates(account));
+  const enabledFlag = usePendingFlag(account.enabled);
+  const participates = participation.checked;
+  const accountEnabled = enabledFlag.checked;
   const onServer = mode === "local" && Boolean(account.remoteLocation);
   const showNotes = mode === "local" && !onServer && account.secretAvailable;
   const errorCode = onServer
@@ -121,17 +125,18 @@ export function AccountCard({
   const statusIndicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
 
-  const updateParticipation = (participate: boolean) => perform(
+  const updateParticipation = (participate: boolean) => participation.select(participate, () => perform(
     `pool-${account.id}`,
     () => updatePoolMembership(mode, { accountIds: [account.id], sourceIds: [], inPool: participate }),
     "feedback.saved",
-  );
+    { backgroundRefresh: true, uiLock: false },
+  ));
   const returnToComputer = async () => {
     if (!await confirm(t("accounts.returnToComputerConfirm", { name: account.label }), {
       title: t("accounts.returnToComputer"),
       confirmLabel: t("accounts.returnToComputerAction"),
     })) return;
-    await perform(`return-account-${account.id}`, () => relayCommands.returnAccountToLocal(account.id), "feedback.accountReturnedToComputer");
+    await perform(`return-account-${account.id}`, () => relayCommands.returnAccountToLocal(account.id), "feedback.accountReturnedToComputer", { backgroundRefresh: true });
   };
   const recoverLocally = async () => {
     if (!await confirm(t("accounts.forceActivateLocalConfirm", { name: account.label }), {
@@ -139,15 +144,16 @@ export function AccountCard({
       confirmLabel: t("accounts.forceActivateLocalAction"),
       danger: true,
     })) return;
-    await perform(`recover-account-${account.id}`, () => relayCommands.forceActivateRemoteAccountLocally(account.id), "feedback.accountRecoveredLocally");
+    await perform(`recover-account-${account.id}`, () => relayCommands.forceActivateRemoteAccountLocally(account.id), "feedback.accountRecoveredLocally", { backgroundRefresh: true });
   };
-  const setEnabled = (enabled: boolean) => perform(
+  const setEnabled = (enabled: boolean) => enabledFlag.select(enabled, () => perform(
     `enable-${account.id}`,
     () => mode === "local"
       ? relayCommands.setAccountEnabled(account.id, enabled)
       : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled }),
     "feedback.saved",
-  );
+    { backgroundRefresh: true, uiLock: false },
+  ));
   const deleteAccount = async () => {
     const confirmKey = onServer
       ? "accounts.deleteLocalRecoveryConfirm"
@@ -161,6 +167,7 @@ export function AccountCard({
         ? relayCommands.deleteAccount(account.id)
         : relayCommands.remoteAction({ type: "delete_account", id: account.id }),
       "feedback.deleted",
+      { backgroundRefresh: true },
     );
   };
 
@@ -194,12 +201,12 @@ export function AccountCard({
               </ActionMenuItem>
             ) : null}
             {onServer ? (
-              <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer()}>
+              <ActionMenuItem icon={<Download aria-hidden />} disabled={busy === `return-account-${account.id}`} onClick={() => void returnToComputer()}>
                 {t("accounts.returnToComputer")}
               </ActionMenuItem>
             ) : null}
             {onServer ? (
-              <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally()}>
+              <ActionMenuItem danger icon={<Power aria-hidden />} disabled={busy === `recover-account-${account.id}`} onClick={() => void recoverLocally()}>
                 {t("accounts.forceActivateLocal")}
               </ActionMenuItem>
             ) : null}
@@ -218,8 +225,8 @@ export function AccountCard({
               {t("accounts.exportOne", { name: account.label })}
             </ActionMenuItem>
             {!onServer ? (
-              <ActionMenuItem icon={<Power aria-hidden />} onClick={() => { void setEnabled(!account.enabled); }}>
-                {account.enabled ? t("common.disable") : t("common.enable")}
+              <ActionMenuItem icon={<Power aria-hidden />} onClick={() => { void setEnabled(!accountEnabled); }}>
+                {accountEnabled ? t("common.disable") : t("common.enable")}
               </ActionMenuItem>
             ) : null}
             <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void deleteAccount()}>
@@ -257,7 +264,6 @@ export function AccountCard({
               className={participates ? "danger" : ""}
               label={poolActionLabel}
               icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
-              disabled={busy === `pool-${account.id}`}
               onClick={() => void updateParticipation(!participates)}
             />
           )}
@@ -266,11 +272,12 @@ export function AccountCard({
             icon={busy === `connection-account-quota-${account.id}`
               ? <Loader2 className="spin" aria-hidden />
               : <RefreshCw aria-hidden />}
-            disabled={!canRefreshQuota || !account.secretAvailable || Boolean(busy)}
+            disabled={!canRefreshQuota || !account.secretAvailable || busy === `connection-account-quota-${account.id}`}
             onClick={() => void perform(
               `connection-account-quota-${account.id}`,
               () => refreshOneAccountQuota(mode, account.id),
               "feedback.refreshed",
+              { backgroundRefresh: true },
             )}
           />
           {mode === "local" ? (

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn basis_points_access_and_policy_refusals_are_not_quota_errors() {
+    for (body, category) in [
+        (b"403: Model access has changed".as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
+        (br#"{"error":{"code":"insufficient_quota","message":"Model access has changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
+        (b"403: This request was blocked by our usage policy.".as_slice(), error_codes::UPSTREAM_CONTENT_POLICY),
+        (br#"{"error":{"type":"permission_error","code":"insufficient_quota","message":"This request was blocked by our usage policy."}}"#.as_slice(), error_codes::UPSTREAM_CONTENT_POLICY),
+    ] {
+        let failure = AttemptFailure::status_with_body(StatusCode::FORBIDDEN, Some(body));
+        assert_eq!(failure.category, category);
+        assert_eq!(failure.status, StatusCode::FORBIDDEN);
+        assert!(!failure_category_affects_account_state(category));
+        assert_eq!(retryable_failure(failure.status, category, false), category == error_codes::UPSTREAM_MODEL_UNAVAILABLE);
+    }
+}
+
+#[test]
 fn upstream_errors_use_stable_status_and_body_categories() {
     let cases = [
             (
@@ -42,6 +58,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 StatusCode::NOT_FOUND,
                 br#"{"error":{"code":"model_not_found"}}"#.as_slice(),
                 "upstream_model_not_found",
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                br#"{"error":{"code":"model_not_found","message":"The model `gpt-6-astra-degrade2-luna-1p-codexswic-ev3` does not exist or you do not have access to it."}}"#.as_slice(),
+                "upstream_route_degraded",
             ),
             (
                 StatusCode::BAD_REQUEST,

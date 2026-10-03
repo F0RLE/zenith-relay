@@ -35,12 +35,16 @@ mod catalog_io;
 mod error;
 pub mod error_codes;
 pub mod gateway;
+mod ids;
 pub mod model_metadata;
+mod paths;
+pub mod poison;
 pub mod pricing;
 pub mod protocol;
 pub mod providers;
 pub mod proxy;
 pub mod quota;
+mod record_impl;
 mod runtime;
 pub mod scheduler;
 pub mod sources;
@@ -50,11 +54,11 @@ mod transport;
 pub mod usage;
 
 pub use catalog::{
-    apply_codex_ultra_from_official_model, canonicalize_model_ids, canonicalize_reasoning_levels,
+    apply_codex_ultra_from_official_model, canonicalize_reasoning_levels,
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias,
-    deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
-    merge_model_display_order, model_id_key, normalize_bounded_model_ids,
+    codex_model_is_picker_eligible, codex_model_is_picker_eligible_for, decode_codex_model_alias,
+    deserialize_model_reasoning_allowed_levels, is_degraded_route_model, is_valid_model_id,
+    is_valid_model_token, merge_model_display_order, model_id_key, normalize_bounded_model_ids,
     normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, publish_routed_codex_context, reasoning_level_rank,
@@ -64,6 +68,8 @@ pub use catalog::{
     MAX_MODEL_LIST_LEN,
 };
 pub use error::{normalize_error_code, Error, Result};
+pub use ids::{is_ascii_ref, is_ascii_token};
+pub use paths::path_with_suffix;
 pub use pricing::{
     normalize_pricing_identity, pricing_refresh_delay, pricing_refresh_jitter_seconds,
     usd_per_request_to_micro_usd, usd_per_token_to_micro_usd_per_million, usd_to_micro,
@@ -92,6 +98,8 @@ pub use runtime::{
     GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
     ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey,
     RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
+    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
+    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
 };
 pub use scheduler::refresh::{
     RefreshCompletion, RefreshCoordinator, RefreshIdentity, RefreshJob, RefreshJobId, RefreshKind,

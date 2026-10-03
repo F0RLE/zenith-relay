@@ -7,6 +7,7 @@ import { relayCommands } from "../../api/commands";
 import type { DiagnosticSettings, RelayStorageInfo } from "../../api/types";
 import { Button, OptionMenu, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { usePendingFlag } from "../../state/usePendingFlag";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
@@ -32,6 +33,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       .catch(() => { if (active) setDiagnosticsUnavailable(true); });
     return () => { active = false; };
   }, []);
+  const debugMode = usePendingFlag(diagnosticSettings?.debugEnabled ?? false);
   const updateDiagnosticDebug = async (enabled: boolean) => {
     const settings = await relayCommands.setDiagnosticDebugMode(enabled);
     setDiagnosticSettings(settings);
@@ -89,7 +91,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FolderOpen aria-hidden />}
           action={t("settings.openData")}
           busy={busy === "open-data"}
-          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}
+          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened", { backgroundRefresh: true })}
         />
       </SettingsGroup>
 
@@ -102,9 +104,9 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             description={diagnosticSettings
               ? t("settings.debugModeHint", { state: t(diagnosticSettings.debugEnabled ? "settings.debugModeOn" : "settings.debugModeOff") })
               : t(diagnosticsUnavailable ? "settings.debugModeUnavailable" : "settings.debugModeLoading")}
-            checked={diagnosticSettings?.debugEnabled ?? false}
-            disabled={diagnosticSettings === null || busy === "diagnostics-debug"}
-            onChange={(enabled) => void perform("diagnostics-debug", () => updateDiagnosticDebug(enabled), "feedback.saved")}
+            checked={debugMode.checked}
+            disabled={diagnosticSettings === null}
+            onChange={(enabled) => debugMode.select(enabled, () => perform("diagnostics-debug", () => updateDiagnosticDebug(enabled), "feedback.saved", { backgroundRefresh: true, uiLock: false }))}
           />
         </div>
         <div className="settings-control-row settings-danger-row">
@@ -122,7 +124,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FolderOpen aria-hidden />}
           action={t("settings.openLogs")}
           busy={busy === "open-logs"}
-          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened")}
+          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened", { backgroundRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.errorLogs")}
@@ -131,7 +133,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FileWarning aria-hidden />}
           action={t("settings.openErrors")}
           busy={busy === "open-error-logs"}
-          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened")}
+          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened", { backgroundRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.crashLogs")}
@@ -140,7 +142,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<Bug aria-hidden />}
           action={t("settings.openCrashes")}
           busy={busy === "open-crash-logs"}
-          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened")}
+          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened", { backgroundRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.operationLogs")}
@@ -149,7 +151,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FileText aria-hidden />}
           action={t("settings.openOperations")}
           busy={busy === "open-operation-logs"}
-          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened")}
+          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened", { backgroundRefresh: true })}
         />
       </SettingsGroup> : null}
     </div>

@@ -65,7 +65,8 @@ for (const mode of ["local", "remote"] as const) {
     });
     const speed = speedControl(page);
     await speed.getByRole("radio", { name: "Ultrafast", exact: true }).click();
-    await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeDisabled();
+    await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeEnabled();
+    await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeChecked();
     await expect(speed).toHaveAttribute("aria-busy", "true");
     await expect(speed).toHaveAttribute("data-speed-tier", "ultrafast");
     await page.locator(".pool-controls").screenshot({ path: testInfo.outputPath("saving.png") });

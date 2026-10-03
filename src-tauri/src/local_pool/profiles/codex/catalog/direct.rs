@@ -14,11 +14,12 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_m
     // `model_provider` points to this selected source. Native Codex rows are
     // useful only as a schema template here; advertising them would send
     // their requests to this source and produce a false model picker entry.
+    // A direct API connection is not the pool, so it keeps every source model.
     let selected_models = source_models
         .iter()
         .map(String::as_str)
         .map(str::trim)
-        .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
+        .filter(|model| is_direct_source_model(model))
         .collect::<Vec<_>>();
     let mut models = Vec::new();
     let mut seen = HashSet::new();
@@ -54,7 +55,6 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
     };
     let mut value: Value = serde_json::from_str(&catalog)
         .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
-    let bundled = bundled_codex_ultra_models(codex_home);
     if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
         for model in models {
             let Some(slug) = model.get("slug").and_then(Value::as_str) else {
@@ -63,7 +63,6 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
             let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
             model["display_name"] = Value::String(metadata.codex_display_name(&decoded));
             metadata.apply_codex_capabilities(&decoded, model);
-            add_installed_codex_ultra(model, &decoded, &bundled);
         }
     }
     Ok(Some(

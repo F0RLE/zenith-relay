@@ -63,7 +63,7 @@ async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output
         "data: {\"type\":\"response.incomplete\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
     );
     let (upstream, server) = response_from_sse_event(event.into()).await;
-    let failure = bootstrap_stream(upstream)
+    let failure = bootstrap_stream(upstream, None)
         .await
         .err()
         .expect("empty incomplete stream must not commit client output");
@@ -81,7 +81,7 @@ async fn bootstrap_does_not_commit_an_opaque_compaction_before_disconnect() {
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}}\n\n"
     );
     let (upstream, server) = response_from_sse_event(event.into()).await;
-    let failure = bootstrap_stream(upstream)
+    let failure = bootstrap_stream(upstream, None)
         .await
         .err()
         .expect("compaction alone must remain retryable");
@@ -97,7 +97,7 @@ async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
     let event =
         format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{delta}\"}}\n\n");
     let (upstream, server) = response_from_sse_event(event).await;
-    let result = bootstrap_stream(upstream).await;
+    let result = bootstrap_stream(upstream, None).await;
     server.await.unwrap();
     assert!(
         result.is_ok(),
@@ -278,4 +278,137 @@ async fn quiet_stream_keeps_sending_heartbeats_until_provider_completion() {
     assert!(events[0].success);
     assert_eq!(events[0].total_tokens, Some(3));
     assert_eq!(events[0].cached_input_tokens, None);
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_a_degraded_served_model_before_output_is_committed() {
+    let event = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra-degrade2-luna\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hidden\"}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let failure = bootstrap_stream(upstream, Some("gpt-6-astra"))
+        .await
+        .err()
+        .expect("degraded model must not commit client output");
+    server.await.unwrap();
+
+    assert_eq!(failure.failure.category, "upstream_route_degraded");
+    assert_eq!(failure.failure.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::NotSent
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_forwards_a_degraded_model_when_blocking_is_off() {
+    let event = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra-degrade2-luna\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let opened = bootstrap_stream(upstream, None).await;
+    server.await.unwrap();
+    let (_, buffered, _) = match opened {
+        Ok(opened) => opened,
+        Err(failure) => panic!(
+            "blocking off keeps the upstream stream, got {}",
+            failure.failure.category
+        ),
+    };
+    assert!(buffered.windows(7).any(|window| window == b"visible"));
+}
+
+#[tokio::test]
+async fn bootstrap_accepts_the_requested_model_name() {
+    let event = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let result = bootstrap_stream(upstream, Some("gpt-6-astra")).await;
+    server.await.unwrap();
+    assert!(result.is_ok(), "a normal served model is not a downgrade");
+}
+
+#[tokio::test]
+async fn bootstrap_checks_model_identity_before_the_first_output() {
+    for (served, expected, rejected) in [
+        ("gpt-5.6-luna", Some("gpt-6-astra"), true),
+        ("gpt-6-astra-2026-09-04", Some("gpt-6-astra"), false),
+        ("", Some("gpt-6-astra"), false),
+        ("gpt-5.6-luna", None, false),
+    ] {
+        let event = format!(
+            "data: {{\"type\":\"response.created\",\"response\":{{\"model\":\"{served}\"}}}}\n\ndata: {{\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}}\n\n"
+        );
+        let (upstream, server) = response_from_sse_event(event).await;
+        let result = bootstrap_stream(upstream, expected).await;
+        server.await.unwrap();
+        if rejected {
+            let failure = result.err().expect("model substitution must be rejected");
+            assert_eq!(failure.failure.category, "upstream_route_degraded");
+            assert_eq!(
+                failure.execution.certainty,
+                crate::scheduler::rotation::ExecutionCertainty::NotSent
+            );
+        } else {
+            assert!(result.is_ok(), "served={served}, expected={expected:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn buffered_basis_points_rejects_created_without_waiting_for_the_body() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, wait) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.6-luna\"}}\n\n").await.unwrap();
+        let _ = wait.await;
+    });
+    let upstream = reqwest::get(format!("http://{address}/stream"))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        crate::gateway::response::collect_upstream_response(upstream, true, Some("gpt-6-astra")),
+    )
+    .await;
+    let _ = release.send(());
+    server.await.unwrap();
+    let failure = result
+        .expect("must reject before upstream completes")
+        .unwrap_err();
+    assert_eq!(
+        failure.failure.category,
+        error_codes::UPSTREAM_ROUTE_DEGRADED
+    );
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::NotSent
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_does_not_replay_a_late_model_mismatch_after_generated_output() {
+    let event = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-luna\"}}\n\n"
+    );
+    let (upstream, server) = response_from_sse_event(event.into()).await;
+    let failure = bootstrap_stream(upstream, Some("gpt-6-astra"))
+        .await
+        .err()
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(failure.failure.category, "upstream_route_degraded");
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::Accepted
+    );
 }

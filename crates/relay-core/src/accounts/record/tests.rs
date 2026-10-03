@@ -356,10 +356,35 @@ fn account_usage_reducer_distinguishes_refreshable_and_access_only_401() {
 
 #[test]
 fn account_usage_reducer_keeps_quota_and_entitlement_failures_recoverable() {
-    for (status, category, refresh_quota) in [
-        (403, "upstream_quota_exhausted", true),
-        (403, "upstream_usage_not_included", false),
-        (429, "upstream_rate_limited", true),
+    for (status, category, refresh_quota, health, error) in [
+        (
+            403,
+            "upstream_quota_exhausted",
+            true,
+            AccountHealthState::Healthy,
+            None,
+        ),
+        (
+            429,
+            "upstream_quota_exhausted",
+            true,
+            AccountHealthState::Healthy,
+            None,
+        ),
+        (
+            403,
+            "upstream_usage_not_included",
+            false,
+            AccountHealthState::Degraded,
+            Some("upstream_usage_not_included"),
+        ),
+        (
+            429,
+            "upstream_rate_limited",
+            true,
+            AccountHealthState::Degraded,
+            Some("upstream_rate_limited"),
+        ),
     ] {
         let update = reduce_account_usage(
             usage_state(),
@@ -373,10 +398,53 @@ fn account_usage_reducer_keeps_quota_and_entitlement_failures_recoverable() {
             None,
             None,
         );
-        assert_eq!(update.state.health, AccountHealthState::Degraded);
-        assert_eq!(update.state.last_error_code.as_deref(), Some(category));
+        assert_eq!(update.state.health, health);
+        assert_eq!(update.state.last_error_code.as_deref(), error);
         assert_eq!(update.refresh_quota, refresh_quota);
     }
+
+    let mut stale_quota = usage_state();
+    stale_quota.health = AccountHealthState::Degraded;
+    stale_quota.last_error_code = Some("upstream_quota_exhausted".into());
+    let cleared = reduce_account_usage(
+        stale_quota,
+        AccountUsageObservation {
+            success: false,
+            http_status: 403,
+            error_category: Some("upstream_quota_exhausted"),
+            affects_account: true,
+        },
+        10,
+        None,
+        None,
+    );
+    assert_eq!(cleared.state.health, AccountHealthState::Healthy);
+    assert_eq!(cleared.state.last_error_code, None);
+    assert!(cleared.refresh_quota);
+    assert!(cleared.reset_runtime_failures);
+
+    let mut rate_limited = usage_state();
+    rate_limited.health = AccountHealthState::Degraded;
+    rate_limited.last_error_code = Some("upstream_rate_limited".into());
+    let kept = reduce_account_usage(
+        rate_limited,
+        AccountUsageObservation {
+            success: false,
+            http_status: 403,
+            error_category: Some("upstream_quota_exhausted"),
+            affects_account: true,
+        },
+        10,
+        None,
+        None,
+    );
+    assert_eq!(kept.state.health, AccountHealthState::Degraded);
+    assert_eq!(
+        kept.state.last_error_code.as_deref(),
+        Some("upstream_rate_limited")
+    );
+    assert!(kept.refresh_quota);
+    assert!(!kept.reset_runtime_failures);
 
     let forbidden = reduce_account_usage(
         usage_state(),
@@ -474,4 +542,88 @@ fn account_usage_reducer_keeps_quota_and_entitlement_failures_recoverable() {
         verification.state.last_error_code.as_deref(),
         Some("upstream_account_verification_required")
     );
+}
+
+#[test]
+fn blank_model_discovery_keeps_the_previous_catalog() {
+    let mut models = vec!["gpt-live".into()];
+    let mut discovered = Some(vec!["gpt-live".into()]);
+    let mut auth = AccountAuthState::Active;
+    let mut health = AccountHealthState::Healthy;
+    let mut error = None;
+
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        Vec::new(),
+    ));
+    assert_eq!(models, ["gpt-live"]);
+    assert_eq!(discovered.as_deref(), Some(models.as_slice()));
+
+    discovered = None;
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        Vec::new(),
+    ));
+    assert_eq!(models, ["gpt-live"]);
+    assert!(discovered.is_none());
+
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        vec!["gpt-next".into()],
+    ));
+    assert_eq!(models, ["gpt-live"]);
+    assert_eq!(
+        discovered.as_deref(),
+        Some(["gpt-next".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn first_nonempty_model_discovery_fills_an_empty_baseline() {
+    let mut models = Vec::new();
+    let mut discovered = None;
+    let mut auth = AccountAuthState::Error;
+    let mut health = AccountHealthState::Unhealthy;
+    let mut error = Some("models_transport".into());
+
+    assert!(!accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        Vec::new(),
+    ));
+    assert!(models.is_empty());
+    assert!(discovered.is_none());
+    assert_eq!(error.as_deref(), Some("models_transport"));
+
+    assert!(accept_discovered_models(
+        &mut models,
+        &mut discovered,
+        &mut auth,
+        &mut health,
+        &mut error,
+        vec!["gpt-recovered".into()],
+    ));
+    assert_eq!(models, ["gpt-recovered"]);
+    assert_eq!(
+        discovered.as_deref(),
+        Some(["gpt-recovered".to_string()].as_slice())
+    );
+    assert_eq!(auth, AccountAuthState::Active);
+    assert_eq!(health, AccountHealthState::Healthy);
+    assert!(error.is_none());
 }

@@ -267,11 +267,8 @@ fn profile_gateway_base_url(state: &AppState) -> Result<String, ManagementError>
 
 fn validate_profile_rotation_id(id: &str) -> Result<(), ManagementError> {
     if id.len() <= PROFILE_KEY_ROTATION_PREFIX.len()
-        || id.len() > 128
         || !id.starts_with(PROFILE_KEY_ROTATION_PREFIX)
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !zenith_relay_core::is_ascii_token(id, 128)
     {
         return Err(ManagementError::validation(
             error_codes::PROFILE_ROTATION_INVALID,

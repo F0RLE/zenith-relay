@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { ModelSummary } from "../../api/types";
+import type { DefaultServiceTier, ModelSummary } from "../../api/types";
 import { Button, Dialog, EmptyState, IconButton, ToggleSwitch } from "../../components/Ui";
 import { currentPoolModelSummaries, groupModelSummaries } from "../../modelSummaries";
 import { formatReasoningEffort } from "../../poolFormatting";
@@ -11,10 +11,14 @@ import {
   toggleReasoningLevel,
 } from "./modelReasoningPolicy";
 import {
+  clearPendingModelEnabled,
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
+  modelShowsReasoningControl,
   normalizeReasoningSelection,
+  pendingModelEnabled,
+  reconcilePendingModelEnabled,
   reorderById,
   reorderModelGroups,
   supportedReasoningLevels,
@@ -33,7 +37,7 @@ type ModelDragState = {
 
 export function ModelRulesView() {
   const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode, runtime, perform } = useRelayState();
   const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
   // Model Rules configures the complete pool inventory. Route health and
   // cooldowns are runtime state; they must not make a member's model vanish
@@ -42,6 +46,8 @@ export function ModelRulesView() {
   const poolModels = models;
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
+  const [pendingSpeed, setPendingSpeed] = useState<Record<string, DefaultServiceTier>>({});
   const orderMutation = useRef(false);
   const currentModels = useRef(models);
   currentModels.current = models;
@@ -49,14 +55,42 @@ export function ModelRulesView() {
   useEffect(() => {
     setOrderedModels(models);
   }, [runtime?.configurationRevision, catalogSignature]);
+  useEffect(() => {
+    setPendingEnabled((current) => reconcilePendingModelEnabled(current, models));
+  }, [catalogSignature]);
+  useEffect(() => {
+    setPendingSpeed((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const model of currentModels.current) {
+        const savedTier = model.speedTier ?? "standard";
+        if (next[model.id] !== undefined && next[model.id] === savedTier) {
+          delete next[model.id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [catalogSignature]);
   const modelGroups = groupModelSummaries(orderedModels, runtime?.accounts ?? []);
-  const toggleModel = (model: ModelSummary) => perform(
-    `model-toggle-${model.id}`,
-    () => mode === "local"
-      ? relayCommands.setModelEnabled(model.id, !model.enabled)
-      : relayCommands.remoteAction({ type: "set_model_enabled" }, { modelId: model.id, enabled: !model.enabled }),
-    "feedback.saved",
-  );
+  const toggleModel = (model: ModelSummary) => {
+    const enabled = !pendingModelEnabled(pendingEnabled, model);
+    setPendingEnabled((current) => ({ ...current, [model.id]: enabled }));
+    let saved = false;
+    void perform(
+      `model-toggle-${model.id}`,
+      async () => {
+        if (mode === "local") await relayCommands.setModelEnabled(model.id, enabled);
+        else await relayCommands.remoteAction({ type: "set_model_enabled" }, { modelId: model.id, enabled });
+        saved = true;
+      },
+      "feedback.saved",
+      { backgroundRefresh: true, uiLock: false },
+    ).then((ok) => {
+      if (saved || ok) return;
+      setPendingEnabled((current) => clearPendingModelEnabled(current, model.id, enabled));
+    });
+  };
   const persistModelOrder = (next: ModelSummary[]) => perform(
     "model-order",
     () => mode === "local"
@@ -66,9 +100,10 @@ export function ModelRulesView() {
         { modelIds: completeModelDisplayOrder(next, poolModels) },
       ),
     "feedback.saved",
+    { backgroundRefresh: true },
   );
   const saveModelOrder = async (next: ModelSummary[]) => {
-    if (orderMutation.current || busy) return;
+    if (orderMutation.current) return;
     orderMutation.current = true;
     setOrderedModels(next);
     try {
@@ -101,7 +136,7 @@ export function ModelRulesView() {
     endModelDrag,
     hoverModel,
     dropModel,
-  } = useModelRuleDrag({ busy, blocked: orderMutation, reorderModels, reorderGroups });
+  } = useModelRuleDrag({ blocked: orderMutation, reorderModels, reorderGroups });
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
   };
@@ -147,13 +182,13 @@ export function ModelRulesView() {
                 </th>
               </tr>
               {!groupCollapsed && group.items.map((model) => {
-                const toggling = busy === `model-toggle-${model.id}`;
+                const enabled = pendingModelEnabled(pendingEnabled, model);
                 const displayName = model.catalogName || model.codexDisplayName || model.id;
-                const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
-                const hasReasoningModes = (model.reasoningLevels?.length ?? 0) > 0 || (model.reasoningSupportedLevels?.length ?? 0) > 0 || model.reasoningManualFallback === true;
+                const toggleLabel = t(enabled ? "models.disable" : "models.enable", { model: model.id });
+                const hasReasoningModes = modelShowsReasoningControl(model);
                 const canEditReasoning = Boolean(model.reasoningConfigurable);
                 const speedTiers = modelSpeedTiers(model);
-                const requestedTier = model.speedTier ?? "standard";
+                const requestedTier = pendingSpeed[model.id] ?? model.speedTier ?? "standard";
                 const speedTier = speedTiers.includes(requestedTier) ? requestedTier : speedTiers[0] ?? "standard";
                 const canEditSpeed = model.speedSupported === true
                   && model.speedConfigurable === true
@@ -161,7 +196,7 @@ export function ModelRulesView() {
                 return <tr
                   key={model.id}
                   data-model-id={model.id}
-                  data-enabled={model.enabled ? "true" : "false"}
+                  data-enabled={enabled ? "true" : "false"}
                   data-drop-target={dropModelId === model.id ? "true" : undefined}
                   className={dragModelId === model.id ? "model-dragging" : undefined}
                   draggable
@@ -187,32 +222,42 @@ export function ModelRulesView() {
                     </div>
                   </td>
                   <td data-column="actions"><div className="model-rule-actions">
-                    <IconButton
-                      data-model-reasoning-edit={model.id}
-                      label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
-                      icon={<BrainCircuit aria-hidden />}
-                      disabled={!hasReasoningModes}
-                      onClick={() => setReasoningModel(model)}
-                    />
                     {canEditSpeed ? <PoolSpeedControl
                       className="model-speed-toggle"
+                      iconsOnly
                       modelId={model.id}
                       value={speedTier}
                       tiers={speedTiers}
                       disabled={false}
-                      saving={busy === `model-speed-${model.id}`}
+                      saving={pendingSpeed[model.id] !== undefined && pendingSpeed[model.id] !== model.speedTier}
                       onChange={(nextTier) => {
-                      void perform(`model-speed-${model.id}`, () => mode === "local"
-                        ? relayCommands.setModelServiceTier(model.id, nextTier)
-                        : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }), "feedback.saved");
-                    }} /> : null}
+                        setPendingSpeed((current) => ({ ...current, [model.id]: nextTier }));
+                        void perform(`model-speed-${model.id}`, () => mode === "local"
+                          ? relayCommands.setModelServiceTier(model.id, nextTier)
+                          : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }),
+                        "feedback.saved",
+                        { backgroundRefresh: true, uiLock: false },
+                        ).then((ok) => {
+                          if (ok) return;
+                          setPendingSpeed((current) => {
+                            if (current[model.id] !== nextTier) return current;
+                            const next = { ...current };
+                            delete next[model.id];
+                            return next;
+                          });
+                        });
+                      }} /> : null}
+                    {hasReasoningModes ? <IconButton
+                      data-model-reasoning-edit={model.id}
+                      label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
+                      icon={<BrainCircuit aria-hidden />}
+                      onClick={() => setReasoningModel(model)}
+                    /> : null}
                     <ToggleSwitch
                       data-model-toggle={model.id}
                       label={toggleLabel}
                       className="model-toggle"
-                      checked={model.enabled}
-                      aria-busy={toggling}
-                      disabled={Boolean(busy)}
+                      checked={enabled}
                       onChange={() => void toggleModel(model)}
                     />
                   </div></td>
@@ -228,12 +273,10 @@ export function ModelRulesView() {
 }
 
 function useModelRuleDrag({
-  busy,
   blocked,
   reorderModels,
   reorderGroups,
 }: {
-  busy: string | null;
   blocked: { current: boolean };
   reorderModels: (sourceId: string, targetId: string) => void;
   reorderGroups: (sourceId: string, targetId: string) => void;
@@ -285,7 +328,7 @@ function useModelRuleDrag({
     onCancel: clearModelDrag,
   });
   const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], id: string) => {
-    if (blocked.current || busy) return;
+    if (blocked.current) return;
     const target = event.target as HTMLElement;
     if (event.button !== 0 || (target.closest(".pool-speed-control, button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
     event.preventDefault();
@@ -296,7 +339,7 @@ function useModelRuleDrag({
     setDropGroupId(null);
   };
   const startGroupDrag = (event: React.DragEvent<HTMLTableRowElement>, groupId: string) => {
-    if (blocked.current || busy) {
+    if (blocked.current) {
       event.preventDefault();
       return;
     }
@@ -308,7 +351,7 @@ function useModelRuleDrag({
   const startModelDrag = (event: React.DragEvent<HTMLTableRowElement>, modelId: string) => {
     // Interactive controls inside a draggable row must keep their normal
     // click/focus behavior; the row itself is the drag surface.
-    if (blocked.current || busy || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
+    if (blocked.current || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
       event.preventDefault();
       return;
     }
@@ -344,7 +387,7 @@ function useModelRuleDrag({
 
 function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, perform, busy } = useRelayState();
+  const { mode, perform } = useRelayState();
   // The backend owns the provider contract and its order. Never synthesize
   // or reorder levels in the editor, and discard stale custom values from old
   // local policies before they can be sent back to the runtime.
@@ -359,7 +402,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
   const allowedLevelsRef = useRef(allowedLevels);
   const policyRevision = useRef(0);
   const mutationLock = useRef(false);
-  const [mutationInFlight, setMutationInFlight] = useState(false);
+  const queuedLevels = useRef<string[] | null>(null);
   const operation = `model-reasoning-${model.id}`;
   const label = (level: string) => t(`usage.reasoningEfforts.${level}`, { defaultValue: formatReasoningEffort(level) });
   const updateAllowedLevels = (next: string[]) => {
@@ -369,29 +412,40 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
   const runSerialized = async (id: string, work: () => Promise<unknown>, successKey?: string) => {
     if (mutationLock.current) return false;
     mutationLock.current = true;
-    setMutationInFlight(true);
     try {
-      return await perform(id, work, successKey);
+      return await perform(id, work, successKey, { backgroundRefresh: true, uiLock: false });
     } finally {
       mutationLock.current = false;
-      setMutationInFlight(false);
     }
   };
   const saveLevels = async (next: string[]) => {
-    if (mutationLock.current) return;
     const normalized = normalizeToSupported(next);
-    const revision = ++policyRevision.current;
-    const ok = await runSerialized(operation, () => mode === "local"
-      ? relayCommands.setModelReasoning(model.id, normalized)
-      : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels: normalized }), "feedback.saved");
-    if (ok && revision === policyRevision.current) updateAllowedLevels(normalized);
+    const previous = allowedLevelsRef.current;
+    if (normalized.join("\0") === previous.join("\0")) return;
+    policyRevision.current += 1;
+    updateAllowedLevels(normalized);
+    queuedLevels.current = normalized;
+    if (mutationLock.current) return;
+    let confirmed = previous;
+    while (queuedLevels.current) {
+      const target = queuedLevels.current;
+      const targetRevision = policyRevision.current;
+      queuedLevels.current = null;
+      const ok = await runSerialized(operation, () => mode === "local"
+        ? relayCommands.setModelReasoning(model.id, target)
+        : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels: target }), "feedback.saved");
+      if (ok) confirmed = target;
+      else if (targetRevision === policyRevision.current && queuedLevels.current === null) {
+        updateAllowedLevels(confirmed);
+        return;
+      }
+    }
   };
   const toggleAllowedLevel = (level: string) => {
     const next = normalizeToSupported(toggleReasoningLevel(allowedLevelsRef.current, level));
     if (next === allowedLevelsRef.current) return;
     void saveLevels(next);
   };
-  const manualBusy = mutationInFlight || busy === operation;
   return <Dialog className="model-reasoning-dialog" title={t("models.reasoningTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
     <div className="model-reasoning-form">
       <code className="model-reasoning-model" data-relay-tooltip={model.id}>{model.id}</code>
@@ -402,7 +456,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
           role="checkbox"
           aria-checked={allowedLevels.includes(level)}
           className={allowedLevels.includes(level) ? "selected" : undefined}
-          disabled={!editable || manualBusy}
+          disabled={!editable}
           onClick={() => toggleAllowedLevel(level)}
         ><Check aria-hidden /><span>{label(level)}</span></button>)}
       </div>

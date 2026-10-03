@@ -62,6 +62,8 @@ pub struct GatewaySummary {
     #[serde(default)]
     /// Legacy snapshot key retained for older desktop/server clients.
     pub chatgpt_retry_until_available: bool,
+    #[serde(default = "default_block_degraded_routes_enabled")]
+    pub block_degraded_routes_enabled: bool,
     #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
 }
@@ -71,6 +73,10 @@ fn default_codex_websockets_enabled() -> bool {
 }
 
 fn default_codex_background_tasks_enabled() -> bool {
+    true
+}
+
+fn default_block_degraded_routes_enabled() -> bool {
     true
 }
 
@@ -199,11 +205,12 @@ pub fn apply_pool_model_configuration(
     runtime: Option<&GatewayRuntime>,
 ) {
     let routes = super::model_protocols::ModelProtocolIndex::new(sources, accounts);
+    let block_degraded_routes = runtime.is_none_or(GatewayRuntime::block_degraded_routes_enabled);
     for model in models {
         let model_id = model.id.clone();
         model.protocol_routes = routes.routes_for(&model_id);
         model.codex_visible = model.enabled
-            && crate::codex_model_is_picker_eligible(&model_id)
+            && crate::codex_model_is_picker_eligible_for(&model_id, block_degraded_routes)
             && model
                 .protocol_routes
                 .iter()
@@ -297,4 +304,47 @@ pub fn apply_model_reasoning_summary(
         model.reasoning_levels = model.reasoning_allowed_levels.clone();
     }
     model.reasoning_configurable = has_pool_route && !model.reasoning_supported_levels.is_empty();
+}
+
+/// Model-setting bodies shared by the desktop commands and the management API.
+///
+/// Names stay camelCase and unknown fields are rejected, so both hosts keep the
+/// same request contract.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelEnabledInput {
+    pub model_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelPriceInput {
+    pub model_id: String,
+    pub input_micro_usd_per_million: Option<u64>,
+    pub cached_input_micro_usd_per_million: Option<u64>,
+    pub cache_write_5m_micro_usd_per_million: Option<u64>,
+    pub cache_write_1h_micro_usd_per_million: Option<u64>,
+    pub output_micro_usd_per_million: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelReasoningInput {
+    pub model_id: String,
+    #[serde(default)]
+    pub allowed_levels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelServiceTierInput {
+    pub model_id: String,
+    pub service_tier: DefaultServiceTier,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelOrderInput {
+    pub model_ids: Vec<String>,
 }

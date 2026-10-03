@@ -92,9 +92,7 @@ impl UsageTotals {
     /// output, total, speed output, and speed duration. A negative SQL count
     /// becomes zero.
     pub fn from_sql_counts<E>(mut count: impl FnMut(usize) -> Result<i64, E>) -> Result<Self, E> {
-        fn nonnegative(value: i64) -> u64 {
-            u64::try_from(value).unwrap_or_default()
-        }
+        use crate::usage::sql_count_u64 as nonnegative;
         Ok(Self {
             requests: nonnegative(count(0)?),
             successful_requests: nonnegative(count(1)?),
