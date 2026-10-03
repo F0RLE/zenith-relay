@@ -140,7 +140,7 @@ test("main pages and model rules contain no browser tooltip attributes", async (
   }
 });
 
-test("keyboard focus stays visible on shared navigation controls", async ({ page }) => {
+test("shared navigation keeps keyboard focus without restoring a focus ring", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, theme: "dark" });
   await page.goto("/");
 
@@ -149,8 +149,8 @@ test("keyboard focus stays visible on shared navigation controls", async ({ page
   await expect(usage).toBeFocused();
   const focusStyle = await usage.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { borderColor: style.borderColor, boxShadow: style.boxShadow };
+    return { outlineStyle: style.outlineStyle, boxShadow: style.boxShadow };
   });
-  expect(focusStyle.borderColor).not.toBe("rgb(48, 58, 64)");
-  expect(focusStyle.boxShadow).not.toBe("none");
+  expect(focusStyle.outlineStyle).toBe("none");
+  expect(focusStyle.boxShadow).toBe("none");
 });

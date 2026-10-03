@@ -18,11 +18,11 @@ function ModelProtectionToggle() {
   const { mode, runtime, perform } = useRelayState();
   const id = useId();
   const saved = Boolean(runtime?.gateway.basisPointsEnabled);
-  const { checked, select } = usePendingFlag(saved);
+  const { checked, saving, select } = usePendingFlag(saved);
   if (!runtime) return null;
   const { gateway } = runtime;
   const change = (enabled: boolean) => {
-    if (enabled === checked) return;
+    if (enabled === checked || saving) return;
     select(enabled, () => perform("gateway-basis-points", () => persistRoutingPolicy(mode, {
       maxRetryCandidates: gateway.maxRetryCandidates,
       defaultServiceTier: gateway.defaultServiceTier,
@@ -39,6 +39,7 @@ function ModelProtectionToggle() {
       <ToggleSwitch id={id} label={t("gateway.modelProtection")}
         aria-describedby={`${id}-description`}
         checked={checked}
+        disabled={saving}
         onChange={(enabled) => void change(enabled)} />
     </div>
   </div>;

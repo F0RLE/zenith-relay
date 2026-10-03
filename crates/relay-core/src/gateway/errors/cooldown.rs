@@ -86,11 +86,6 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
     }
     let scope = if status == StatusCode::TOO_MANY_REQUESTS {
         rate_limit_scope(category, hint.global, model)
-    } else if matches!(
-        status,
-        StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN
-    ) {
-        "*"
     } else if category.starts_with("upstream_model_")
         || matches!(
             category,
@@ -205,6 +200,7 @@ pub(crate) fn failure_cooldown_reason(
                 | error_codes::UPSTREAM_QUOTA_EXHAUSTED
                 | error_codes::UPSTREAM_REGION_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
                 | error_codes::UPSTREAM_ROUTE_DEGRADED
                 | error_codes::UPSTREAM_MODEL_CAPACITY

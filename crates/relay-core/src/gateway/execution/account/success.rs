@@ -91,6 +91,36 @@ pub(super) fn complete_account_response(input: AccountSuccessInput<'_>) -> Accou
         started.elapsed().as_millis() as u64,
     );
     populate_tokens(&mut event, &bytes);
+    if runtime.block_degraded_routes_enabled() {
+        if let Err(rejected) = super::super::super::response::completed_upstream_response(
+            &bytes,
+            false,
+            Some(&route.source_model),
+        ) {
+            let mut failure = rejected.failure;
+            // This account-only endpoint has already collected a full response.
+            // Reject the result without starting another generation.
+            failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
+            event.success = false;
+            event.http_status = failure.status.as_u16();
+            event.error_category = Some(failure.category.to_string());
+            let state = super::super::super::errors::settle_attempt_failure(
+                runtime,
+                lease,
+                &route.source_model,
+                &failure,
+                response_headers,
+            );
+            super::super::super::errors::apply_failure_state(&mut event, state);
+            emit_usage(runtime, event);
+            return AccountSuccess::Respond(super::super::attempt_error_response(
+                failure,
+                rejected.preserved.as_ref(),
+                selected_error_origin,
+                request_id,
+            ));
+        }
+    }
     let client_bytes = if basis_points_route {
         match super::super::basis_points::translate_response(&bytes, request) {
             Ok(bytes) => bytes,

@@ -177,10 +177,16 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 
 #[tokio::test]
 async fn model_switch_uses_materialized_http_history_before_selection() {
-    let (old_model_upstream, old_state) =
-        spawn_upstream(vec![success_reply("old-model-response")]).await;
-    let (new_model_upstream, new_state) =
-        spawn_upstream(vec![success_reply("new-model-response")]).await;
+    let (old_model_upstream, old_state) = spawn_upstream(vec![success_reply_for_model(
+        "old-model-response",
+        "old-model",
+    )])
+    .await;
+    let (new_model_upstream, new_state) = spawn_upstream(vec![success_reply_for_model(
+        "new-model-response",
+        "new-model",
+    )])
+    .await;
     let authority = Arc::new(TokenAuthority::new(2).unwrap());
     register_ready(&authority, "old-model-account", "old-model-access").await;
     register_ready(&authority, "new-model-account", "new-model-access").await;

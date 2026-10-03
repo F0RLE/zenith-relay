@@ -100,7 +100,7 @@ export function ModelRulesView() {
         { modelIds: completeModelDisplayOrder(next, poolModels) },
       ),
     "feedback.saved",
-    { backgroundRefresh: true, uiLock: false },
+    { backgroundRefresh: true },
   );
   const saveModelOrder = async (next: ModelSummary[]) => {
     if (orderMutation.current) return;

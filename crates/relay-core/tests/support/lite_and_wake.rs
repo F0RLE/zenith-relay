@@ -8,8 +8,8 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
     account_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     let (account_upstream, account_state) = spawn_upstream_with_catalog(
         vec![
-            success_reply("full-response"),
-            success_reply("explicit-lite-response"),
+            success_reply_for_model("full-response", OFFICIAL_CODEX_MODEL),
+            success_reply_for_model("explicit-lite-response", OFFICIAL_CODEX_MODEL),
         ],
         account_catalog,
     )
@@ -107,8 +107,14 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
 async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
     let mut lite_catalog = default_upstream_model_catalog();
     lite_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
-    let (lite_upstream, lite_state) =
-        spawn_upstream_with_catalog(vec![success_reply("full-compact")], lite_catalog).await;
+    let (lite_upstream, lite_state) = spawn_upstream_with_catalog(
+        vec![success_reply_for_model(
+            "full-compact",
+            OFFICIAL_CODEX_MODEL,
+        )],
+        lite_catalog,
+    )
+    .await;
     let mut full_catalog = default_upstream_model_catalog();
     full_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     full_catalog["models"][0]["use_responses_lite"] = Value::Bool(false);

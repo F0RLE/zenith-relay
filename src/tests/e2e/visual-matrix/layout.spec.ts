@@ -506,7 +506,9 @@ for (const viewport of viewports) {
     const sourceMenu = page.getByRole("menu");
     await expect(sourceMenu.getByRole("menuitem")).toHaveCount(4);
     await expect(sourceMenu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
-    expect(await sourceMenu.evaluate((element) => {
+    // The popover is placed after it is inserted, so poll the settled rect
+    // instead of reading one frame that may still be unplaced.
+    await expect.poll(() => sourceMenu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
     })).toBe(true);

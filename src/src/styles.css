@@ -17,9 +17,9 @@
 @import "./styles/responsive.css";
 @import "./styles/pages/workspace.css";
 
-/* The launcher has no focus ring. Do not restore an outline or an inset
-   focus box-shadow on tabs, buttons, fields, or dialogs. */
+/* The launcher uses no focus rings on controls or their field wrappers. */
 :focus,
 :focus-visible {
   outline: none !important;
+  box-shadow: none !important;
 }

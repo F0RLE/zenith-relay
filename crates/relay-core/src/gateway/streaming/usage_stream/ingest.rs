@@ -184,6 +184,28 @@ impl<S> UsageStream<S> {
                 return (false, 0);
             }
             let terminal = parse_sse_event(&event);
+            // Reported consumption remains real even when identity validation
+            // rejects the response before it can reach the client.
+            if let Some(usage) = terminal.usage {
+                if let Some(current) = self.event.as_mut() {
+                    apply_usage(current, &usage);
+                }
+            }
+            if let Some(service_tier) = terminal.applied_service_tier {
+                if let Some(current) = self.event.as_mut() {
+                    current.applied_service_tier = Some(service_tier);
+                }
+            }
+            if self.expected_model.as_deref().is_some_and(|expected| {
+                terminal
+                    .payload
+                    .as_ref()
+                    .is_some_and(|value| served_model_is_rejected(value, expected))
+            }) {
+                self.sse_pending.clear();
+                self.fail_stream(error_codes::UPSTREAM_ROUTE_DEGRADED);
+                return (false, 0);
+            }
             if terminal.has_data && !terminal.valid {
                 self.set_upstream_error(terminal.upstream_error);
                 self.sse_pending.clear();
@@ -231,16 +253,6 @@ impl<S> UsageStream<S> {
             {
                 if let Some(current) = self.event.as_mut() {
                     current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
-                }
-            }
-            if let Some(usage) = terminal.usage {
-                if let Some(current) = self.event.as_mut() {
-                    apply_usage(current, &usage);
-                }
-            }
-            if let Some(service_tier) = terminal.applied_service_tier {
-                if let Some(current) = self.event.as_mut() {
-                    current.applied_service_tier = Some(service_tier);
                 }
             }
             if terminal.response_id.is_some() {

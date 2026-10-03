@@ -19,6 +19,7 @@ use super::errors::{
 use super::now_ms;
 use super::request::response_tool_call_ids;
 use super::response::response_id_from_bytes;
+use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
     repair_custom_tool_item_ids,
@@ -283,9 +284,24 @@ pub(super) fn attempt_error_response(
             Some(request_id),
         );
     }
-    api_error_with_origin(
+    let code = match failure.category {
+        error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE => {
+            error_codes::UPSTREAM_ERROR
+        }
+        _ => {
+            return api_error_with_origin(
+                failure.status,
+                failure.message,
+                failure.category,
+                failure_origin,
+                Some(request_id),
+            );
+        }
+    };
+    api_error_with_origin_and_category(
         failure.status,
         failure.message,
+        code,
         failure.category,
         failure_origin,
         Some(request_id),

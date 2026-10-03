@@ -80,7 +80,7 @@ test("API degraded-route switch is on for ChatGPT accounts and saves immediately
   await openGatewayApi(page);
   const toggle = page.getByRole("checkbox", { name: "Degraded routes", exact: true });
   await expect(toggle).toBeChecked();
-  await expect(page.getByText("For ChatGPT accounts. Do not send a request when OpenAI replaces the model with an internal downgrade id.")).toBeVisible();
+  await expect(page.getByText("For ChatGPT accounts. Reject responses reporting a different model or an internal downgrade id such as degrade2.")).toBeVisible();
   await toggle.click();
   await expect(toggle).not.toBeChecked();
   const values = await page.evaluate(() => (window as unknown as {

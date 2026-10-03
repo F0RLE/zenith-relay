@@ -367,8 +367,8 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
   await key.focus();
   expect(await key.evaluate((input) => {
     const field = input.closest<HTMLElement>(".secret-field")!;
-    return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineWidth };
-  })).toEqual({ inputOutline: "none", fieldOutline: "2px" });
+    return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineStyle, fieldShadow: getComputedStyle(field).boxShadow };
+  })).toEqual({ inputOutline: "none", fieldOutline: "none", fieldShadow: "none" });
 
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
   await dialog.getByLabel("Upstream API key").fill("test-source-key");

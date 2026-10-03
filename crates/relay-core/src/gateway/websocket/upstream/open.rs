@@ -79,7 +79,7 @@ pub(super) async fn open_upgraded_socket(
     let initial_messages = match initial_application_messages(
         &mut upstream,
         source_error_origin,
-        block_degraded_routes,
+        block_degraded_routes.then_some(route.source_model.as_str()),
     )
     .await
     {

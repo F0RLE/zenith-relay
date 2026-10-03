@@ -1,6 +1,32 @@
 use super::*;
 
 #[tokio::test]
+async fn late_model_substitution_ends_the_stream_without_forwarding_completion() {
+    let first = Bytes::from_static(
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+    );
+    let completed = Bytes::from_static(b"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-luna\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut stream = usage_stream_with_events(
+        stream::iter([Ok::<_, Infallible>(first.clone()), Ok(completed)]),
+        events.clone(),
+    );
+    stream.expected_model = Some("gpt-6-astra".into());
+    assert_eq!(stream.next().await.unwrap().unwrap(), first);
+    assert!(stream.next().await.is_none());
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(events[0].input_tokens, Some(3));
+    assert_eq!(events[0].output_tokens, Some(2));
+    assert_eq!(events[0].total_tokens, Some(5));
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some(error_codes::UPSTREAM_ROUTE_DEGRADED)
+    );
+}
+
+#[tokio::test]
 async fn usage_stream_forwards_chunks_without_waiting_for_an_sse_boundary() {
     let first = Bytes::from_static(br#"data: {"type":"response.output_text.delta","delta":"hel"#);
     let second = Bytes::from_static(b"lo\"}\n\n");

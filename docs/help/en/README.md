@@ -512,8 +512,9 @@ WebSocket, audio/video conversion and server-side tool emulation are not offered
 
 **Use Basis Points** is available in the **API** tab. For ChatGPT accounts in
 the pool it sends requests through Excel instead of Responses. It may help a
-degraded account generate, but Relay does not guarantee that and cannot verify
-which model actually runs the request at OpenAI. Changes save immediately and
+degraded account generate, without a guarantee. **Degraded routes** checks the
+model identity reported by the upstream; it cannot measure generation quality
+or independently prove which model ran. Changes save immediately and
 apply to every compatible ChatGPT account. The route used is still shown in
 request details under **Usage**.
 
@@ -716,8 +717,8 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
 | `upstream_edge_challenge`, `edge_security_challenge` | An edge security check replaced the API response. | Verify the API address, service status, and network configuration. Ask the provider for supported API access; signing in to Relay again cannot resolve its edge challenge. |
 | `upstream_model_not_found` · provider `model_not_found` | This provider does not expose the requested model ID. | Refresh this source's models and verify key access. Remove an obsolete permission or select an actual available ID. |
-| `upstream_route_degraded`, `route_degraded` | OpenAI answered with an internal downgrade id such as `degrade2`. That id is not a model. | While Degraded routes is on in the API tab, Relay does not send it. The ChatGPT account pauses and another member is tried. Turning it off sends the request again. Headers and Excel mode do not repair the id. |
-| `upstream_model_unavailable`, `model_not_available` · 503 | This provider cannot serve the model temporarily. | Relay pauses this model on the failed route and tries another compatible member. Recovery observes the provider delay. |
+| `upstream_route_degraded`, `route_degraded` | The ChatGPT response reports a different model or an internal downgrade id such as `degrade2`. | With Degraded routes enabled in API, Relay rejects it in JSON, SSE (including response.created) and WebSocket. A pre-generation refusal can rotate; generated or delivered output is never replayed. Dated snapshots of the same model are allowed. The account pauses briefly. This checks reported identity, not quality. |
+| `upstream_model_unavailable`, `model_not_available` · 403/503 | The model is temporarily unavailable, including Basis Points `Model access has changed`. | Only this model on the member pauses; other models remain available. Relay can try another compatible member. Basis Points access can differ between accounts and from native Responses; the model pause currently covers both account transports. This is not exhausted quota. |
 | `upstream_model_unsupported`, `model_not_supported` | The selected provider path does not support this model. | Refresh the source catalog and verify the model ID, API address, key permissions, and provider support. Relay will use another compatible member when one is available. |
 | `upstream_model_capacity`, `model_at_capacity` | The model is temporarily overloaded. | Wait or use another compatible source. Signing in again does not increase provider capacity. |
 
@@ -734,7 +735,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `compaction_response_invalid` · 502 | Context compaction did not finish with a valid encrypted result. | Keep the existing conversation history and retry explicitly after checking the upstream connection. Relay does not replay this generation or fabricate a summary. |
 | `upstream_instructions_required`, `missing_required_parameter` | A required field, including instructions, is absent. | Supply the field named by the provider or update the client generating it. Retrying the same body does not fix it. |
 | `upstream_unsupported_request`, `unsupported_request` | A parameter or capability is unsupported. | Disable the named parameter, tool, or mode and use a compatible format. |
-| `upstream_content_policy`, `content_policy_violation` | Provider content rules rejected the request. | Revise the request according to the service rules. Rotating members is not a correction for that request. |
+| `upstream_content_policy`, `content_policy_violation` | Provider policy rejected the request, including `This request was blocked by our usage policy`. | A real HTTP 403 stays 403, even if a host labels it insufficient_quota. Relay does not zero quota, pause the account or rotate members for this refusal. Check the provider's rules and route access; headers do not establish permission. |
 | `response_continuation_unavailable`, `response_affinity_miss` | The response owner is unavailable and full replay history is missing. | Restore the original account/API or resend complete history from the client. Start a new conversation if history is lost. A rotation mode change cannot restore context. |
 | `upstream_previous_response_not_found`, `previous_response_not_found` | The provider no longer knows the previous response. | Resend full history without the stale response reference, or start a new conversation. Do not transfer just a response ID to another API. |
 | `upstream_tool_call_mismatch`, `tool_call_not_found` | A tool result has no matching call, or a call has no result. | Relay retries once when the complete pair proves a missing or confused call identifier. It never removes results or guesses between parallel calls. If the error remains, update the client and resend the complete call/result pair, or start a new conversation if the missing history cannot be recovered. |

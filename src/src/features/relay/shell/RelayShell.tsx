@@ -229,8 +229,12 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
+        {/* Remount the boundary per page: a retained boundary keeps the
+            previous page hidden in the DOM while the next lazy chunk loads,
+            so automation and assistive tech would still resolve the old
+            page's nodes after navigation. */}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : (
-          <Suspense fallback={<div className="relay-loading">{t("common.loading")}</div>}>
+          <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}>
             <Page
               page={page}
               onImport={() => openImport()}

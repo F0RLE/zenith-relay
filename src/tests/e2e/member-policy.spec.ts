@@ -192,7 +192,7 @@ for (const [width, height] of [[1160, 760], [840, 560], [740, 760], [640, 720], 
           await expect(input).toHaveCSS("outline-style", "none");
           await expect(input).toHaveCSS("border-width", "0px");
           await expect(input).toHaveCSS("box-shadow", "none");
-          await expect(dialog.locator(".source-price-input").first()).not.toHaveCSS("box-shadow", "none");
+          await expect(dialog.locator(".source-price-input").first()).toHaveCSS("box-shadow", "none");
           await dialog.screenshot({ path: `output/playwright/member-prices-focused-${theme}-${width}.png` });
           const focusedBorder = await input.evaluate((element) => getComputedStyle(element.parentElement!).borderColor);
           await input.fill("1324134314");

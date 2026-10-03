@@ -115,6 +115,34 @@ async fn generic_failure_preserves_provider_retry_after() {
 }
 
 #[tokio::test]
+async fn model_access_403_only_cools_the_requested_model() {
+    for (category, expected_scope) in [
+        (error_codes::UPSTREAM_MODEL_UNAVAILABLE, Some("model-a")),
+        (error_codes::UPSTREAM_FORBIDDEN, Some("*")),
+        (error_codes::UPSTREAM_CONTENT_POLICY, None),
+    ] {
+        let runtime = runtime(5);
+        let lease = reserve(&runtime).await;
+        let state = settle_classified_failure(
+            &runtime,
+            &lease,
+            "model-a",
+            StatusCode::FORBIDDEN,
+            category,
+            &reqwest::header::HeaderMap::new(),
+            RateLimitBodyHint::default(),
+        );
+        assert_eq!(state.cooldown_scope.as_deref(), expected_scope);
+        assert_eq!(
+            current_failure_state(&runtime, "source", "model-b")
+                .retry_at_ms
+                .is_some(),
+            expected_scope == Some("*")
+        );
+    }
+}
+
+#[tokio::test]
 async fn global_retry_scope_survives_an_equal_circuit_deadline_after_dispatch() {
     let runtime = runtime(5);
     let lease = reserve(&runtime).await;
