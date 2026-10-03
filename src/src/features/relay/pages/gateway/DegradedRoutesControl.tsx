@@ -8,7 +8,7 @@ export function DegradedRoutesControl() {
   const { t } = useTranslation();
   const { mode, runtime, blockDegradedRoutesEnabled, setBlockDegradedRoutesEnabled } = useRelayState();
   const id = useId();
-  const { checked, select } = usePendingFlag(blockDegradedRoutesEnabled);
+  const { checked, saving, select } = usePendingFlag(blockDegradedRoutesEnabled);
   if (mode === "zenith" || !runtime || (mode === "remote" && !runtime.capabilities.features.includes("block_degraded_routes"))) return null;
   return <div className="gateway-api-toggle-setting">
     <div className="relay-toggle-setting">
@@ -21,6 +21,7 @@ export function DegradedRoutesControl() {
         label={t("gateway.degradedRoutes")}
         aria-describedby={`${id}-description`}
         checked={checked}
+        disabled={saving}
         onChange={(enabled) => select(enabled, () => setBlockDegradedRoutesEnabled(enabled))}
       />
     </div>

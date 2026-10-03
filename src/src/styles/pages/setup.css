@@ -858,6 +858,7 @@
 }
 
 .source-price-input {
+  --price-field-focus: var(--relay-focus);
   min-width: 0;
   height: 36px;
   display: grid;
@@ -874,6 +875,11 @@
 
 .source-price-input:hover {
   border-color: var(--relay-border-strong);
+}
+
+.source-price-input:focus-within {
+  border-color: var(--price-field-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--price-field-focus) 18%, transparent);
 }
 
 .source-price-currency {
@@ -909,6 +915,7 @@
 }
 
 .source-price-input:has(input[aria-invalid="true"]) {
+  --price-field-focus: var(--relay-error);
   border-color: var(--relay-error);
 }
 

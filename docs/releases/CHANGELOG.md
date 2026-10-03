@@ -26,7 +26,7 @@ Zenith Relay 1.1.4 rotates to the account with the most remaining quota, blocks 
 - Switching an account keeps the official ChatGPT catalog and its official models. A direct API connection uses the models reported by that provider. Known reasoning levels come from the catalog parser and are connected directly, without the pool rewriting them.
 - The pool picker filters working, cooldown, unavailable, disabled, and server connections. The status color matches the account card. The automatic queue is the left-to-right order of the cards, not a text list.
 - Model speed is shown as icons. A reasoning control appears only for a text model that has reasoning levels, and it sits after the speed icons.
-- On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right. The launcher no longer draws focus rings.
+- On macOS, close, minimize, and full screen are on the left and do what those buttons normally do. The name and logo stay on the right.
 - A model switch saves without waiting for a full snapshot. Other switches keep their new value while a background refresh runs, so the rest of the window stays usable.
 - ChatGPT account requests use current Chrome headers. Quota rejection keeps the account recoverable and applies to the open primary window instead of marking the account broken.
 - Excel / Basis Points accepts an image inside a user message. A data URL is uploaded with the account and replaced by file_id. A remote image URL is rejected, and detail is not forwarded. One encrypted-content failure drops the foreign ciphertext and retries the same account.
@@ -47,7 +47,7 @@ Zenith Relay 1.1.4 ставит в ротацию аккаунт с наибол
 - Переключение аккаунта сохраняет официальный каталог ChatGPT и его официальные модели. Прямое API-подключение берёт модели, которые сообщил этот провайдер. Известные уровни размышления берутся из разбора каталога и подключаются напрямую, без переписывания пулом.
 - При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта. Автоматическая очередь видна порядком карточек слева направо, а не текстовым списком.
 - Скорость модели показана иконками. Выбор размышления появляется только у текстовой модели, у которой есть уровни, и стоит после иконок скорости.
-- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа. У лаунчера больше нет обводки фокуса.
+- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа.
 - Переключение модели сохраняется без ожидания полного снимка. Остальные переключатели сохраняют новое значение, пока идёт фоновое обновление, поэтому остальным окном можно пользоваться.
 - Запросы аккаунта ChatGPT отправляются с актуальными заголовками Chrome. Отказ по квоте оставляет аккаунт восстановимым и применяется к открытому основному окну, а не помечает аккаунт сломанным.
 - Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на file_id. Внешняя ссылка отклоняется, поле detail не пересылается. Одна ошибка зашифрованного содержимого убирает чужой шифротекст и повторяет запрос тем же аккаунтом.

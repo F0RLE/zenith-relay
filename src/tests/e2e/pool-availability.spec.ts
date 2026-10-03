@@ -84,11 +84,12 @@ for (const mode of ["local", "remote"] as const) {
       await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
       await expect(page.locator(".pool-current-route")).toHaveText("Waiting for the first request");
       if (mode === "local") await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeEnabled();
-      const order = ["Fixture 4", "Fixture 6", "Fixture 2", "Fixture 1", "Fixture 5", "Fixture 3"];
-      await expect(page.locator(".pool-member-name")).toHaveText(order);
+      const poolOrder = ["Fixture 6", "Fixture 4", "Fixture 2", "Fixture 1", "Fixture 5", "Fixture 3"];
+      const connectionOrder = ["Fixture 4", "Fixture 6", "Fixture 2", "Fixture 1", "Fixture 5", "Fixture 3"];
+      await expect(page.locator(".pool-member-name")).toHaveText(poolOrder);
 
       await page.getByRole("button", { name: "Connections", exact: true }).click();
-      await expect(page.locator(".account-card .account-identity > strong")).toHaveText(order);
+      await expect(page.locator(".account-card .account-identity > strong")).toHaveText(connectionOrder);
     });
   }
 }

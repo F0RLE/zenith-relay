@@ -75,7 +75,7 @@ export function PoolPage() {
         className="pool-header-icon"
         label={t("models.resetOrder")}
         icon={busy === "model-order-reset" ? <Loader2 className="spin" aria-hidden /> : <RotateCcw aria-hidden />}
-        disabled={busy === "model-order-reset" || !runtime?.gateway.models?.length}
+        disabled={busy === "model-order" || busy === "model-order-reset" || !runtime?.gateway.models?.length}
         onClick={() => void perform("model-order-reset", () => mode === "local"
           ? relayCommands.setModelDisplayOrder([])
           : relayCommands.remoteAction({ type: "set_model_order" }, { modelIds: [] }), "feedback.saved", { backgroundRefresh: true })}
