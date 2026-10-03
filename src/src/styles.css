@@ -17,9 +17,9 @@
 @import "./styles/responsive.css";
 @import "./styles/pages/workspace.css";
 
-/* Focus stays visible to the keyboard user through the caret and the
-   control itself. The green ring is not used anywhere in the launcher. */
+/* The launcher uses no focus rings on controls or their field wrappers. */
 :focus,
 :focus-visible {
   outline: none !important;
+  box-shadow: none !important;
 }

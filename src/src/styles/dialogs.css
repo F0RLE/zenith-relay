@@ -971,11 +971,6 @@
   border-radius: 0 6px 6px 0;
 }
 
-.secret-field:focus-within {
-  outline: 2px solid var(--relay-focus);
-  outline-offset: 1px;
-}
-
 .secret-field input:focus-visible,
 .secret-field button:focus-visible {
   outline: 0;

@@ -13,7 +13,7 @@ export function usePendingFlag(saved: boolean) {
     const current = ++ticket.current;
     setPending(enabled);
     setSaving(true);
-    void save().then((ok) => {
+    void Promise.resolve().then(save).catch(() => false).then((ok) => {
       if (ticket.current !== current || ok) return;
       setPending((value) => value === enabled ? null : value);
     }).finally(() => {
