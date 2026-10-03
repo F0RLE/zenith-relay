@@ -137,6 +137,19 @@ fn conflicting_remote_and_unknown_images_are_rejected() {
 }
 
 #[test]
+fn unicode_image_urls_are_rejected_without_panicking() {
+    for url in ["🖼🖼", "图像图片", "data🖼"] {
+        let input = json!({"input": [{"role": "user", "content": [{
+            "type": "input_image", "image_url": url
+        }]}]});
+        assert_eq!(
+            failure_message(stage_input_images(&input)),
+            "input_image must be a data URL or file_id"
+        );
+    }
+}
+
+#[test]
 fn attachment_url_replaces_the_responses_segment() {
     let responses = url::Url::parse("https://bps.openai.com/basispoints/api/responses").unwrap();
     assert_eq!(

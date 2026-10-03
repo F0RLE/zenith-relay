@@ -153,7 +153,10 @@ fn image_job(part: &Map<String, Value>) -> Result<ImageJob, AttachmentFailure> {
         )),
         (Some(file_id), None) => Ok(ImageJob::File(file_id)),
         (None, Some(image_url)) => {
-            if image_url.len() < 5 || !image_url[..5].eq_ignore_ascii_case("data:") {
+            if !image_url
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+            {
                 return Err(invalid_image("input_image must be a data URL or file_id"));
             }
             decode_inline_image(image_url).map(ImageJob::Upload)

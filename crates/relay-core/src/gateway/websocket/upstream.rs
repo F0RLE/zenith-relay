@@ -14,9 +14,11 @@ use std::collections::HashSet;
 use super::super::execution::AttemptRepairs;
 use super::*;
 
-pub(in crate::gateway::websocket) use messages::first_message_terminal;
 #[cfg(test)]
 pub(in crate::gateway::websocket) use messages::initial_payloads_are_empty_incomplete;
+pub(in crate::gateway::websocket) use messages::{
+    first_message_terminal, message_serves_rejected_model,
+};
 pub(in crate::gateway::websocket) use session::{
     await_while_client_connected, connect_upstream_while_client_connected,
 };

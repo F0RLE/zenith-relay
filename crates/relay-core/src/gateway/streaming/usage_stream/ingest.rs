@@ -184,6 +184,16 @@ impl<S> UsageStream<S> {
                 return (false, 0);
             }
             let terminal = parse_sse_event(&event);
+            if self.expected_model.as_deref().is_some_and(|expected| {
+                terminal
+                    .payload
+                    .as_ref()
+                    .is_some_and(|value| served_model_is_rejected(value, expected))
+            }) {
+                self.sse_pending.clear();
+                self.fail_stream(error_codes::UPSTREAM_ROUTE_DEGRADED);
+                return (false, 0);
+            }
             if terminal.has_data && !terminal.valid {
                 self.set_upstream_error(terminal.upstream_error);
                 self.sse_pending.clear();

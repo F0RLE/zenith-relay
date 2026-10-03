@@ -2,6 +2,24 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn websocket_model_guard_checks_text_and_binary_envelopes_only() {
+    use crate::gateway::websocket::upstream::message_serves_rejected_model;
+    use reqwest_websocket::Message;
+    let payload = r#"{"type":"response.created","response":{"model":"gpt-5.6-luna"}}"#;
+    for message in [
+        Message::Text(payload.into()),
+        Message::Binary(payload.as_bytes().to_vec().into()),
+    ] {
+        assert!(message_serves_rejected_model(&message, "gpt-6-astra"));
+        assert!(!message_serves_rejected_model(&message, "gpt-5.6-luna"));
+    }
+    assert!(!message_serves_rejected_model(
+        &Message::Text(r#"{"delta":"gpt-5.6-luna"}"#.into()),
+        "gpt-6-astra"
+    ));
+}
+
+#[test]
 fn only_upstream_incomplete_failures_cool_the_candidate() {
     assert!(incomplete_requires_cooldown("upstream_websocket_closed"));
     assert!(incomplete_requires_cooldown("websocket_idle_timeout"));

@@ -171,7 +171,11 @@ impl AttemptFailure {
             execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
             category,
-            message: "upstream stream failed before client output",
+            message: match category {
+                error_codes::UPSTREAM_BODY_TOO_LARGE => "upstream response is too large",
+                error_codes::UPSTREAM_BODY => "upstream response failed",
+                _ => "upstream stream failed before client output",
+            },
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }

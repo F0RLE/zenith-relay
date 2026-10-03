@@ -349,7 +349,7 @@ error_codes! {
     UPSTREAM_REFRESH_TOKEN_REUSED => ("upstream_refresh_token_reused", "upstream_refresh_token_reused", None),
     UPSTREAM_REGION_UNSUPPORTED => ("upstream_region_unsupported", "unsupported_country_region_territory", Some((403, "upstream rejected the request region"))),
     UPSTREAM_REQUEST_TIMEOUT => ("upstream_request_timeout", "request_timeout", Some((408, "upstream request timed out"))),
-    UPSTREAM_ROUTE_DEGRADED => ("upstream_route_degraded", "route_degraded", Some((404, "upstream routed the account to an internal degraded model"))),
+    UPSTREAM_ROUTE_DEGRADED => ("upstream_route_degraded", "route_degraded", Some((404, "upstream served a different or internally degraded model"))),
     UPSTREAM_SERVER_ERROR => ("upstream_server_error", "internal_server_error", Some((500, "upstream service failed"))),
     UPSTREAM_STATUS => ("upstream_status", "upstream_status", None),
     UPSTREAM_STREAM => ("upstream_stream", "upstream_stream", None),

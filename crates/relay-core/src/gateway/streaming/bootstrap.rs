@@ -52,7 +52,7 @@ pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFail
 )]
 pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
-    block_degraded_routes: bool,
+    expected_model: Option<&str>,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
@@ -83,16 +83,21 @@ pub(in crate::gateway) async fn bootstrap_stream(
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
-                    if block_degraded_routes
-                        && event
+                    if expected_model.is_some_and(|expected| {
+                        event
                             .payload
                             .as_ref()
-                            .is_some_and(super::served_model_is_degraded)
-                    {
+                            .is_some_and(|value| super::served_model_is_rejected(value, expected))
+                    }) {
                         // The served model is known, and this buffer has not
                         // reached the client. Drop the attempt, including a
                         // later delta that arrived in the same chunk.
-                        return Err(degraded_route_stream_failure());
+                        let mut failure = degraded_route_stream_failure();
+                        if saw_output || event.semantic_output {
+                            failure.execution =
+                                crate::scheduler::rotation::ExecutionObservation::accepted();
+                        }
+                        return Err(failure);
                     }
                     if event.has_data && !event.valid {
                         return Err(StreamBootstrapFailure {
@@ -112,7 +117,7 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             event.cooldown_hint,
                         );
                         return Err(StreamBootstrapFailure {
-                            execution: if saw_output {
+                            execution: if saw_output || event.semantic_output {
                                 crate::scheduler::rotation::ExecutionObservation::accepted()
                             } else {
                                 failure.execution

@@ -22,6 +22,45 @@ pub(super) async fn handle_upstream_message(
     state: &mut BridgeState,
     message: UpstreamMessage,
 ) -> bool {
+    if runtime.block_degraded_routes_enabled()
+        && state.in_flight.as_ref().is_some_and(|in_flight| {
+            in_flight.route.account_id.is_some()
+                && super::super::upstream::message_serves_rejected_model(
+                    &message,
+                    &in_flight.route.source_model,
+                )
+        })
+    {
+        let request_id = state.request_id().map(str::to_owned);
+        let stream_id = state.request_stream_id().map(str::to_owned);
+        // This bridge may already have forwarded setup or output bytes. End
+        // this response and retain its owner; do not reconnect and replay it.
+        if let Some(in_flight) = state.in_flight.as_mut() {
+            in_flight.client_visible_output = true;
+        }
+        finish_terminal(
+            runtime,
+            state,
+            EventTerminal {
+                outcome: Some(EventTerminalOutcome::Failure),
+                status: Some(StatusCode::NOT_FOUND),
+                error_category: Some(error_codes::UPSTREAM_ROUTE_DEGRADED),
+                ..EventTerminal::default()
+            },
+        );
+        send_gateway_error(
+            downstream,
+            &GatewayFailure::classified(
+                StatusCode::NOT_FOUND,
+                error_codes::UPSTREAM_ROUTE_DEGRADED,
+                state.upstream_origin,
+            ),
+            request_id.as_deref(),
+            stream_id.as_deref(),
+        )
+        .await;
+        return false;
+    }
     match message {
         UpstreamMessage::Text(text) => {
             if text.len() > MAX_WEBSOCKET_MESSAGE_BYTES {

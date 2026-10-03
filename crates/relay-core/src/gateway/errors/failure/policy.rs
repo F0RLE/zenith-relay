@@ -80,6 +80,7 @@ pub(crate) fn failure_category_affects_account_state(category: &str) -> bool {
             category,
             error_codes::UPSTREAM_MODEL_NOT_FOUND
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
                 | error_codes::UPSTREAM_MODEL_CAPACITY
                 | error_codes::UPSTREAM_OVERLOADED

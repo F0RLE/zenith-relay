@@ -108,7 +108,8 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
     };
     match bootstrap_stream(
         upstream,
-        route.account_id.is_some() && runtime.block_degraded_routes_enabled(),
+        (route.account_id.is_some() && runtime.block_degraded_routes_enabled())
+            .then_some(route.source_model.as_str()),
     )
     .await
     {
@@ -170,17 +171,20 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                 details.http_status = Some(status.as_u16());
                 details
             });
-            if try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
-                request: &mut request,
-                wire_api,
-                adapter_is_passthrough,
-                upstream_rejected_tool_links: tool_links_rejected,
-                repair_attempted: legacy_call_id_repair_attempted,
-                tried,
-                candidate_id: &route.candidate_id,
-                has_unpaired_tool_output,
-                requires_affinity_owner,
-            }) {
+            let safe_to_repair = failure.execution.certainty == ExecutionCertainty::NotSent;
+            if safe_to_repair
+                && try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
+                    request: &mut request,
+                    wire_api,
+                    adapter_is_passthrough,
+                    upstream_rejected_tool_links: tool_links_rejected,
+                    repair_attempted: legacy_call_id_repair_attempted,
+                    tried,
+                    candidate_id: &route.candidate_id,
+                    has_unpaired_tool_output,
+                    requires_affinity_owner,
+                })
+            {
                 lease.settle_rotation_repair(now_ms());
                 return OpenedStream::Continue(retry(
                     request,
@@ -189,7 +193,8 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                     prompt_affinity_key,
                 ));
             }
-            if wire_api == WireApi::Responses
+            if safe_to_repair
+                && wire_api == WireApi::Responses
                 && adapter_is_passthrough
                 && has_previous_response_id
                 && !*native_replay_attempted
@@ -230,7 +235,8 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                     Err(error) => return OpenedStream::Respond(adapter_error_response(error)),
                 }
             }
-            if wire_api == WireApi::Responses
+            if safe_to_repair
+                && wire_api == WireApi::Responses
                 && has_previous_response_id
                 && missing_tool_output
                 && last_preserved_upstream_error.as_ref().is_some_and(|error| {
@@ -264,7 +270,9 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                 settle_attempt_failure(runtime, &lease, &source_model, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
-            if failure_category_is_request_terminal(failure.category) {
+            if failure_category_is_request_terminal(failure.category)
+                || failure.execution.certainty != ExecutionCertainty::NotSent
+            {
                 return OpenedStream::Respond(attempt_error_response(
                     failure,
                     last_preserved_upstream_error.as_ref(),

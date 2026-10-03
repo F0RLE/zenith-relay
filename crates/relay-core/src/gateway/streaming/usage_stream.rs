@@ -5,6 +5,7 @@ mod ingest;
 pub(super) struct UsageStream<S> {
     pub(super) inner: Pin<Box<S>>,
     pub(super) runtime: Option<Arc<GatewayRuntime>>,
+    pub(super) expected_model: Option<String>,
     pub(super) callback: crate::UsageCallback,
     pub(super) completion: CompletionCallback,
     pub(super) event: Option<UsageEvent>,
@@ -39,6 +40,7 @@ impl<S> UsageStream<S> {
         Self {
             inner: Box::pin(stream),
             runtime,
+            expected_model: None,
             callback,
             completion,
             event: Some(event),

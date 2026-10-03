@@ -2,7 +2,7 @@ mod completion;
 mod http;
 mod usage;
 
-pub(super) use completion::completed_upstream_response;
+pub(super) use completion::{collect_upstream_response, completed_upstream_response};
 pub(super) use http::{
     attach_error_diagnostics, attach_stream_diagnostics, proxy_error_response, proxy_json_response,
     proxy_response, proxy_sse_response, route_error_origin, upstream_body_error_response,

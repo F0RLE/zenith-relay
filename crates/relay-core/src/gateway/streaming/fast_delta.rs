@@ -78,6 +78,8 @@ struct FastDeltaBody<'a> {
     item: Option<IgnoredAny>,
     #[serde(default)]
     status: Option<IgnoredAny>,
+    #[serde(default)]
+    model: Option<IgnoredAny>,
 }
 
 impl FastDeltaBody<'_> {
@@ -95,6 +97,7 @@ impl FastDeltaBody<'_> {
             || self.id.is_some()
             || self.item.is_some()
             || self.status.is_some()
+            || self.model.is_some()
     }
 }
 
@@ -159,6 +162,10 @@ mod tests {
 
     #[test]
     fn leaves_usage_terminal_and_split_data_on_the_full_parser() {
+        assert!(fast_response_delta_json(
+            br#"{"type":"response.output_text.delta","delta":"x","model":"gpt-5.6-luna"}"#
+        )
+        .is_none());
         assert!(fast_response_delta(
             b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1}}}\n\n"
         )

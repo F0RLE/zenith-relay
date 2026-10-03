@@ -21,7 +21,18 @@ pub(in crate::gateway) fn is_compaction_payload(value: &Value, event_type: Optio
 /// conservatively; this function is deliberately limited to confirmed output.
 pub(in crate::gateway) fn has_semantic_output(value: &Value, event_type: Option<&str>) -> bool {
     !is_compaction_payload(value, event_type)
-        && (has_output_delta(value, event_type) || event_type == Some("response.output_item.done"))
+        && (has_output_delta(value, event_type)
+            || event_type == Some("response.output_item.done")
+            || [value.get("output"), value.pointer("/response/output")]
+                .into_iter()
+                .filter_map(|output| output.and_then(Value::as_array))
+                .flatten()
+                .any(|item| {
+                    !item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(crate::protocol::is_compaction_checkpoint_type)
+                }))
 }
 
 /// Known lifecycle and compaction frames are safe to buffer while selecting a

@@ -32,6 +32,10 @@ impl Rule {
 
 const RULES: &[Rule] = &[
     Rule::Phrases(
+        &[error_codes::UPSTREAM_ROUTE_DEGRADED],
+        error_codes::UPSTREAM_ROUTE_DEGRADED,
+    ),
+    Rule::Phrases(
         &[
             error_codes::RESPONSE_CONTINUATION_UNAVAILABLE,
             "responses continuation route is unknown",
@@ -112,6 +116,16 @@ const RULES: &[Rule] = &[
             "subscription does not include",
         ],
         error_codes::UPSTREAM_USAGE_NOT_INCLUDED,
+    ),
+    // Some hosts wrap these 403 responses in `insufficient_quota`.
+    // The specific provider refusal takes precedence over that wrapper.
+    Rule::Phrases(
+        &["blocked by our usage policy"],
+        error_codes::UPSTREAM_CONTENT_POLICY,
+    ),
+    Rule::Phrases(
+        &["model access has changed"],
+        error_codes::UPSTREAM_MODEL_UNAVAILABLE,
     ),
     Rule::Custom(quota_exhausted),
     Rule::Custom(unauthorized),

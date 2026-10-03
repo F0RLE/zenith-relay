@@ -188,7 +188,13 @@ pub(super) fn upstream_failure_status(category: &str) -> StatusCode {
 }
 
 pub(super) fn canonical_upstream_status(status: StatusCode, category: &str) -> StatusCode {
-    if category == error_codes::UPSTREAM_STATUS {
+    if category == error_codes::UPSTREAM_STATUS
+        || status == StatusCode::FORBIDDEN
+            && matches!(
+                category,
+                error_codes::UPSTREAM_CONTENT_POLICY | error_codes::UPSTREAM_MODEL_UNAVAILABLE
+            )
+    {
         status
     } else {
         upstream_failure_status(category)
