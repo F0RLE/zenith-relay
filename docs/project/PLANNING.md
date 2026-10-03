@@ -703,8 +703,17 @@ and no cookie values enter storage, diagnostics, or client responses.
 The optional Excel / Basis Points transport is configured in API as
 **Use Basis Points** and identified in Usage. It sends ChatGPT account requests
 through Excel instead of Responses. It may help a degraded account generate,
-but Relay does not guarantee that and cannot verify the model running at the
-provider.
+without guaranteeing quality. The ChatGPT-only degraded-route guard compares
+the reported `model`/`response.model` with the selected upstream model, allowing
+provider qualification and dated snapshots of the same identity. It rejects
+substitutions and internal degrade ids in JSON, SSE and WebSocket, including
+buffered Basis Points preambles and reused sockets. Only a pre-output rejection
+can rotate; generated, unknown or committed attempts are never replayed.
+Reported identity is not independent proof of the actual model or its quality.
+Basis Points `Model access has changed` pauses only the member's model (shared
+by its native and Excel transports). `blocked by our usage policy` is a
+request-terminal policy refusal, including when wrapped as insufficient_quota;
+it neither exhausts quota nor rotates members. Their original HTTP 403 is kept.
 The API control uses the existing shared routing setting and saves immediately.
 There are no switches in Connections, Pool or account cards.
 The control appears when a compatible account exists, even before it joins
