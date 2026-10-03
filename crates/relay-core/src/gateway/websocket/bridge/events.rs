@@ -33,6 +33,16 @@ pub(super) async fn handle_upstream_message(
     {
         let request_id = state.request_id().map(str::to_owned);
         let stream_id = state.request_stream_id().map(str::to_owned);
+        // Keep actual usage even though this frame will not be forwarded.
+        match &message {
+            UpstreamMessage::Text(text) => {
+                inspect_upstream_event(text.as_bytes(), state);
+            }
+            UpstreamMessage::Binary(bytes) => {
+                inspect_upstream_event(bytes, state);
+            }
+            _ => {}
+        }
         // This bridge may already have forwarded setup or output bytes. End
         // this response and retain its owner; do not reconnect and replay it.
         if let Some(in_flight) = state.in_flight.as_mut() {
