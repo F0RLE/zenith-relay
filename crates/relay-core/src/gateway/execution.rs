@@ -286,9 +286,7 @@ pub(super) fn attempt_error_response(
         );
     }
     let code = match failure.category {
-        error_codes::UPSTREAM_BODY => {
-            error_codes::UPSTREAM_ERROR
-        }
+        error_codes::UPSTREAM_BODY => error_codes::UPSTREAM_ERROR,
         _ => {
             return api_error_with_origin(
                 failure.status,

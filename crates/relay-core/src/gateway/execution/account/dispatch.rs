@@ -211,22 +211,21 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
     };
     let mut status = upstream.status();
     let mut response_headers = upstream.headers().clone();
-    let mut bytes =
-        match crate::transport::collect(upstream).await {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return continue_after_unreadable_body(
-                    runtime,
-                    lease,
-                    &route,
-                    attempt,
-                    &failed_usage,
-                    selected_error_origin,
-                    last_failure,
-                    last_failure_origin,
-                );
-            }
-        };
+    let mut bytes = match crate::transport::collect(upstream).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return continue_after_unreadable_body(
+                runtime,
+                lease,
+                &route,
+                attempt,
+                &failed_usage,
+                selected_error_origin,
+                last_failure,
+                last_failure_origin,
+            );
+        }
+    };
     if endpoint == AccountEndpoint::Compact
         && budget.can_dispatch()
         && super::super::super::compaction::missing_legacy_endpoint(status, &bytes)

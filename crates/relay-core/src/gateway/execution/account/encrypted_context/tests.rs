@@ -43,21 +43,15 @@ fn rejected_ciphertext_is_removed_without_losing_visible_or_ordinary_history() {
     assert!(items.iter().any(|item| item["id"] == "rs_empty"));
     assert!(items.iter().any(|item| item["id"] == "cmp_plain"));
     assert!(items.iter().any(|item| item["role"] == "assistant"));
-    assert!(
-        items
-            .iter()
-            .any(|item| item["type"] == "function_call_output")
-    );
-    assert!(
-        items
-            .iter()
-            .all(|item| item.get("id").and_then(serde_json::Value::as_str) != Some("cmp_foreign"))
-    );
-    assert!(
-        items
-            .iter()
-            .all(|item| item.get("id").and_then(serde_json::Value::as_str) != Some("rs_untyped"))
-    );
+    assert!(items
+        .iter()
+        .any(|item| item["type"] == "function_call_output"));
+    assert!(items
+        .iter()
+        .all(|item| item.get("id").and_then(serde_json::Value::as_str) != Some("cmp_foreign")));
+    assert!(items
+        .iter()
+        .all(|item| item.get("id").and_then(serde_json::Value::as_str) != Some("rs_untyped")));
 }
 
 #[test]

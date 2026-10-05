@@ -125,11 +125,7 @@ async fn routed_compaction_response(response: Response<Body>) -> Response<Body> 
     if !response.status().is_success() {
         return response;
     }
-    let bytes = axum::body::to_bytes(
-        response.into_body(),
-        usize::MAX,
-    )
-    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await;
     let Ok(bytes) = bytes else {
         return compaction_invalid();
     };

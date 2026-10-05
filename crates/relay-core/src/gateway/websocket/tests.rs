@@ -3,8 +3,7 @@ use super::{
     event_terminal, fallback_event_message, fallback_response_origin, incomplete_requires_cooldown,
     initial_payloads_are_empty_incomplete, semantic_output_payload, terminal_failure_status,
     ClientRequest, EventTerminalOutcome, GatewayFailure, RELAY_ERROR_ORIGIN_HEADER,
-    RELAY_UPSTREAM_ORIGIN_HEADER,
-    WEBSOCKET_PROTOCOLS,
+    RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS,
 };
 use crate::{
     ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,

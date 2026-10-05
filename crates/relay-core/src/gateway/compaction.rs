@@ -207,10 +207,9 @@ pub(super) async fn execute(
     let response = upstream.response;
     let status = response.status();
     let mut headers = response.headers().clone();
-    let bytes =
-        crate::transport::collect(response)
-            .await
-            .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
+    let bytes = crate::transport::collect(response)
+        .await
+        .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
     if !status.is_success() {
         let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
         super::errors::apply_degraded_route_policy(runtime, &mut failure);

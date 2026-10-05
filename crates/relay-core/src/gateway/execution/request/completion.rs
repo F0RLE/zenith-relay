@@ -375,10 +375,7 @@ async fn read_completed_body(
             let mut failure = upstream_failure.failure;
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
-            let state = if matches!(
-                failure.category,
-                error_codes::UPSTREAM_BODY
-            ) {
+            let state = if matches!(failure.category, error_codes::UPSTREAM_BODY) {
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
             } else {

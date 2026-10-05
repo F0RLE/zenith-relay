@@ -129,8 +129,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         None,
         started.elapsed().as_millis() as u64,
     );
-    let bytes = match crate::transport::collect(upstream).await
-    {
+    let bytes = match crate::transport::collect(upstream).await {
         Ok(bytes) => bytes,
         Err(_) if retryable_status(status, has_previous_response_id) => {
             let failure = AttemptFailure::status_with_body(status, None);
@@ -152,9 +151,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         }
         Err(_) => {
             lease.settle_rotation_unknown(now_ms());
-            return FailureStep::Respond(upstream_body_error_response(
-                runtime, event, started,
-            ));
+            return FailureStep::Respond(upstream_body_error_response(runtime, event, started));
         }
     };
 
