@@ -145,7 +145,7 @@ impl<S> UsageStream<S> {
                 super::SseForwardMode::Normal => {
                     let Some(end) = crate::protocol::sse_event_end(&self.sse_forward_pending)
                     else {
-                        forwarded.extend(self.sse_forward_pending.drain(..));
+                        forwarded.append(&mut self.sse_forward_pending);
                         break;
                     };
                     let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
@@ -193,7 +193,7 @@ impl<S> UsageStream<S> {
                                 // events are held as soon as their `event:`
                                 // name identifies them.
                                 self.sse_forward_mode = super::SseForwardMode::Normal;
-                                forwarded.extend(self.sse_forward_pending.drain(..));
+                                forwarded.append(&mut self.sse_forward_pending);
                                 break;
                             };
                             let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
@@ -533,12 +533,8 @@ fn classify_json_error_prefix(bytes: &[u8]) -> Option<bool> {
     if bytes[offset] != b'"' {
         return Some(false);
     }
-    let Some((key, consumed)) = read_json_string_prefix(&bytes[offset..]) else {
-        return None;
-    };
-    let Some(key) = key else {
-        return None;
-    };
+    let (key, consumed) = read_json_string_prefix(&bytes[offset..])?;
+    let key = key?;
     offset = skip_ascii_whitespace(bytes, offset + consumed);
     if offset == bytes.len() {
         return None;
@@ -561,9 +557,7 @@ fn classify_json_error_prefix(bytes: &[u8]) -> Option<bool> {
     if bytes[offset] != b'"' {
         return Some(false);
     }
-    let Some((value, _)) = read_json_string_prefix(&bytes[offset..]) else {
-        return None;
-    };
+    let (value, _) = read_json_string_prefix(&bytes[offset..])?;
     let Some(value) = value else {
         return Some(false);
     };
@@ -636,7 +630,7 @@ fn prefix_stream_error_event(
     };
     let mut rewritten = Vec::with_capacity(event.len().saturating_add(origin.label().len() + 2));
     let mut wrote_data = false;
-    for line in crate::protocol::sse_lines(&event) {
+    for line in crate::protocol::sse_lines(event) {
         if line.strip_prefix(b"data:").is_some() {
             if !wrote_data {
                 rewritten.extend_from_slice(b"data: ");

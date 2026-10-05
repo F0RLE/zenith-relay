@@ -94,6 +94,8 @@ impl RuntimeControl {
             .copied()
     }
 
+    // These independent request attributes map directly to one usage event.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn blocked_codex_background_event(
         &self,
         usage: &UsageCallback,

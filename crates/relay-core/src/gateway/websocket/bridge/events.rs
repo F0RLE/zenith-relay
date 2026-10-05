@@ -175,30 +175,6 @@ fn prefix_websocket_error_payload(
     serde_json::to_vec(&value).unwrap_or_else(|_| payload.to_vec())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upstream_websocket_error_prefixes_the_selected_source() {
-        let terminal = EventTerminal {
-            outcome: Some(EventTerminalOutcome::Failure),
-            error_category: Some(error_codes::UPSTREAM_TERMINAL),
-            ..EventTerminal::default()
-        };
-        let original = br#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"Provider: unavailable"}}}"#;
-        let output =
-            prefix_websocket_error_payload(original, &terminal, crate::ErrorOrigin::Account);
-        let value: Value = serde_json::from_slice(&output).unwrap();
-
-        assert_eq!(
-            value["response"]["error"]["message"],
-            "Account: unavailable"
-        );
-        assert_eq!(value["response"]["error"]["code"], "server_error");
-    }
-}
-
 async fn reject_oversized_upstream_message(
     downstream: &mut WebSocket,
     runtime: &GatewayRuntime,
@@ -318,4 +294,28 @@ fn inspect_parsed_event(value: &Value, state: &mut BridgeState) -> EventTerminal
         }
     }
     event_terminal(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_websocket_error_prefixes_the_selected_source() {
+        let terminal = EventTerminal {
+            outcome: Some(EventTerminalOutcome::Failure),
+            error_category: Some(error_codes::UPSTREAM_TERMINAL),
+            ..EventTerminal::default()
+        };
+        let original = br#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"Provider: unavailable"}}}"#;
+        let output =
+            prefix_websocket_error_payload(original, &terminal, crate::ErrorOrigin::Account);
+        let value: Value = serde_json::from_slice(&output).unwrap();
+
+        assert_eq!(
+            value["response"]["error"]["message"],
+            "Account: unavailable"
+        );
+        assert_eq!(value["response"]["error"]["code"], "server_error");
+    }
 }

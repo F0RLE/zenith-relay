@@ -70,23 +70,20 @@ impl ErrorOrigin {
     /// stale source label if the message was already tagged elsewhere.
     pub fn prefix_message(self, message: &str) -> String {
         let mut message = message.trim_start();
-        loop {
-            let Some(unprefixed) = [Self::Provider, Self::Account, Self::Relay]
-                .into_iter()
-                .find_map(|origin| {
-                    let label_length = origin.label().len();
-                    let label = message.get(..label_length)?;
-                    if !label.eq_ignore_ascii_case(origin.label()) {
-                        return None;
-                    }
-                    message
-                        .get(label_length..)?
-                        .strip_prefix(':')
-                        .map(str::trim_start)
-                })
-            else {
-                break;
-            };
+        while let Some(unprefixed) = [Self::Provider, Self::Account, Self::Relay]
+            .into_iter()
+            .find_map(|origin| {
+                let label_length = origin.label().len();
+                let label = message.get(..label_length)?;
+                if !label.eq_ignore_ascii_case(origin.label()) {
+                    return None;
+                }
+                message
+                    .get(label_length..)?
+                    .strip_prefix(':')
+                    .map(str::trim_start)
+            })
+        {
             message = unprefixed;
         }
         format!("{}: {message}", self.label())
