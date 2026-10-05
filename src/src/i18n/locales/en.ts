@@ -1292,6 +1292,11 @@ const relayEn = {
     accountUsage: "Usage for {{account}}",
     serviceTier: "Request speed",
     upstreamTier: "Upstream tier",
+    transport: "Transport",
+    transports: {
+      http: "HTTP",
+      websocket: "WebSocket",
+    },
     protocols: {
       responses: "Responses",
       messages: "Messages",
@@ -1487,6 +1492,7 @@ const relayEn = {
     removedAccount: "Removed account",
     anyErrorCategory: "Any error category",
     anyProtocol: "Any protocol",
+    anyTransport: "Any transport",
     moreFilters: "More filters",
     clearFilters: "Clear filters",
     clearLogs: "Clear logs",

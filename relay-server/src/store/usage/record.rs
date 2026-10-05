@@ -18,21 +18,21 @@ impl Store {
                 .prepare(
                     r#"INSERT INTO usage_events(
                         request_id, attempt, local_key_id, candidate_kind, candidate_hint,
-                        requested_model, resolved_model, wire_api, success, http_status,
+                        requested_model, resolved_model, wire_api, transport, success, http_status,
                         error_category, latency_ms, ttft_ms, generation_ms, input_tokens,
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json,
                         service_tier, applied_service_tier, tool_use_json, error_origin,
                         requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl, upstream_error_json
                     ) SELECT
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                        ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?31
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                        ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+                        ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?32
                     WHERE NOT EXISTS (
                         SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
                     AND (?4 != 'account' OR EXISTS (
-                        SELECT 1 FROM accounts WHERE id = ?30
+                        SELECT 1 FROM accounts WHERE id = ?31
                     ))
                     ON CONFLICT(request_id) DO UPDATE SET
                         attempt=excluded.attempt,
@@ -42,6 +42,7 @@ impl Store {
                         requested_model=excluded.requested_model,
                         resolved_model=excluded.resolved_model,
                         wire_api=excluded.wire_api,
+                        transport=excluded.transport,
                         success=excluded.success,
                         http_status=excluded.http_status,
                         error_category=excluded.error_category,
@@ -96,6 +97,7 @@ impl Store {
                         event.requested_model,
                         event.resolved_model,
                         event.wire_api.as_str(),
+                        event.transport.as_str(),
                         i64::from(event.success),
                         i64::from(event.http_status),
                         event.error_category,

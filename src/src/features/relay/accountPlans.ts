@@ -1,5 +1,20 @@
-const subscriptionPlanPriority = ["enterprise", "business", "pro-20x", "pro-5x", "pro", "plus", "go", "edu", "free", "unknown"];
-const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
+const subscriptionPlanPriority = ["enterprise", "business", "pro-500", "pro-200", "pro-100", "plus", "go", "edu", "free", "unknown"];
+const accountPlanOrder = ["plus", "pro-100", "pro-200", "pro-500", "business", "enterprise", "free", "go", "edu", "unknown"];
+const proTierLabels: Record<string, string> = {
+  prolite: "Pro 100",
+  pro5x: "Pro 100",
+  pro100: "Pro 100",
+  chatgptprolite: "Pro 100",
+  pro: "Pro 200",
+  proplan: "Pro 200",
+  pro20x: "Pro 200",
+  pro200: "Pro 200",
+  chatgptpro: "Pro 200",
+  chatgptproplan: "Pro 200",
+  promax: "Pro 500",
+  pro500: "Pro 500",
+  chatgptpromax: "Pro 500",
+};
 
 export function compareSubscriptionPlanPriority(left: { id: string; label: string }, right: { id: string; label: string }) {
   const leftRank = subscriptionPlanPriority.indexOf(left.id);
@@ -13,9 +28,8 @@ export function formatAccountPlan(planType: string | null, unknown: string) {
   const key = value.toLocaleLowerCase().replace(/[\s_-]/g, "");
   if (key.includes("team") || key.includes("business")) return "Business";
   if (key.includes("enterprise")) return "Enterprise";
-  if (key === "prolite") return "Pro 5x";
-  if (key === "promax") return "Pro 20x";
-  if (key === "pro") return "Pro";
+  const proTier = proTierLabels[key];
+  if (proTier) return proTier;
   if (key.includes("plus")) return "Plus";
   if (key === "free") return "Free";
   if (key === "go") return "Go";

@@ -71,8 +71,7 @@ impl PricingContext {
             .is_some_and(|value| value.cache_write_models.contains(&super::normalize(model)));
         if !cache_write_allowed {
             if let Some(quote) = resolved.quote.as_mut() {
-                quote.cache_write_5m = None;
-                quote.cache_write_1h = None;
+                *quote = quote.clear_cache_writes();
             }
         }
         resolved

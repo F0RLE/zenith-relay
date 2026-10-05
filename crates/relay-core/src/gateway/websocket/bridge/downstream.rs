@@ -190,6 +190,7 @@ async fn start_next_request(
                 false,
             )
             .ok_or_else(GatewayFailure::unavailable)?;
+        route.client_transport = crate::UsageTransport::Websocket;
         route.half_open_probe = selected.half_open_probe;
         route.account_token_generation = prepared.token_generation;
         route.routing = Some(selected.diagnostics);

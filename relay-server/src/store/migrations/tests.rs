@@ -336,7 +336,9 @@ fn v1_migration_creates_backup_and_ordered_ledger() {
             (36, "036_upstream_error_details".to_string()),
             (37, "037_account_refresh_revisions".to_string()),
             (38, "038_source_refresh_revisions".to_string()),
-            (39, "039_remove_v1_routing_options".to_string())
+            (39, "039_remove_v1_routing_options".to_string()),
+            (40, "040_usage_price_schedule".to_string()),
+            (41, "041_usage_transport".to_string())
         ]
     );
     drop(store);

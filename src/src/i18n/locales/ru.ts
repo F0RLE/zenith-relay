@@ -1292,6 +1292,11 @@ const relayRu = {
     accountUsage: "Использование учётной записи {{account}}",
     serviceTier: "Скорость запроса",
     upstreamTier: "Режим у провайдера",
+    transport: "Транспорт",
+    transports: {
+      http: "HTTP",
+      websocket: "WebSocket",
+    },
     protocols: {
       responses: "Responses",
       messages: "Messages",
@@ -1487,6 +1492,7 @@ const relayRu = {
     removedAccount: "Удалённая учётная запись",
     anyErrorCategory: "Любая категория ошибки",
     anyProtocol: "Любой протокол",
+    anyTransport: "Любой транспорт",
     moreFilters: "Другие фильтры",
     clearFilters: "Сбросить фильтры",
     clearLogs: "Очистить журналы",

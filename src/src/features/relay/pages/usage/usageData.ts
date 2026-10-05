@@ -9,6 +9,7 @@ import type {
   RoutingDiagnostics,
   ToolUseDiagnostics,
   UpstreamErrorDetails,
+  UsageTransport,
   UsageTotals,
 } from "../../api/types";
 import type { TokenSpeedSample } from "../../usageSpeed";
@@ -34,6 +35,7 @@ export type UsageRow = {
   effectiveReasoningEffort: ReasoningEffort | null;
   connection: string;
   wireApi: string | null;
+  transport: UsageTransport;
   serviceTier: DefaultServiceTier | null;
   appliedServiceTier: ObservedServiceTier | null;
   ttft: number | null;
@@ -116,6 +118,7 @@ function usageRowFromEvent(
     effectiveReasoningEffort: event.effectiveReasoningEffort ?? null,
     connection,
     wireApi: event.wireApi,
+    transport: event.transport ?? "http",
     serviceTier: event.serviceTier ?? null,
     appliedServiceTier: normalizeObservedServiceTier(event.appliedServiceTier),
     ttft: event.ttftMs ?? null,

@@ -521,3 +521,101 @@ fn price_override_input_is_normalized_and_validated_once() {
             .unwrap();
     assert_eq!(normalized.get("claude-opus-4-8"), Some(&price));
 }
+
+#[test]
+fn flex_priority_and_long_context_use_published_components_only() {
+    use crate::pricing::{LongContextRates, TokenPrice, TokenRateSet};
+
+    let quote = TokenPrice {
+        input: 2_000_000,
+        cache_read: Some(100_000),
+        cache_write_5m: Some(2_500_000),
+        cache_write_1h: None,
+        output: 10_000_000,
+        flex: TokenRateSet {
+            input: Some(1_000_000),
+            output: Some(5_000_000),
+            ..TokenRateSet::EMPTY
+        },
+        priority: TokenRateSet {
+            input: Some(4_000_000),
+            output: Some(20_000_000),
+            ..TokenRateSet::EMPTY
+        },
+        above_200k: LongContextRates::default(),
+        above_272k: LongContextRates {
+            standard: TokenRateSet {
+                input: Some(4_000_000),
+                output: Some(15_000_000),
+                ..TokenRateSet::EMPTY
+            },
+            priority: TokenRateSet {
+                input: Some(8_000_000),
+                output: Some(30_000_000),
+                ..TokenRateSet::EMPTY
+            },
+            ..LongContextRates::default()
+        },
+    };
+    let usage = |tier: Option<&str>, input: u64| {
+        ApiEquivalentUsage {
+            input_tokens: Some(input),
+            cached_input_tokens: Some(0),
+            output_tokens: Some(10),
+            total_tokens: Some(input + 10),
+            ..Default::default()
+        }
+        .with_observed_rates(tier, Some(input))
+    };
+
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(usage(None, 100), Some(quote)).micro_usd,
+        token_cost_fixture(100, 2_000_000) + token_cost_fixture(10, 10_000_000)
+    );
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(usage(Some("flex"), 100), Some(quote)).micro_usd,
+        token_cost_fixture(100, 1_000_000) + token_cost_fixture(10, 5_000_000)
+    );
+    let priority = estimate_api_equivalent_with_token_price(usage(Some("fast"), 100), Some(quote));
+    assert_eq!(
+        priority.micro_usd,
+        token_cost_fixture(100, 4_000_000) + token_cost_fixture(10, 20_000_000)
+    );
+    assert_eq!(priority.unpriced_tokens, 0);
+
+    let missing_cache = estimate_api_equivalent_with_token_price(
+        ApiEquivalentUsage {
+            input_tokens: Some(100),
+            cached_input_tokens: Some(40),
+            output_tokens: Some(10),
+            total_tokens: Some(110),
+            ..Default::default()
+        }
+        .with_observed_rates(Some("priority"), Some(100)),
+        Some(quote),
+    );
+    assert_eq!(missing_cache.priced_tokens, 70);
+    assert_eq!(missing_cache.unpriced_tokens, 40);
+
+    let long =
+        estimate_api_equivalent_with_token_price(usage(Some("priority"), 300_000), Some(quote));
+    assert_eq!(
+        long.micro_usd,
+        token_cost_fixture(300_000, 8_000_000) + token_cost_fixture(10, 30_000_000)
+    );
+    let below_272k = estimate_api_equivalent_with_token_price(usage(None, 250_000), Some(quote));
+    assert_eq!(
+        below_272k.micro_usd,
+        token_cost_fixture(250_000, 2_000_000) + token_cost_fixture(10, 10_000_000)
+    );
+    assert_eq!(
+        estimate_api_equivalent_with_token_price(usage(Some("ultrafast"), 100), Some(quote))
+            .micro_usd,
+        token_cost_fixture(100, 2_000_000) + token_cost_fixture(10, 10_000_000)
+    );
+}
+
+fn token_cost_fixture(tokens: u64, micro_usd_per_million: u64) -> u64 {
+    let numerator = u128::from(tokens) * u128::from(micro_usd_per_million) + 500_000;
+    u64::try_from(numerator / 1_000_000).unwrap()
+}

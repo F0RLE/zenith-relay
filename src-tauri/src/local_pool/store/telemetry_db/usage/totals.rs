@@ -135,6 +135,7 @@ pub(in crate::local_pool::store::telemetry_db) fn is_unfiltered_all_time(
         && query.model_query.is_none()
         && query.source_or_account_query.is_none()
         && query.wire_api.is_none()
+        && query.transport.is_none()
         && query.success.is_none()
         && query.error_category.is_none()
         && query.request_id_query.is_none()
@@ -177,6 +178,10 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
                 values.push(SqlValue::Text(value.as_str().to_string()));
             }
         }
+    }
+    if let Some(value) = query.transport {
+        clauses.push("transport = ?");
+        values.push(SqlValue::Text(value.as_str().to_string()));
     }
     if let Some(value) = query.success {
         clauses.push("success = ?");

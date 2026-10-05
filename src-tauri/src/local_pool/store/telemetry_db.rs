@@ -77,6 +77,7 @@ pub struct UsageLog {
     pub requested_reasoning_effort: Option<String>,
     pub effective_reasoning_effort: Option<String>,
     pub wire_api: String,
+    pub transport: String,
     pub service_tier: DefaultServiceTier,
     pub applied_service_tier: Option<ObservedServiceTier>,
     pub success: bool,

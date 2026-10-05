@@ -5,6 +5,8 @@ pub(super) struct UsageAggregate {
     candidate_kind: String,
     candidate_id: String,
     model: String,
+    price_class: String,
+    context_band: String,
     input_tokens: i64,
     input_samples: i64,
     cached_input_tokens: i64,
@@ -47,6 +49,7 @@ impl UsageAggregate {
             cache_write_ttl.as_deref(),
             event.output_tokens,
             event.total_tokens,
+            event.applied_service_tier.as_deref(),
         )
     }
 
@@ -60,6 +63,7 @@ impl UsageAggregate {
         let cache_write_ttl: Option<String> = row.get(offset + 6)?;
         let output_tokens: Option<i64> = row.get(offset + 7)?;
         let total_tokens: Option<i64> = row.get(offset + 8)?;
+        let applied_service_tier: Option<String> = row.get(offset + 9)?;
         Ok(Self::from_values(
             &candidate_kind,
             &candidate_id,
@@ -70,6 +74,7 @@ impl UsageAggregate {
             cache_write_ttl.as_deref(),
             output_tokens.map(|value| value.max(0) as u64),
             total_tokens.map(|value| value.max(0) as u64),
+            applied_service_tier.as_deref(),
         ))
     }
 
@@ -84,11 +89,28 @@ impl UsageAggregate {
         cache_write_ttl: Option<&str>,
         output_tokens: Option<u64>,
         total_tokens: Option<u64>,
+        applied_service_tier: Option<&str>,
     ) -> Self {
         let mut aggregate = Self {
             candidate_kind: candidate_kind.to_string(),
             candidate_id: candidate_id.to_string(),
             model: model.to_string(),
+            price_class: match zenith_relay_core::usage::UsagePriceClass::from_observed(
+                applied_service_tier,
+            ) {
+                zenith_relay_core::usage::UsagePriceClass::Flex => "flex",
+                zenith_relay_core::usage::UsagePriceClass::Priority => "priority",
+                zenith_relay_core::usage::UsagePriceClass::Standard => "standard",
+            }
+            .to_string(),
+            context_band: match zenith_relay_core::usage::UsageContextBand::from_input_tokens(
+                input_tokens,
+            ) {
+                zenith_relay_core::usage::UsageContextBand::Above272k => "above_272k",
+                zenith_relay_core::usage::UsageContextBand::Above200k => "above_200k",
+                zenith_relay_core::usage::UsageContextBand::Base => "base",
+            }
+            .to_string(),
             input_tokens: input_tokens.map(sql_u64).unwrap_or_default(),
             input_samples: i64::from(input_tokens.is_some()),
             cached_input_tokens: cached_input_tokens.map(sql_u64).unwrap_or_default(),
@@ -120,12 +142,13 @@ pub(super) fn apply_aggregate_delta(
         .execute(
             "INSERT INTO usage_candidate_rollups(
                 candidate_kind, candidate_id, model,
+                price_class, context_band,
                 input_tokens, input_samples, cached_input_tokens, cached_input_samples,
                 cache_write_input_tokens, cache_write_input_samples,
                 cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
                 output_tokens, output_samples, total_tokens, total_samples
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-             ON CONFLICT(candidate_kind, candidate_id, model) DO UPDATE SET
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO UPDATE SET
                 input_tokens = input_tokens + excluded.input_tokens,
                 input_samples = input_samples + excluded.input_samples,
                 cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
@@ -143,6 +166,8 @@ pub(super) fn apply_aggregate_delta(
                 &aggregate.candidate_kind,
                 &aggregate.candidate_id,
                 &aggregate.model,
+                &aggregate.price_class,
+                &aggregate.context_band,
                 aggregate.input_tokens * multiplier,
                 aggregate.input_samples * multiplier,
                 aggregate.cached_input_tokens * multiplier,

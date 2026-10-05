@@ -82,7 +82,7 @@ impl Store {
         let mut events = if query.includes_events() {
             let sql = format!(
                 "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, \
-                 requested_model, resolved_model, wire_api, success, http_status, error_category, \
+                 requested_model, resolved_model, wire_api, transport, success, http_status, error_category, \
                  latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, \
                  cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, \
                  created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, \
@@ -117,6 +117,10 @@ impl Store {
                     event.tokens.cache_write_ttl.as_deref(),
                     event.tokens.output_tokens,
                     event.tokens.total_tokens,
+                )
+                .with_observed_rates(
+                    event.applied_service_tier.as_deref(),
+                    event.tokens.input_tokens,
                 ),
             );
         }
@@ -142,61 +146,66 @@ fn map_usage_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageSummary> {
     Ok(UsageSummary {
         id: row.get(0)?,
         request_id: row.get(1)?,
-        attempt: row.get::<_, i64>(29)?.clamp(0, i64::from(u16::MAX)) as u16,
+        attempt: row.get::<_, i64>(30)?.clamp(0, i64::from(u16::MAX)) as u16,
         candidate_kind: row.get(3)?,
         candidate_hint: row.get(4)?,
         candidate_label: None,
         routing: row
-            .get::<_, Option<String>>(21)?
+            .get::<_, Option<String>>(22)?
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),
         requested_model: row.get(5)?,
         resolved_model: row.get(6)?,
         requested_reasoning_effort: row
-            .get::<_, Option<String>>(26)?
-            .as_deref()
-            .and_then(zenith_relay_core::normalize_reasoning_effort),
-        effective_reasoning_effort: row
             .get::<_, Option<String>>(27)?
             .as_deref()
             .and_then(zenith_relay_core::normalize_reasoning_effort),
+        effective_reasoning_effort: row
+            .get::<_, Option<String>>(28)?
+            .as_deref()
+            .and_then(zenith_relay_core::normalize_reasoning_effort),
         wire_api: WireApi::from_storage_value(&wire_api).unwrap_or(WireApi::Responses),
-        service_tier: DefaultServiceTier::from_storage_value(&row.get::<_, String>(22)?),
+        transport: row
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default(),
+        service_tier: DefaultServiceTier::from_storage_value(&row.get::<_, String>(23)?),
         applied_service_tier: row
-            .get::<_, Option<String>>(23)?
+            .get::<_, Option<String>>(24)?
             .as_deref()
             .and_then(normalize_observed_service_tier),
         tool_use: row
-            .get::<_, Option<String>>(24)?
+            .get::<_, Option<String>>(25)?
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),
-        success: row.get::<_, i64>(8)? != 0,
-        http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
-        error_category: row.get(10)?,
+        success: row.get::<_, i64>(9)? != 0,
+        http_status: row.get::<_, i64>(10)?.clamp(0, i64::from(u16::MAX)) as u16,
+        error_category: row.get(11)?,
         upstream_error: row
-            .get::<_, Option<String>>(30)?
+            .get::<_, Option<String>>(31)?
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),
         error_origin: row
-            .get::<_, Option<String>>(25)?
+            .get::<_, Option<String>>(26)?
             .as_deref()
             .and_then(|value| value.parse().ok()),
-        latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
-        ttft_ms: optional_u64(row.get(12)?),
-        generation_ms: optional_u64(row.get(13)?),
+        latency_ms: row.get::<_, i64>(12)?.max(0) as u64,
+        ttft_ms: optional_u64(row.get(13)?),
+        generation_ms: optional_u64(row.get(14)?),
         tokens: UsageTokenBreakdown {
-            input_tokens: optional_u64(row.get(14)?),
-            cached_input_tokens: optional_u64(row.get(15)?),
-            cache_write_input_tokens: optional_u64(row.get(16)?),
+            input_tokens: optional_u64(row.get(15)?),
+            cached_input_tokens: optional_u64(row.get(16)?),
+            cache_write_input_tokens: optional_u64(row.get(17)?),
             cache_write_ttl: row
-                .get::<_, Option<String>>(28)?
+                .get::<_, Option<String>>(29)?
                 .as_deref()
                 .and_then(zenith_relay_core::usage::normalize_reported_cache_ttls),
-            reasoning_tokens: optional_u64(row.get(17)?),
-            output_tokens: optional_u64(row.get(18)?),
-            total_tokens: optional_u64(row.get(19)?),
+            reasoning_tokens: optional_u64(row.get(18)?),
+            output_tokens: optional_u64(row.get(19)?),
+            total_tokens: optional_u64(row.get(20)?),
         },
         api_equivalent: ApiEquivalentSummary::default(),
-        created_at_ms: row.get::<_, i64>(20)?.max(0) as u64,
+        created_at_ms: row.get::<_, i64>(21)?.max(0) as u64,
     })
 }

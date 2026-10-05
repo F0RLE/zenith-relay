@@ -1,6 +1,7 @@
 use super::decimal::{usd_per_request_to_micro_usd, usd_per_token_to_micro_usd_per_million};
 use super::{
-    CatalogEntry, ImageModelPrice, PricingError, TokenPrice, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    CatalogEntry, ImageModelPrice, LongContextRates, PricingError, TokenPrice, TokenRateSet,
+    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };
 use serde_json::Value;
 
@@ -56,7 +57,61 @@ fn parse_token_price(
         cache_write_5m,
         cache_write_1h,
         output,
+        flex: rate_set(object, "_flex")?,
+        priority: rate_set(object, "_priority")?,
+        above_200k: long_context_rates(object, "200k")?,
+        above_272k: long_context_rates(object, "272k")?,
     }))
+}
+
+fn long_context_rates(
+    object: &serde_json::Map<String, Value>,
+    threshold: &str,
+) -> Result<LongContextRates, PricingError> {
+    Ok(LongContextRates {
+        standard: long_context_set(object, threshold, "")?,
+        flex: long_context_set(object, threshold, "_flex")?,
+        priority: long_context_set(object, threshold, "_priority")?,
+    })
+}
+
+fn long_context_set(
+    object: &serde_json::Map<String, Value>,
+    threshold: &str,
+    tier_suffix: &str,
+) -> Result<TokenRateSet, PricingError> {
+    let above = format!("_above_{threshold}_tokens{tier_suffix}");
+    Ok(TokenRateSet {
+        input: optional_token(object, &format!("input_cost_per_token{above}"))?,
+        cache_read: optional_token(object, &format!("cache_read_input_token_cost{above}"))?,
+        cache_write_5m: optional_token(object, &format!("cache_creation_input_token_cost{above}"))?,
+        cache_write_1h: optional_token(
+            object,
+            &format!(
+                "cache_creation_input_token_cost_above_1hr_above_{threshold}_tokens{tier_suffix}"
+            ),
+        )?,
+        output: optional_token(object, &format!("output_cost_per_token{above}"))?,
+    })
+}
+
+fn rate_set(
+    object: &serde_json::Map<String, Value>,
+    suffix: &str,
+) -> Result<TokenRateSet, PricingError> {
+    Ok(TokenRateSet {
+        input: optional_token(object, &format!("input_cost_per_token{suffix}"))?,
+        cache_read: optional_token(object, &format!("cache_read_input_token_cost{suffix}"))?,
+        cache_write_5m: optional_token(
+            object,
+            &format!("cache_creation_input_token_cost{suffix}"),
+        )?,
+        cache_write_1h: optional_token(
+            object,
+            &format!("cache_creation_input_token_cost_above_1hr{suffix}"),
+        )?,
+        output: optional_token(object, &format!("output_cost_per_token{suffix}"))?,
+    })
 }
 
 fn parse_image_price(
@@ -146,6 +201,48 @@ mod tests {
         assert_eq!(token.cache_read, Some(300_000));
         assert_eq!(token.cache_write_5m, Some(3_750_000));
         assert_eq!(token.cache_write_1h, Some(6_000_000));
+    }
+
+    #[test]
+    fn parses_flex_priority_and_long_context_without_filling_gaps() {
+        let entry = parse_entry(
+            "gpt-6.1-sol",
+            &json!({
+                "litellm_provider": "openai",
+                "input_cost_per_token": 2e-6,
+                "output_cost_per_token": 10e-6,
+                "cache_read_input_token_cost": 0.1e-6,
+                "cache_creation_input_token_cost": 2.5e-6,
+                "input_cost_per_token_flex": 1e-6,
+                "output_cost_per_token_flex": 5e-6,
+                "cache_read_input_token_cost_priority": 0.2e-6,
+                "input_cost_per_token_priority": 4e-6,
+                "output_cost_per_token_priority": 20e-6,
+                "input_cost_per_token_above_272k_tokens": 4e-6,
+                "output_cost_per_token_above_272k_tokens": 15e-6,
+                "input_cost_per_token_above_272k_tokens_priority": 8e-6,
+                "output_cost_per_token_above_272k_tokens_priority": 30e-6,
+                "input_cost_per_token_above_200k_tokens_flex": 3e-6
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let token = entry.token.unwrap();
+        assert_eq!(token.flex.input, Some(1_000_000));
+        assert_eq!(token.flex.output, Some(5_000_000));
+        assert_eq!(token.flex.cache_read, None);
+        assert_eq!(token.priority.input, Some(4_000_000));
+        assert_eq!(token.priority.output, Some(20_000_000));
+        assert_eq!(token.priority.cache_read, Some(200_000));
+        assert_eq!(token.priority.cache_write_5m, None);
+        assert!(token.above_200k.standard.is_empty());
+        assert_eq!(token.above_200k.flex.input, Some(3_000_000));
+        assert_eq!(token.above_200k.flex.output, None);
+        assert_eq!(token.above_272k.standard.input, Some(4_000_000));
+        assert_eq!(token.above_272k.standard.output, Some(15_000_000));
+        assert_eq!(token.above_272k.priority.input, Some(8_000_000));
+        assert_eq!(token.above_272k.priority.output, Some(30_000_000));
+        assert!(token.above_272k.flex.is_empty());
     }
 
     #[test]

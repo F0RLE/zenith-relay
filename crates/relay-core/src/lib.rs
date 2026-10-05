@@ -15,6 +15,8 @@ macro_rules! define_usage_request_contract {
             pub effective_reasoning_effort: Option<String>,
             pub wire_api: WireApi,
             #[serde(default)]
+            pub transport: crate::usage::UsageTransport,
+            #[serde(default)]
             pub service_tier: DefaultServiceTier,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub applied_service_tier: Option<ObservedServiceTier>,
@@ -161,7 +163,7 @@ pub use usage::{
     sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
     ApiModelPriceSources, CandidatePriceQuery, CatalogPriceResolver, ErrorOrigin,
     ObservedServiceTier, ObservedUsageSums, SourceModelPriceOverrides, TerminalOutputKind,
-    ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageTransport, UsageValue,
 };
 
 /// Drops optional text that is empty or only whitespace.

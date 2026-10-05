@@ -32,6 +32,7 @@ fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: crate::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: false,

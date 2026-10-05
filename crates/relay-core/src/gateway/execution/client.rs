@@ -14,7 +14,7 @@ use super::request::{execute_request, RequestExecution};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::{GatewayRuntime, WireApi};
+use crate::{GatewayRuntime, UsageTransport, WireApi};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, Response, StatusCode};
@@ -27,14 +27,15 @@ use std::sync::Arc;
 pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) request_id: String,
     pub(in crate::gateway) budget: SharedRequestBudget,
+    pub(in crate::gateway) transport: UsageTransport,
 }
 
 pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
     request: Request<Body>,
-    wire_api: WireApi,
+    client_wire_api: WireApi,
 ) -> Response<Body> {
-    execute_client_request_inner(runtime, request, wire_api, None, false).await
+    execute_client_request_inner(runtime, request, client_wire_api, None, false).await
 }
 
 pub(in crate::gateway) async fn execute_gemini_client_request(
@@ -49,7 +50,7 @@ pub(in crate::gateway) async fn execute_gemini_client_request(
 async fn execute_client_request_inner(
     runtime: Arc<GatewayRuntime>,
     request: Request<Body>,
-    wire_api: WireApi,
+    client_wire_api: WireApi,
     path_model: Option<String>,
     force_stream: bool,
 ) -> Response<Body> {
@@ -58,17 +59,17 @@ async fn execute_client_request_inner(
     if !valid_local_host(&headers) {
         return invalid_host();
     }
-    let key = super::super::auth::authenticate_client(&runtime, &headers, wire_api);
+    let key = super::super::auth::authenticate_client(&runtime, &headers, client_wire_api);
     let Some(key) = key else {
         return unauthorized();
     };
-    let client_wire_api = match wire_api {
+    let client_api = match client_wire_api {
         WireApi::Responses => ClientWireApi::Responses,
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
         WireApi::Messages => ClientWireApi::Messages,
         WireApi::Gemini => ClientWireApi::Gemini,
     };
-    if !runtime.allows_client_wire_api(&key, client_wire_api) {
+    if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
     }
     let mut request = match super::super::request_body::read_json_object(&headers, body).await {
@@ -86,7 +87,8 @@ async fn execute_client_request_inner(
     } else {
         ServiceTierPolicy::client_owned(&request)
     };
-    if wire_api == WireApi::ChatCompletions && !chat_request_is_text_or_image_only(&request) {
+    if client_wire_api == WireApi::ChatCompletions && !chat_request_is_text_or_image_only(&request)
+    {
         return api_error(
             StatusCode::BAD_REQUEST,
             "Chat Completions supports text and image content only",
@@ -114,10 +116,14 @@ async fn execute_client_request_inner(
             error_codes::INVALID_REQUEST,
         );
     };
-    let background_kind = (wire_api == WireApi::Responses)
+    let background_kind = (client_wire_api == WireApi::Responses)
         .then(|| codex_background_request_kind(&headers, &request))
         .flatten();
     let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
+    let transport = identity
+        .as_ref()
+        .map(|identity| identity.transport)
+        .unwrap_or(UsageTransport::Http);
     let (request_id, budget) = identity.map_or_else(
         || {
             (
@@ -145,13 +151,14 @@ async fn execute_client_request_inner(
                 &request_id,
                 &key.id,
                 &requested_model,
-                wire_api,
+                client_wire_api,
+                UsageTransport::Http,
                 kind,
             );
-            return blocked_background_response(wire_api, stream, &request_id, kind);
+            return blocked_background_response(client_wire_api, stream, &request_id, kind);
         }
     }
-    let continuation = if wire_api == WireApi::Responses {
+    let continuation = if client_wire_api == WireApi::Responses {
         match prepare_response_continuation(&runtime, &key.id, &mut request, now_ms(), None) {
             Ok(continuation) => Some(continuation),
             Err(()) => {
@@ -170,7 +177,7 @@ async fn execute_client_request_inner(
         .resolve_visible_model(
             &key,
             &requested_model,
-            candidate_protocols(wire_api),
+            candidate_protocols(client_wire_api),
             now_ms(),
         )
         .or_else(|| {
@@ -180,7 +187,7 @@ async fn execute_client_request_inner(
                     runtime.resolve_configured_model(
                         &key,
                         &requested_model,
-                        candidate_protocols(wire_api),
+                        candidate_protocols(client_wire_api),
                     )
                 })
                 .flatten()
@@ -192,11 +199,11 @@ async fn execute_client_request_inner(
             error_codes::MODEL_NOT_FOUND,
         );
     };
-    let responses_lite = (wire_api == WireApi::Responses)
+    let responses_lite = (client_wire_api == WireApi::Responses)
         .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
         .flatten();
     let client_context_id = client_context_fingerprint(&headers);
-    let forwarded_headers = match wire_api {
+    let forwarded_headers = match client_wire_api {
         WireApi::Messages => forwarded_messages_headers(&headers),
         WireApi::Responses | WireApi::ChatCompletions => {
             forwarded_codex_headers(&headers, &request_id)
@@ -220,17 +227,18 @@ async fn execute_client_request_inner(
             .and_then(|continuation| continuation.response_affinity_key.clone()),
         requires_affinity_owner: continuation
             .is_some_and(|continuation| continuation.requires_affinity_owner),
-        wire_api,
+        client_wire_api,
         responses_lite,
         allow_previous_response_reset: true,
         attempt_offset: 0,
         budget,
+        transport,
     })
     .await
 }
 
 fn blocked_background_response(
-    wire_api: WireApi,
+    client_wire_api: WireApi,
     stream: bool,
     request_id: &str,
     kind: &str,
@@ -245,7 +253,7 @@ fn blocked_background_response(
             })
         )
     } else {
-        match wire_api {
+        match client_wire_api {
             WireApi::Responses => serde_json::json!({
                 "id": response_id,
                 "object": "response",

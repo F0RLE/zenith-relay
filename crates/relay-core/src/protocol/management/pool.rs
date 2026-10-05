@@ -209,21 +209,30 @@ fn resolve_pool_model_price(
                 let current_quote = current
                     .quote
                     .expect("a resolved pool price always has a quote");
-                current.quote = Some(TokenPrice {
-                    input: current_quote.input,
-                    cache_read: current_quote.cache_read,
-                    // The same public model can be exposed by a generic route
-                    // and an Anthropic Messages route. Preserve the primary
-                    // route's price while filling cache-write fields only
-                    // from the route-aware Messages evidence.
-                    cache_write_5m: current_quote
-                        .cache_write_5m
-                        .or(candidate_quote.cache_write_5m),
-                    cache_write_1h: current_quote
-                        .cache_write_1h
-                        .or(candidate_quote.cache_write_1h),
-                    output: current_quote.output,
-                });
+                let mut quote = current_quote;
+                // The same public model can be exposed by a generic route
+                // and an Anthropic Messages route. Preserve the primary
+                // route's price while filling cache-write fields only
+                // from the route-aware Messages evidence.
+                quote.cache_write_5m = current_quote
+                    .cache_write_5m
+                    .or(candidate_quote.cache_write_5m);
+                quote.cache_write_1h = current_quote
+                    .cache_write_1h
+                    .or(candidate_quote.cache_write_1h);
+                if quote.flex.is_empty() {
+                    quote.flex = candidate_quote.flex;
+                }
+                if quote.priority.is_empty() {
+                    quote.priority = candidate_quote.priority;
+                }
+                if quote.above_200k.is_empty() {
+                    quote.above_200k = candidate_quote.above_200k;
+                }
+                if quote.above_272k.is_empty() {
+                    quote.above_272k = candidate_quote.above_272k;
+                }
+                current.quote = Some(quote);
                 resolved = Some(current);
             } else {
                 resolved = Some(candidate);

@@ -47,6 +47,7 @@ export function UsagePage() {
   const [modelQuery, setModelQuery] = useState("");
   const [connectionQuery, setConnectionQuery] = useState("");
   const [wireApi, setWireApi] = useState("");
+  const [transport, setTransport] = useState("");
   const [errorQuery, setErrorQuery] = useState("");
   const [requestQuery, setRequestQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -71,6 +72,9 @@ export function UsagePage() {
     const selectedWireApi: NonNullable<RemoteUsageQuery["wireApi"]> | undefined = requestFiltersActive && wireApi
       ? wireApi as NonNullable<RemoteUsageQuery["wireApi"]>
       : undefined;
+    const selectedTransport: NonNullable<RemoteUsageQuery["transport"]> | undefined = requestFiltersActive && transport
+      ? transport as NonNullable<RemoteUsageQuery["transport"]>
+      : undefined;
     const success = view === "errors" ? false : requestFiltersActive && status !== "all" ? status === "success" : undefined;
     return {
       page,
@@ -79,6 +83,7 @@ export function UsagePage() {
       ...(model ? { modelQuery: model } : {}),
       ...((selectedAccountQuery ?? connection) ? { sourceOrAccountQuery: selectedAccountQuery ?? connection } : {}),
       ...(selectedWireApi !== undefined ? { wireApi: selectedWireApi } : {}),
+      ...(selectedTransport !== undefined ? { transport: selectedTransport } : {}),
       ...(success !== undefined ? { success } : {}),
       ...(error ? { errorCategory: error } : {}),
       ...(requestId ? { requestIdQuery: requestId } : {}),
@@ -88,7 +93,7 @@ export function UsagePage() {
       includeModels: view === "models",
       includePoolMembers: view === "connections",
     };
-  }, [page, range, modelQuery, connectionQuery, wireApi, status, errorQuery, requestQuery, view, selectedAccountQuery, requestFiltersActive]);
+  }, [page, range, modelQuery, connectionQuery, wireApi, transport, status, errorQuery, requestQuery, view, selectedAccountQuery, requestFiltersActive]);
 
   useEffect(() => {
     if (mode === "zenith" || !runtimeReady || !remoteUsageSupported) {
@@ -158,9 +163,10 @@ export function UsagePage() {
         && (!normalizedModelQuery || item.model?.toLocaleLowerCase().includes(normalizedModelQuery))
         && (!normalizedConnectionQuery || item.connection.toLocaleLowerCase().includes(normalizedConnectionQuery))
         && (!wireApi || item.wireApi === wireApi)
+        && (!transport || item.transport === transport)
         && (!normalizedErrorQuery || item.errorCategory === normalizedErrorQuery);
     });
-  }, [connectionQuery, cutoff, errorQuery, mode, modelQuery, requestFiltersActive, requestQuery, rows, status, view, wireApi]);
+  }, [connectionQuery, cutoff, errorQuery, mode, modelQuery, requestFiltersActive, requestQuery, rows, status, transport, view, wireApi]);
   const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
   const totals = usagePage?.totals ?? totalsFromRows(filtered);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
@@ -180,6 +186,7 @@ export function UsagePage() {
     requestedReasoningEffort: row.requestedReasoningEffort,
     effectiveReasoningEffort: row.effectiveReasoningEffort,
     connection: row.connection,
+    transport: row.transport,
     latencyMs: row.duration,
     ttftMs: row.ttft,
     inputTokens: row.inputTokens,
@@ -245,7 +252,7 @@ export function UsagePage() {
   const errorRows = useMemo(() => filtered.filter((item) => !item.success), [filtered]);
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
-    setWireApi(""); setErrorQuery(""); setRequestQuery("");
+    setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
     setPage(1); setSelected(null);
   };
 
@@ -332,6 +339,8 @@ export function UsagePage() {
       setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))}
       wireApi={wireApi}
       setWireApi={(value) => resetPage(() => setWireApi(value))}
+      transport={transport}
+      setTransport={(value) => resetPage(() => setTransport(value))}
       errorQuery={errorQuery}
       setErrorQuery={(value) => resetPage(() => setErrorQuery(value))}
       requestQuery={requestQuery}
@@ -346,7 +355,7 @@ export function UsagePage() {
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? (
       <UsagePagination
-        key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, errorQuery, requestQuery, selectedAccountId])}
+        key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, transport, errorQuery, requestQuery, selectedAccountId])}
         page={page}
         totalPages={usagePage.totalPages}
         loading={usageLoading}

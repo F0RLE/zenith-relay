@@ -62,13 +62,14 @@ pub(super) async fn drive_selected_candidate(
     ) else {
         return Ok(DrivenConnect::Continue(request));
     };
+    route.client_transport = crate::UsageTransport::Websocket;
     request.apply_service_tier_for_route(runtime, &route);
     route.service_tier = request.service_tier(runtime, &route);
     route.half_open_probe = selected.half_open_probe;
     route.routing = Some(selected.diagnostics);
     route.client_context_id = client_context_fingerprint(client_headers);
     let source_error_origin = route_error_origin(&route);
-    if route.wire_api != WireApi::Responses {
+    if route.client_wire_api != WireApi::Responses {
         return Ok(DrivenConnect::Continue(request));
     }
     // Basis Points speaks HTTP on its responses URL. Upgrading that URL as a

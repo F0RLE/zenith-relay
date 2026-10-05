@@ -53,6 +53,7 @@ impl TelemetryDb {
         let mut statement = connection
             .prepare(
                 "SELECT candidate_kind, candidate_id, model,
+                    price_class, context_band,
                     input_tokens, cached_input_tokens, cache_write_input_tokens,
                     cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
                     output_tokens, total_tokens, input_samples,
@@ -65,6 +66,8 @@ impl TelemetryDb {
                 let model = row.get::<_, Option<String>>(2)?;
                 let kind = row.get::<_, String>(0)?;
                 let id = row.get::<_, String>(1)?;
+                let price_class: String = row.get(3)?;
+                let context_band: String = row.get(4)?;
                 Ok((
                     kind.clone(),
                     id.clone(),
@@ -77,7 +80,8 @@ impl TelemetryDb {
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),
                             )?,
-                        ),
+                        )
+                        .with_aggregate_rates(&price_class, &context_band),
                     ),
                 ))
             })

@@ -118,6 +118,12 @@ impl TelemetryDb {
         if version <= 28 {
             connection.execute_batch(MIGRATION_029).map_err(db_error)?;
         }
+        if version <= 29 {
+            connection.execute_batch(MIGRATION_030).map_err(db_error)?;
+        }
+        if version <= 30 {
+            connection.execute_batch(MIGRATION_031).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;

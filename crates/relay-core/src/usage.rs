@@ -9,15 +9,16 @@ pub use api_equivalent::{
     estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
     resolve_candidate_price, ApiEquivalentUsage, ApiModelPriceOverride, ApiModelPriceSources,
     CandidatePriceQuery, CatalogPriceResolver, ObservedUsageSums, SourceModelPriceOverrides,
-    API_EQUIVALENT_AGGREGATE_SQL, CACHE_WRITE_TTL_BUCKET_SUMS_SQL, CANDIDATE_ROLLUP_TOKEN_OFFSET,
+    UsageContextBand, UsagePriceClass, API_EQUIVALENT_AGGREGATE_SQL,
+    CACHE_WRITE_TTL_BUCKET_SUMS_SQL, CANDIDATE_ROLLUP_TOKEN_OFFSET,
     PRICED_AGGREGATE_CACHED_INPUT_TOKENS, PRICED_AGGREGATE_CACHED_SAMPLES,
     PRICED_AGGREGATE_CACHE_WRITE_1H_TOKENS, PRICED_AGGREGATE_CACHE_WRITE_5M_TOKENS,
     PRICED_AGGREGATE_CACHE_WRITE_SAMPLES, PRICED_AGGREGATE_INPUT_SAMPLES,
     PRICED_AGGREGATE_INPUT_TOKENS, PRICED_AGGREGATE_OUTPUT_SAMPLES, PRICED_AGGREGATE_OUTPUT_TOKENS,
     PRICED_AGGREGATE_TOTAL_SAMPLES, PRICED_AGGREGATE_TOTAL_TOKENS,
-    PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS,
+    PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS, USAGE_CONTEXT_BAND_SQL, USAGE_PRICE_CLASS_SQL,
 };
-pub use event::{ErrorOrigin, UsageEvent};
+pub use event::{ErrorOrigin, UsageEvent, UsageTransport};
 pub use reasoning::normalize_reasoning_effort;
 pub(crate) use reasoning::ReasoningEffortDiagnostics;
 pub use tools::{TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics};

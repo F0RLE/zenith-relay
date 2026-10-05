@@ -26,6 +26,7 @@ fn usage_survives_database_reopen() {
         requested_reasoning_effort: Some("max".into()),
         effective_reasoning_effort: Some("low".into()),
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Fast,
         applied_service_tier: Some("flex".into()),
         success: true,

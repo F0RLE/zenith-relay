@@ -2,6 +2,108 @@ use super::{CatalogStatus, PricingCatalog, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenRateSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+}
+
+impl TokenRateSet {
+    pub const EMPTY: Self = Self {
+        input: None,
+        cache_read: None,
+        cache_write_5m: None,
+        cache_write_1h: None,
+        output: None,
+    };
+
+    pub const fn is_empty(self) -> bool {
+        self.input.is_none()
+            && self.cache_read.is_none()
+            && self.cache_write_5m.is_none()
+            && self.cache_write_1h.is_none()
+            && self.output.is_none()
+    }
+
+    fn skip_serializing(value: &Self) -> bool {
+        value.is_empty()
+    }
+
+    pub const fn is_valid(self) -> bool {
+        option_is_valid(self.input)
+            && option_is_valid(self.cache_read)
+            && option_is_valid(self.cache_write_5m)
+            && option_is_valid(self.cache_write_1h)
+            && option_is_valid(self.output)
+    }
+
+    pub const fn overlay(self, above: Self) -> Self {
+        Self {
+            input: or_rate(above.input, self.input),
+            cache_read: or_rate(above.cache_read, self.cache_read),
+            cache_write_5m: or_rate(above.cache_write_5m, self.cache_write_5m),
+            cache_write_1h: or_rate(above.cache_write_1h, self.cache_write_1h),
+            output: or_rate(above.output, self.output),
+        }
+    }
+
+    const fn clear_cache_writes(self) -> Self {
+        Self {
+            cache_write_5m: None,
+            cache_write_1h: None,
+            ..self
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongContextRates {
+    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    pub standard: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    pub flex: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    pub priority: TokenRateSet,
+}
+
+impl LongContextRates {
+    pub const EMPTY: Self = Self {
+        standard: TokenRateSet::EMPTY,
+        flex: TokenRateSet::EMPTY,
+        priority: TokenRateSet::EMPTY,
+    };
+
+    pub const fn is_empty(self) -> bool {
+        self.standard.is_empty() && self.flex.is_empty() && self.priority.is_empty()
+    }
+
+    fn skip_serializing(value: &Self) -> bool {
+        value.is_empty()
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.standard.is_valid() && self.flex.is_valid() && self.priority.is_valid()
+    }
+
+    const fn clear_cache_writes(self) -> Self {
+        Self {
+            standard: self.standard.clear_cache_writes(),
+            flex: self.flex.clear_cache_writes(),
+            priority: self.priority.clear_cache_writes(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenPrice {
@@ -13,6 +115,17 @@ pub struct TokenPrice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<u64>,
     pub output: u64,
+    /// Published Flex components. An empty set means this catalog has no Flex
+    /// price; callers must not reuse the standard components for that tier.
+    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    pub flex: TokenRateSet,
+    /// Published Priority components. `fast` uses this set. Ultrafast does not.
+    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    pub priority: TokenRateSet,
+    #[serde(default, skip_serializing_if = "LongContextRates::skip_serializing")]
+    pub above_200k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::skip_serializing")]
+    pub above_272k: LongContextRates,
 }
 
 impl TokenPrice {
@@ -22,6 +135,22 @@ impl TokenPrice {
             && option_is_valid(self.cache_read)
             && option_is_valid(self.cache_write_5m)
             && option_is_valid(self.cache_write_1h)
+            && self.flex.is_valid()
+            && self.priority.is_valid()
+            && self.above_200k.is_valid()
+            && self.above_272k.is_valid()
+    }
+
+    pub const fn clear_cache_writes(self) -> Self {
+        Self {
+            cache_write_5m: None,
+            cache_write_1h: None,
+            flex: self.flex.clear_cache_writes(),
+            priority: self.priority.clear_cache_writes(),
+            above_200k: self.above_200k.clear_cache_writes(),
+            above_272k: self.above_272k.clear_cache_writes(),
+            ..self
+        }
     }
 }
 
@@ -29,6 +158,13 @@ const fn option_is_valid(value: Option<u64>) -> bool {
     match value {
         Some(value) => value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
         None => true,
+    }
+}
+
+const fn or_rate(preferred: Option<u64>, fallback: Option<u64>) -> Option<u64> {
+    match preferred {
+        Some(value) => Some(value),
+        None => fallback,
     }
 }
 

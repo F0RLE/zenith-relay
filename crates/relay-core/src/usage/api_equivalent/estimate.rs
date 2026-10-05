@@ -3,7 +3,8 @@ use crate::{
     is_valid_model_id, model_id_key,
     pricing::{
         PriceEvidence, PriceSource, PricingCatalog, PricingContext, PricingMetadata,
-        PricingSourceSummary, ResolvedPrice, TokenPrice, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+        PricingSourceSummary, ResolvedPrice, TokenPrice, TokenRateSet,
+        MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
     },
 };
 use std::collections::BTreeMap;
@@ -60,6 +61,10 @@ impl From<ApiModelPriceOverride> for TokenPrice {
             cache_write_5m: price.cache_write_5m_micro_usd_per_million,
             cache_write_1h: price.cache_write_1h_micro_usd_per_million,
             output: price.output_micro_usd_per_million,
+            flex: TokenRateSet::EMPTY,
+            priority: TokenRateSet::EMPTY,
+            above_200k: Default::default(),
+            above_272k: Default::default(),
         }
     }
 }
@@ -198,14 +203,20 @@ pub fn estimate_api_equivalent_with_token_price(
             ..Default::default()
         };
     };
+    let Some(rates) = rates_for(quote, usage.price_class, usage.context_band) else {
+        return ApiEquivalentSummary {
+            unpriced_tokens: total_tokens,
+            ..Default::default()
+        };
+    };
 
     let components = [
-        (uncached, Some(quote.input)),
-        (Some(cached), quote.cache_read),
-        (Some(write_5m), quote.cache_write_5m),
-        (Some(write_1h), quote.cache_write_1h),
+        (uncached, rates.input),
+        (Some(cached), rates.cache_read),
+        (Some(write_5m), rates.cache_write_5m),
+        (Some(write_1h), rates.cache_write_1h),
         (Some(unknown), None),
-        (output, Some(quote.output)),
+        (output, rates.output),
     ];
     let mut priced_tokens = 0_u64;
     let mut micro_usd = 0_u64;
@@ -364,4 +375,65 @@ fn token_cost(tokens: u64, micro_usd_per_million: u64) -> u64 {
         .saturating_mul(u128::from(micro_usd_per_million))
         .saturating_add(500_000);
     u64::try_from(numerator / 1_000_000).unwrap_or(u64::MAX)
+}
+
+/// Picks the published schedule for one tier and prompt band.
+///
+/// Flex and Priority are used only when that schedule publishes at least one
+/// component. A tier the catalog does not publish uses the standard schedule,
+/// including the standard long-context band. Inside a published tier, a missing
+/// component stays unpriced: it is not replaced by the standard component and
+/// it is not zero. Long-context components replace only the fields that tier
+/// publishes; the highest exceeded threshold wins. Ultrafast stays standard.
+fn rates_for(
+    quote: TokenPrice,
+    class: super::UsagePriceClass,
+    band: super::UsageContextBand,
+) -> Option<TokenRateSet> {
+    use super::{UsageContextBand, UsagePriceClass};
+    let class = match class {
+        UsagePriceClass::Flex if quote.flex.is_empty() => UsagePriceClass::Standard,
+        UsagePriceClass::Priority if quote.priority.is_empty() => UsagePriceClass::Standard,
+        class => class,
+    };
+    let mut rates = match class {
+        UsagePriceClass::Standard => TokenRateSet {
+            input: Some(quote.input),
+            cache_read: quote.cache_read,
+            cache_write_5m: quote.cache_write_5m,
+            cache_write_1h: quote.cache_write_1h,
+            output: Some(quote.output),
+        },
+        UsagePriceClass::Flex => quote.flex,
+        UsagePriceClass::Priority => quote.priority,
+    };
+    let above = match (band, class) {
+        (UsageContextBand::Base, _) => None,
+        (UsageContextBand::Above272k, class) => first_published([
+            band_rates(quote.above_272k, class),
+            band_rates(quote.above_200k, class),
+        ]),
+        (UsageContextBand::Above200k, class) => band_rates(quote.above_200k, class),
+    };
+    if let Some(above) = above {
+        rates = rates.overlay(above);
+    }
+    Some(rates)
+}
+
+fn band_rates(
+    rates: crate::pricing::LongContextRates,
+    class: super::UsagePriceClass,
+) -> Option<TokenRateSet> {
+    use super::UsagePriceClass;
+    let rates = match class {
+        UsagePriceClass::Standard => rates.standard,
+        UsagePriceClass::Flex => rates.flex,
+        UsagePriceClass::Priority => rates.priority,
+    };
+    (!rates.is_empty()).then_some(rates)
+}
+
+fn first_published(rates: [Option<TokenRateSet>; 2]) -> Option<TokenRateSet> {
+    rates.into_iter().flatten().next()
 }

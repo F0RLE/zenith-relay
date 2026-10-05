@@ -58,12 +58,15 @@ pub(super) fn account_pricing_aggregates(
 ) -> Result<Vec<(String, ApiEquivalentUsage)>> {
     let sql = format!(
         "SELECT COALESCE(resolved_model, requested_model, ''), \
+            {price_class}, {context_band}, \
             {USAGE_PRICING_AGGREGATE_COLUMNS} \
          FROM request_logs \
          WHERE account_id = ?1 \
            AND created_at >= datetime(?2 / 1000, 'unixepoch') \
            AND created_at <= datetime(?3 / 1000, 'unixepoch') \
-         GROUP BY 1"
+         GROUP BY 1, 2, 3",
+        price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+        context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
     );
     let values = [
         SqlValue::Text(account_id.to_string()),
@@ -73,7 +76,7 @@ pub(super) fn account_pricing_aggregates(
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
-            Ok((row.get(0)?, usage_pricing_usage_from_row(row, 1)?))
+            Ok((row.get(0)?, usage_pricing_usage_from_row(row, 3)?))
         })
         .map_err(db_error)?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -117,6 +120,7 @@ pub(super) fn usage_model_equivalents(
         // version (or a recovery tool) before the aggregate flag existed.
         format!(
             "SELECT candidate_kind, candidate_id, model,
+                price_class, context_band,
                 input_tokens, cached_input_tokens, cache_write_input_tokens,
                 cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
                 output_tokens, total_tokens, input_samples,
@@ -126,17 +130,23 @@ pub(super) fn usage_model_equivalents(
              UNION ALL
              SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
+                {price_class}, {context_band},
                 {USAGE_PRICING_AGGREGATE_COLUMNS}
              FROM request_logs
              WHERE usage_aggregate_recorded = 0
-             GROUP BY 1, 2, 3"
+             GROUP BY 1, 2, 3, 4, 5",
+            price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+            context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
         )
     } else {
         format!(
             "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
+                {price_class}, {context_band},
                 {USAGE_PRICING_AGGREGATE_COLUMNS}
-             FROM request_logs{where_sql} GROUP BY 1, 2, 3"
+             FROM request_logs{where_sql} GROUP BY 1, 2, 3, 4, 5",
+            price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+            context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
         )
     };
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -150,7 +160,7 @@ pub(super) fn usage_model_equivalents(
                 &kind,
                 &candidate_id,
                 model_ref,
-                usage_pricing_usage_from_row(row, 3)?,
+                usage_pricing_usage_from_row(row, 5)?,
             );
             let source = resolver.source(&kind, &candidate_id, model_ref);
             Ok((model.clone(), estimate, source))
@@ -198,8 +208,11 @@ pub(super) fn usage_buckets(
     let price_sql = format!(
         "SELECT {bucket_sql}, CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END, \
             COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model), \
+            {price_class}, {context_band}, \
             {USAGE_PRICING_AGGREGATE_COLUMNS} \
-         FROM request_logs{where_sql} GROUP BY 1, 2, 3, 4"
+         FROM request_logs{where_sql} GROUP BY 1, 2, 3, 4, 5, 6",
+        price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+        context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
     );
     let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
     let rows = statement
@@ -214,7 +227,7 @@ pub(super) fn usage_buckets(
                     &kind,
                     &candidate_id,
                     model.as_deref(),
-                    usage_pricing_usage_from_row(row, 4)?,
+                    usage_pricing_usage_from_row(row, 6)?,
                 ),
             ))
         })

@@ -24,6 +24,8 @@ type RequestsViewProps = {
   setConnectionQuery: (value: string) => void;
   wireApi: string;
   setWireApi: (value: string) => void;
+  transport: string;
+  setTransport: (value: string) => void;
   errorQuery: string;
   setErrorQuery: (value: string) => void;
   requestQuery: string;
@@ -45,6 +47,8 @@ export function RequestsView({
   setConnectionQuery,
   wireApi,
   setWireApi,
+  transport,
+  setTransport,
   errorQuery,
   setErrorQuery,
   requestQuery,
@@ -55,7 +59,7 @@ export function RequestsView({
 }: RequestsViewProps) {
   const { t } = useTranslation();
   const [showMoreFilters, setShowMoreFilters] = useState(false);
-  const secondaryCount = [wireApi, errorQuery, requestQuery].filter(Boolean).length;
+  const secondaryCount = [wireApi, transport, errorQuery, requestQuery].filter(Boolean).length;
   const hasFilters = status !== "all" || Boolean(modelQuery || connectionQuery || secondaryCount);
   const errorOptions = [
     { value: "", label: t("usage.anyErrorCategory") },
@@ -105,6 +109,17 @@ export function RequestsView({
           { value: "messages", label: "Messages" },
           { value: "chat_completions", label: "Chat Completions" },
           { value: "gemini", label: "Gemini" },
+        ]}
+      />
+      <OptionMenu
+        className="filter-option-menu"
+        label={t("usage.transport")}
+        value={transport}
+        onChange={setTransport}
+        options={[
+          { value: "", label: t("usage.anyTransport") },
+          { value: "http", label: t("usage.transports.http") },
+          { value: "websocket", label: t("usage.transports.websocket") },
         ]}
       />
       <OptionMenu className="filter-option-menu" label={t("usage.errorCategory")} value={errorQuery} onChange={setErrorQuery} options={errorOptions} />

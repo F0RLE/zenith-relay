@@ -11,7 +11,7 @@ impl TelemetryDb {
             .prepare(
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                     local_key_id, source_id, candidate_id, account_id, requested_model,
-                    resolved_model, wire_api, success, http_status, error_category, latency_ms,
+                    resolved_model, wire_api, transport, success, http_status, error_category, latency_ms,
                     ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
@@ -186,7 +186,7 @@ impl TelemetryDb {
             let sql = format!(
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                     local_key_id, source_id, candidate_id, account_id, requested_model,
-                    resolved_model, wire_api, success, http_status, error_category, latency_ms,
+                    resolved_model, wire_api, transport, success, http_status, error_category, latency_ms,
                     ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
@@ -229,7 +229,8 @@ impl TelemetryDb {
                     event.cache_write_ttl.as_deref(),
                     event.output_tokens,
                     event.total_tokens,
-                ),
+                )
+                .with_observed_rates(event.applied_service_tier.as_deref(), event.input_tokens),
             );
         }
         let total_pages = UsageQuery::page_count(total, page_size);

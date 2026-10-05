@@ -32,6 +32,7 @@ export type ToolUseDiagnostics = {
 };
 
 export type ErrorOrigin = "provider" | "account" | "relay";
+export type UsageTransport = "http" | "websocket";
 export type UpstreamErrorDetails = {
   httpStatus: number | null;
   code: string | null;
@@ -53,6 +54,7 @@ type UsageEventRecord = {
   requestedReasoningEffort?: ReasoningEffort | null;
   effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages" | "gemini";
+  transport: UsageTransport;
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: ObservedServiceTier | null;
   success: boolean;
@@ -144,6 +146,7 @@ export type UsageExportRow = {
   requestedReasoningEffort?: ReasoningEffort | null;
   effectiveReasoningEffort?: ReasoningEffort | null;
   connection: string;
+  transport: UsageTransport;
   latencyMs: number;
   ttftMs: number | null;
   inputTokens: number | null;
@@ -189,6 +192,7 @@ export type RemoteUsageQuery = {
   modelQuery?: string;
   sourceOrAccountQuery?: string;
   wireApi?: "responses" | "chat_completions" | "messages" | "gemini";
+  transport?: UsageTransport;
   success?: boolean;
   errorCategory?: string;
   requestIdQuery?: string;

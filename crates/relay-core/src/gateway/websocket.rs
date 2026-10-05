@@ -13,7 +13,7 @@ use super::request::{
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event, UsageAttempt};
 use super::streaming::{
     has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
-    is_known_non_output_event, parse_sse_event, NativeReplayCapture, MAX_SSE_EVENT_BYTES,
+    is_known_non_output_event, parse_sse_event, NativeReplayCapture,
 };
 use super::turn_state::request_scope;
 use crate::error_codes;
@@ -21,7 +21,7 @@ use crate::protocol::ClientWireApi;
 use crate::runtime::{
     AuthenticatedKey, AuthorizationIncarnation, CandidateLease, ExecutorPrepareError, ExecutorRoute,
 };
-use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, WireApi};
+use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, UsageTransport, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -63,7 +63,7 @@ use events::{
 use failure::{send_gateway_error, GatewayFailure};
 use request::ClientRequest;
 
-const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::request::MAX_CLIENT_REQUEST_BODY_BYTES;
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
 const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -119,6 +119,7 @@ async fn handle_connection(
                 &key.id,
                 &request.requested_model,
                 WireApi::Responses,
+                UsageTransport::Websocket,
                 kind,
             );
             let mut payload = serde_json::json!({

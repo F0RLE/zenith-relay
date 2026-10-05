@@ -141,28 +141,18 @@
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   overflow: hidden;
-  padding: 0 3px;
-  border: 1px solid color-mix(in srgb, var(--plan-accent) 32%, var(--relay-border));
+  padding: 0 7px;
+  border: 0;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--plan-accent) 9%, var(--relay-surface));
-  color: color-mix(in srgb, var(--plan-accent) 78%, var(--relay-text));
-  font-size: 10px;
+  background: color-mix(in srgb, var(--plan-accent) 16%, var(--relay-surface));
+  color: var(--plan-accent);
+  font-size: 11px;
   font-style: normal;
-  font-weight: 700;
-  line-height: 18px;
+  font-weight: 500;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.account-plan-badge::before {
-  width: 4px;
-  height: 4px;
-  flex: 0 0 4px;
-  border-radius: 50%;
-  background: currentColor;
-  content: "";
 }
 
 .account-plan-badge[data-plan="plus"] { --plan-accent: var(--relay-accent-hover); }

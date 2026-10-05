@@ -118,6 +118,7 @@ export type {
   RoutingDiagnostics,
   ToolUseDiagnostics,
   ErrorOrigin,
+  UsageTransport,
   UpstreamErrorDetails,
   ReasoningEffort,
   LocalUsage,

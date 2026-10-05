@@ -94,7 +94,7 @@ impl GatewayRuntime {
             account_id: None,
             account_token_generation: None,
             client_context_id: None,
-            wire_api: binding.wire_api,
+            client_wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
             cache_write_ttl: binding.cache_write_ttl,
@@ -102,6 +102,7 @@ impl GatewayRuntime {
             upstream_url: source.endpoint(binding.binding_key, &source_model, upstream_stream)?,
             upstream_headers: source.protocol_headers_for_binding(source_binding),
             account_transport: AccountTransport::NativeResponses,
+            client_transport: crate::UsageTransport::Http,
             source_model,
             half_open_probe: false,
             routing: None,
@@ -132,7 +133,7 @@ impl GatewayRuntime {
             account_id: Some(account.id.clone()),
             account_token_generation: None,
             client_context_id: None,
-            wire_api,
+            client_wire_api: wire_api,
             adapter,
             reasoning_mode: if adapter.is_passthrough() {
                 MessagesReasoningMode::Disabled
@@ -152,6 +153,7 @@ impl GatewayRuntime {
                 }
             },
             account_transport,
+            client_transport: crate::UsageTransport::Http,
             source_model,
             half_open_probe: false,
             routing: None,

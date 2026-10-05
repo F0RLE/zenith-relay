@@ -1,4 +1,4 @@
-use crate::{DefaultServiceTier, UsageCallback, UsageEvent, WireApi};
+use crate::{DefaultServiceTier, UsageCallback, UsageEvent, UsageTransport, WireApi};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -101,6 +101,7 @@ impl RuntimeControl {
         local_key_id: &str,
         requested_model: &str,
         wire_api: WireApi,
+        transport: UsageTransport,
         origin: &'static str,
     ) {
         let event = UsageEvent {
@@ -118,6 +119,7 @@ impl RuntimeControl {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api,
+            transport,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: true,

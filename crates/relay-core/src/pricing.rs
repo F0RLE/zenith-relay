@@ -34,8 +34,9 @@ mod snapshot;
 
 pub use context::PricingContext;
 pub use quote::{
-    ImageModelPrice, ImageRequestPrice, PriceEvidence, PriceSource, PricingMetadata,
-    PricingSourceSummary, ResolvedPrice, SourcePricingMetadata, TokenPrice,
+    ImageModelPrice, ImageRequestPrice, LongContextRates, PriceEvidence, PriceSource,
+    PricingMetadata, PricingSourceSummary, ResolvedPrice, SourcePricingMetadata, TokenPrice,
+    TokenRateSet,
 };
 pub use snapshot::{CatalogEntry, PricingCatalog, PricingCatalogHandle, PricingError};
 

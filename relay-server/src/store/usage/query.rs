@@ -43,6 +43,10 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
         clauses.push("wire_api = ?");
         values.push(SqlValue::Text(value.as_str().to_string()));
     }
+    if let Some(value) = query.transport {
+        clauses.push("transport = ?");
+        values.push(SqlValue::Text(value.as_str().to_string()));
+    }
     if let Some(value) = query.success {
         clauses.push("success = ?");
         values.push(SqlValue::Integer(i64::from(value)));
@@ -107,8 +111,11 @@ pub(super) fn usage_model_equivalents(
 ) -> Result<(HashMap<String, ApiEquivalentSummary>, Vec<PriceSource>), String> {
     let sql = format!(
         "SELECT candidate_kind, candidate_hint, COALESCE(resolved_model, requested_model, ''),
+            {price_class}, {context_band},
             {USAGE_PRICING_AGGREGATE_COLUMNS}
-         FROM usage_events{where_sql} GROUP BY 1, 2, 3"
+         FROM usage_events{where_sql} GROUP BY 1, 2, 3, 4, 5",
+        price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+        context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
     );
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
@@ -116,7 +123,7 @@ pub(super) fn usage_model_equivalents(
             let kind = row.get::<_, String>(0)?;
             let candidate_id = row.get::<_, String>(1)?;
             let model = row.get::<_, String>(2)?;
-            let usage = aggregate_usage_from_row(row, 3)?;
+            let usage = aggregate_usage_from_row(row, 5)?;
             let model_ref = (!model.is_empty()).then_some(model.as_str());
             let estimate = resolver.estimate(&kind, &candidate_id, model_ref, usage);
             let source = resolver.source(&kind, &candidate_id, model_ref);
@@ -136,11 +143,14 @@ pub(super) fn candidate_window_usage(
     let mut statement = connection
         .prepare(&format!(
             "SELECT COALESCE(resolved_model, requested_model, ''),
+                    {price_class}, {context_band},
                     {USAGE_PRICING_AGGREGATE_COLUMNS}
                  FROM usage_events
                  WHERE candidate_kind = 'account' AND candidate_hint = ?1
                    AND created_at_ms >= ?2 AND created_at_ms <= ?3
-                 GROUP BY 1"
+                 GROUP BY 1, 2, 3",
+            price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+            context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
         ))
         .map_err(db_error)?;
     let values = [
@@ -151,7 +161,7 @@ pub(super) fn candidate_window_usage(
     let rows = statement
         .query_map(params_from_iter(values.iter()), |row| {
             let model = row.get::<_, String>(0)?;
-            Ok((model, aggregate_usage_from_row(row, 1)?))
+            Ok((model, aggregate_usage_from_row(row, 3)?))
         })
         .map_err(db_error)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
@@ -161,12 +171,15 @@ fn aggregate_usage_from_row(
     row: &rusqlite::Row<'_>,
     start: usize,
 ) -> rusqlite::Result<ApiEquivalentUsage> {
-    Ok(ApiEquivalentUsage::from_observed_sums(
-        ObservedUsageSums::from_priced_aggregate(
+    let price_class: String = row.get(start - 2)?;
+    let context_band: String = row.get(start - 1)?;
+    Ok(
+        ApiEquivalentUsage::from_observed_sums(ObservedUsageSums::from_priced_aggregate(
             |column| row.get(start + column),
             |column| row.get(start + column),
-        )?,
-    ))
+        )?)
+        .with_aggregate_rates(&price_class, &context_band),
+    )
 }
 
 pub(super) fn usage_buckets(
@@ -204,8 +217,11 @@ pub(super) fn usage_buckets(
     let price_sql = format!(
         "SELECT {bucket_sql}, candidate_kind, candidate_hint, \
             COALESCE(resolved_model, requested_model), \
+            {price_class}, {context_band}, \
             {USAGE_PRICING_AGGREGATE_COLUMNS} \
-         FROM usage_events{where_sql} GROUP BY 1, 2, 3, 4"
+         FROM usage_events{where_sql} GROUP BY 1, 2, 3, 4, 5, 6",
+        price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+        context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
     );
     let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
     let rows = statement
@@ -220,7 +236,7 @@ pub(super) fn usage_buckets(
                     &kind,
                     &candidate_id,
                     model.as_deref(),
-                    aggregate_usage_from_row(row, 4)?,
+                    aggregate_usage_from_row(row, 6)?,
                 ),
             ))
         })

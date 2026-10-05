@@ -73,6 +73,12 @@ export function formatWireApi(value: string | null, t: TFunction): string {
   return value ?? "—";
 }
 
+export function formatTransport(value: string | null | undefined, t: TFunction): string {
+  if (value === "websocket") return t("usage.transports.websocket");
+  if (value === "http") return t("usage.transports.http");
+  return value ?? "—";
+}
+
 export function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
   if (value === "excel_basis_points") return t("usage.endpoints.excelBasisPoints");
   if (value === "responses") return t("usage.protocols.responses");
@@ -89,6 +95,13 @@ export function formatErrorCategory(category: string | null, t: TFunction): stri
 
 export function formatErrorOrigin(origin: ErrorOrigin | null, t: TFunction): string {
   return origin ? t(`usage.errorOrigins.${origin}`) : t("common.unknown");
+}
+
+export function prefixErrorOrigin(origin: ErrorOrigin | null | undefined, message: string): string {
+  if (!origin) return message;
+  const label = origin === "account" ? "Account" : origin === "provider" ? "Provider" : "Relay";
+  const unprefixed = message.replace(/^(?:Account|Provider|Relay):\s*/i, "");
+  return `${label}: ${unprefixed}`;
 }
 
 export function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction): string {

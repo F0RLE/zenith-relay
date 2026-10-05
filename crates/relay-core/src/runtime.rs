@@ -88,8 +88,14 @@ pub use images::normalize_image_base_model;
 #[cfg(test)]
 use images::{cheapest_image_main_model, select_image_main_model};
 
-pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
+/// Relay's virtual Image API model for OAuth account routes.
+///
+/// The account bridge sends this model in the Responses `image_generation`
+/// tool while the top-level Responses model remains the account's selected
+/// text model. Keep the public virtual id aligned with the current stable
+/// GPT Image model; provider routes still use the model selected by their own
+/// source catalog.
+pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
@@ -216,7 +222,8 @@ pub(crate) struct ExecutorRoute {
     /// request. This is request-local provenance, not route configuration.
     pub(crate) account_token_generation: Option<u64>,
     pub(crate) client_context_id: Option<String>,
-    pub(crate) wire_api: WireApi,
+    /// Client contract. The adapter maps it to the upstream protocol.
+    pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
     pub(crate) cache_write_ttl: CacheWriteTtl,
@@ -224,6 +231,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) upstream_url: Url,
     pub(crate) upstream_headers: HeaderMap,
     pub(crate) account_transport: AccountTransport,
+    pub(crate) client_transport: crate::UsageTransport,
     pub(crate) source_model: String,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,

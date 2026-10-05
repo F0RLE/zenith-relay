@@ -1,7 +1,15 @@
+//! HTTP client-request attempt pipeline.
+//!
+//! `client` validates and admits a request; `request::execute` owns candidate
+//! selection and retry state; `drive` runs one candidate through `prepare`,
+//! `dispatch`, and either `completion` or `stream`. `failure` owns upstream
+//! rejection handling and pre-output repairs. Responses continuation ownership
+//! is shared from `gateway::continuation`; account-only calls use `account`.
+
 use super::super::request::{RequestToolPolicy, ServiceTierPolicy};
 use crate::runtime::AuthenticatedKey;
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::{GatewayRuntime, WireApi};
+use crate::{GatewayRuntime, UsageTransport, WireApi};
 use axum::http::{HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::sync::Arc;
@@ -20,11 +28,12 @@ pub(super) struct RequestExecution {
     pub(super) client_context_id: Option<String>,
     pub(super) response_affinity_key: Option<String>,
     pub(super) requires_affinity_owner: bool,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) responses_lite: Option<HeaderValue>,
     pub(super) allow_previous_response_reset: bool,
     pub(super) attempt_offset: u16,
     pub(super) budget: SharedRequestBudget,
+    pub(super) transport: UsageTransport,
 }
 
 mod completion;

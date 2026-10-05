@@ -14,6 +14,7 @@ import {
 } from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
+import { prefixErrorOrigin } from "../src/features/relay/pages/usage/usageReportFormat";
 
 const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   id: "request",
@@ -27,6 +28,7 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   effectiveReasoningEffort: null,
   connection: "Account",
   wireApi: "responses",
+  transport: "http",
   serviceTier: "standard",
   appliedServiceTier: null,
   ttft: 100,
@@ -56,6 +58,14 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("usage error messages keep an English source prefix without duplication", () => {
+    expect(prefixErrorOrigin("account", "Provider: upstream rejected request")).toBe(
+      "Account: upstream rejected request",
+    );
+    expect(prefixErrorOrigin("relay", "Relay: request failed")).toBe("Relay: request failed");
+    expect(prefixErrorOrigin(null, "historical request failed")).toBe("historical request failed");
+  });
+
   test("keeps documented model minimum separate from provider-reported cache windows", () => {
     for (const model of ["gpt-5.6", "openai/gpt-5.6-2026-09-01", "gpt-6", "gpt-6-astra", "gpt-6-sol", "gpt-7-future"]) {
       expect(documentedCacheRetentionMinimum(model, 0, 10)).toBe("30m");
@@ -124,6 +134,7 @@ describe("usage data", () => {
       requestedModel: "gpt-5.4",
       resolvedModel: "gpt-5.4",
       wireApi: "responses",
+      transport: "http",
       serviceTier: "fast",
       appliedServiceTier: "priority",
       success: true,
@@ -151,6 +162,7 @@ describe("usage data", () => {
       requestedModel: "gpt-5.4",
       resolvedModel: "gpt-5.4",
       wireApi: "responses",
+      transport: "websocket",
       serviceTier: "standard",
       appliedServiceTier: "flex",
       success: true,
@@ -229,7 +241,7 @@ describe("usage data", () => {
     const base = {
       id: 1, requestId: "request", attempt: 1,
       requestedModel: "public-alias", resolvedModel: "vendor/model",
-      wireApi: "responses" as const, success: true, httpStatus: 200, errorCategory: null,
+      wireApi: "responses" as const, transport: "http" as const, success: true, httpStatus: 200, errorCategory: null,
       latencyMs: 1, inputTokens: null, cachedInputTokens: null,
       reasoningTokens: null, outputTokens: null, totalTokens: null,
     };
@@ -263,6 +275,7 @@ describe("usage data", () => {
       requestedModel: "gpt-5.4",
       resolvedModel: "gpt-5.4",
       wireApi: "responses",
+      transport: "http" as const,
       serviceTier: "standard" as const,
       success: true,
       httpStatus: 200,
@@ -282,6 +295,7 @@ describe("usage data", () => {
       requestedModel: "gpt-5.4",
       resolvedModel: "gpt-5.4",
       wireApi: "responses",
+      transport: "websocket" as const,
       serviceTier: "standard" as const,
       success: true,
       httpStatus: 200,

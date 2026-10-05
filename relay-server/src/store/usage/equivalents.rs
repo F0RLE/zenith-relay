@@ -70,13 +70,13 @@ impl Store {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(&format!(
-                "SELECT candidate_kind, candidate_id, model,
+                "SELECT candidate_kind, candidate_id, model, price_class, context_band,
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
                     SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens), SUM(unknown_cache_write_tokens),
                     SUM(output_tokens), SUM(total_tokens), SUM(input_samples),
                     SUM(cached_input_samples), SUM(cache_write_input_samples)
                  FROM (
-                    SELECT candidate_kind, candidate_id, model,
+                    SELECT candidate_kind, candidate_id, model, price_class, context_band,
                         input_tokens, cached_input_tokens, cache_write_input_tokens,
                         0 AS cache_write_5m_tokens, 0 AS cache_write_1h_tokens,
                         cache_write_input_tokens AS unknown_cache_write_tokens,
@@ -86,15 +86,18 @@ impl Store {
                     UNION ALL
                     SELECT candidate_kind, candidate_hint,
                         COALESCE(resolved_model, requested_model, ''),
+                        {price_class}, {context_band},
                         COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
                         COALESCE(SUM(cache_write_input_tokens), 0),
                         {cache_write_buckets},
                         COALESCE(SUM(output_tokens), 0),
                         COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
                         COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
-                    FROM usage_events GROUP BY 1, 2, 3
-                 ) GROUP BY candidate_kind, candidate_id, model",
-                cache_write_buckets = zenith_relay_core::usage::CACHE_WRITE_TTL_BUCKET_SUMS_SQL
+                    FROM usage_events GROUP BY 1, 2, 3, 4, 5
+                 ) GROUP BY candidate_kind, candidate_id, model, price_class, context_band",
+                cache_write_buckets = zenith_relay_core::usage::CACHE_WRITE_TTL_BUCKET_SUMS_SQL,
+                price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
+                context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
             ))
             .map_err(db_error)?;
         let rows = statement
@@ -102,6 +105,8 @@ impl Store {
                 let kind = row.get::<_, String>(0)?;
                 let candidate_id = row.get::<_, String>(1)?;
                 let model = row.get::<_, Option<String>>(2)?;
+                let price_class: String = row.get(3)?;
+                let context_band: String = row.get(4)?;
                 Ok((candidate_id.clone(), {
                     resolver.estimate(
                         &kind,
@@ -112,7 +117,8 @@ impl Store {
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),
                             )?,
-                        ),
+                        )
+                        .with_aggregate_rates(&price_class, &context_band),
                     )
                 }))
             })

@@ -1,6 +1,6 @@
 use crate::{
     ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, PriceSource,
-    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, WireApi,
+    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, UsageTransport, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -203,6 +203,8 @@ pub struct UsageQuery {
     pub model_query: Option<String>,
     pub source_or_account_query: Option<String>,
     pub wire_api: Option<WireApi>,
+    #[serde(default)]
+    pub transport: Option<UsageTransport>,
     pub success: Option<bool>,
     pub error_category: Option<String>,
     pub request_id_query: Option<String>,

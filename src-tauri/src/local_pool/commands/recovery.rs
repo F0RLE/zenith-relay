@@ -46,6 +46,7 @@ pub struct UsageExportRow {
     #[serde(default)]
     pub(super) effective_reasoning_effort: Option<String>,
     pub(super) connection: String,
+    pub(super) transport: zenith_relay_core::UsageTransport,
     pub(super) latency_ms: u64,
     pub(super) ttft_ms: Option<u64>,
     pub(super) input_tokens: Option<u64>,
@@ -288,6 +289,7 @@ mod tests {
             requested_reasoning_effort: Some("max".into()),
             effective_reasoning_effort: Some("low".into()),
             connection: "account".into(),
+            transport: zenith_relay_core::UsageTransport::Http,
             latency_ms: 1,
             ttft_ms: Some(1),
             input_tokens: Some(1),

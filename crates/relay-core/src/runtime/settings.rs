@@ -125,6 +125,7 @@ impl GatewayRuntime {
         local_key_id: &str,
         requested_model: &str,
         wire_api: WireApi,
+        transport: crate::UsageTransport,
         origin: &'static str,
     ) {
         self.control.blocked_codex_background_event(
@@ -133,6 +134,7 @@ impl GatewayRuntime {
             local_key_id,
             requested_model,
             wire_api,
+            transport,
             origin,
         );
     }

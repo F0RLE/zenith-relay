@@ -9,7 +9,7 @@ import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { usageBreakdown } from "./usageBreakdown";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatDurationMs, requestStatusLabel, formatRequestOrigin, formatReasoningSummary, formatServiceTier, formatObservedServiceTier, formatWireApi, formatEndpointKind, formatErrorCategory, formatErrorOrigin, formatToolChoice, formatTerminalOutput, cacheRemainingLabel } from "./usageReportFormat";
+import { formatDurationMs, requestStatusLabel, formatRequestOrigin, formatReasoningSummary, formatServiceTier, formatObservedServiceTier, formatWireApi, formatTransport, formatEndpointKind, formatErrorCategory, formatErrorOrigin, formatToolChoice, formatTerminalOutput, cacheRemainingLabel, prefixErrorOrigin } from "./usageReportFormat";
 import type { CacheTouch } from "./usageReportFormat";
 import { RequestDetailMetric, SpeedValue } from "./usageReportParts";
 
@@ -62,6 +62,9 @@ export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: 
     return () => { active = false; };
   }, [local, row.cacheWriteTtl, row.clientContextId, row.model, row.time, showCacheClock]);
   const cacheRemaining = cacheTouch ? cacheRemainingLabel(cacheLifetime(cacheTouch, nowMs), t) : null;
+  const upstreamErrorMessage = row.upstreamError?.message
+    ? prefixErrorOrigin(row.errorOrigin, row.upstreamError.message)
+    : null;
   const toolWarning = Boolean(
     toolUse
       && toolUse.forwardedToolCount > 0
@@ -101,6 +104,7 @@ export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: 
         </> : null}
         <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
         <div><dt>{t("usage.protocol")}</dt><dd><code>{formatWireApi(row.wireApi, t)}</code></dd></div>
+        <div><dt>{t("usage.transport")}</dt><dd><code>{formatTransport(row.transport, t)}</code></dd></div>
         {row.success && routing?.endpointKind && routing.endpointKind !== row.wireApi ? (
           <div><dt>{t("usage.endpoint")}</dt><dd><code>{formatEndpointKind(routing.endpointKind, row.wireApi, t)}</code></dd></div>
         ) : null}
@@ -125,9 +129,9 @@ export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: 
             {row.upstreamError.code ? <div><dt>{t("usage.upstreamErrorCode")}</dt><dd><code>{row.upstreamError.code}</code></dd></div> : null}
             {row.upstreamError.errorType ? <div><dt>{t("usage.upstreamErrorType")}</dt><dd><code>{row.upstreamError.errorType}</code></dd></div> : null}
           </dl>
-          {row.upstreamError.message ? <div className="request-upstream-message">
-            <pre>{row.upstreamError.message}</pre>
-            <CopyButton value={row.upstreamError.message} label={t("usage.copyUpstreamError")} />
+          {upstreamErrorMessage ? <div className="request-upstream-message">
+            <pre>{upstreamErrorMessage}</pre>
+            <CopyButton value={upstreamErrorMessage} label={t("usage.copyUpstreamError")} />
           </div> : <p className="form-note">{t("usage.upstreamErrorUnavailable")}</p>}
           {row.upstreamError.redacted ? <p className="form-note">{t("usage.upstreamErrorRedacted")}</p> : null}
           {row.upstreamError.truncated ? <p className="form-note">{t("usage.upstreamErrorTruncated")}</p> : null}
