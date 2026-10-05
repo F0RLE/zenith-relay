@@ -12,10 +12,11 @@ info:
     authorization headers, prompts, and provider response bodies never appear
     in those management responses. The /v1 data plane may carry the user's
     request and provider response as required by the selected API contract.
-    Runtime JSON generation and account compact/search bodies accept identity,
-    gzip or zstd Content-Encoding with 64 MiB limits on both wire and decoded
-    bodies. Stacked encodings are unsupported. This does not apply to multipart
-    image edits or management requests.
+    Relay does not reject JSON generation, image upload, or image edit for size.
+    The provider can still reject the payload. JSON generation and account
+    compact/search accept identity, gzip, or zstd. Stacked encodings are
+    unsupported, and the zstd window stays at 64 MiB. Management requests keep
+    their own body limit.
 servers:
   - url: https://relay.example.com
 paths:

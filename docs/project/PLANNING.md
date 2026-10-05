@@ -293,15 +293,16 @@ text/image lanes; zero means no additional member cap, not infinite runtime
 capacity. OAuth images retain their separate one-request limit. Reservation
 and release belong to their own lease, including recovery permits. Preview does
 not advance weighted credits. Capacity and recovery waits share a bounded
-runtime queue: 1,024 waiters / 256 MiB, at most 256 waiters / 128 MiB per request
-key. Retained parsed envelopes, repair copies and queue metadata are charged;
-requests with immediately free capacity do not consume queue slots. Capacity
+runtime queue: 1,024 waiters, at most 256 waiters per request key. A waiting
+request is not rejected because its body is large. Retained parsed envelopes,
+repair copies and queue metadata are still recorded; requests with immediately
+free capacity do not consume queue slots. Capacity
 admission selects the oldest compatible waiter with round-robin turns between
 principals, so an incompatible head cannot block another model. Cancellation
 removes its registration synchronously. Events, known due times and deadlines
 wake waiters; there is no periodic availability polling. The 30-second total
 queue budget survives retry passes and WS/HTTP handoff; explicit persistent
-waiting removes the time bound, not count/byte limits or the dispatch budget.
+waiting removes the time bound, not the waiter counts or the dispatch budget.
 Local saturation/expiry returns a Relay-origin 503 (`admission_queue_full` or
 `admission_wait_expired`), without a provider-health vote or generation debit.
 
@@ -633,6 +634,14 @@ before a clean EOF; foreign protocol markers cannot establish success.
 
 Failures preserve `relay`, `account`, or `provider` route origin plus safe
 category, status, and timings across protocols, storage, UI, and exports.
+Client-visible model API error messages add the fixed English source label
+(`Relay:`, `Account:`, or `Provider:`) at the start. Generated JSON errors,
+upstream HTTP error envelopes, native Messages errors, SSE terminal errors,
+WebSocket errors, and local route/method failures use the same label; existing
+error codes and provider diagnostic fields stay unchanged. Usage storage keeps
+the original provider diagnostic message, and the usage detail view adds the
+same English label without localizing that message. Historical records without
+an origin remain unlabelled.
 Local and server usage additionally retain a bounded, redacted provider error
 envelope (original code, type, message, and observed HTTP status), separately
 from Relay's classification. Successful replacement attempts clear stale error
@@ -642,16 +651,17 @@ Invalid SSE JSON records Relay parser diagnostics in the existing error envelope
 with type `relay_stream_parser`: fixed error category, position, byte/line counts
 and format flags only. Upstream event names and payload fragments are excluded.
 Upstream origin identifies the selected account or API source independently
-of whether the failure affects account health. Generic HTTP 400/422 or
+of whether the failure affects account health. An upstream payload-size rejection
+is terminal and is not retried with the same request. Generic HTTP 400/422 or
 `invalid_request_error` alone does not prove a client error: candidate rejection
 can still fall back, while explicit request-validation failures stop retries.
 
 ## Protocol adapters
 
-All four JSON generation entrances and account compact/search use one bounded
-body decoder for identity, gzip and zstd. Wire and decoded bodies each have a
-64 MiB limit; stacked encodings are rejected and zstd windows are bounded.
-Multipart image edits retain their separate body contract.
+All four JSON generation entrances and account compact/search use one
+body decoder for identity, gzip and zstd. Relay does not reject JSON generation,
+image upload, or image edit for size; a provider can still reject the payload.
+Stacked encodings are rejected and zstd windows stay bounded at 64 MiB.
 
 Account compact first uses the legacy endpoint. Only an explicit missing
 endpoint (405 or an unambiguous route-not-found 404) permits one Responses
@@ -725,8 +735,11 @@ function/custom calls and outputs through its native `run_officejs` envelope,
 then the protocol adapter converts the result to the client's format.
 Historical client calls are restored to that envelope even when the current
 request no longer includes their catalog. A declared tool excluded by
-`tool_choice` is rejected as a choice error, not as a missing tool. Encrypted
-`agent_message` content is rejected before dispatch. The upstream returns
+`tool_choice` is rejected as a choice error, not as a missing tool. The
+reserved transport name cannot also be declared as a client tool. When
+`parallel_tool_calls` is false, Relay rejects multiple returned client calls
+and permits one corrected generation. Encrypted `agent_message` content is
+rejected before dispatch. The upstream returns
 completed JSON, so requested SSE is buffered and emitted only after completion.
 A user input image is uploaded to the account attachment endpoint and sent as file_id. Item identifiers longer than 64 characters keep their namespace prefix and a stable hash of the original value, so a call and its output stay paired. Ciphertext-bound ids are left unchanged. A reasoning summary without ciphertext stays in history. Requested maximum reasoning is sent as the supported extra-high level; ultra stays ultra. Remote image URLs and explicit nonstandard service tiers are incompatible with this route. `auto`, `default`, and `standard` are ordinary tiers and are omitted from the upstream body. Structured `text.format` is rejected rather than dropped. Developer instructions follow the v0.2.8 adapter: examples are generated only for tools allowed in the request and match the declared function or custom shape, including the two JSON layers of a function payload. A second developer message repeats the transport reminder and tells each custom tool to keep its input raw. The one malformed-relay retry hint is appended after that prepared input, before a compaction trigger.
 opaque `previous_response_id` continuation is rejected before dispatch rather
@@ -753,8 +766,9 @@ budget or encountering an unsafe scope preserves the original schema atomically.
 Responses bridges accept Codex client tracing and cache-affinity keys without
 forwarding them as provider parameters. The optional encrypted-reasoning output
 selector does not require fabricated encrypted output; native bridge state stays
-local. Foreign encrypted reasoning and encrypted compaction still require a
-compatible native route. A non-native route can answer Codex auto-compact,
+local. Protocol bridges preserve encrypted reasoning and compaction only on
+compatible native routes; Relay neither decodes nor rewrites their ciphertext.
+A non-native route can answer Codex auto-compact,
 including `/v1/responses/compact`, with a text summary and a Relay-owned
 compaction checkpoint; the next bridged turn expands that checkpoint back into
 text. This is the same path for every bridged model, not a single family.
@@ -771,8 +785,13 @@ selected member before reserving capacity. Routes have stable identities; all
 routes of one member share weight and concurrency. Endpoint/model failures
 remain scoped, resource failures apply to the physical member, all attempts use
 one retry budget, and visible output prevents fallback. Continuation ownership
-is retained unless a complete portable history permits replay. Opaque state,
-encrypted reasoning and unpaired tool results are never discarded for retry.
+is retained unless a complete portable history permits replay. Opaque response
+IDs and unpaired tool results are never discarded for retry. Relay keeps
+encrypted Responses history on the first send. After a ChatGPT account
+explicitly rejects it, Relay removes each ciphertext-bearing item and its bound
+ID, then permits one pre-output retry. The rejected candidate is eligible again
+for that retry. Visible reasoning or compaction summaries and the remaining
+history stay intact.
 
 Streams retain tool IDs and order, terminal status, and actual upstream usage.
 Adjacent Responses function calls remain one assistant turn when bridged to
@@ -843,7 +862,21 @@ explicitly declared family for any other model, then manual price. Known familie
 are GPT, ChatGPT, and Codex to OpenAI, Claude to Anthropic, Gemini to Google, and
 Grok to xAI. The family comes from the model id, never from a source label or URL. Endpoint/protocol changes invalidate stale source evidence. Input,
 cached input, cache writes, output, and request/image prices remain distinct;
-missing required counters/prices are unknown, not `$0`. Adapters follow the
+missing required counters/prices are unknown, not `$0`. Flex and Priority are
+separate published components, including their cache read and cache write
+prices. They apply when upstream usage reports that tier and the catalog
+publishes it; `fast` is Priority. A tier the catalog does not publish uses the
+standard schedule. Inside a published tier, a missing component stays
+unpriced: it is not replaced by the standard price and it is not zero.
+Ultrafast has no price of its own and stays on the standard schedule. A prompt
+above 200,000 input
+tokens uses that model's published above-200k components; above 272,000 input
+tokens uses the above-272k components when published, otherwise the above-200k
+components. The replacement covers the whole component, and a component the
+higher band does not publish keeps the tier's lower rate. Batch and other
+unpublished service tiers are not priced as Flex or Priority. Usage totals
+are grouped by observed tier and context band before pricing. Raw history that
+was already pruned stays on the standard base schedule. Adapters follow the
 actual upstream cache contract without borrowing another protocol's semantics.
 Explicit 5m/1h prices in a source catalog remain visible in source pricing
 regardless of the catalog endpoint; an untagged cache-write price does not
