@@ -8,7 +8,7 @@ use std::{
 // and may advance only to a newer stable release fetched from the official
 // release feed. API-key routes preserve the downstream client's identity
 // headers instead.
-pub const CODEX_STABLE_FALLBACK_VERSION: &str = "0.154.0";
+pub const CODEX_STABLE_FALLBACK_VERSION: &str = "0.160.0";
 pub const CODEX_CLIENT_VERSION: &str = CODEX_STABLE_FALLBACK_VERSION;
 pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
@@ -238,7 +238,7 @@ mod tests {
                 "x86_64",
                 "WindowsTerminal"
             ),
-            "codex_cli_rs/0.154.0 (Windows 10.0; x86_64) WindowsTerminal"
+            "codex_cli_rs/0.160.0 (Windows 10.0; x86_64) WindowsTerminal"
         );
     }
 
@@ -261,14 +261,14 @@ mod tests {
 
     #[test]
     fn newer_verified_release_never_downgrades_process_identity() {
-        assert!(is_newer_official_release("0.155.0", CODEX_CLIENT_VERSION));
-        assert!(!is_newer_official_release(CODEX_CLIENT_VERSION, "0.155.0"));
+        assert!(is_newer_official_release("0.161.0", CODEX_CLIENT_VERSION));
+        assert!(!is_newer_official_release(CODEX_CLIENT_VERSION, "0.161.0"));
         assert!(!is_newer_official_release(
             CODEX_CLIENT_VERSION,
             CODEX_CLIENT_VERSION
         ));
         assert!(!is_newer_official_release(
-            "0.155.0-alpha.3.7",
+            "0.161.0-alpha.1",
             CODEX_CLIENT_VERSION
         ));
         assert!(!is_newer_official_release(
