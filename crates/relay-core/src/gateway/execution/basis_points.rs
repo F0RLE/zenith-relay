@@ -19,8 +19,6 @@ mod prepare;
 mod response;
 
 pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};
-
-pub(in crate::gateway::execution) use history::drop_foreign_encrypted_context;
 #[cfg(test)]
 pub(in crate::gateway::execution) use prepare::{add_tool_relay_retry_hint, prepare_request};
 pub(in crate::gateway::execution) use prepare::{prepare_upstream, take_tool_relay_retry};

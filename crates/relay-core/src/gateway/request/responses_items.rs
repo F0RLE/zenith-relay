@@ -16,6 +16,15 @@ pub(in crate::gateway) fn contains_tool_call_output(value: &Value) -> bool {
     found
 }
 
+/// Whether a Responses item contains a non-empty encrypted payload.
+pub(in crate::gateway) fn responses_item_has_ciphertext(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        None | Some(Value::Null) => false,
+        Some(_) => true,
+    }
+}
+
 /// Returns the stable ids carried by Responses tool outputs. These ids are
 /// stateful when the matching call is not included in the same request: the
 /// provider that emitted the call is then the only safe owner.

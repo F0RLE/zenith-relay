@@ -18,7 +18,8 @@ use super::super::{
     ContinuationReset, ResponsesItemPrefixRepairs,
 };
 use crate::error_codes;
-use crate::runtime::{AccountTransport, AuthenticatedKey, CandidateLease, ExecutorRoute};
+use crate::gateway::request::AccountEndpoint;
+use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorRoute};
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
 use crate::{ErrorOrigin, GatewayRuntime};
 use axum::body::Body;
@@ -35,6 +36,7 @@ pub(super) enum AccountStatusFailure {
 pub(super) struct AccountStatusFailureInput<'a> {
     pub(super) status: StatusCode,
     pub(super) bytes: Vec<u8>,
+    pub(super) endpoint: AccountEndpoint,
     pub(super) response_headers: &'a HeaderMap,
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) lease: &'a CandidateLease,
@@ -175,14 +177,18 @@ fn repair_classified_account_failure(
         let request = &mut *input.request;
         let tried = &mut *input.tried;
         let candidate_id = input.route.candidate_id.as_str();
-        if input.route.account_transport == AccountTransport::ExcelBasisPoints
+        let supports_responses_history = matches!(
+            input.endpoint,
+            AccountEndpoint::Compact | AccountEndpoint::Wake
+        );
+        if supports_responses_history
             && repair_once(
                 &mut input.repairs.encrypted_context,
                 classified.failure.category == error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
                 tried,
                 candidate_id,
                 input.lease,
-                || super::super::basis_points::drop_foreign_encrypted_context(request),
+                || super::drop_rejected_encrypted_context(request),
             )
         {
             emit_usage(input.runtime, classified.event.clone());

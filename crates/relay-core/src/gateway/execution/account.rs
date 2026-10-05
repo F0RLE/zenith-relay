@@ -1,4 +1,9 @@
+//! Account-only request execution for Responses, compact, search, and wake.
+//! Account-specific encrypted-history recovery lives in `encrypted_context`;
+//! the Basis Points transport adapter remains isolated in `basis_points`.
+
 mod dispatch;
+mod encrypted_context;
 mod failure;
 mod prepare;
 mod selection;
@@ -34,6 +39,8 @@ use selection::{handle_account_selection_miss, AccountSelectionMiss, AccountSele
 use serde_json::Value;
 use std::sync::Arc;
 use success::{complete_account_response, AccountSuccess, AccountSuccessInput};
+
+pub(in crate::gateway::execution) use encrypted_context::drop_rejected_encrypted_context;
 
 pub(in crate::gateway) struct AccountExecution {
     pub(in crate::gateway) runtime: Arc<GatewayRuntime>,
@@ -309,6 +316,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             match handle_account_status_failure(AccountStatusFailureInput {
                 status,
                 bytes,
+                endpoint,
                 response_headers: &response_headers,
                 runtime: &runtime,
                 lease: &lease,

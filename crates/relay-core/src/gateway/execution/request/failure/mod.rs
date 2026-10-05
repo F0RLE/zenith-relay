@@ -28,7 +28,7 @@ pub(super) struct UpstreamFailureInput<'a> {
 
 /// Fields that survive from the failed attempt into repair and settlement.
 pub(super) struct RejectionCarry<'a> {
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) has_previous_response_id: bool,
@@ -90,7 +90,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         started,
         carry:
             RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
@@ -129,11 +129,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         None,
         started.elapsed().as_millis() as u64,
     );
-    let bytes = match crate::transport::collect_limited(
-        upstream,
-        crate::runtime::MAX_NON_STREAM_BODY_BYTES,
-    )
-    .await
+    let bytes = match crate::transport::collect(upstream).await
     {
         Ok(bytes) => bytes,
         Err(_) if retryable_status(status, has_previous_response_id) => {
@@ -154,10 +150,10 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
             *last_failure_origin = selected_error_origin;
             return FailureStep::Continue;
         }
-        Err(error) => {
+        Err(_) => {
             lease.settle_rotation_unknown(now_ms());
             return FailureStep::Respond(upstream_body_error_response(
-                runtime, event, started, error,
+                runtime, event, started,
             ));
         }
     };
@@ -172,7 +168,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         request_id,
         key,
         carry: RejectionCarry {
-            wire_api,
+            client_wire_api,
             request,
             adapter_is_passthrough,
             has_previous_response_id,

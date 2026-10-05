@@ -22,7 +22,7 @@ pub(super) fn repair_collected_rejection(
         key,
         carry:
             super::RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
@@ -62,7 +62,7 @@ pub(super) fn repair_collected_rejection(
     } = repairs;
     if try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
         request,
-        wire_api,
+        client_wire_api,
         adapter_is_passthrough,
         upstream_rejected_tool_links: status.is_client_error()
             && responses_tool_call_links_rejected(&bytes),
@@ -75,7 +75,7 @@ pub(super) fn repair_collected_rejection(
         lease.settle_rotation_repair(now_ms());
         return AfterRepair::Step(FailureStep::Continue);
     }
-    if wire_api == WireApi::Responses
+    if client_wire_api == WireApi::Responses
         && adapter_is_passthrough
         && repair_responses_item_prefixes(
             request,
@@ -101,7 +101,7 @@ pub(super) fn repair_collected_rejection(
         crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
     event.upstream_error = Some(upstream_error.clone());
     event.error_category = Some(failure.category.to_string());
-    if wire_api == WireApi::Responses
+    if client_wire_api == WireApi::Responses
         && adapter_is_passthrough
         && has_previous_response_id
         && !*native_replay_attempted
@@ -139,7 +139,7 @@ pub(super) fn repair_collected_rejection(
             }
         }
     }
-    if wire_api == WireApi::Responses
+    if client_wire_api == WireApi::Responses
         && has_previous_response_id
         && responses_tool_call_is_missing_output(&bytes)
         && recover_stale_tool_history(
@@ -164,7 +164,7 @@ pub(super) fn repair_collected_rejection(
         lease.settle_rotation_repair(now_ms());
         return AfterRepair::Step(FailureStep::Continue);
     }
-    if wire_api == WireApi::Responses
+    if client_wire_api == WireApi::Responses
         && allow_previous_response_reset
         && !*model_switch_reset_attempted
         && reset_materialized_continuation(
@@ -192,18 +192,18 @@ pub(super) fn repair_collected_rejection(
         lease.settle_rotation_repair(now_ms());
         return AfterRepair::Step(FailureStep::Continue);
     }
-    // Basis Points cannot decrypt reasoning or compaction ciphertext that
-    // belongs to another model or account. Drop those items and retry this
-    // candidate once. The first attempt already forwarded the ciphertext, so
-    // a real continuation on the same account is unchanged.
-    if route.account_transport == AccountTransport::ExcelBasisPoints
+    // Keep encrypted context intact for the first attempt. After a ChatGPT
+    // account explicitly rejects it, remove ciphertext-bearing Responses
+    // history and permit one pre-output retry; visible summaries remain.
+    if client_wire_api == WireApi::Responses
+        && route.account_id.is_some()
         && super::super::super::repair_once(
             encrypted_context_attempted,
             failure.category == error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
             tried,
             &route.candidate_id,
             lease,
-            || super::super::super::basis_points::drop_foreign_encrypted_context(request),
+            || super::super::super::account::drop_rejected_encrypted_context(request),
         )
     {
         emit_usage(runtime, event.clone());
@@ -223,7 +223,7 @@ pub(super) fn repair_collected_rejection(
             request_id,
             key,
             carry: super::RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,

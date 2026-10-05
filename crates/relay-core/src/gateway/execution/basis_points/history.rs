@@ -1,6 +1,7 @@
 use super::catalog::{client_tool_call_name, history_tool, tool_spec, ClientTool};
 use super::codec::{json_text, parse_function_arguments};
 use super::{is_transport_tool, TRANSPORT_TOOL};
+use crate::gateway::request::responses_item_has_ciphertext as has_item_ciphertext;
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
@@ -130,10 +131,9 @@ pub(super) fn translate_input_items(
                 }
             }
             "reasoning" => {
-                // Same-account continuity needs the ciphertext on the first
-                // attempt. A rejection drops the whole item: the ciphertext is
-                // bound to that item and cannot be edited safely. Visible
-                // summaries without ciphertext are still useful context.
+                // Preserve ciphertext on the first attempt for same-account
+                // continuity. Account recovery removes a rejected blob and its
+                // bound ID while retaining any visible summary.
                 if has_item_ciphertext(object.get("encrypted_content")) {
                     result.push(value);
                 } else if let Some(visible) = visible_item_without_ciphertext(object) {
@@ -147,43 +147,6 @@ pub(super) fn translate_input_items(
     }
     identifiers::limit_responses_identifiers(&mut result);
     Ok(result)
-}
-
-/// Remove reasoning and compaction items that carry ciphertext another model
-/// or account cannot decrypt. Visible messages, tool history and items without
-/// ciphertext stay. Returns whether the request changed.
-pub(in crate::gateway::execution) fn drop_foreign_encrypted_context(request: &mut Value) -> bool {
-    let Some(items) = request.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let before = items.len();
-    items.retain(|item| !is_foreign_encrypted_context(item));
-    items.len() != before
-}
-
-fn is_foreign_encrypted_context(item: &Value) -> bool {
-    let Some(object) = item.as_object() else {
-        return false;
-    };
-    if !has_item_ciphertext(object.get("encrypted_content")) {
-        return false;
-    }
-    let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
-    if matches!(kind, "reasoning" | "compaction" | "compaction_summary") {
-        return true;
-    }
-    object
-        .get("id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| id.starts_with("rs_") || id.starts_with("cmp_"))
-}
-
-pub(super) fn has_item_ciphertext(value: Option<&Value>) -> bool {
-    match value {
-        Some(Value::String(text)) => !text.trim().is_empty(),
-        None | Some(Value::Null) => false,
-        Some(_) => true,
-    }
 }
 
 /// Drop a ciphertext blob and the id bound to it. Visible summary text stays.
