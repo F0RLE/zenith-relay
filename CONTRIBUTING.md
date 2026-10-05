@@ -11,11 +11,12 @@ and the package manifests. AGPL grants permission to use, modify, and distribute
 the project; it does not transfer a contributor's copyright to the maintainer.
 Keep its standard license text intact.
 
-Before submitting a PR, read the [Contributor Agreement, version
-1.0](CONTRIBUTOR_LICENSE_AGREEMENT.md). It assigns copyright in your accepted,
-original Contribution to the Project Owner, `F0RLE`, and permits relicensing of
-rights the Project Owner actually receives. You retain a license to reuse your
-own Contribution. Existing AGPL grants and third-party licenses remain in force.
+Before submitting a PR, read the
+[Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). It assigns copyright
+in your accepted, original Contribution to the Project Owner, `F0RLE`, and
+permits relicensing of rights the Project Owner actually receives. You retain a
+license to reuse your own Contribution. Existing AGPL grants and third-party
+licenses remain in force.
 This agreement does not apply retroactively to earlier contributions or impose
 extra conditions on people who only use, distribute, or fork the project.
 
@@ -33,16 +34,16 @@ confirmation in comments under their own accounts. An authorized employer
 representative or a separate signed instrument may be needed. Do not publish
 private identity or employer documents in the PR.
 
-Use the agreement version in the PR's **base branch**, not changed terms
-proposed by that PR. Keep consent accurate when updating the PR. If the
-agreement version changes, read it and give fresh consent before acceptance.
+Use the agreement text in the PR's **base branch**, not changed terms proposed
+by that PR. Keep consent accurate when updating the PR. If the base-branch
+agreement changes, read the updated text and give fresh consent before acceptance.
 To withdraw consent before acceptance, say so explicitly in the PR and clear
 the checkbox.
 
 The `Release context` check validates the template and confirmation. It does
 not verify legal identity, employer authority, or co-author consent. Before
-acceptance, the maintainer must review those records and retain the accepted
-commits, agreement version, and consent. Complete any legally required separate
+acceptance, the maintainer must review those records and retain the agreement
+text, accepted commits, and consent. Complete any legally required separate
 signature or identity formalities privately before accepting the Contribution.
 
 Only dependency maintenance PRs from GitHub's `dependabot[bot]` that touch
@@ -299,12 +300,12 @@ before making the check required. If an Actions event policy blocks
 before relying on the check. Do not enable unreviewed workflows or broaden token
 permissions as a workaround.
 
-Policy changes use the agreement currently in the base branch and must not use
-their proposed wording to authorize themselves. Keep the template's agreement
-link pointed at the reviewed version in the designated development/release
-branch. When changing that link or agreement terms, update the template,
-validator, and tests together; terms changes also require a new version and
-fresh consent on open PRs. Update those PRs against the new base before merging.
+Policy changes use the agreement text currently in the base branch and must not
+use their proposed wording to authorize themselves. Keep the template's
+agreement link pointed at the reviewed text in the designated development or
+release branch. When changing that link or agreement terms, update the template,
+validator, and tests together; changes require fresh consent on open PRs. Update
+those PRs against the new base before merging.
 
 ### Updater changelog for release admins
 

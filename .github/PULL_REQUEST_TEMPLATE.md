@@ -2,7 +2,7 @@
 
 <!-- Read the linked agreement, then check this box yourself. Keep the wording unchanged. -->
 
-- [ ] I have read and agree to the [Contributor Agreement v1.0](https://github.com/F0RLE/zenith-relay/blob/release/1.1.3/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.
+- [ ] I have read and agree to the [Contributor Agreement](https://github.com/F0RLE/zenith-relay/blob/main/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.
 
 <!-- Only if applicable: list co-authors, employer-owned or pre-existing material, third-party sources/licenses, and their consent below. Otherwise leave this blank. Keep private identity and employer documents out of the PR. -->
 

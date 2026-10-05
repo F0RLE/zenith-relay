@@ -1,4 +1,4 @@
-const agreementConfirmation = "I have read and agree to the [Contributor Agreement v1.0](https://github.com/F0RLE/zenith-relay/blob/release/1.1.3/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.";
+const agreementConfirmation = "I have read and agree to the [Contributor Agreement](https://github.com/F0RLE/zenith-relay/blob/main/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.";
 
 const requiredHeadings = [
   "Contributor Agreement",

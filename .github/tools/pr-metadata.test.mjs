@@ -7,6 +7,7 @@ const completed = template
   .replaceAll("- [ ] I ", "- [x] I ")
   .replace("- [ ] No release note", "- [x] No release note");
 const confirmations = completed.split(/\r?\n/).filter((line) => line.startsWith("- [x] I "));
+const agreementConfirmation = confirmations[0];
 const human = { type: "User", login: "example-contributor" };
 const check = (body = completed) => validatePullRequest({ user: human, body }).errors;
 
@@ -26,11 +27,11 @@ describe("contributor consent", () => {
   });
 
   test.each([
-    "Contributor Agreement v0.9",
-    "Contributor Agreement v2.0",
-    "Contributor Agreement v1.0 except its copyright assignment",
-  ])("a changed agreement or version does not pass: %s", (agreement) => {
-    expect(check(completed.replace("Contributor Agreement v1.0", agreement)).length).toBeGreaterThan(0);
+    "Earlier Contributor Agreement",
+    "Alternate Contributor Agreement",
+  ])("a different agreement title does not pass: %s", (agreement) => {
+    const changed = agreementConfirmation.replace("[Contributor Agreement]", `[${agreement}]`);
+    expect(check(completed.replace(agreementConfirmation, changed)).length).toBeGreaterThan(0);
   });
 
   test.each([
@@ -57,7 +58,7 @@ describe("contributor consent", () => {
 
   test("the old three-checkbox template is not mistaken for the new confirmation", () => {
     const oldConfirmations = [
-      "- [x] I have read and agree to Contributor Agreement v1.0 (CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment.",
+      "- [x] I have read and agree to Contributor Agreement (CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment.",
       "- [x] I assign the copyright I own in this PR's original contributions to F0RLE upon acceptance under that agreement.",
       "- [x] I have authority to make this assignment and have disclosed all co-authored, employer-owned, pre-existing, and third-party material.",
     ].join("\n");
