@@ -5,7 +5,10 @@ use super::codec::{
 };
 use super::history::translate_input_items;
 use super::response::has_encrypted_agent_message;
-use super::{FUNCTION_RELAY_ENCODING, TRANSPORT_RETRY_HINT, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
+use super::{
+    is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_RETRY_HINT, TRANSPORT_TOOL,
+    TRANSPORT_TOOL_ALIAS,
+};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
@@ -356,6 +359,9 @@ pub(in crate::gateway::execution) fn prepare_request(
     }
     validate_text_format(object.get("text"))?;
     let all_tools = client_tools(request);
+    if all_tools.iter().any(|tool| is_transport_tool(&tool.key())) {
+        return Err(AdapterError::invalid_request().with_parameter("tools"));
+    }
     let callable = selected_tools(request, &all_tools);
     let tool_choice_requires_call = requires_tool_call(object.get("tool_choice"));
     if tool_choice_requires_call && callable.is_empty() {

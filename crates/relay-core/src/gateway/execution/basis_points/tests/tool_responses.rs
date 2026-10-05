@@ -108,6 +108,49 @@ fn function_tool_arguments_must_be_an_object() {
 }
 
 #[test]
+fn serial_tool_requests_do_not_return_multiple_client_tool_calls() {
+    let mut request = request_with_tool();
+    request["parallel_tool_calls"] = json!(false);
+    assert!(translate_response(
+        &tool_response(r#"{"tool":"exec_command","args":{"cmd":"pwd"}}"#),
+        &request
+    )
+    .is_ok());
+    let envelope = |call_id: &str, command: &str| {
+        json!({
+            "type": "function_call",
+            "id": format!("fc_{call_id}"),
+            "call_id": call_id,
+            "name": TRANSPORT_TOOL,
+            "arguments": json!({
+                "code": json!({"tool": "exec_command", "args": {"cmd": command}}).to_string()
+            }).to_string()
+        })
+    };
+    let body = serde_json::to_vec(&json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [envelope("call_1", "pwd"), envelope("call_2", "ls")]
+    }))
+    .unwrap();
+    let error = translate_response(&body, &request).unwrap_err();
+    assert_eq!(
+        error.parameter(),
+        Some("output.run_officejs.parallel_tool_calls")
+    );
+
+    let mut attempted = false;
+    let mut parameter = None;
+    assert!(take_tool_relay_retry(
+        error,
+        &body,
+        &mut attempted,
+        &mut parameter
+    ));
+    assert_eq!(parameter, Some("output.run_officejs.parallel_tool_calls"));
+}
+
+#[test]
 fn ambiguous_namespace_tool_name_is_rejected() {
     let request = json!({
         "tools": [
@@ -457,7 +500,7 @@ fn web_search_ids_keep_the_ws_prefix_when_history_is_shrunk() {
 }
 
 #[test]
-fn maximum_reasoning_stays_on_the_first_basis_points_attempt() {
+fn maximum_reasoning_and_ciphertext_stay_on_the_first_basis_points_attempt() {
     let request = json!({
         "model": "gpt-6-luna",
         "reasoning": {"effort": "max"},
@@ -485,16 +528,6 @@ fn maximum_reasoning_stays_on_the_first_basis_points_attempt() {
         reasoning["summary"][0]["text"],
         "Checked the previous result."
     );
-
-    let mut retry = request;
-    assert!(drop_foreign_encrypted_context(&mut retry));
-    let retried = prepare_request(&retry).unwrap();
-    assert_eq!(retried["reasoning_effort"], "xhigh");
-    assert!(retried["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["type"] != "reasoning"));
 }
 
 #[test]

@@ -167,14 +167,20 @@ pub(in crate::gateway::execution) fn translate_response(
     if requires_tool_call(request.get("tool_choice")) && call_ids.is_empty() {
         return Err(invalid_tool_output("output.tool_call"));
     }
+    if request.get("parallel_tool_calls") == Some(&Value::Bool(false)) && call_ids.len() > 1 {
+        // The upstream transport cannot enforce this Responses option in its
+        // strict request body. Do not return a successful response that breaks
+        // the client's serial tool contract; the bounded relay retry can ask
+        // the model to regenerate it once.
+        return Err(invalid_tool_output(
+            "output.run_officejs.parallel_tool_calls",
+        ));
+    }
     serde_json::to_vec(&response).map_err(|_| AdapterError::upstream_response_invalid())
 }
 
 pub(super) fn has_encrypted_agent_message(input: Option<&Value>) -> bool {
-    let Some(items) = input.and_then(Value::as_array) else {
-        return false;
-    };
-    items.iter().any(|item| {
+    let is_encrypted_agent_message = |item: &Value| {
         item.get("type").and_then(Value::as_str) == Some("agent_message")
             && item
                 .get("content")
@@ -184,7 +190,12 @@ pub(super) fn has_encrypted_agent_message(input: Option<&Value>) -> bool {
                         part.get("type").and_then(Value::as_str) == Some("encrypted_content")
                     })
                 })
-    })
+    };
+    match input {
+        Some(Value::Array(items)) => items.iter().any(is_encrypted_agent_message),
+        Some(Value::Object(_)) => input.is_some_and(is_encrypted_agent_message),
+        _ => false,
+    }
 }
 
 mod stream;

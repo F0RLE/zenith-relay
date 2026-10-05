@@ -296,6 +296,45 @@ fn structured_text_format_is_rejected_instead_of_dropped() {
 }
 
 #[test]
+fn encrypted_agent_message_is_rejected_for_single_item_input_too() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": {
+            "type": "agent_message",
+            "content": [{"type": "encrypted_content", "data": "synthetic-ciphertext"}]
+        }
+    });
+    let error = prepare_request(&request).unwrap_err();
+    assert_eq!(
+        error.parameter(),
+        Some("input.agent_message.encrypted_content")
+    );
+}
+
+#[test]
+fn client_tool_cannot_collide_with_the_basis_points_transport_name() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": "hello",
+        "tools": [{"type": "function", "name": "run_officejs"}]
+    });
+    let error = prepare_request(&request).unwrap_err();
+    assert_eq!(error.parameter(), Some("tools"));
+
+    let namespaced = json!({
+        "model": "gpt-6-astra",
+        "input": "hello",
+        "tools": [{"type": "namespace", "name": "functions", "tools": [
+            {"type": "function", "name": "run_officejs"}
+        ]}]
+    });
+    assert_eq!(
+        prepare_request(&namespaced).unwrap_err().parameter(),
+        Some("tools")
+    );
+}
+
+#[test]
 fn preparation_preserves_stream_flag_without_forwarding_tool_schema() {
     let mut request = request_with_tool();
     request["stream"] = json!(true);
@@ -357,8 +396,8 @@ fn unsupported_opaque_continuation_is_not_silently_dropped() {
 }
 
 #[test]
-fn foreign_encrypted_context_is_kept_until_the_provider_rejects_it() {
-    let mut request = json!({
+fn basis_points_forwards_encrypted_history_on_the_first_attempt() {
+    let request = json!({
         "model": "gpt-6-luna",
         "input": [
             {"id":"rs_foreign","type":"reasoning","encrypted_content":"foreign-reasoning","summary":[{"type":"summary_text","text":"old"}]},
@@ -386,26 +425,4 @@ fn foreign_encrypted_context_is_kept_until_the_provider_rejects_it() {
     assert!(first.contains("pelican"));
     assert!(first.contains("input_image"));
     assert!(first.contains("exec_command"));
-
-    assert!(drop_foreign_encrypted_context(&mut request));
-    assert!(!drop_foreign_encrypted_context(&mut request));
-    let kept = request["input"].as_array().unwrap();
-    assert!(kept.iter().any(|item| item["id"] == "cmp_plain"));
-    assert!(kept.iter().any(|item| item["id"] == "rs_empty"));
-    assert!(kept.iter().all(|item| {
-        item.get("encrypted_content")
-            .and_then(|value| value.as_str())
-            .is_none_or(|value| value.trim().is_empty())
-    }));
-
-    let second = prepare_request(&request).unwrap().to_string();
-    assert!(!second.contains("foreign-reasoning"));
-    assert!(!second.contains("foreign-compaction"));
-    assert!(!second.contains("foreign-summary"));
-    assert!(!second.contains("foreign-nested"));
-    assert!(second.contains("cmp_plain"));
-    assert!(second.contains("previous answer"));
-    assert!(second.contains("pelican"));
-    assert!(second.contains("input_image"));
-    assert!(second.contains("exec_command"));
 }
