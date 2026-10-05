@@ -64,8 +64,10 @@ impl Default for AdmissionLimits {
         Self {
             requests: 1024,
             principal_requests: 256,
-            bytes: 256 * 1024 * 1024,
-            principal_bytes: 128 * 1024 * 1024,
+            // Waiter counts stay bounded. Body size is not a reason to refuse
+            // the request; the provider makes that decision.
+            bytes: usize::MAX,
+            principal_bytes: usize::MAX,
         }
     }
 }

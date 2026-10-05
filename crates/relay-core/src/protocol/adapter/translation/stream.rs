@@ -8,9 +8,6 @@ mod messages;
 mod output;
 mod responses;
 
-const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TRANSCRIPT_BYTES: usize = 64 * 1024 * 1024;
-
 #[derive(Debug)]
 pub struct TranslationStream {
     request: TranslationRequest,
@@ -26,7 +23,6 @@ pub struct TranslationStream {
     terminal: bool,
     completed: Option<MessagesBridgeResponse>,
     upstream_error: Option<Value>,
-    received: usize,
     sequence: u64,
 }
 
@@ -52,20 +48,12 @@ impl TranslationStream {
             terminal: false,
             completed: None,
             upstream_error: None,
-            received: 0,
             sequence: 0,
         }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
         if self.terminal {
-            return;
-        }
-        self.received = self.received.saturating_add(bytes.len());
-        if self.pending.len().saturating_add(bytes.len()) > MAX_EVENT_BYTES
-            || self.received > MAX_TRANSCRIPT_BYTES
-        {
-            self.fail();
             return;
         }
         self.pending = crate::protocol::push_pending_sse_frames(

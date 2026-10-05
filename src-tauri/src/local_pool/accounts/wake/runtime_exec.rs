@@ -82,9 +82,6 @@ fn runtime_status_failure(
         Some(error_codes::MODEL_NOT_FOUND | error_codes::INVALID_REQUEST) => {
             (WakeExecutionErrorCode::InvalidRequest, false)
         }
-        Some(error_codes::UPSTREAM_BODY_TOO_LARGE) => {
-            (WakeExecutionErrorCode::ResponseTooLarge, false)
-        }
         _ => match status {
             reqwest::StatusCode::UNAUTHORIZED => (WakeExecutionErrorCode::Unauthorized, false),
             reqwest::StatusCode::FORBIDDEN => (WakeExecutionErrorCode::Forbidden, false),

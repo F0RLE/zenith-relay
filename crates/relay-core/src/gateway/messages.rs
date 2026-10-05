@@ -15,11 +15,18 @@ pub(super) async fn native_messages_error_response(response: Response<Body>) -> 
         return response;
     }
     let (mut parts, body) = response.into_parts();
+    let origin = parts
+        .headers
+        .get("x-zenith-relay-error-origin")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(crate::ErrorOrigin::Relay);
     let message = axum::body::to_bytes(body, MAX_ERROR_MESSAGE_CHARS.saturating_mul(4))
         .await
         .ok()
         .and_then(|body| native_messages_error_message(&body))
-        .unwrap_or_else(|| "request failed".to_string());
+        .map(|message| origin.prefix_message(&message))
+        .unwrap_or_else(|| origin.prefix_message("request failed"));
     parts.headers.remove(CONTENT_LENGTH);
     // Relay accepts both Bearer and x-api-key locally, but a native Messages
     // client must not be told that only Bearer authentication is available.
@@ -83,7 +90,7 @@ mod tests {
         assert_eq!(body["error"]["type"], "rate_limit_error");
         assert_eq!(
             body["error"]["message"],
-            "all eligible sources are cooling down"
+            "Relay: all eligible sources are cooling down"
         );
         assert!(body["error"].get("code").is_none());
     }

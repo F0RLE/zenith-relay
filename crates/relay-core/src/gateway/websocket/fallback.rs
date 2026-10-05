@@ -135,6 +135,7 @@ async fn serve_http_fallback_request(
         .insert(super::super::execution::RoutedRequestIdentity {
             request_id: request.request_id.clone(),
             budget: request.budget.clone(),
+            transport: crate::UsageTransport::Websocket,
         });
     let response = await_while_client_connected(
         downstream,
@@ -168,9 +169,6 @@ async fn serve_http_fallback_request(
         let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
         pending.extend_from_slice(&chunk);
         while let Some(event) = crate::protocol::take_sse_event(&mut pending) {
-            if event.len() > MAX_SSE_EVENT_BYTES {
-                return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
-            }
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
                 return Err(GatewayFailure::transport(stream_origin));
@@ -192,12 +190,6 @@ async fn serve_http_fallback_request(
             if terminal.outcome.is_some() {
                 return Ok(());
             }
-        }
-        // Complete events have already been drained above. Only an incomplete
-        // tail counts against the per-event budget; one transport chunk may
-        // contain several complete events whose combined size is larger.
-        if pending.len() > MAX_SSE_EVENT_BYTES {
-            return Err(GatewayFailure::message_too_large(ErrorOrigin::Relay));
         }
     }
     Err(GatewayFailure::closed(stream_origin))
@@ -223,6 +215,7 @@ pub(super) fn fallback_event_message(
                 Ok(None)
             };
         };
+        prefix_fallback_error(&mut payload, terminal, origin);
         let Some(object) = payload.as_object_mut() else {
             return Err(GatewayFailure::transport(origin));
         };
@@ -260,7 +253,9 @@ pub(super) fn fallback_event_message(
     let Some(payload) = terminal.payload.as_ref() else {
         return Ok(None);
     };
-    let payload = serde_json::to_vec(payload).map_err(|_| GatewayFailure::transport(origin))?;
+    let mut payload = payload.clone();
+    prefix_fallback_error(&mut payload, terminal, origin);
+    let payload = serde_json::to_vec(&payload).map_err(|_| GatewayFailure::transport(origin))?;
     if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
         return Err(GatewayFailure::message_too_large(origin));
     }
@@ -270,6 +265,26 @@ pub(super) fn fallback_event_message(
         message: Message::Text(text.into()),
         semantic_output,
     }))
+}
+
+fn prefix_fallback_error(
+    payload: &mut Value,
+    terminal: &super::super::streaming::TerminalEvent,
+    origin: ErrorOrigin,
+) {
+    if !matches!(
+        terminal.outcome,
+        Some(
+            super::super::streaming::TerminalOutcome::Failure
+                | super::super::streaming::TerminalOutcome::Incomplete
+        )
+    ) {
+        return;
+    }
+    let category = terminal
+        .error_category
+        .unwrap_or(crate::error_codes::UPSTREAM_TERMINAL);
+    super::super::errors::prefix_error_value(payload, origin.for_category(category));
 }
 
 pub(super) const RELAY_ERROR_ORIGIN_HEADER: &str = "x-zenith-relay-error-origin";

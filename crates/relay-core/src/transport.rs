@@ -24,6 +24,15 @@ pub(crate) fn retry_after_ms(
     )
 }
 
+pub(crate) async fn collect(response: reqwest::Response) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        body.extend_from_slice(&chunk?);
+    }
+    Ok(body)
+}
+
 pub async fn collect_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     if response
         .content_length()

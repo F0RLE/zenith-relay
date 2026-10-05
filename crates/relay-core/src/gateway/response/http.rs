@@ -2,7 +2,7 @@ use super::super::errors::RateLimitBodyHint;
 use super::emit_usage;
 use crate::error_codes;
 use crate::runtime::ExecutorRoute;
-use crate::{Error, ErrorOrigin, GatewayRuntime, UsageEvent};
+use crate::{ErrorOrigin, GatewayRuntime, UsageEvent};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -15,30 +15,19 @@ pub(in crate::gateway) fn upstream_body_error_response(
     runtime: &GatewayRuntime,
     mut event: UsageEvent,
     started: Instant,
-    error: Error,
 ) -> Response<Body> {
     event.success = false;
     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-    let too_large = matches!(error, Error::UpstreamBodyTooLarge);
-    let category = if too_large {
-        error_codes::UPSTREAM_BODY_TOO_LARGE
-    } else {
-        error_codes::UPSTREAM_BODY
-    };
-    event.error_category = Some(category.to_string());
+    event.error_category = Some(error_codes::UPSTREAM_BODY.to_string());
     event.latency_ms = started.elapsed().as_millis() as u64;
     let origin = event.error_origin().unwrap_or(ErrorOrigin::Relay);
     let request_id = event.request_id.clone();
     emit_usage(runtime, event);
     super::super::errors::api_error_with_origin_and_category(
         StatusCode::BAD_GATEWAY,
-        if too_large {
-            "upstream response is too large"
-        } else {
-            "upstream response failed"
-        },
+        "upstream response failed",
         error_codes::UPSTREAM_ERROR,
-        category,
+        error_codes::UPSTREAM_BODY,
         origin,
         Some(&request_id),
     )
@@ -57,12 +46,14 @@ pub(in crate::gateway) fn proxy_response(
 pub(in crate::gateway) fn proxy_error_response(
     status: reqwest::StatusCode,
     upstream_headers: &reqwest::header::HeaderMap,
-    body: Body,
+    body: &[u8],
     origin: ErrorOrigin,
     category: &str,
     request_id: Option<&str>,
 ) -> Response<Body> {
-    let mut response = proxy_response(status, upstream_headers, body);
+    let origin = origin.for_category(category);
+    let body = super::super::errors::prefix_error_body(body, origin);
+    let mut response = proxy_response(status, upstream_headers, Body::from(body));
     attach_error_diagnostics(&mut response, origin, category, request_id);
     response
 }

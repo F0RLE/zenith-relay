@@ -37,7 +37,7 @@ pub(super) struct OpenStreamInput<'a> {
     pub(super) requested_model: String,
     pub(super) source_model: String,
     pub(super) prompt_affinity_key: Option<String>,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) tool_use: ToolUseDiagnostics,
     pub(super) attempt: u16,
@@ -76,7 +76,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
         requested_model,
         source_model,
         prompt_affinity_key,
-        wire_api,
+        client_wire_api,
         reasoning_effort,
         tool_use,
         attempt,
@@ -127,7 +127,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                     requested_model,
                     source_model,
                     prompt_affinity_key,
-                    wire_api,
+                    client_wire_api,
                     reasoning_effort,
                     tool_use,
                     attempt,
@@ -175,7 +175,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
             if safe_to_repair
                 && try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
                     request: &mut request,
-                    wire_api,
+                    client_wire_api,
                     adapter_is_passthrough,
                     upstream_rejected_tool_links: tool_links_rejected,
                     repair_attempted: legacy_call_id_repair_attempted,
@@ -194,7 +194,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                 ));
             }
             if safe_to_repair
-                && wire_api == WireApi::Responses
+                && client_wire_api == WireApi::Responses
                 && adapter_is_passthrough
                 && has_previous_response_id
                 && !*native_replay_attempted
@@ -236,7 +236,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                 }
             }
             if safe_to_repair
-                && wire_api == WireApi::Responses
+                && client_wire_api == WireApi::Responses
                 && has_previous_response_id
                 && missing_tool_output
                 && last_preserved_upstream_error.as_ref().is_some_and(|error| {

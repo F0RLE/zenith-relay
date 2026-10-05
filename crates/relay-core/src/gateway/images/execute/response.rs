@@ -5,7 +5,7 @@ use super::super::super::errors::{
 use super::super::super::now_ms;
 use super::super::super::response::{
     apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
-    proxy_sse_response,
+    proxy_sse_response, route_error_origin,
 };
 use super::super::account::{
     image_capability_unavailable, image_error_response, translate_account_response, ImageAttempt,
@@ -75,11 +75,16 @@ pub(super) fn handle_collected_image(
         populate_tokens(&mut event, &bytes);
         event.upstream_error = Some(upstream_error);
         emit_usage(runtime, event);
-        return ImageAttemptStep::Respond(proxy_response(
+        let origin = route_error_origin(route).for_category(failure.category);
+        let response = super::super::super::response::proxy_error_response(
             status,
             &response_headers,
-            Body::from(bytes),
-        ));
+            &bytes,
+            origin,
+            failure.category,
+            Some(observed.request_id),
+        );
+        return ImageAttemptStep::Respond(response);
     }
 
     if !account_route {
@@ -155,7 +160,11 @@ pub(super) fn handle_collected_image(
                 *details
             });
             emit_usage(runtime, event);
-            return ImageAttemptStep::Respond(image_error_response(failure));
+            return ImageAttemptStep::Respond(image_error_response(
+                failure,
+                route_error_origin(route),
+                observed.request_id,
+            ));
         }
     };
     let mut event = observed.event(true, status, None);

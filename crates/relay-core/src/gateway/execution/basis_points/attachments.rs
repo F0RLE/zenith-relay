@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FILE_ID_LEN: usize = 512;
 const MAX_ATTACHMENT_CACHE: usize = 512;
@@ -182,7 +181,7 @@ fn decode_inline_image(data_url: &str) -> Result<InlineImage, AttachmentFailure>
     } else {
         decoded
     };
-    if data.is_empty() || data.len() > MAX_IMAGE_BYTES {
+    if data.is_empty() {
         return Err(invalid_image("input_image data URL is invalid"));
     }
     let (media_type, filename) = sniff_image(&data)

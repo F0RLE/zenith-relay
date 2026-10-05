@@ -212,7 +212,7 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
     let mut status = upstream.status();
     let mut response_headers = upstream.headers().clone();
     let mut bytes =
-        match crate::transport::collect_limited(upstream, endpoint.response_limit()).await {
+        match crate::transport::collect(upstream).await {
             Ok(bytes) => bytes,
             Err(_) => {
                 return continue_after_unreadable_body(

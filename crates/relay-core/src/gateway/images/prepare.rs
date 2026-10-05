@@ -9,12 +9,9 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::stream;
-use multer::{Constraints, Multipart, SizeLimit};
+use multer::Multipart;
 use serde_json::{Map, Value};
 use std::io;
-
-const MAX_IMAGE_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_IMAGE_UPLOAD_BYTES: u64 = 20 * 1024 * 1024;
 
 #[expect(
     clippy::result_large_err,
@@ -27,15 +24,13 @@ pub(super) async fn prepare_request(
     body: Body,
     endpoint: ImageEndpoint,
 ) -> Result<PreparedImageRequest, Response<Body>> {
-    let raw_body = axum::body::to_bytes(body, MAX_IMAGE_REQUEST_BODY_BYTES)
-        .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "image request body exceeds 64 MiB",
-                error_codes::REQUEST_TOO_LARGE,
-            )
-        })?;
+    let raw_body = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "request body could not be read",
+            error_codes::INVALID_REQUEST,
+        )
+    })?;
     let content_type = headers
         .get(CONTENT_TYPE)
         .cloned()
@@ -190,12 +185,8 @@ pub(super) async fn parse_multipart(
             error_codes::INVALID_REQUEST,
         )
     })?;
-    let size_limit = SizeLimit::new()
-        .whole_stream(MAX_IMAGE_REQUEST_BODY_BYTES as u64)
-        .per_field(MAX_IMAGE_UPLOAD_BYTES);
-    let constraints = Constraints::new().size_limit(size_limit);
     let body = stream::once(async move { Ok::<Bytes, io::Error>(body) });
-    let mut multipart = Multipart::with_constraints(body, boundary, constraints);
+    let mut multipart = Multipart::new(body, boundary);
     let mut fields = Map::new();
     let mut images = Vec::new();
     let mut mask = None;
@@ -265,27 +256,11 @@ pub(super) async fn parse_multipart(
     Ok((fields, images, mask))
 }
 
-fn multipart_error(error: multer::Error) -> Response<Body> {
-    let too_large = matches!(
-        error,
-        multer::Error::FieldSizeExceeded { .. } | multer::Error::StreamSizeExceeded { .. }
-    );
+fn multipart_error(_error: multer::Error) -> Response<Body> {
     api_error(
-        if too_large {
-            StatusCode::PAYLOAD_TOO_LARGE
-        } else {
-            StatusCode::BAD_REQUEST
-        },
-        if too_large {
-            "multipart image upload is too large"
-        } else {
-            "multipart image upload is invalid"
-        },
-        if too_large {
-            error_codes::REQUEST_TOO_LARGE
-        } else {
-            error_codes::INVALID_REQUEST
-        },
+        StatusCode::BAD_REQUEST,
+        "multipart image upload is invalid",
+        error_codes::INVALID_REQUEST,
     )
 }
 

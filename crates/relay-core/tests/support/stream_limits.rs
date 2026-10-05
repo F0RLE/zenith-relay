@@ -43,7 +43,7 @@ async fn non_stream_response_and_usage_are_redacted() {
 }
 
 #[tokio::test]
-async fn large_client_requests_are_forwarded_with_a_bounded_limit() {
+async fn large_client_requests_are_forwarded() {
     let (upstream, state) = spawn_upstream().await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
 
@@ -59,65 +59,6 @@ async fn large_client_requests_are_forwarded_with_a_bounded_limit() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.requests.lock().unwrap().len(), 1);
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({
-            "model": "gpt-test",
-            "input": "x".repeat(MAX_CLIENT_REQUEST_BODY_BYTES),
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "request_too_large");
-    assert_eq!(state.requests.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn oversized_non_stream_response_is_rejected_and_recorded() {
-    let upstream = spawn(Router::new().route(
-        "/v1/responses",
-        post(|| async {
-            let chunks = stream::iter([
-                Ok::<_, Infallible>(Bytes::from(vec![b'x'; 8 * 1024 * 1024])),
-                Ok::<_, Infallible>(Bytes::from(vec![b'x'; 8 * 1024 * 1024 + 1])),
-            ]);
-            Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from_stream(chunks))
-                .unwrap()
-        }),
-    ))
-    .await;
-    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": "gpt-test", "input": "private prompt"}))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "upstream_error");
-    assert_eq!(body["error"]["message"], "upstream response is too large");
-    assert_eq!(
-        body["error"]["zenith_relay"]["category"],
-        "upstream_body_too_large"
-    );
-    let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(!events[0].success);
-    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_body_too_large")
-    );
 }
 
 #[tokio::test]

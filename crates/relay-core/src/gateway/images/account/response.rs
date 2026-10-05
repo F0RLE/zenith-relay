@@ -345,17 +345,17 @@ pub(in crate::gateway::images) fn image_capability_unavailable(bytes: &[u8]) -> 
         || text.contains(error_codes::IMAGE_GENERATION_NOT_ENABLED)
 }
 
-pub(in crate::gateway::images) fn image_error_response(failure: ImageFailure) -> Response<Body> {
-    (
+pub(in crate::gateway::images) fn image_error_response(
+    failure: ImageFailure,
+    origin: crate::ErrorOrigin,
+    request_id: &str,
+) -> Response<Body> {
+    super::super::super::errors::api_error_with_origin_and_category(
         failure.status,
-        Json(json!({
-            "error": {
-                "message": failure.message,
-                "type": api_error_type(failure.status, &failure.code),
-                "code": failure.code,
-                "param": null,
-            }
-        })),
+        &failure.message,
+        &failure.code,
+        failure.category,
+        origin,
+        Some(request_id),
     )
-        .into_response()
 }

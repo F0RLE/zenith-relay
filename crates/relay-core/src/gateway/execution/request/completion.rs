@@ -32,7 +32,7 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) status: StatusCode,
     pub(super) response_headers: &'a HeaderMap,
     pub(super) account_route: bool,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) repairs: &'a mut AttemptRepairs,
@@ -80,7 +80,7 @@ pub(super) async fn complete_buffered_response(
         status,
         response_headers,
         account_route,
-        wire_api,
+        client_wire_api,
         request,
         adapter_is_passthrough,
         repairs,
@@ -136,7 +136,7 @@ pub(super) async fn complete_buffered_response(
             request,
             response_headers,
             status,
-            wire_api,
+            client_wire_api,
             stream,
             account_route,
             response_affinity_hit,
@@ -260,7 +260,7 @@ pub(super) async fn complete_buffered_response(
             now_ms(),
         );
     }
-    if wire_api == WireApi::Responses {
+    if client_wire_api == WireApi::Responses {
         bind_responses_turn(
             runtime,
             &key.id,
@@ -340,7 +340,7 @@ struct CompletedBodyRead<'a> {
     request: &'a mut Value,
     response_headers: &'a HeaderMap,
     status: StatusCode,
-    wire_api: WireApi,
+    client_wire_api: WireApi,
     stream: bool,
     account_route: bool,
     response_affinity_hit: bool,
@@ -377,7 +377,7 @@ async fn read_completed_body(
             *read.last_preserved_upstream_error = upstream_failure.preserved;
             let state = if matches!(
                 failure.category,
-                error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE
+                error_codes::UPSTREAM_BODY
             ) {
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
@@ -399,7 +399,7 @@ async fn read_completed_body(
                 details.http_status = Some(read.status.as_u16());
                 details
             });
-            if read.wire_api == WireApi::Responses
+            if read.client_wire_api == WireApi::Responses
                 && failure.execution.certainty == ExecutionCertainty::NotSent
                 && read.response_affinity_hit
                 && read.has_previous_response_id

@@ -1,5 +1,4 @@
 use super::errors::api_error;
-use super::request::{MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR};
 use crate::error_codes;
 use axum::body::Body;
 use axum::http::{header::CONTENT_ENCODING, HeaderMap, Response, StatusCode};
@@ -41,12 +40,11 @@ fn retained_value_bytes(value: &Value) -> usize {
 
 #[derive(Debug, PartialEq)]
 enum ReadError {
-    TooLarge,
     InvalidEncoding,
 }
 
-fn decode(bytes: &[u8], encoding: &str, limit: usize) -> Result<Vec<u8>, ReadError> {
-    let reader: Box<dyn Read + '_> = match encoding {
+fn decode(bytes: &[u8], encoding: &str) -> Result<Vec<u8>, ReadError> {
+    let mut reader: Box<dyn Read + '_> = match encoding {
         "gzip" => Box::new(flate2::read::MultiGzDecoder::new(bytes)),
         "zstd" => {
             let mut decoder =
@@ -60,12 +58,8 @@ fn decode(bytes: &[u8], encoding: &str, limit: usize) -> Result<Vec<u8>, ReadErr
     };
     let mut output = Vec::new();
     reader
-        .take(limit as u64 + 1)
         .read_to_end(&mut output)
         .map_err(|_| ReadError::InvalidEncoding)?;
-    if output.len() > limit {
-        return Err(ReadError::TooLarge);
-    }
     Ok(output)
 }
 
@@ -86,22 +80,17 @@ pub(super) async fn read_json_object(
             error_codes::REQUEST_ENCODING_UNSUPPORTED,
         )));
     }
-    let bytes = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES)
+    let bytes = axum::body::to_bytes(body, usize::MAX)
         .await
-        .map_err(|_| Box::new(too_large()))?;
+        .map_err(|_| Box::new(unread_body()))?;
     let bytes = if encoding == "identity" {
         bytes
     } else {
-        tokio::task::spawn_blocking(move || {
-            decode(&bytes, &encoding, MAX_CLIENT_REQUEST_BODY_BYTES)
-        })
-        .await
-        .map_err(|_| Box::new(invalid_encoding()))?
-        .map_err(|error| match error {
-            ReadError::TooLarge => Box::new(too_large()),
-            ReadError::InvalidEncoding => Box::new(invalid_encoding()),
-        })?
-        .into()
+        tokio::task::spawn_blocking(move || decode(&bytes, &encoding))
+            .await
+            .map_err(|_| Box::new(invalid_encoding()))?
+            .map_err(|_| Box::new(invalid_encoding()))?
+            .into()
     };
     match serde_json::from_slice(&bytes) {
         Ok(Value::Object(object)) => Ok(object),
@@ -113,11 +102,11 @@ pub(super) async fn read_json_object(
     }
 }
 
-fn too_large() -> Response<Body> {
+fn unread_body() -> Response<Body> {
     api_error(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        MAX_CLIENT_REQUEST_BODY_ERROR,
-        error_codes::REQUEST_TOO_LARGE,
+        StatusCode::BAD_REQUEST,
+        "request body could not be read",
+        error_codes::INVALID_REQUEST,
     )
 }
 
@@ -135,7 +124,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn compression_is_bounded_and_truncated_streams_are_rejected() {
+    fn truncated_compressed_streams_are_rejected() {
         let input = br#"{"model":"synthetic","input":"hello"}"#;
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gzip.write_all(input).unwrap();
@@ -146,10 +135,9 @@ mod tests {
                 zstd::stream::encode_all(input.as_slice(), 1).unwrap(),
             ),
         ] {
-            assert_eq!(decode(&bytes, encoding, input.len()).unwrap(), input);
-            assert_eq!(decode(&bytes, encoding, 8), Err(ReadError::TooLarge));
+            assert_eq!(decode(&bytes, encoding).unwrap(), input);
             assert_eq!(
-                decode(&bytes[..bytes.len() - 2], encoding, 100),
+                decode(&bytes[..bytes.len() - 2], encoding),
                 Err(ReadError::InvalidEncoding)
             );
         }

@@ -1,5 +1,5 @@
 use super::errors::AttemptFailure;
-use super::request::{codex_client_version, MAX_CLIENT_REQUEST_BODY_BYTES};
+use super::request::codex_client_version;
 use super::streaming::{parse_sse_event, NativeReplayCapture, TerminalOutcome};
 use crate::error_codes;
 use crate::protocol::{ensure_compaction_trigger, sse_event_end};
@@ -51,9 +51,6 @@ fn request_body(request: &Value) -> Result<Vec<u8>, AttemptFailure> {
         .entry("include")
         .or_insert(json!(["reasoning.encrypted_content"]));
     let bytes = serde_json::to_vec(&request).map_err(|_| AttemptFailure::invalid_request())?;
-    if bytes.len() > MAX_CLIENT_REQUEST_BODY_BYTES {
-        return Err(AttemptFailure::invalid_request());
-    }
     Ok(bytes)
 }
 
@@ -211,7 +208,7 @@ pub(super) async fn execute(
     let status = response.status();
     let mut headers = response.headers().clone();
     let bytes =
-        crate::transport::collect_limited(response, crate::runtime::MAX_NON_STREAM_BODY_BYTES)
+        crate::transport::collect(response)
             .await
             .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
     if !status.is_success() {

@@ -30,7 +30,7 @@ pub(super) fn inline_local_refs(value: &mut Value) {
 }
 
 // Account for strings, keys and tree nodes before cloning a referenced subtree.
-// A small DAG can otherwise expand exponentially despite the HTTP body limit.
+// A small DAG can otherwise expand exponentially.
 fn charge(value: &Value, remaining: &mut usize) -> bool {
     let cost = std::mem::size_of::<Value>() + value.as_str().map_or(0, str::len);
     let Some(left) = remaining.checked_sub(cost) else {

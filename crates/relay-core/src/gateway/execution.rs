@@ -69,7 +69,7 @@ pub(super) struct AttemptRepairs {
     pub(super) model_switch_reset: bool,
     pub(super) stale_tool_history: bool,
     pub(super) quota_yield: bool,
-    /// Basis Points rejected ciphertext from another model or account.
+    /// An account rejected encrypted Responses history and received one cleanup retry.
     pub(super) encrypted_context: bool,
 }
 
@@ -258,6 +258,7 @@ pub(super) fn finish_request_failure(input: RequestFailureInput<'_>) -> Response
                 retry_at,
                 Some(&failure),
                 reason == crate::scheduler::CooldownReason::RateLimit,
+                failure_origin,
             );
         }
     }
@@ -285,7 +286,7 @@ pub(super) fn attempt_error_response(
         );
     }
     let code = match failure.category {
-        error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE => {
+        error_codes::UPSTREAM_BODY => {
             error_codes::UPSTREAM_ERROR
         }
         _ => {

@@ -172,7 +172,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message: match category {
-                error_codes::UPSTREAM_BODY_TOO_LARGE => "upstream response is too large",
                 error_codes::UPSTREAM_BODY => "upstream response failed",
                 _ => "upstream stream failed before client output",
             },

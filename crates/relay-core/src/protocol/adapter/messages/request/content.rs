@@ -170,8 +170,6 @@ fn content_to_messages_blocks(content: &Value) -> AdapterResult<Vec<Value>> {
     }
 }
 
-const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
-
 const SUPPORTED_IMAGE_TYPES: &[&str] = &["image/gif", "image/jpeg", "image/png", "image/webp"];
 
 fn image_block_from_data_uri(data_uri: &str) -> AdapterResult<Value> {
@@ -197,16 +195,13 @@ fn image_block_from_data_uri(data_uri: &str) -> AdapterResult<Value> {
         return Err(AdapterError::invalid_request());
     }
     let data = data.trim();
-    if data.is_empty()
-        || data.bytes().any(|byte| byte.is_ascii_whitespace())
-        || data.len() > (MAX_IMAGE_BYTES * 4 / 3).saturating_add(4)
-    {
+    if data.is_empty() || data.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return Err(AdapterError::invalid_request());
     }
     let decoded = STANDARD
         .decode(data)
         .map_err(|_| AdapterError::invalid_request())?;
-    if decoded.is_empty() || decoded.len() > MAX_IMAGE_BYTES {
+    if decoded.is_empty() {
         return Err(AdapterError::invalid_request());
     }
 

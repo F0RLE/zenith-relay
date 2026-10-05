@@ -68,16 +68,6 @@ pub(in crate::gateway) async fn bootstrap_stream(
     loop {
         match stream.next().await {
             Some(Ok(chunk)) => {
-                if chunk.len() > super::MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
-                }
-                // Bootstrap may contain a large Responses setup event before the
-                // first visible delta. Keep the same bounded budget as the
-                // regular SSE parser instead of rejecting valid upstream data
-                // at the old 256 KiB bootstrap threshold.
-                if buffered.len().saturating_add(chunk.len()) > super::MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
-                }
                 buffered.extend_from_slice(&chunk);
                 let mut ready_to_forward = false;
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {

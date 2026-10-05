@@ -55,29 +55,13 @@ pub(in crate::gateway) async fn collect_upstream_response(
             };
             let chunk =
                 chunk.map_err(|error| Box::new(AttemptFailure::transport(&error).into()))?;
-            if bytes.len().saturating_add(chunk.len()) > crate::runtime::MAX_NON_STREAM_BODY_BYTES {
-                return Err(Box::new(
-                    AttemptFailure::stream(error_codes::UPSTREAM_BODY_TOO_LARGE).into(),
-                ));
-            }
             bytes.extend_from_slice(&chunk);
         }
         bytes
     } else {
-        crate::transport::collect_limited(upstream, crate::runtime::MAX_NON_STREAM_BODY_BYTES)
+        crate::transport::collect(upstream)
             .await
-            .map_err(|error| {
-                Box::new(
-                    AttemptFailure::stream(
-                        if matches!(error, crate::Error::UpstreamBodyTooLarge) {
-                            error_codes::UPSTREAM_BODY_TOO_LARGE
-                        } else {
-                            error_codes::UPSTREAM_BODY
-                        },
-                    )
-                    .into(),
-                )
-            })?
+            .map_err(|_| Box::new(AttemptFailure::stream(error_codes::UPSTREAM_BODY).into()))?
     };
     completed_upstream_response(&bytes, account_stream, expected_model)
 }

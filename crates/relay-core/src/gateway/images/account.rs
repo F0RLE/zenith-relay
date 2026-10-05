@@ -1,7 +1,6 @@
 use super::super::errors::{
-    api_error_type, canonical_upstream_status, classify_upstream_error_value,
-    rate_limit_body_hint_value, retryable_failure, upstream_failure_status,
-    upstream_status_from_value, RateLimitBodyHint,
+    canonical_upstream_status, classify_upstream_error_value, rate_limit_body_hint_value,
+    retryable_failure, upstream_failure_status, upstream_status_from_value, RateLimitBodyHint,
 };
 use super::super::now_ms;
 use super::super::response::{usage_event, UsageAttempt};
@@ -18,8 +17,6 @@ use crate::runtime::{AuthenticatedKey, ExecutorRoute};
 use crate::UsageEvent;
 use axum::body::Body;
 use axum::http::{Response, StatusCode};
-use axum::response::IntoResponse;
-use axum::Json;
 use serde_json::{json, Map, Value};
 use std::time::{Instant, SystemTime};
 
@@ -57,17 +54,23 @@ impl ImageAttempt<'_> {
     }
 }
 
-pub(super) fn direct_request_body(request: &PreparedImageRequest) -> Vec<u8> {
+pub(super) fn direct_request_body(request: &PreparedImageRequest, source_model: &str) -> Vec<u8> {
     if request
         .content_type
         .to_str()
         .is_ok_and(|value| value.to_ascii_lowercase().starts_with("application/json"))
     {
         let mut fields = request.fields.clone();
-        fields.insert(
-            "model".to_string(),
-            Value::String(request.resolved_model.clone()),
-        );
+        fields.insert("model".to_string(), Value::String(source_model.to_string()));
+        // GPT Image models always return base64 image data. Older clients may
+        // still send the legacy Image API response_format switch; forwarding
+        // it makes current GPT Image providers reject an otherwise valid
+        // request. Relay already normalizes the response to the requested
+        // public format, so it is safe to omit this provider-incompatible
+        // field for the new family.
+        if crate::model_id_key(source_model).starts_with("gpt-image-") {
+            fields.remove("response_format");
+        }
         return serde_json::to_vec(&fields).unwrap_or_else(|_| request.raw_body.to_vec());
     }
     request.raw_body.to_vec()

@@ -185,10 +185,29 @@ fn http_fallback_does_not_commit_response_setup_events() {
 }
 
 #[test]
-fn sse_fallback_limit_is_wider_than_the_error_body_limit() {
-    assert_eq!(MAX_WEBSOCKET_ERROR_BYTES, 1024 * 1024);
-    assert_eq!(MAX_SSE_EVENT_BYTES, 16 * 1024 * 1024);
-    const _: () = assert!(MAX_SSE_EVENT_BYTES > MAX_WEBSOCKET_ERROR_BYTES);
+fn http_fallback_prefixes_terminal_errors_for_the_selected_account() {
+    let terminal = super::super::parse_sse_event(
+        br#"event: response.failed
+data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"connection closed"}}}
+
+"#,
+    );
+
+    for stream_id in [None, Some("main")] {
+        let message = fallback_event_message(&terminal, stream_id, ErrorOrigin::Account)
+            .ok()
+            .flatten()
+            .expect("terminal failure should be forwarded");
+        let text = match message.message {
+            axum::extract::ws::Message::Text(text) => text,
+            other => panic!("expected text WebSocket frame, got {other:?}"),
+        };
+        let payload: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            payload["response"]["error"]["message"],
+            "Account: connection closed"
+        );
+    }
 }
 
 #[test]
@@ -231,7 +250,10 @@ fn websocket_terminal_and_handshake_keep_original_failure_details() {
     )
     .with_upstream_error(Some(details));
     let event = super::super::failure::gateway_error_event(&failure, None, None);
-    assert_eq!(event["error"]["message"], "Invalid field: temperature");
+    assert_eq!(
+        event["error"]["message"],
+        "Account: Invalid field: temperature"
+    );
     let handshake = GatewayFailure::upstream_status(
         StatusCode::UNPROCESSABLE_ENTITY,
         Some(br#"{"error":{"code":"validation_error","message":"Invalid field: temperature"}}"#),
@@ -297,6 +319,9 @@ fn websocket_errors_keep_the_source_origin_and_unmapped_category() {
     assert_eq!(event["stream_id"], "main");
 
     assert_eq!(event["error"]["code"], "invalid_request");
+    assert!(event["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("Account: ")));
     assert_eq!(
         event["error"]["zenith_relay"]["category"],
         "upstream_invalid_request"

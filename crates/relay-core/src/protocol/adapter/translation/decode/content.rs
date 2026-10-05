@@ -218,9 +218,7 @@ pub(super) fn image(url: String, detail: Option<String>) -> AdapterResult<Block>
         let (mime, data) = data
             .split_once(";base64,")
             .ok_or_else(AdapterError::invalid_request)?;
-        if !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime)
-            || data.len() > 28 * 1024 * 1024
-        {
+        if !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime) {
             return Err(AdapterError::parameter_unsupported());
         }
         base64::engine::general_purpose::STANDARD

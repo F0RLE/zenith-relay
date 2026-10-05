@@ -4,8 +4,6 @@ use super::{AdapterError, AdapterResult, MessagesBridgeState};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
 
-const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
-
 pub(super) fn append_responses_input(
     state: &mut MessagesBridgeState,
     input: &Value,
@@ -234,12 +232,9 @@ fn image_part(part: &Map<String, Value>) -> AdapterResult<Value> {
                 )
             })
             .ok_or_else(AdapterError::invalid_request)?;
-        let decoded = STANDARD
+        STANDARD
             .decode(data)
             .map_err(|_| AdapterError::invalid_request())?;
-        if decoded.len() > MAX_INLINE_MEDIA_BYTES {
-            return Err(AdapterError::invalid_request());
-        }
         return Ok(json!({"inlineData":{"mimeType":mime,"data":data}}));
     }
     if !(url.starts_with("https://") || url.starts_with("http://")) {

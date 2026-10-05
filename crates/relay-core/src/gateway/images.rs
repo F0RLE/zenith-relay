@@ -112,7 +112,7 @@ async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::account::{build_account_request, translate_account_response};
+    use super::account::{build_account_request, direct_request_body, translate_account_response};
     use super::prepare::parse_multipart;
     use super::*;
     use crate::runtime::IMAGE_API_MODEL;
@@ -143,6 +143,31 @@ mod tests {
         assert_eq!(body["tools"][0]["model"], IMAGE_API_MODEL);
         assert_eq!(body["tools"][0]["quality"], "low");
         assert!(body["tools"][0].get("size").is_none());
+    }
+
+    #[test]
+    fn direct_provider_request_uses_canonical_source_model() {
+        let request = PreparedImageRequest {
+            requested_model: IMAGE_API_MODEL.to_string(),
+            resolved_model: IMAGE_API_MODEL.to_string(),
+            fields: serde_json::from_value(json!({
+                "model": IMAGE_API_MODEL,
+                "prompt": "draw",
+                "response_format": "b64_json"
+            }))
+            .unwrap(),
+            input_images: Vec::new(),
+            mask_image: None,
+            raw_body: Bytes::from_static(br#"{"model":"gpt-image-2.5-sunburst","prompt":"draw"}"#),
+            content_type: HeaderValue::from_static("application/json"),
+            stream: false,
+            response_format: "b64_json".to_string(),
+            client_context_id: None,
+        };
+        let body = direct_request_body(&request, "gpt-image-2.5-flare");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["model"], "gpt-image-2.5-flare");
+        assert!(body.get("response_format").is_none());
     }
 
     #[test]

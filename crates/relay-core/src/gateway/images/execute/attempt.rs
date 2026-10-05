@@ -17,8 +17,6 @@ use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use std::time::Instant;
 
-const MAX_IMAGE_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
-
 pub(super) struct SelectedImageRoute<'a> {
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
@@ -66,7 +64,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
             }
         }
     } else {
-        direct_request_body(prepared)
+        direct_request_body(prepared, &route.source_model)
     };
 
     let started = Instant::now();
@@ -161,9 +159,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
 
     let status = upstream.status();
     let response_headers = upstream.headers().clone();
-    let Ok(bytes) =
-        crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES).await
-    else {
+    let Ok(bytes) = crate::transport::collect(upstream).await else {
         lease.settle_rotation_unknown(now_ms());
         let failure = AttemptFailure::body();
         let state = current_failure_state(runtime, &route.candidate_id, &prepared.resolved_model);

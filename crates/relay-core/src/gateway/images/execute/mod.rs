@@ -1,9 +1,9 @@
-use super::super::errors::{api_error, cooldown_error, AttemptFailure};
+use super::super::errors::{api_error_with_origin_and_category, cooldown_error, AttemptFailure};
 use super::super::now_ms;
 use super::super::request::request_id;
 use super::{ImageEndpoint, PreparedImageRequest, IMAGE_PROTOCOLS};
 use crate::runtime::AuthenticatedKey;
-use crate::GatewayRuntime;
+use crate::{ErrorOrigin, GatewayRuntime};
 use attempt::run_selected_attempt;
 use attempt::SelectedImageRoute;
 use axum::body::Body;
@@ -46,6 +46,7 @@ pub(super) async fn execute_prepared(
     );
     let mut tried = HashSet::new();
     let mut last_failure = None;
+    let mut last_failure_origin = ErrorOrigin::Relay;
 
     loop {
         budget.configure_retry_window(runtime.route_recovery_window_ms(), false);
@@ -77,6 +78,7 @@ pub(super) async fn execute_prepared(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = prepared.client_context_id.clone();
+        let route_origin = super::super::response::route_error_origin(&route);
         match run_selected_attempt(SelectedImageRoute {
             runtime: &runtime,
             key: &key,
@@ -89,7 +91,10 @@ pub(super) async fn execute_prepared(
         })
         .await
         {
-            ImageAttemptStep::Retry(failure) => last_failure = Some(failure),
+            ImageAttemptStep::Retry(failure) => {
+                last_failure = Some(failure);
+                last_failure_origin = route_origin;
+            }
             ImageAttemptStep::Respond(response) => return response,
         }
     }
@@ -112,8 +117,17 @@ pub(super) async fn execute_prepared(
                 retry_at,
                 Some(&failure),
                 reason == crate::scheduler::CooldownReason::RateLimit,
+                last_failure_origin,
             );
         }
     }
-    api_error(failure.status, failure.message, failure.category)
+    let origin = last_failure_origin.for_category(failure.category);
+    api_error_with_origin_and_category(
+        failure.status,
+        failure.message,
+        failure.category,
+        failure.category,
+        origin,
+        Some(&request_id),
+    )
 }

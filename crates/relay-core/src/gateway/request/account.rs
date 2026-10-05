@@ -5,7 +5,7 @@ use super::super::request_body::read_json_object;
 use super::normalization::{
     normalize_compact_account_request, responses_lite_parallel_tool_calls_valid,
 };
-use super::{CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES};
+use super::CODEX_RESPONSES_LITE_HEADER;
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::runtime::AuthenticatedKey;
@@ -127,7 +127,7 @@ async fn routed_compaction_response(response: Response<Body>) -> Response<Body> 
     }
     let bytes = axum::body::to_bytes(
         response.into_body(),
-        crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+        usize::MAX,
     )
     .await;
     let Ok(bytes) = bytes else {
@@ -253,15 +253,6 @@ pub(in crate::gateway) enum AccountEndpoint {
     /// The account route already points at `/backend-api/codex/responses`, so
     /// this variant intentionally leaves the URL unchanged.
     Wake,
-}
-
-impl AccountEndpoint {
-    pub(in crate::gateway) fn response_limit(self) -> usize {
-        match self {
-            Self::Compact | Self::Wake => crate::runtime::MAX_NON_STREAM_BODY_BYTES,
-            Self::AlphaSearch => MAX_ALPHA_SEARCH_RESPONSE_BYTES,
-        }
-    }
 }
 
 pub(in crate::gateway) fn account_endpoint_url(

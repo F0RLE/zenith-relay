@@ -1,11 +1,11 @@
 use super::*;
 
 #[tokio::test]
-async fn invalid_encrypted_reasoning_is_preserved_without_retrying_a_different_conversation() {
+async fn invalid_foreign_reasoning_retries_a_native_account_without_ciphertext() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
-            json!({"error":{"code":"invalid_encrypted_content"}}),
+            json!({"error":{"message":"Encrypted content for item rs_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}),
         ),
         success_reply("recovered-response"),
     ])
@@ -27,30 +27,43 @@ async fn invalid_encrypted_reasoning_is_preserved_without_retrying_a_different_c
         .json(&json!({
             "model": MODEL,
             "input": [
-                {"id":"rs_1","type":"reasoning","encrypted_content":"invalid","summary":[]},
+                {"id":"rs_1","type":"reasoning","encrypted_content":"foreign-ciphertext","summary":[{"type":"summary_text","text":"visible old reasoning"}]},
+                {"role":"assistant","content":"previous answer"},
                 {"role":"user","content":"continue"}
             ]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].body["input"][0]["encrypted_content"], "invalid");
-    assert_eq!(requests[0].body["input"][0]["id"], "rs_1");
-    drop(requests);
-    let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_encrypted_content_invalid")
+        requests[0].body["input"][0]["encrypted_content"],
+        "foreign-ciphertext"
     );
+    assert_eq!(requests[0].body["input"][0]["id"], "rs_1");
+    let retry_input = requests[1].body["input"].as_array().unwrap();
+    assert_eq!(retry_input.len(), 3);
+    assert_eq!(retry_input[0]["type"], "reasoning");
+    assert!(retry_input[0].get("encrypted_content").is_none());
+    assert!(retry_input[0].get("id").is_none());
+    assert_eq!(
+        retry_input[0]["summary"][0]["text"],
+        "visible old reasoning"
+    );
+    assert!(retry_input
+        .iter()
+        .all(|item| item.get("encrypted_content").is_none()));
+    assert!(requests[1].body.to_string().contains("previous answer"));
+    assert!(requests[1].body.to_string().contains("continue"));
+    drop(requests);
+    assert_eq!(events.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn invalid_encrypted_compaction_is_not_discarded_to_retry_without_context() {
+async fn invalid_foreign_compaction_retries_without_the_rejected_items() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -90,13 +103,20 @@ async fn invalid_encrypted_compaction_is_not_discarded_to_retry_without_context(
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].body["input"][0]["encrypted_content"], "invalid");
     assert_eq!(requests[0].body["input"][1]["encrypted_content"], "invalid");
     assert_eq!(requests[0].body["input"].as_array().unwrap().len(), 4);
+    let retry_input = requests[1].body["input"].as_array().unwrap();
+    assert_eq!(retry_input.len(), 2);
+    assert_eq!(retry_input[0]["id"], "cmp_plain");
+    assert_eq!(retry_input[1]["role"], "user");
+    assert!(retry_input
+        .iter()
+        .all(|item| item.get("encrypted_content").is_none()));
 }
 
 #[tokio::test]
