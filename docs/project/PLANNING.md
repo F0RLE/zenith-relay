@@ -552,11 +552,14 @@ catalog errors preserve a previously terminal discovery failure until a
 successful catalog refresh.
 
 Pool and Connections display operational groups in the same order: rotation,
-quota wait, unavailable, disabled. Scheduler order remains intact within each
-group; Connections can additionally group by subscription. The rotation editor
-groups by operational status in Automatic and preserves the editable manual
-queue in Manual. Manual cycles through the saved priority order, skipping
-unavailable members and those at their concurrency limit, then wraps to the top.
+quota wait, unavailable, disabled. Within a group, Automatic pool cards sort by
+positive remaining quota; when neither card has a positive quota window, fresh
+provider-reported credits sort next, with saved/runtime order resolving ties.
+Source wallet balances do not participate. Connections can additionally group
+by subscription. The rotation editor groups by operational status in Automatic
+and preserves the editable manual queue in Manual. Manual cycles through the
+saved priority order, skipping unavailable members and those at their
+concurrency limit, then wraps to the top.
 Only Manual exposes reordering; only Automatic exposes weights. The dialog uses
 one scrolling body, concise status labels and detailed explanations in Help.
 The scheduler supplies the next-route preview using the request key's scope,

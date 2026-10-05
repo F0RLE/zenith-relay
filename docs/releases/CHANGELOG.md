@@ -12,6 +12,9 @@ release entries are kept concise and link to the corresponding tag.
 
 - Automatic pool rotation spreads concurrent requests across the least-loaded eligible members, then ranks by fresh quota and provider credits. Session affinity stays until another equally loaded member leads by 15 credits; pool cards show active request counts.
 - Pool rotation now has Automatic and Manual modes. Manual cycles through the saved member order, skips unavailable members and concurrency limits, and wraps to the start; automatic mode retains request weights and per-member limits.
+- In Automatic mode, pool cards with no positive quota window sort by fresh provider-reported credits. API source wallet balances do not affect the order.
+- Quick Setup places the Relay mark between connection sources and compatible applications, with window controls in a frameless, draggable top area.
+- The pool rotation dialog no longer repeats mode explanations; the full behavior remains in Help.
 
 <!-- relay-notes:ru -->
 
@@ -19,6 +22,9 @@ release entries are kept concise and link to the corresponding tag.
 
 - Автоматическая ротация распределяет параллельные запросы по наименее загруженным участникам, затем учитывает свежую квоту и кредиты провайдера. Привязка сессии сохраняется, пока другой участник с такой же загрузкой не опередит на 15 кредитов; карточки пула показывают число активных запросов.
 - В ротации пула остались режимы «Автоматически» и «Вручную». Ручной режим циклически проходит сохранённый порядок, пропускает недоступных участников и достигших лимита запросов, а затем начинает сначала; автоматический режим сохраняет долю запросов и индивидуальные лимиты.
+- В автоматическом режиме карточки без положительной квоты сортируются по актуальным кредитам провайдера. Баланс API-источника на порядок не влияет.
+- В быстрой настройке логотип Relay размещён между подключениями и совместимыми приложениями; кнопки окна остаются в перетаскиваемой верхней области без полосы.
+- В окне ротации убраны пояснения режимов; подробное описание осталось в справке.
 
 ## [1.1.5] - 2026-10-05
 
