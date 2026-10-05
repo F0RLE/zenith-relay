@@ -6,9 +6,31 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-10-05
+
 <!-- relay-notes:en -->
 
+Zenith Relay 1.1.5 improves ChatGPT account continuity, makes API errors easier to identify, and expands request usage details.
+
+### Changed
+
+- A ChatGPT account retries once after rejecting encrypted reasoning or compaction context from another connection. Relay removes the rejected ciphertext and its bound id, keeps visible summaries and the remaining history, then retries the request once.
+- Basis Points honors `parallel_tool_calls: false`. If the provider returns multiple client tool calls, Relay asks it to regenerate once and returns an error if the next response still violates the serial setting.
+- Chat API errors begin with an English `Account:`, `Provider:`, or `Relay:` prefix in JSON, Messages, Relay Server responses, SSE, WebSocket, route and method failures, and request details.
+- Usage details show whether a request used HTTP or WebSocket and provide an informational API-equivalent estimate from published model rates, observed service tier, and input-context band. Missing prices remain unknown. Account plan labels recognize Pro 100, Pro 200, and Pro 500.
+- Relay no longer applies fixed byte caps to JSON generation, image upload or edit, provider responses, SSE events, translated streams, or alpha search results. Providers may still reject large requests or responses.
+
 <!-- relay-notes:ru -->
+
+Zenith Relay 1.1.5 восстанавливает продолжение чатов ChatGPT, упрощает определение источника ошибки API и добавляет сведения об использовании запросов.
+
+### Изменения
+
+- Если аккаунт ChatGPT отклоняет зашифрованный контекст рассуждений или сжатия из другого подключения, Relay удаляет отклонённый шифротекст и связанный с ним id, сохраняет видимое краткое содержание и оставшуюся историю, затем один раз повторяет запрос.
+- Basis Points соблюдает `parallel_tool_calls: false`. Если провайдер возвращает несколько клиентских вызовов инструментов, Relay один раз просит сформировать ответ заново и возвращает ошибку, если следующее сообщение всё ещё нарушает последовательный режим.
+- Ошибки Chat API начинаются с английской метки `Account:`, `Provider:` или `Relay:` в JSON, Messages, ответах Relay Server, SSE, WebSocket, ошибках маршрута и метода, а также сведениях о запросе.
+- В сведениях об использовании указан транспорт запроса — HTTP или WebSocket — и приведена информационная оценка эквивалентной стоимости API по опубликованным ценам модели, сообщённому режиму обслуживания и размеру контекста на входе. Неизвестные цены остаются неизвестными. Метки планов аккаунта распознают Pro 100, Pro 200 и Pro 500.
+- Relay больше не задаёт фиксированные ограничения размера для JSON-генерации, загрузки и редактирования изображений, ответов провайдера, событий SSE, преобразованных потоков и результатов alpha search. Провайдеры по-прежнему могут отклонить большой запрос или ответ.
 
 ## [1.1.4] - 2026-10-03
 
@@ -1357,7 +1379,8 @@ account pool.
 
 - Initial Zenith Codex desktop release.
 
-[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.4...HEAD
+[Unreleased]: https://github.com/F0RLE/zenith-relay/compare/v1.1.5...HEAD
+[1.1.5]: https://github.com/F0RLE/zenith-relay/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/F0RLE/zenith-relay/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/F0RLE/zenith-relay/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/F0RLE/zenith-relay/releases/tag/v1.1.2
