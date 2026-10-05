@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,6 +71,50 @@ export function withZenithRustEnv(env = process.env) {
         }
       }
     }
+
+    const developmentHome = next.DEVELOPMENT_HOME
+      || (next.USERPROFILE ? join(next.USERPROFILE, "Development") : "");
+    const visualStudioRoot = next.VSINSTALLDIR
+      || (next.VCINSTALLDIR ? dirname(next.VCINSTALLDIR) : "")
+      || (developmentHome ? join(developmentHome, "visual-studio", "build-tools") : "");
+    const cmakeRoot = visualStudioRoot
+      ? join(
+          visualStudioRoot,
+          "Common7",
+          "IDE",
+          "CommonExtensions",
+          "Microsoft",
+          "CMake",
+        )
+      : "";
+    const cmakeBin = join(cmakeRoot, "CMake", "bin");
+    const ninjaBin = join(cmakeRoot, "Ninja");
+    const toolPaths = [
+      existsSync(join(cmakeBin, "cmake.exe")) ? cmakeBin : "",
+      existsSync(join(ninjaBin, "ninja.exe")) ? ninjaBin : "",
+    ].filter(Boolean);
+
+    if (developmentHome) {
+      const nasmHome = join(developmentHome, "tools", "nasm-3.02");
+      if (existsSync(join(nasmHome, "nasm.exe"))) {
+        toolPaths.unshift(nasmHome);
+      }
+    }
+
+    if (toolPaths.length > 0) {
+      const existingPath = next[pathKey] ?? next.PATH ?? "";
+      next[pathKey] = `${toolPaths.join(delimiter)}${delimiter}${existingPath}`;
+      next.PATH = next[pathKey];
+    }
+
+    // Keep MSBuild's temporary archive files inside Cargo's writable target tree.
+    const buildTemp = join(repoRoot(), "src-tauri", "target", "msbuild-temp");
+    mkdirSync(buildTemp, { recursive: true });
+    next.TEMP = buildTemp;
+    next.TMP = buildTemp;
+    next.AWS_LC_SYS_CMAKE_BUILDER ??= "1";
+    next.CARGO_BUILD_JOBS ??= "1";
+    next.CMAKE_BUILD_PARALLEL_LEVEL ??= "1";
   }
 
   return next;
