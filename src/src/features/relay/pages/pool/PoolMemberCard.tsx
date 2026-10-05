@@ -97,7 +97,7 @@ export function PoolMemberCard({
       : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
       ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
       : undefined;
-  const parallelRequests = activeRequestCount(runtimeState);
+  const activeRequests = activeRequestCount(runtimeState);
   const name = member.kind === "source" ? member.name : member.label;
   const editLabel = `${t("pool.editMember")}: ${name}`;
   const removeLabel = `${t("pool.removeMember")}: ${name}`;
@@ -174,8 +174,8 @@ export function PoolMemberCard({
       ) : (
         <div className="pool-member-context" data-kind="source">
           <div className="pool-member-runtime-meta">
-            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode}`)}</strong></div> : null}
-            <div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div>
+            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode === "automatic" ? "automatic" : "manual"}`)}</strong></div> : null}
+            <div><span>{t("pool.activeRequestCount")}</span><strong>{activeRequests}</strong></div>
           </div>
         </div>
       )}

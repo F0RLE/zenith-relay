@@ -17,7 +17,7 @@ export function applyPoolRoutingEdits(policy: PoolRoutingPolicy, edits: readonly
       ...current,
       members: current.members.map((member) => routingMemberKey(member) === edit.member ? { ...member, [edit.field]: edit.value } : member),
     };
-    if (current.mode !== "in_order" || edit.member === edit.target) return current;
+    if (current.mode === "automatic" || edit.member === edit.target) return current;
     const member = current.members.find((entry) => routingMemberKey(entry) === edit.member);
     const members = current.members.filter((entry) => routingMemberKey(entry) !== edit.member);
     const target = members.findIndex((entry) => routingMemberKey(entry) === edit.target);

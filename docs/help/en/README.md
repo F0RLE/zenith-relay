@@ -287,52 +287,52 @@ single model does not necessarily block the member's other models.
 The 1.1.3 update switches existing profiles to the current pool rotation automatically.
 No separate confirmation or gateway stop is needed. Saved member order, request
 shares, concurrency limits, pool membership and gateway enabled state remain.
-The former Smart mode becomes Automatic; In order and Round robin keep their
-mode. There is no separate migration notification or old-scheduler rollback.
+The former Smart mode becomes Automatic. Legacy In order and Round robin
+profiles appear as Manual and keep their member order; request shares apply
+only in Automatic. There is no separate migration notification or old-scheduler
+rollback.
 
 New profiles also use this rotation. Older servers without support for these settings
 cannot accept them; update your own server before using the rotation editor.
 Older configuration presets are converted on import without adding permissions.
 
-**Pool rotation** has three modes:
+**Pool rotation** has two modes:
 
-- **Automatic** chooses the member with the greatest fresh quota remainder.
-  A one-point difference is enough: requests stay there until that remainder
-  falls below another known remainder. Load and request share are compared
-  only when the remainder is equal. Unknown or stale remainders do not outrank
-  anyone. Balance, latency and money do not rank members. Confirmed quota or
-  access blocks still exclude a member. Cache affinity applies only inside
-  that same group.
-- **In order** chooses the first eligible member with a free slot in your
-  list. If it is unavailable or at its concurrency cap, Relay checks the next
-  members. New requests return to it when it recovers. Only this mode lets
-  you reorder members manually.
-- **Round robin** distributes new independent requests among eligible members
-  according to their request shares. Equal shares alternate; unavailable
-  members and those at their concurrency cap are skipped.
+- **Automatic** sends a new concurrent request to a least-loaded eligible
+  member. Among equally loaded members, it chooses the greatest fresh quota
+  remainder. When none of those members has a fresh positive quota remainder,
+  it chooses the greatest fresh provider-credit balance. Customer billing,
+  API wallet balance, latency and price estimates do not rank members. A chat's
+  session affinity stays on its current member until another equally loaded
+  member leads by at least 15 provider credits. Confirmed quota or access
+  blocks still exclude a member.
+- **Manual** cycles through members in your saved order. Relay starts at the
+  top, chooses the next eligible member for each new request, and returns to
+  the top after the last member. Unavailable members and members at their
+  concurrency cap are skipped. Reorder members to set their priority.
 
 In every mode, a continuation that carries another member's response id stays
-on that member. Automatic mode can move it to a member with a larger known
-remainder only when Relay has saved history it can resend. Without that
-history, the continuation stays put.
+on that member. Automatic mode can move it only when Relay has saved history it
+can resend: a larger fresh quota remainder is enough, or (when neither member
+has a fresh quota remainder) the other member must have at least 15 more fresh
+provider credits. Without that history, the continuation stays put.
 
 Mode, order, request share and concurrency changes save immediately. Drag a
-member by its handle or use the arrows in **In order**. **Close** waits for
+member by its handle or use the arrows in **Manual**. **Close** waits for
 pending changes. The list follows changes to pool membership automatically;
 if saving fails, an error appears and the stored values are shown again.
 
-**Request share** is a ratio for Automatic and Round robin. For example, 2 and 1
-give roughly two parts of traffic to the first member and one to the second
-when they are equally available. In Automatic mode this ratio applies only to
-members with the same known quota remainder and equal load, not to all traffic. It is not a percentage,
-requests per second, or extra quota. **Concurrent requests** limits how many requests one member
-can serve at a time, across its models and formats. A value of 2 allows two
-simultaneous requests. **Unlimited** removes the member-specific cap; runtime safety and provider
-limits still apply.
+**Request share** is a ratio used by Automatic when eligible members have the
+same load, quota and credit balance. For example, 2 and 1 give roughly two
+parts of traffic to the first member and one to the second in that tie. It is
+neither a percentage, a request rate, nor extra quota. **Concurrent requests**
+limits how many requests one member can serve at a time, across its models and
+formats. A value of 2 allows two simultaneous requests. **Unlimited** removes
+the member-specific cap; runtime safety and provider limits still apply.
 
 Cards group members by readiness, quota wait, unavailability, and disabled
-state. In the rotation dialog, **In order** preserves the manual queue even
-when states change; automatic modes show ready members first.
+state. In the rotation dialog, **Manual** preserves your saved order even when
+states change; **Automatic** shows ready members first.
 The current, last-used, and **Next candidate** indicators have different
 meanings. Next candidate appears only when the choice for a new text request
 agrees across enabled models and formats. An absent hint does not mean the

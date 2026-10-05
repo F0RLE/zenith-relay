@@ -184,7 +184,7 @@ for (const mode of ["local", "remote"] as const) {
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
     await expect(member).toContainText("Automatic");
-    for (const name of ["In order", "Round robin"]) {
+    for (const name of ["Manual"]) {
       await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
       const editor = page.getByRole("dialog", { name: "Pool rotation", exact: true });
       await editor.getByRole("radio", { name, exact: true }).click();
@@ -196,12 +196,12 @@ for (const mode of ["local", "remote"] as const) {
     if (mode === "local") {
       expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 0 });
       expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
-      expect(calls.filter((call) => call.command === "update_local_routing")).toHaveLength(2);
+      expect(calls.filter((call) => call.command === "update_local_routing")).toHaveLength(1);
     } else {
       const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
       expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 0 });
       expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
-      expect(actions.filter((call) => call.action.type === "set_routing_policy")).toHaveLength(2);
+      expect(actions.filter((call) => call.action.type === "set_routing_policy")).toHaveLength(1);
     }
   });
 
@@ -524,9 +524,9 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(dialog).not.toContainText("Request speed");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
-  await expect(dialog.getByRole("radio")).toHaveCount(3);
+  await expect(dialog.getByRole("radio")).toHaveCount(2);
   await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   await expect(dialog.getByLabel("Retry candidates")).toHaveCount(0);
   await expect(dialog.getByLabel("Failures before cooldown")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
@@ -579,7 +579,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   const ids = () => dialog.getByRole("listitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-member-id")));
   const original = await ids();
   await dialog.getByRole("listitem").first().getByRole("button", { name: / down$/ }).click();
@@ -587,7 +587,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   const reordered = await ids();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-  await expect(dialog.getByRole("radio", { name: "In order", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radio", { name: "Manual", exact: true })).toHaveAttribute("aria-checked", "true");
   expect(await ids()).toEqual(reordered);
 });
 
@@ -602,7 +602,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const dialog = page.getByRole("dialog", { name: "Pool rotation" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Request speed");
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);

@@ -1,5 +1,5 @@
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { ArrowDown, ArrowUp, Cloud, GripVertical, ListOrdered, Repeat2, Sparkles, UserRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Cloud, GripVertical, ListOrdered, Sparkles, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button, Dialog, IconButton, StatusBadge } from "../../components/Ui";
 import { compareOperationalStatus, operationalStatusTone } from "../../accountStatus";
@@ -11,9 +11,8 @@ import { routingMemberKey } from "./poolRoutingEdits";
 import { usePoolRoutingEditor } from "./usePoolRoutingEditor";
 
 const MODES = [
-  { value: "automatic", icon: Sparkles },
-  { value: "in_order", icon: ListOrdered },
-  { value: "round_robin", icon: Repeat2 },
+  { value: "automatic", policyMode: "automatic", icon: Sparkles },
+  { value: "manual", policyMode: "in_order", icon: ListOrdered },
 ] as const;
 
 export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
@@ -25,7 +24,7 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const dragRef = useRef<(PointerDragPosition & { member: string }) | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const members = new Map((runtime ? poolMembersFromRuntime(runtime) : []).map((member) => [`${member.kind}:${member.id}`, member]));
-  const manualOrder = policy.mode === "in_order";
+  const manualOrder = policy.mode !== "automatic";
   const rows = policy.members.map((rule, index) => ({ rule, index, member: members.get(`${rule.kind}:${rule.id}`) }));
   if (!manualOrder) rows.sort((left, right) => compareOperationalStatus(left.member?.operationalStatus ?? "unavailable", right.member?.operationalStatus ?? "unavailable"));
   const listLabel = t(manualOrder ? "pool.memberOrder" : "pool.rotationMembers");
@@ -36,7 +35,7 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     const next = event.key === "Home" ? 0 : event.key === "End" ? MODES.length - 1 : (index + (offset ?? 0) + MODES.length) % MODES.length;
     const option = MODES[next];
     if (!option) return;
-    edit({ type: "mode", mode: option.value });
+    edit({ type: "mode", mode: option.policyMode });
     event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
   };
   const move = (from: number, to: number) => {
@@ -89,21 +88,24 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
       }}
     >
       <div className="pool-routing-modes" role="radiogroup" aria-label={t("pool.routingStrategy")}>
-        {MODES.map(({ value, icon: Icon }, index) => (
+        {MODES.map(({ value, policyMode, icon: Icon }, index) => (
           <button
             key={value}
             type="button"
             role="radio"
-            aria-checked={policy.mode === value}
-            tabIndex={policy.mode === value ? 0 : -1}
+            aria-checked={value === "automatic" ? policy.mode === "automatic" : manualOrder}
+            tabIndex={(value === "automatic" ? policy.mode === "automatic" : manualOrder) ? 0 : -1}
             disabled={!available}
             onKeyDown={(event) => chooseModeWithKeyboard(event, index)}
-            onClick={() => edit({ type: "mode", mode: value })}
+            onClick={() => edit({ type: "mode", mode: policyMode })}
           >
           <Icon aria-hidden /><span>{t(`pool.rotationModes.${value}`)}</span>
           </button>
         ))}
       </div>
+      <p className="pool-routing-mode-description">
+        {t(`pool.rotationModeDescriptions.${manualOrder ? "manual" : "automatic"}`)}
+      </p>
       {errorKey ? <p role="alert" className="form-error">{t(errorKey)}</p> : null}
       {!runtime?.capabilities.features.includes("rotation_v2") ? <p role="alert" className="form-error">{t("remote.capabilityUnavailable")}</p> : null}
       <div className="pool-routing-columns" aria-hidden>

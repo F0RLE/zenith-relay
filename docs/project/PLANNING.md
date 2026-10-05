@@ -271,29 +271,39 @@ The host-refresh and remaining acceptance gates in
 [ROADMAP.md](ROADMAP.md) remain open. The design is a target, not proof of
 full acceptance.
 
-Automatic selection ranks eligible physical members by the freshest known
-remaining quota. A one-point difference is enough: that member is used until
-its remainder falls below another known remainder. Normalized load
-(`in_flight / effective capacity`) and request share apply only inside an
-equal-remainder group. Unknown quota and observations older than the stale
-window do not outrank a known remainder. Balance, recent latency and money
-still do not rank. Confirmed exhaustion remains a block. Soft cache affinity
-only breaks a tie inside the current automatic group. In every mode, an opaque
-response owner stays put unless Automatic mode can replay saved local history
-onto a member with a strictly larger known remainder. A foreign response id is
-never sent to another member.
+Automatic selection first chooses the compatible ready physical members with
+the least normalized load (`in_flight / effective capacity`). This spreads
+concurrent chats over free members before reusing a busy one. Within that
+least-loaded group, a fresh positive quota remainder ranks first. If no member
+in that group has a fresh positive quota remainder, fresh provider-reported
+credits rank next; a credit-only account is schedulable but never pretends to
+have one basis point of quota. Unknown or stale quota and credit observations
+do not rank. The existing request-share rotation resolves ties after load,
+quota and credits. Customer billing, source wallet balances, price estimates
+and recent latency do not rank.
 
-In order selects the first ready member in the saved order; busy or blocked
-members do not prevent trying the next one. Round robin uses smooth weighted
-rotation and ignores soft affinity. Hard response ownership applies in every
-mode. Protocol aliases share physical capacity and do not gain extra weight.
+Soft prompt/session affinity holds its member when no other equally loaded
+member leads its fresh provider-credit balance by at least 15 credits. A fresh
+quota remainder still takes precedence. In every mode, an opaque response
+owner stays put unless Automatic mode can replay saved local history onto a
+member with a larger fresh quota remainder, or with at least 15 more fresh
+provider credits when neither owner nor alternative has a fresh quota
+remainder. The caller must materialize history before clearing the binding; a
+foreign response id is never sent to another member.
 
-Weights range from 1 to 100. A member's limit covers all its protocol routes and
-text/image lanes; zero means no additional member cap, not infinite runtime
-capacity. OAuth images retain their separate one-request limit. Reservation
-and release belong to their own lease, including recovery permits. Preview does
-not advance weighted credits. Capacity and recovery waits share a bounded
-runtime queue: 1,024 waiters, at most 256 waiters per request key. A waiting
+Manual cycles through ready members in the saved order, skipping busy or blocked
+members and wrapping to the top after the last priority. It ignores weights and
+soft affinity. Automatic uses weights only after load, quota and credit ranks
+tie. Hard response ownership applies in every mode. Protocol aliases share
+physical capacity and do not gain extra weight.
+
+Weights range from 1 to 100 and apply only in Automatic mode. A member's limit
+covers all its protocol routes and text/image lanes; zero means no additional
+member cap, not infinite runtime capacity. OAuth images retain their separate
+one-request limit. Reservation and release belong to their own lease, including
+recovery permits. Preview does not advance the manual cursor or automatic
+request-share credits. Capacity and recovery waits share a bounded runtime
+queue: 1,024 waiters, at most 256 waiters per request key. A waiting
 request is not rejected because its body is large. Retained parsed envelopes,
 repair copies and queue metadata are still recorded; requests with immediately
 free capacity do not consume queue slots. Capacity
@@ -348,7 +358,9 @@ Desktop and server install the same engine from the complete configured pool,
 including unavailable members; direct core callers also use it. Legacy roles
 still map to the initial saved order (primary APIs, accounts, ordinary APIs,
 reserve APIs). The forward-only startup converter maps Smart to
-Automatic; In order/Round robin retain their mode, order, weights and limits.
+Automatic. Legacy In order and Round robin policies both project to Manual and
+retain their member order and limits; request shares remain stored but apply
+only in Automatic.
 The conversion is idempotent, persists before listener construction and does
 not change gateway enabled state, credentials, membership, source delays,
 persistent waiting or other user controls. No migration preview/apply API,
@@ -542,13 +554,15 @@ successful catalog refresh.
 Pool and Connections display operational groups in the same order: rotation,
 quota wait, unavailable, disabled. Scheduler order remains intact within each
 group; Connections can additionally group by subscription. The rotation editor
-also groups by operational status in Automatic and Round robin, while In order
-preserves the editable manual queue. Only In order exposes
-reordering, and only Automatic and Round robin expose weights. The dialog uses one
-scrolling body, concise status labels and detailed explanations in Help.
+groups by operational status in Automatic and preserves the editable manual
+queue in Manual. Manual cycles through the saved priority order, skipping
+unavailable members and those at their concurrency limit, then wraps to the top.
+Only Manual exposes reordering; only Automatic exposes weights. The dialog uses
+one scrolling body, concise status labels and detailed explanations in Help.
 The scheduler supplies the next-route preview using the request key's scope,
-model rules, protocols and current member capacity. It names a physical member
-only if all fresh text routes agree; continuations keep their own affinity.
+model rules, protocols, current member capacity and the same Automatic
+load/quota/credit ranking used by dispatch. It names a physical member only if
+all fresh text routes agree; continuations keep their own affinity.
 Activity events invalidate older previews until a fresh snapshot arrives.
 Runtime IDs and activity revisions reject stale reserve/release events across
 runtime replacement. A missing preview is not evidence that all members are

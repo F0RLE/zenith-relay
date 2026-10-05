@@ -6,6 +6,20 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+<!-- relay-notes:en -->
+
+### Changed
+
+- Automatic pool rotation spreads concurrent requests across the least-loaded eligible members, then ranks by fresh quota and provider credits. Session affinity stays until another equally loaded member leads by 15 credits; pool cards show active request counts.
+- Pool rotation now has Automatic and Manual modes. Manual cycles through the saved member order, skips unavailable members and concurrency limits, and wraps to the start; automatic mode retains request weights and per-member limits.
+
+<!-- relay-notes:ru -->
+
+### Изменения
+
+- Автоматическая ротация распределяет параллельные запросы по наименее загруженным участникам, затем учитывает свежую квоту и кредиты провайдера. Привязка сессии сохраняется, пока другой участник с такой же загрузкой не опередит на 15 кредитов; карточки пула показывают число активных запросов.
+- В ротации пула остались режимы «Автоматически» и «Вручную». Ручной режим циклически проходит сохранённый порядок, пропускает недоступных участников и достигших лимита запросов, а затем начинает сначала; автоматический режим сохраняет долю запросов и индивидуальные лимиты.
+
 ## [1.1.5] - 2026-10-05
 
 <!-- relay-notes:en -->

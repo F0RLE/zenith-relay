@@ -1,3 +1,4 @@
+/** Stored values; the editor presents both manual values as the Manual mode. */
 export type PoolRoutingMode = "automatic" | "in_order" | "round_robin";
 export type LegacyPoolRoutingMode = "smart" | "in_order" | "round_robin";
 export type PoolRoutingMember = {

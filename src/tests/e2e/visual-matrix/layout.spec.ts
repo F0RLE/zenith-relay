@@ -98,7 +98,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Ротация пула" });
     await expect(distribution).not.toContainText("Скорость запроса");
-    await distribution.getByRole("radio", { name: "По порядку", exact: true }).click();
+    await distribution.getByRole("radio", { name: "Вручную", exact: true }).click();
     await expect(distribution.getByRole("listitem")).toHaveCount(6);
     expect(await distribution.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-member-order-${viewport.width}x${viewport.height}.png` });
@@ -121,7 +121,7 @@ for (const viewport of viewports) {
     await expect(apiCard).toContainText("128");
     await expect(apiCard.getByRole("button", { name: "Обновить баланс" })).toBeVisible();
     await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Режим работы");
-    await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Параллельность");
+    await expect(apiCard.locator(".pool-member-runtime-meta")).toContainText("Активных запросов");
     await expect(apiCard.locator(".pool-member-active-runtime")).toHaveCount(0);
     expect(await apiCard.locator(".pool-member-runtime-meta > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     await expect(members.getByRole("button", { name: "Обновить", exact: true })).toHaveCount(5);
@@ -430,9 +430,9 @@ for (const viewport of viewports) {
       await page.getByRole("button", { name: "Пул", exact: true }).click();
       await page.getByRole("button", { name: "Настройки ротации пула", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Ротация пула" });
-      await expect(dialog.getByRole("radio")).toHaveCount(3);
+      await expect(dialog.getByRole("radio")).toHaveCount(2);
       await expect(dialog.getByRole("radio", { name: "Автоматически", exact: true })).toHaveAttribute("aria-checked", "true");
-      await dialog.getByRole("radio", { name: "По кругу", exact: true }).click();
+      await dialog.getByRole("radio", { name: "Вручную", exact: true }).click();
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
       await expect(dialog).not.toContainText("Скорость запроса");
