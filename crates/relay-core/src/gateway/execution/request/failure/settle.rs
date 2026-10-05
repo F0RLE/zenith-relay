@@ -14,7 +14,7 @@ pub(super) fn settle_collected_rejection(
         key,
         carry:
             super::RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
@@ -58,7 +58,7 @@ pub(super) fn settle_collected_rejection(
     // successful turn before selecting another candidate.  This is
     // the safe hand-off path: the new candidate receives the
     // materialized conversation, never a foreign opaque response id.
-    if wire_api == WireApi::Responses
+    if client_wire_api == WireApi::Responses
         && adapter_is_passthrough
         && has_previous_response_id
         && response_affinity_hit
@@ -139,11 +139,12 @@ pub(super) fn settle_collected_rejection(
     }
     populate_tokens(event, &bytes);
     emit_usage(runtime, event.clone());
+    let origin = selected_error_origin.for_category(failure.category);
     let mut response = proxy_error_response(
         status,
         response_headers,
-        Body::from(bytes),
-        selected_error_origin,
+        &bytes,
+        origin,
         failure.category,
         Some(request_id),
     );

@@ -167,6 +167,80 @@ async fn usage_stream_preserves_upstream_terminal_failures_after_output() {
 }
 
 #[tokio::test]
+async fn upstream_stream_errors_prefix_the_selected_account() {
+    let mut event = test_usage_event();
+    event.account_id = Some("synthetic-account".to_string());
+    let first = Bytes::from_static(
+        b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"",
+    );
+    let second = Bytes::from_static(b"connection closed\"}}}\n\n");
+    let mut stream = UsageStream::new(
+        stream::iter([Ok::<_, Infallible>(first), Ok(second)]),
+        Arc::new(|_| {}),
+        event,
+        Instant::now(),
+        Arc::new(|_, _, _| {}),
+    );
+
+    let error = stream.next().await.unwrap().unwrap();
+    let error = parse_sse_event(&error);
+    assert_eq!(
+        error.payload.unwrap()["response"]["error"]["message"],
+        "Account: connection closed"
+    );
+}
+
+#[tokio::test]
+async fn upstream_stream_error_with_reordered_json_fields_gets_prefixed_as_one_event() {
+    let mut event = test_usage_event();
+    event.account_id = Some("synthetic-account".to_string());
+    let first = Bytes::from_static(
+        b"event: response.failed\ndata: {\"id\":\"resp_test\",\"type\":\"response.failed\",",
+    );
+    let second =
+        Bytes::from_static(b"\"response\":{\"error\":{\"message\":\"connection closed\"}}}\n\n");
+    let mut stream = UsageStream::new(
+        stream::iter([Ok::<_, Infallible>(first), Ok(second)]),
+        Arc::new(|_| {}),
+        event,
+        Instant::now(),
+        Arc::new(|_, _, _| {}),
+    );
+
+    let forwarded = stream.next().await.unwrap().unwrap();
+    let error = parse_sse_event(&forwarded);
+    let payload = error.payload.unwrap();
+    assert_eq!(payload["id"], "resp_test");
+    assert_eq!(
+        payload["response"]["error"]["message"],
+        "Account: connection closed"
+    );
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn upstream_sse_error_event_without_json_type_gets_prefixed() {
+    let mut event = test_usage_event();
+    event.account_id = Some("synthetic-account".to_string());
+    let error = Bytes::from_static(b"event: error\ndata: {\"message\":\"connection closed\"}\n\n");
+    let mut stream = UsageStream::new(
+        stream::iter([Ok::<_, Infallible>(error)]),
+        Arc::new(|_| {}),
+        event,
+        Instant::now(),
+        Arc::new(|_, _, _| {}),
+    );
+
+    let forwarded = stream.next().await.unwrap().unwrap();
+    let error = parse_sse_event(&forwarded);
+    assert_eq!(error.outcome, Some(TerminalOutcome::Failure));
+    assert_eq!(
+        error.payload.unwrap()["message"],
+        "Account: connection closed"
+    );
+}
+
+#[tokio::test]
 async fn native_responses_stream_capture_keeps_completed_tool_output_for_http_replay() {
     let captured = Arc::new(Mutex::new(None));
     let mut stream = UsageStream::new(

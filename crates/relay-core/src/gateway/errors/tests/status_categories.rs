@@ -96,6 +96,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
             ),
             (
                 StatusCode::BAD_REQUEST,
+                br#"{"error":{"message":"The encrypted content for item rs_synthetic could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}"#.as_slice(),
+                "upstream_encrypted_content_invalid",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
                 br#"{"error":{"message":"Instructions are required"}}"#.as_slice(),
                 "upstream_instructions_required",
             ),

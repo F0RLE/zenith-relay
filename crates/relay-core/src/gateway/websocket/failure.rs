@@ -30,6 +30,12 @@ pub(super) fn gateway_error_event(
     stream_id: Option<&str>,
 ) -> Value {
     let code = super::super::errors::api_error_code(failure.category);
+    let origin = failure.origin.for_category(failure.category);
+    let message = failure
+        .upstream_error
+        .as_ref()
+        .and_then(|details| details.message.as_deref())
+        .unwrap_or(failure.message);
     let mut event = json!({
         "type": "error",
         "status": failure.status.as_u16(),
@@ -39,10 +45,10 @@ pub(super) fn gateway_error_event(
                 code,
             ),
             "code": code,
-            "message": failure.upstream_error.as_ref().and_then(|details| details.message.as_deref()).unwrap_or(failure.message),
+            "message": origin.prefix_message(message),
             "param": null,
             "zenith_relay": {
-                "origin": failure.origin.for_category(failure.category).as_str(),
+                "origin": origin.as_str(),
                 "category": failure.category,
                 "request_id": request_id,
             },

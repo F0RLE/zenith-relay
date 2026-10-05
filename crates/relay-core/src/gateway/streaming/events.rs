@@ -216,7 +216,21 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             };
         }
     };
-    let event_type = value.get("type").and_then(Value::as_str);
+    let event_type = value.get("type").and_then(Value::as_str).or_else(|| {
+        event_name.filter(|name| {
+            matches!(
+                *name,
+                "error"
+                    | "response.failed"
+                    | "response.incomplete"
+                    | "response.cancelled"
+                    | "response.canceled"
+                    | "response.completed"
+                    | "response.done"
+                    | "message_stop"
+            )
+        })
+    });
     let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
         || is_compaction_payload(&value, event_type);
     let upstream_error_category = upstream_event_failure_category(event_type, &value);

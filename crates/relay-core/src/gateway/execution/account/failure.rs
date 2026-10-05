@@ -337,11 +337,12 @@ fn settle_account_failure(
         return AccountStatusFailure::Continue;
     }
     emit_usage(runtime, event);
+    let origin = selected_error_origin.for_category(failure.category);
     let mut response = proxy_error_response(
         status,
         response_headers,
-        Body::from(bytes),
-        selected_error_origin,
+        &bytes,
+        origin,
         failure.category,
         Some(request_id),
     );

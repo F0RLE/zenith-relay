@@ -15,7 +15,7 @@ pub(super) struct SelectionMissInput<'a> {
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) resolved_model: &'a str,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
     pub(super) request: &'a mut Value,
     pub(super) response_affinity_key: &'a mut Option<String>,
@@ -75,7 +75,7 @@ fn release_unroutable_affinity(input: &mut SelectionMissInput<'_>) -> bool {
             input.key,
             input.response_affinity_key,
             input.resolved_model,
-            candidate_protocols(input.wire_api),
+            candidate_protocols(input.client_wire_api),
             now_ms(),
         )
 }
@@ -96,7 +96,7 @@ fn reset_owner_without_model(input: &mut SelectionMissInput<'_>) -> bool {
             input.runtime.response_affinity_owner_supports_model(
                 affinity_key,
                 input.resolved_model,
-                candidate_protocols(input.wire_api),
+                candidate_protocols(input.client_wire_api),
                 now_ms(),
             )
         });
@@ -110,7 +110,7 @@ fn reset_owner_without_model(input: &mut SelectionMissInput<'_>) -> bool {
 /// trying the replacement pool. This keeps the continuation safe while avoiding
 /// a permanent no-candidate failure after an operator rotates API sources.
 fn replay_pinned_continuation(input: &mut SelectionMissInput<'_>) -> Option<SelectionMiss> {
-    if input.wire_api != WireApi::Responses
+    if input.client_wire_api != WireApi::Responses
         || !input.has_previous_response_id
         || !*input.requires_affinity_owner
         || input.repairs.native_replay
@@ -221,7 +221,7 @@ fn first_attempt_cooldown(input: &SelectionMissInput<'_>) -> Option<SelectionMis
     let (retry_at, reason) = input.runtime.all_applicable_cooldown(
         input.key,
         input.resolved_model,
-        candidate_protocols(input.wire_api),
+        candidate_protocols(input.client_wire_api),
         input.tried,
         input.response_affinity_key.as_deref(),
         now_ms(),
@@ -231,6 +231,7 @@ fn first_attempt_cooldown(input: &SelectionMissInput<'_>) -> Option<SelectionMis
         retry_at,
         None,
         reason == crate::scheduler::CooldownReason::RateLimit,
+        crate::ErrorOrigin::Relay,
     )))
 }
 
@@ -246,7 +247,7 @@ fn stop_without_candidate(input: &mut SelectionMissInput<'_>) -> SelectionMiss {
 }
 
 fn pinned_responses_reset_allowed(input: &SelectionMissInput<'_>) -> bool {
-    input.wire_api == WireApi::Responses
+    input.client_wire_api == WireApi::Responses
         && input.allow_previous_response_reset
         && input.has_previous_response_id
         && *input.requires_affinity_owner
@@ -259,7 +260,7 @@ fn owner_supports_route(input: &SelectionMissInput<'_>, affinity_key: &str) -> O
         input.key,
         affinity_key,
         input.resolved_model,
-        candidate_protocols(input.wire_api),
+        candidate_protocols(input.client_wire_api),
         now_ms(),
     )
 }

@@ -85,7 +85,14 @@ pub(super) async fn handle_upstream_message(
                     in_flight.client_visible_output = true;
                 }
             }
-            if downstream.send(Message::Text(text.into())).await.is_err() {
+            let outgoing =
+                prefix_websocket_error_payload(text.as_bytes(), &terminal, state.upstream_origin);
+            let outgoing = String::from_utf8(outgoing).unwrap_or_else(|_| text.to_string());
+            if downstream
+                .send(Message::Text(outgoing.into()))
+                .await
+                .is_err()
+            {
                 finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
                 return false;
             }
@@ -104,7 +111,13 @@ pub(super) async fn handle_upstream_message(
                     in_flight.client_visible_output = true;
                 }
             }
-            if downstream.send(Message::Binary(bytes)).await.is_err() {
+            let outgoing =
+                prefix_websocket_error_payload(bytes.as_ref(), &terminal, state.upstream_origin);
+            if downstream
+                .send(Message::Binary(outgoing.into()))
+                .await
+                .is_err()
+            {
                 finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
                 return false;
             }
@@ -135,6 +148,54 @@ pub(super) async fn handle_upstream_message(
             }
             false
         }
+    }
+}
+
+fn prefix_websocket_error_payload(
+    payload: &[u8],
+    terminal: &EventTerminal,
+    origin: crate::ErrorOrigin,
+) -> Vec<u8> {
+    if !matches!(
+        terminal.outcome,
+        Some(EventTerminalOutcome::Failure | EventTerminalOutcome::Incomplete)
+    ) {
+        return payload.to_vec();
+    }
+    let Ok(mut value) = serde_json::from_slice::<Value>(payload) else {
+        return payload.to_vec();
+    };
+    let category = terminal
+        .error_category
+        .unwrap_or(error_codes::UPSTREAM_TERMINAL);
+    let origin = origin.for_category(category);
+    if !super::super::super::errors::prefix_error_value(&mut value, origin) {
+        return payload.to_vec();
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| payload.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_websocket_error_prefixes_the_selected_source() {
+        let terminal = EventTerminal {
+            outcome: Some(EventTerminalOutcome::Failure),
+            error_category: Some(error_codes::UPSTREAM_TERMINAL),
+            ..EventTerminal::default()
+        };
+        let original = br#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"Provider: unavailable"}}}"#;
+        let output =
+            prefix_websocket_error_payload(original, &terminal, crate::ErrorOrigin::Account);
+        let value: Value = serde_json::from_slice(&output).unwrap();
+
+        assert_eq!(
+            value["response"]["error"]["message"],
+            "Account: unavailable"
+        );
+        assert_eq!(value["response"]["error"]["code"], "server_error");
     }
 }
 
