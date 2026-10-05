@@ -36,9 +36,10 @@ pub(in crate::gateway) fn usage_event(
     let mut routing = route.routing.clone();
     if let Some(diagnostics) = routing.as_mut() {
         diagnostics.endpoint_kind = Some(match route.account_transport {
-            AccountTransport::NativeResponses => {
-                route.adapter.route_suffix(route.wire_api).to_string()
-            }
+            AccountTransport::NativeResponses => route
+                .adapter
+                .route_suffix(route.client_wire_api)
+                .to_string(),
             AccountTransport::ExcelBasisPoints => "excel_basis_points".to_string(),
         });
     }
@@ -56,7 +57,8 @@ pub(in crate::gateway) fn usage_event(
         resolved_model: Some(route.source_model.clone()),
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
-        wire_api: route.wire_api,
+        wire_api: route.client_wire_api,
+        transport: route.client_transport,
         service_tier: route.service_tier,
         applied_service_tier: None,
         success,

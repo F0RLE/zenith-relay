@@ -22,7 +22,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) lease: &'a CandidateLease,
     pub(super) budget: &'a SharedRequestBudget,
     pub(super) route: ExecutorRoute,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
     pub(super) account_route: bool,
     pub(super) basis_points_route: bool,
@@ -50,7 +50,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         lease,
         budget,
         mut route,
-        wire_api,
+        client_wire_api,
         stream,
         account_route,
         basis_points_route,
@@ -102,7 +102,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
     let mut upstream_headers = if basis_points_route {
         HeaderMap::new()
     } else if adapter_request.requires_bridge_headers() {
-        match route.adapter.upstream_protocol(wire_api) {
+        match route.adapter.upstream_protocol(client_wire_api) {
             crate::UpstreamProtocol::Messages => {
                 forwarded_bridge_messages_headers(forwarded_headers)
             }
@@ -119,7 +119,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
     }
     let turn_scope = (account_route
         && !basis_points_route
-        && wire_api == WireApi::Responses
+        && client_wire_api == WireApi::Responses
         && route.adapter.is_passthrough())
     .then(|| {
         request_scope(

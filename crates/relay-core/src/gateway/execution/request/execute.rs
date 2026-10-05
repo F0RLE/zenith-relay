@@ -22,11 +22,12 @@ pub(in crate::gateway::execution) async fn execute_request(
         client_context_id,
         mut response_affinity_key,
         mut requires_affinity_owner,
-        wire_api,
+        client_wire_api,
         responses_lite,
         allow_previous_response_reset,
         attempt_offset,
         budget,
+        transport,
     } = context;
     let mut tried: HashSet<String> = Default::default();
     let mut attempt = attempt_offset;
@@ -44,7 +45,7 @@ pub(in crate::gateway::execution) async fn execute_request(
     // client Lite headers remain authoritative, but a mixed or partly unknown
     // pool must use full Responses so fallback preserves its tool/context
     // contract.
-    let automatic_responses_lite = wire_api == WireApi::Responses
+    let automatic_responses_lite = client_wire_api == WireApi::Responses
         && runtime.codex_model_responses_routes_all_support_lite(&key, &resolved_model);
     let mut has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
     let mut prompt_affinity_key = runtime.prompt_affinity_key(
@@ -57,7 +58,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         runtime: &runtime,
         key: &key,
         resolved_model: &resolved_model,
-        protocols: candidate_protocols(wire_api),
+        protocols: candidate_protocols(client_wire_api),
         operation: crate::scheduler::rotation::RotationOperation::Text,
         exclusions: &HashSet::new(),
     };
@@ -80,7 +81,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                     &key,
                     &affinity_key,
                     &resolved_model,
-                    candidate_protocols(wire_api),
+                    candidate_protocols(client_wire_api),
                     &tried,
                     now_ms(),
                 ) && drop_materialized_previous_response_id(
@@ -101,7 +102,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         // Recovery can deliberately remove an unusable opaque response id.
         // Derive continuation semantics from the request that will actually be
         // sent on this attempt, rather than from its original payload.
-        let has_previous_response_id = request_has_previous_response_id(wire_api, &request);
+        let has_previous_response_id = request_has_previous_response_id(client_wire_api, &request);
         // The gateway setting is live for every text protocol. Turning it off
         // wakes an already-waiting request on its next availability event.
         let retry_until_available = runtime.route_recovery_enabled();
@@ -120,7 +121,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             runtime: &runtime,
             key: &key,
             model: &resolved_model,
-            client: wire_api,
+            client: client_wire_api,
             request: &request,
             stream,
             tier_policy: &service_tier_policy,
@@ -135,7 +136,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             .select_and_reserve_with_budget(
                 &key,
                 &resolved_model,
-                candidate_protocols(wire_api),
+                candidate_protocols(client_wire_api),
                 &selection_exclusions,
                 (
                     response_affinity_key.as_deref(),
@@ -151,7 +152,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 runtime: &runtime,
                 key: &key,
                 resolved_model: &resolved_model,
-                wire_api,
+                client_wire_api,
                 stream,
                 request: &mut request,
                 response_affinity_key: &mut response_affinity_key,
@@ -191,8 +192,9 @@ pub(in crate::gateway::execution) async fn execute_request(
             runtime: &runtime,
             key: &key,
             budget: &budget,
+            transport,
             resolved_model: &resolved_model,
-            wire_api,
+            client_wire_api,
             stream,
             responses_lite: &responses_lite,
             automatic_responses_lite,
@@ -239,7 +241,7 @@ pub(in crate::gateway::execution) async fn execute_request(
     }
 
     if allow_previous_response_reset
-        && request_has_previous_response_id(wire_api, &request)
+        && request_has_previous_response_id(client_wire_api, &request)
         && confirmed_response_missing
     {
         let mut reset_request = request;
@@ -264,11 +266,12 @@ pub(in crate::gateway::execution) async fn execute_request(
                 client_context_id,
                 response_affinity_key: None,
                 requires_affinity_owner: false,
-                wire_api,
+                client_wire_api,
                 responses_lite,
                 allow_previous_response_reset: false,
                 attempt_offset: attempt,
                 budget,
+                transport,
             }))
             .await;
         }
@@ -292,7 +295,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         runtime: &runtime,
         key: &key,
         resolved_model: &resolved_model,
-        protocols: candidate_protocols(wire_api),
+        protocols: candidate_protocols(client_wire_api),
         operation: crate::scheduler::rotation::RotationOperation::Text,
         exclusions: &HashSet::new(),
         response_affinity_key: response_affinity_key.as_deref(),

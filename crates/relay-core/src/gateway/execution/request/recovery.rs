@@ -46,8 +46,8 @@ pub(in crate::gateway::execution) fn recover_stale_tool_history(
     true
 }
 
-pub(super) fn request_has_previous_response_id(wire_api: WireApi, request: &Value) -> bool {
-    wire_api == WireApi::Responses && previous_response_id(request).is_some()
+pub(super) fn request_has_previous_response_id(client_wire_api: WireApi, request: &Value) -> bool {
+    client_wire_api == WireApi::Responses && previous_response_id(request).is_some()
 }
 
 /// Applies the one permitted repair for a strict upstream rejection, then
@@ -56,7 +56,7 @@ pub(super) fn request_has_previous_response_id(wire_api: WireApi, request: &Valu
 /// stream bootstrap failure, so both paths share this mutation.
 pub(super) struct LegacyCallIdRepair<'a> {
     pub(super) request: &'a mut Value,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) adapter_is_passthrough: bool,
     pub(super) upstream_rejected_tool_links: bool,
     pub(super) repair_attempted: &'a mut bool,
@@ -69,7 +69,7 @@ pub(super) struct LegacyCallIdRepair<'a> {
 pub(super) fn try_repair_legacy_responses_call_ids(repair: LegacyCallIdRepair<'_>) -> bool {
     let LegacyCallIdRepair {
         request,
-        wire_api,
+        client_wire_api,
         adapter_is_passthrough,
         upstream_rejected_tool_links,
         repair_attempted,
@@ -78,7 +78,7 @@ pub(super) fn try_repair_legacy_responses_call_ids(repair: LegacyCallIdRepair<'_
         has_unpaired_tool_output,
         requires_affinity_owner,
     } = repair;
-    if wire_api != WireApi::Responses
+    if client_wire_api != WireApi::Responses
         || !adapter_is_passthrough
         || *repair_attempted
         || !upstream_rejected_tool_links
@@ -91,7 +91,7 @@ pub(super) fn try_repair_legacy_responses_call_ids(repair: LegacyCallIdRepair<'_
     tried.remove(candidate_id);
     *has_unpaired_tool_output = !unpaired_tool_output_ids(request).is_empty();
     *requires_affinity_owner =
-        request_has_previous_response_id(wire_api, request) || *has_unpaired_tool_output;
+        request_has_previous_response_id(client_wire_api, request) || *has_unpaired_tool_output;
     true
 }
 
