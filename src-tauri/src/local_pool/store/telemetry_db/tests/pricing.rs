@@ -250,6 +250,7 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
                  ALTER TABLE request_logs DROP COLUMN client_context_id;
                  ALTER TABLE request_logs DROP COLUMN upstream_error_json;
+                 ALTER TABLE request_logs DROP COLUMN transport;
                  DROP TABLE usage_candidate_rollups;
                  CREATE TABLE usage_candidate_rollups (
                      candidate_kind TEXT NOT NULL,
