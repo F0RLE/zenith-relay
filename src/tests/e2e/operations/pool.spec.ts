@@ -444,7 +444,7 @@ test("pool member picker lists individual accounts instead of subscription group
   await expect(accountRows.locator("small")).toHaveCount(4);
   await expect(accountRows.locator("small.pool-picker-status")).toHaveCount(4);
   await expect(accountRows.nth(2).locator("small.pool-picker-status")).toContainText("Waiting for quota");
-  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Pro", "Business", "Plus", "Free"]);
+  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Pro 200", "Business", "Plus", "Free"]);
 
   await dialog.getByRole("navigation").getByRole("button", { name: "Accounts", exact: true }).click();
   await chooseOption(page, dialog, "Filter by plan", "business");

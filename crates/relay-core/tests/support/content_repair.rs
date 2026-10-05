@@ -206,12 +206,14 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/images/generations", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model":"gpt-image-2","prompt":"draw a test"}))
+        .json(&json!({"model":"gpt-image-2.5-sunburst","prompt":"draw a test"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
+    let response_status = response.status();
+    let response_body = response.text().await.unwrap();
+    assert_eq!(response_status, StatusCode::OK, "{response_body}");
+    let body: Value = serde_json::from_str(&response_body).unwrap();
     assert_eq!(body["data"][0]["b64_json"], "aW1hZ2U=");
 
     let requests = state.requests.lock().unwrap();
@@ -219,14 +221,20 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
     assert_eq!(requests[0].path, "/v1/responses");
     assert_eq!(requests[0].body["model"], "gpt-5.6-terra");
     assert_eq!(requests[0].body["tools"][0]["type"], "image_generation");
-    assert_eq!(requests[0].body["tools"][0]["model"], "gpt-image-2");
+    assert_eq!(
+        requests[0].body["tools"][0]["model"],
+        "gpt-image-2.5-sunburst"
+    );
     assert!(requests[0].body["tools"][0].get("size").is_none());
     drop(requests);
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
-    assert_eq!(events[0].requested_model.as_deref(), Some("gpt-image-2"));
+    assert_eq!(
+        events[0].requested_model.as_deref(),
+        Some("gpt-image-2.5-sunburst")
+    );
     assert_eq!(events[0].resolved_model.as_deref(), Some("gpt-5.6-terra"));
 }
 
@@ -262,13 +270,19 @@ async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
     let response = reqwest::Client::new()
         .post(format!("{}/v1/images/generations", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model":"gpt-image-2","prompt":"draw a test"}))
+        .json(&json!({"model":"gpt-image-2.5-sunburst","prompt":"draw a test"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let response_status = response.status();
+    let response_body = response.text().await.unwrap();
     assert_eq!(
-        response.json::<Value>().await.unwrap()["error"]["code"],
+        response_status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{response_body}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&response_body).unwrap()["error"]["code"],
         "rate_limit_exceeded"
     );
     assert_eq!(limited_state.requests.lock().unwrap().len(), 1);

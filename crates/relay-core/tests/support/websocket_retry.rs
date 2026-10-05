@@ -6,7 +6,7 @@ async fn failed_initial_websocket_response_with_output_is_not_retried() {
         "type": "response.failed",
         "response": {
             "status": "failed",
-            "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+            "error": {"code": "insufficient_quota", "message": "Account: quota exhausted"},
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]
         }
     });

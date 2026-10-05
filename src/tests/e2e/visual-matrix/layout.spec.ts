@@ -19,7 +19,7 @@ for (const viewport of viewports) {
     await accountSearch.fill("pro");
     await expect(dialog.locator(".pool-member-options > label").first()).toContainText("Pro account");
     const planBadge = dialog.locator(".pool-member-options .account-plan-badge");
-    await expect(planBadge).toHaveText("Pro");
+    await expect(planBadge).toHaveText("Pro 200");
     expect(await planBadge.evaluate((badge) => badge.scrollWidth <= badge.clientWidth && badge.scrollHeight <= badge.clientHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-add-pro-ru-dark-${viewport.width}x${viewport.height}.png` });
     await accountSearch.fill("");
@@ -114,7 +114,7 @@ for (const viewport of viewports) {
     })).toBe(true);
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
-    await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
+    await expect(members.locator('.account-plan-badge[data-plan="pro-200"]')).toHaveText("Pro 200");
     const apiCard = members.locator('.pool-member-card[data-member-kind="source"]');
     await expect(apiCard).toContainText("42,50");
     await expect(apiCard).toContainText("7,50");
@@ -153,7 +153,7 @@ for (const viewport of viewports) {
     const members = page.locator(".pool-member-list");
 
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
-    await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
+    await expect(members.locator('.account-plan-badge[data-plan="pro-200"]')).toHaveText("Pro 200");
     const apiCard = members.locator('.pool-member-card[data-member-kind="source"]');
     await expect(apiCard).toContainText("$42.50");
     await expect(apiCard).toContainText("$7.50");
