@@ -169,7 +169,11 @@ impl PoolScheduler {
         let reason = if owner.is_none()
             && !selected.recovery
             && self.rotation.mode() == RotationMode::Automatic
-            && selected.reason != super::rotation::RotationSelectionReason::QuotaHeadroom
+            && !matches!(
+                selected.reason,
+                super::rotation::RotationSelectionReason::QuotaHeadroom
+                    | super::rotation::RotationSelectionReason::ProviderCredits
+            )
             && rotation_request.preferred.as_deref() == Some(selected.candidate_id.as_str())
         {
             SelectionReason::PromptCacheAffinity
@@ -184,7 +188,10 @@ impl PoolScheduler {
                 super::rotation::RotationSelectionReason::QuotaHeadroom => {
                     SelectionReason::QuotaHeadroom
                 }
-                super::rotation::RotationSelectionReason::PrimaryFirst => {
+                super::rotation::RotationSelectionReason::ProviderCredits => {
+                    SelectionReason::ProviderCredits
+                }
+                super::rotation::RotationSelectionReason::ManualPriority => {
                     SelectionReason::ManualPriority
                 }
                 super::rotation::RotationSelectionReason::WeightedRotation => {

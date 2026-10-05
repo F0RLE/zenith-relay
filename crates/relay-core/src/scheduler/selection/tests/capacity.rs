@@ -65,7 +65,7 @@ fn removing_a_busy_candidate_drains_its_lease_before_final_removal() {
     assert_eq!(scheduler.runtime_activity_for("busy").1, 0);
 }
 #[test]
-fn occupied_oauth_account_remains_eligible_for_text_selection() {
+fn automatic_load_spreading_prefers_a_free_account_before_a_slightly_larger_quota() {
     let mut scheduler = PoolScheduler::new();
     let mut busy = oauth_candidate("busy");
     busy.quota = CandidateQuota::Available(5_000);
@@ -77,8 +77,8 @@ fn occupied_oauth_account_remains_eligible_for_text_selection() {
 
     let selected = select(&mut scheduler, &HashSet::new()).unwrap();
 
-    assert_eq!(selected.candidate_id, "busy");
-    assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
+    assert_eq!(selected.candidate_id, "free");
+    assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
 }
 #[test]
 fn one_oauth_account_accepts_parallel_text_requests() {
@@ -102,7 +102,7 @@ fn one_oauth_account_accepts_parallel_text_requests() {
     assert!(scheduler.release("only"));
 }
 #[test]
-fn concurrent_requests_stay_on_the_largest_quota() {
+fn concurrent_requests_spread_across_least_loaded_quota_accounts() {
     let mut scheduler = PoolScheduler::new();
     for (id, quota) in [
         ("sixty-three", 6_300),
@@ -122,11 +122,51 @@ fn concurrent_requests_stay_on_the_largest_quota() {
         *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
     }
 
-    assert_eq!(counts, [("sixty-three".into(), 200),].into());
+    assert_eq!(
+        counts,
+        [
+            ("sixty-three".into(), 50),
+            ("fifty-four".into(), 50),
+            ("fifty-two".into(), 50),
+            ("fifty-one".into(), 50),
+        ]
+        .into()
+    );
     for (id, count) in counts {
         for _ in 0..count {
             assert!(scheduler.release(&id));
         }
+    }
+}
+
+#[test]
+fn three_parallel_account_chats_use_three_accounts_then_reuse_the_largest_remainder() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, quota) in [
+        ("account-1", 10_000),
+        ("account-2", 5_000),
+        ("account-3", 2_500),
+    ] {
+        let mut account = oauth_candidate(id);
+        account.quota = CandidateQuota::Available(quota);
+        account.quota_updated_at_ms = Some(100);
+        scheduler.upsert(account);
+    }
+
+    for expected in ["account-1", "account-2", "account-3"] {
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, expected);
+        assert!(scheduler.reserve_for(&selected.candidate_id, "gpt-5", 100));
+    }
+
+    assert_eq!(
+        select(&mut scheduler, &HashSet::new())
+            .unwrap()
+            .candidate_id,
+        "account-1"
+    );
+    for id in ["account-1", "account-2", "account-3"] {
+        assert!(scheduler.release_for(id, Some("gpt-5")));
     }
 }
 #[test]

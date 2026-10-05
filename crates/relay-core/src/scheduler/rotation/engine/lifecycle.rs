@@ -73,7 +73,7 @@ impl RotationEngine {
             return Err(AdmissionError::CandidateChanged);
         }
         let (ready, ordinary_alternatives) = self.selection_candidates(request, now_ms);
-        let group = self.selection_group(&ready, now_ms);
+        let group = self.selection_group(&ready, request, now_ms);
         let selected = self
             .choose_for_request(request, &group)
             .ok_or(AdmissionError::NoEligibleCandidate)?;
@@ -154,7 +154,12 @@ impl RotationEngine {
                     .copied(),
             },
         );
-        self.advance_weighted_credit(&request.route_key, &group, &candidate_id);
+        self.advance_rotation_state(
+            &request.route_key,
+            &group,
+            &candidate_id,
+            request.owner.is_none(),
+        );
         Ok(RotationLease {
             lease_id,
             candidate_id,

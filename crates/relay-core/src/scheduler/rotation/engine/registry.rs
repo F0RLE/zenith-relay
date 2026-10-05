@@ -71,6 +71,10 @@ impl RotationEngine {
             candidate.quota = runtime.candidate.quota;
             candidate.quota_remaining_basis_points = runtime.candidate.quota_remaining_basis_points;
             candidate.quota_observed_at_ms = runtime.candidate.quota_observed_at_ms;
+            candidate.provider_credits_micro_units = runtime.candidate.provider_credits_micro_units;
+            candidate.provider_credits_unlimited = runtime.candidate.provider_credits_unlimited;
+            candidate.provider_credits_observed_at_ms =
+                runtime.candidate.provider_credits_observed_at_ms;
             candidate.rate = runtime.candidate.rate;
             candidate.route_rates = runtime
                 .candidate
@@ -302,6 +306,22 @@ impl RotationEngine {
         let remaining = remaining_basis_points.filter(|remaining| *remaining > 0);
         runtime.candidate.quota_remaining_basis_points = remaining;
         runtime.candidate.quota_observed_at_ms = observed_at_ms.filter(|_| remaining.is_some());
+        true
+    }
+
+    pub fn set_provider_credits(
+        &mut self,
+        candidate_id: &str,
+        credits_micro_units: Option<u64>,
+        unlimited: bool,
+        observed_at_ms: Option<u64>,
+    ) -> bool {
+        let Some(runtime) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        runtime.candidate.provider_credits_micro_units = credits_micro_units;
+        runtime.candidate.provider_credits_unlimited = unlimited;
+        runtime.candidate.provider_credits_observed_at_ms = observed_at_ms;
         true
     }
 

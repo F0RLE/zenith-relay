@@ -77,7 +77,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         if !repairs.quota_yield {
             repairs.quota_yield = true;
             if let Some(affinity_key) = response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield_for_quota(
+                if runtime.automatic_response_owner_should_yield(
                     &key,
                     &affinity_key,
                     &resolved_model,

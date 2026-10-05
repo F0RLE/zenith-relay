@@ -55,6 +55,7 @@ pub enum SelectionReason {
     SourceLoad,
     PoolPolicy,
     QuotaHeadroom,
+    ProviderCredits,
     SubscriptionExpiry,
     SubscriptionPlan,
     ManualPriority,
@@ -248,7 +249,10 @@ impl PoolScheduler {
             eligible_candidates: u32::try_from(eligible_candidates).unwrap_or(u32::MAX),
             quota_remaining_basis_points: match candidate.quota {
                 CandidateQuota::Available(remaining) => Some(remaining),
-                CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => None,
+                CandidateQuota::Unknown
+                | CandidateQuota::CreditFallback
+                | CandidateQuota::Exhausted
+                | CandidateQuota::Stale => None,
             },
             in_flight_before: self.in_flight_count(candidate_id, lane),
             dispatches_before: self.dispatch_count(candidate_id, lane),

@@ -131,7 +131,7 @@ impl GatewayRuntime {
         .await
     }
 
-    pub(crate) fn automatic_response_owner_should_yield_for_quota(
+    pub(crate) fn automatic_response_owner_should_yield(
         &self,
         key: &AuthenticatedKey,
         affinity_key: &str,
@@ -141,14 +141,13 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> bool {
         let scope = key.scope_snapshot();
-        self.lock_scheduler()
-            .automatic_response_owner_should_yield_for_quota(
-                affinity_key,
-                model,
-                allowed_protocols,
-                &scope,
-                tried,
-                now_ms,
-            )
+        self.lock_scheduler().automatic_response_owner_should_yield(
+            affinity_key,
+            model,
+            allowed_protocols,
+            &scope,
+            tried,
+            now_ms,
+        )
     }
 }

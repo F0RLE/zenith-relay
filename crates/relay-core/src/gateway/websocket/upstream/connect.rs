@@ -37,7 +37,7 @@ pub(super) async fn connect_upstream(
         if !repairs.quota_yield {
             repairs.quota_yield = true;
             if let Some(affinity_key) = request.response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield_for_quota(
+                if runtime.automatic_response_owner_should_yield(
                     key,
                     &affinity_key,
                     &request.resolved_model,

@@ -302,6 +302,10 @@ impl PoolScheduler {
         {
             return false;
         }
-        matches!(candidate.quota, CandidateQuota::Available(remaining) if remaining > *reserve)
+        match candidate.quota {
+            CandidateQuota::Available(remaining) => remaining > *reserve,
+            CandidateQuota::CreditFallback => *reserve == 0,
+            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => false,
+        }
     }
 }

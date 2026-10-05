@@ -9,6 +9,9 @@ pub enum CandidateQuota {
     #[default]
     Unknown,
     Available(u64),
+    /// No positive provider quota window is available, but the provider has
+    /// explicitly confirmed that its separate credit ledger can still serve.
+    CreditFallback,
     Exhausted,
     Stale,
 }
@@ -26,11 +29,9 @@ impl CandidateQuota {
         {
             return Self::Stale;
         }
-        // Keep the reported percentage while its window still has room. A
-        // separate provider credit balance must not reduce a 42% window to
-        // one basis point: the protected-account reserve is measured in those
-        // same basis points. Credits only keep an exhausted/unknown window
-        // eligible, with the lowest known preference.
+        // Keep percentage quota separate from provider credits. A credit-only
+        // account remains schedulable, but must not look like it has one basis
+        // point of actual quota when automatic routing ranks candidates.
         let window_remaining = quota
             .primary
             .iter()
@@ -38,22 +39,20 @@ impl CandidateQuota {
             .filter_map(|window| window.available_basis_points)
             .map(u64::from)
             .min();
-        if quota.has_usable_provider_credits() {
-            return Self::Available(
-                window_remaining
-                    .filter(|remaining| *remaining > 0)
-                    .unwrap_or(1),
-            );
-        }
         match window_remaining {
+            Some(0) if quota.has_usable_provider_credits() => Self::CreditFallback,
             Some(0) => Self::Exhausted,
             Some(remaining) => Self::Available(remaining),
+            None if quota.has_usable_provider_credits() => Self::CreditFallback,
             None => Self::Unknown,
         }
     }
 
     pub(crate) fn is_eligible(self) -> bool {
-        matches!(self, Self::Unknown | Self::Available(1..))
+        matches!(
+            self,
+            Self::Unknown | Self::Available(1..) | Self::CreditFallback
+        )
     }
 }
 
@@ -76,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_provider_credits_keep_zero_window_account_schedulable() {
+    fn fresh_provider_credits_keep_zero_window_account_schedulable_without_inventing_quota() {
         let quota = QuotaSnapshot {
             primary: Some(crate::quota::QuotaWindow {
                 kind: crate::quota::QuotaWindowKind::Primary,
@@ -98,7 +97,22 @@ mod tests {
 
         assert_eq!(
             CandidateQuota::from_snapshot(&quota, 1_001, QUOTA_STALE_AFTER_MS),
-            CandidateQuota::Available(1)
+            CandidateQuota::CreditFallback
+        );
+    }
+
+    #[test]
+    fn fresh_provider_credits_without_a_window_use_the_credit_fallback_state() {
+        let quota = QuotaSnapshot {
+            provider_credits_available: true,
+            available_credits_micro_units: Some(250_000_000),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            CandidateQuota::from_snapshot(&quota, 1_001, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::CreditFallback
         );
     }
 

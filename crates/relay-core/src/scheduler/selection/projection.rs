@@ -9,8 +9,11 @@ impl PoolScheduler {
             .as_ref()
             .map(|policy| match policy.mode {
                 crate::PoolRoutingMode::Automatic => RotationMode::Automatic,
-                crate::PoolRoutingMode::InOrder => RotationMode::InOrder,
-                crate::PoolRoutingMode::RoundRobin => RotationMode::RoundRobin,
+                // Both previously exposed manual choices now use one cycling
+                // mode. Their saved member order remains the manual priority.
+                crate::PoolRoutingMode::InOrder | crate::PoolRoutingMode::RoundRobin => {
+                    RotationMode::Manual
+                }
                 // `set_pool_routing` validates activation before storing the
                 // policy. Smart is therefore a storage/import compatibility
                 // value only and must never silently select a runtime mode.
@@ -44,6 +47,9 @@ impl PoolScheduler {
             .member_policy(candidate)
             .and_then(|(_, member)| (member.max_concurrency > 0).then_some(member.max_concurrency))
             .unwrap_or_default();
+        result.provider_credits_micro_units = candidate.provider_credits_micro_units;
+        result.provider_credits_unlimited = candidate.provider_credits_unlimited;
+        result.provider_credits_observed_at_ms = candidate.quota_updated_at_ms;
         result.enabled = candidate.enabled;
         result.draining = candidate.draining;
         result.routes.clear();
@@ -101,6 +107,7 @@ impl PoolScheduler {
             let routing_quota = self.routing_quota(candidate);
             let (quota, remaining) = match routing_quota {
                 CandidateQuota::Unknown => (RotationQuotaState::Unknown, None),
+                CandidateQuota::CreditFallback => (RotationQuotaState::Unknown, None),
                 CandidateQuota::Available(0) => (
                     RotationQuotaState::Exhausted {
                         reset_at_ms: candidate.quota_reset_at_ms,
@@ -136,6 +143,12 @@ impl PoolScheduler {
             let _ =
                 self.rotation
                     .set_quota_remaining(&id, remaining, candidate.quota_updated_at_ms);
+            let _ = self.rotation.set_provider_credits(
+                &id,
+                candidate.provider_credits_micro_units,
+                candidate.provider_credits_unlimited,
+                candidate.quota_updated_at_ms,
+            );
             for model in &candidate.models {
                 let not_before_ms = candidate
                     .cooldowns
@@ -287,7 +300,10 @@ impl PoolScheduler {
         match candidate.quota {
             CandidateQuota::Available(remaining) => remaining.saturating_sub(reserve),
             CandidateQuota::Unknown if reserve == 0 => 1,
-            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => 0,
+            CandidateQuota::Unknown
+            | CandidateQuota::CreditFallback
+            | CandidateQuota::Exhausted
+            | CandidateQuota::Stale => 0,
         }
     }
 
