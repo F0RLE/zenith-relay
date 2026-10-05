@@ -306,7 +306,7 @@ const relayRu = {
   onboarding: {
     intro: "Подключите свои аккаунты и API к ChatGPT, OpenCode и другим приложениям.",
     flowLabel: "Учётные записи через Zenith Relay к приложениям",
-    accounts: "Учётные записи",
+    accounts: "Аккаунты",
     apps: "Приложения",
     factLocal: "Работает приватно, пока открыто приложение.",
     factRemote: "Продолжает работать на вашем сервере.",

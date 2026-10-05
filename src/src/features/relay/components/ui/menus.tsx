@@ -101,7 +101,7 @@ export function ActionMenuItem({ children, icon, danger = false, className = "",
   </>;
 }
 
-export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false }: {
+export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false, align = "end", fitContent = false, listClassName = "", showSelectionIndicator = true }: {
   label: string;
   value: string;
   options: Array<{ value: string; label: string; shortLabel?: string }>;
@@ -109,6 +109,10 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
   onChange: (value: string) => void;
   className?: string;
   disabled?: boolean;
+  align?: "start" | "center" | "end";
+  fitContent?: boolean;
+  listClassName?: string;
+  showSelectionIndicator?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -129,14 +133,44 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     if (!trigger || !list) return;
     const margin = 8;
     const gap = 6;
-    const width = Math.min(Math.max(trigger.width, 220), window.innerWidth - margin * 2);
-    const left = Math.max(margin, Math.min(trigger.right - width, window.innerWidth - width - margin));
+    const measuredWidth = () => {
+      const labels = [...list.querySelectorAll<HTMLElement>("button > span")];
+      const labelWidth = Math.max(0, ...labels.map((label) => {
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        return range.getBoundingClientRect().width;
+      }));
+      const item = list.querySelector<HTMLElement>("button");
+      if (!item) return list.getBoundingClientRect().width;
+      const pixels = (value: string) => Number.parseFloat(value) || 0;
+      const itemStyle = window.getComputedStyle(item);
+      const listStyle = window.getComputedStyle(list);
+      const indicatorWidth = showSelectionIndicator ? 16 + pixels(itemStyle.columnGap) : 0;
+      return Math.ceil(
+        labelWidth
+        + pixels(itemStyle.paddingLeft)
+        + pixels(itemStyle.paddingRight)
+        + indicatorWidth
+        + pixels(listStyle.paddingLeft)
+        + pixels(listStyle.paddingRight)
+        + pixels(listStyle.borderLeftWidth)
+        + pixels(listStyle.borderRightWidth),
+      );
+    };
+    const preferredWidth = fitContent ? measuredWidth() : 220;
+    const width = Math.min(Math.max(trigger.width, preferredWidth), window.innerWidth - margin * 2);
+    const preferredLeft = align === "start"
+      ? trigger.left
+      : align === "center"
+        ? trigger.left + (trigger.width - width) / 2
+        : trigger.right - width;
+    const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - width - margin));
     const below = trigger.bottom + gap;
     const top = below + list.offsetHeight <= window.innerHeight - margin
       ? below
       : Math.max(margin, trigger.top - list.offsetHeight - gap);
     setPosition({ left, top, width });
-  }, [open, options.length]);
+  }, [align, fitContent, open, options.length, showSelectionIndicator]);
 
   useEffect(() => {
     if (!open) return;
@@ -220,10 +254,11 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     {open && typeof document !== "undefined" ? createPortal(
       <div
         ref={listRef}
-        className="relay-option-list relay-popover-panel"
+        className={`relay-option-list relay-popover-panel ${listClassName}`.trim()}
         role="listbox"
         aria-label={label}
         data-positioned={Boolean(position)}
+        data-selection-indicator={showSelectionIndicator}
         style={position ? { left: position.left, top: position.top, width: position.width } : undefined}
       >
         {options.map((option, index) => <button
@@ -240,7 +275,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
           onKeyDown={(event) => moveFocus(event, index)}
         >
           <span>{option.label}</span>
-          {option.value === value ? <Check aria-hidden /> : null}
+          {showSelectionIndicator && option.value === value ? <Check aria-hidden /> : null}
         </button>)}
       </div>,
       document.body,

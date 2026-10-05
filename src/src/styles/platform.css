@@ -164,6 +164,30 @@ button {
   order: 1;
 }
 
+/* Keep the setup screens free of a title strip while retaining their window controls. */
+html:not([data-startup-ready="true"]) .app > .titlebar,
+.app:has(.setup-shell) > .titlebar {
+  position: relative;
+  z-index: 1001;
+  border-color: transparent;
+  background: transparent;
+}
+
+.app:has(.setup-shell) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.app:has(.setup-shell) > .titlebar {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 34px;
+}
+
+html:not([data-startup-ready="true"]) .app > .titlebar .titlebar-drag > *,
+.app:has(.setup-shell) > .titlebar .titlebar-drag > * {
+  display: none;
+}
+
 .window-controls-macos {
   gap: 8px;
   flex: 0 0 auto;

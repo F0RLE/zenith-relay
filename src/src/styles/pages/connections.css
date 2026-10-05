@@ -1563,6 +1563,10 @@
   cursor: pointer;
 }
 
+.relay-option-list[data-selection-indicator="false"] button {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .relay-option-list button:hover,
 .relay-option-list button:focus-visible,
 .relay-option-list button[aria-selected="true"] {

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Clock3, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, MessageSquare, Server, SkipForward, Terminal, Upload, UserRoundCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, CircleAlert, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, MessageSquare, Server, SkipForward, Terminal, Upload, UserRoundCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import relayLogoUrl from "../../../../../src-tauri/icons/zenith-relay.svg?url";
 import { setI18nLanguage } from "../../../i18n";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
@@ -238,7 +239,7 @@ export function QuickSetupWizard() {
     </section>
     <footer className="setup-footer">
       <div>
-        <Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>
+        {step > 1 ? <Button variant="ghost" icon={<ArrowLeft aria-hidden />} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button> : null}
         {step < 3 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={finishLater}>{t("onboarding.skipStep")}</Button> : null}
       </div>
       <Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button>
@@ -414,17 +415,43 @@ function SetupHeader() {
 
 function SetupIntro({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
   const { t } = useTranslation();
+  const sources = [
+    { id: "accounts", label: t("onboarding.accounts") },
+    { id: "api", label: "API" },
+  ];
+  const harnesses = [
+    { id: "chatgpt", label: "ChatGPT", icon: "/icons/chatgpt.svg" },
+    { id: "opencode", label: "OpenCode", icon: "/icons/opencode.svg" },
+  ];
+
   return (
     <main className="setup-shell setup-shell-intro">
-      <SetupHeader />
+      <header className="setup-header setup-header-intro"><LanguageSelect /></header>
       <section className="product-intro">
-        <div className="intro-copy">
-          <h1>Zenith Relay</h1>
-          <p>{t("onboarding.intro")}</p>
-        </div>
-        <div className="intro-actions">
-          <Button variant="primary" onClick={onStart}>{t("onboarding.start")}</Button>
-          <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={onSkip}>{t("onboarding.skip")}</Button>
+        <div className="intro-hero">
+          <div className="intro-copy">
+            <div className="intro-copy-heading">
+              <h1>Zenith Relay</h1>
+              <p>{t("onboarding.intro")}</p>
+            </div>
+            <div className="intro-actions">
+              <Button variant="primary" onClick={onStart}>{t("onboarding.start")}</Button>
+              <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={onSkip}>{t("onboarding.skip")}</Button>
+            </div>
+          </div>
+          <div className="intro-visual">
+            <div className="intro-flow" role="group" aria-label={t("onboarding.flowLabel")}>
+              <div className="intro-flow-column intro-flow-sources">
+                {sources.map((source) => <div className="intro-flow-node" key={source.id}><span>{source.label}</span></div>)}
+              </div>
+              <ArrowRight className="intro-flow-arrow" aria-hidden />
+              <img className="intro-flow-logo" src={relayLogoUrl} alt="" />
+              <ArrowRight className="intro-flow-arrow" aria-hidden />
+              <div className="intro-flow-column intro-flow-harnesses">
+                {harnesses.map((harness) => <div className="intro-flow-node" key={harness.id}><img src={harness.icon} alt="" /><span>{harness.label}</span></div>)}
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -521,9 +548,12 @@ function LanguageSelect() {
   const { i18n, t } = useTranslation();
   return <OptionMenu
     className="setup-language-menu"
-    icon={<Languages aria-hidden />}
+    listClassName="setup-language-options"
     label={t("settings.language")}
     value={i18n.language.startsWith("ru") ? "ru" : "en"}
+    align="center"
+    fitContent
+    showSelectionIndicator={false}
     onChange={(value) => void setI18nLanguage(value)}
     options={[{ value: "ru", label: "Русский", shortLabel: "RU" }, { value: "en", label: "English", shortLabel: "EN" }]}
   />;
