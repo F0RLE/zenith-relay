@@ -903,7 +903,6 @@
 .pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent); background: var(--relay-accent-soft); border-color: transparent; }
 .pool-routing-modes button:disabled { cursor: not-allowed; opacity: .5; }
 .pool-routing-modes svg { width: 16px; height: 16px; flex-shrink: 0; }
-.pool-routing-mode-description { margin: -8px 0 0; color: var(--relay-secondary); font-size: 12px; line-height: 1.45; }
 .pool-routing-columns, .pool-routing-member { display: grid; grid-template-columns: minmax(0, 1fr) 104px 156px; gap: 12px; align-items: center; }
 .pool-routing-editor[data-manual-order="true"] .pool-routing-columns,
 .pool-routing-editor[data-manual-order="true"] .pool-routing-member { grid-template-columns: minmax(0, 1fr) 156px 68px; }

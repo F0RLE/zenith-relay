@@ -1021,10 +1021,6 @@ const relayEn = {
     routingSettings: "Pool rotation settings",
     routingSettingsTitle: "Pool rotation",
     rotationModes: { automatic: "Automatic", manual: "Manual" },
-    rotationModeDescriptions: {
-      automatic: "New requests go to the least-loaded ready members. Fresh quota and provider credits rank equally loaded members; request share breaks remaining ties. Per-member concurrent request limits apply.",
-      manual: "The first request starts at the first ready member in your saved order. Later requests continue through the order, skip unavailable members and full limits, then wrap to the top.",
-    },
     routingChanged: "Pool settings changed during saving. Current values are shown; repeat your change.",
     memberOrder: "Member order",
     rotationMembers: "Members",

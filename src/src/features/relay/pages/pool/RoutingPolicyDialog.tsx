@@ -103,9 +103,6 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
           </button>
         ))}
       </div>
-      <p className="pool-routing-mode-description">
-        {t(`pool.rotationModeDescriptions.${manualOrder ? "manual" : "automatic"}`)}
-      </p>
       {errorKey ? <p role="alert" className="form-error">{t(errorKey)}</p> : null}
       {!runtime?.capabilities.features.includes("rotation_v2") ? <p role="alert" className="form-error">{t("remote.capabilityUnavailable")}</p> : null}
       <div className="pool-routing-columns" aria-hidden>
