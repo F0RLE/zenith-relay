@@ -204,7 +204,7 @@ test("pasted Cockpit arrays reach the Rust batch preview unchanged", async ({ pa
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Import", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Import accounts" });
-  await expect(dialog).not.toContainText("Cockpit");
+  await expect(dialog).toContainText("Cockpit Tools JSON");
   await expect(dialog.getByLabel("Account data or tokens")).toHaveAttribute("placeholder", /JWT/);
   const payload = JSON.stringify([
     { type: "codex", access_token: "synthetic-access-one", account_id: "synthetic-one", email: "one@example.test" },

@@ -8,9 +8,13 @@ release entries are kept concise and link to the corresponding tag.
 
 <!-- relay-notes:en -->
 
+- Account import recognizes Cockpit Tools JSON, and account export can create Cockpit Tools files with safe account metadata.
+
 - Direct ChatGPT OAuth clears Relay provider and catalog overrides from the root and named Codex profiles, then lets Codex discover its native models. Relay pool activation clears stale named-profile overrides and uses the validated catalog from Relay's live model endpoint. Profile backups and credential snapshots stay in Relay recovery storage and the OS secret store, outside the Codex directory; profile or account-token changes invalidate Codex's model cache.
 
 <!-- relay-notes:ru -->
+
+- Импорт распознаёт JSON Cockpit Tools, а экспорт создаёт файлы Cockpit Tools с безопасными метаданными аккаунта.
 
 - Прямой вход ChatGPT OAuth очищает провайдеры и каталоги Relay в корневых и именованных профилях Codex, после чего Codex сам получает список своих моделей. При включении пула Relay удаляет устаревшие переопределения в именованных профилях и использует проверенный каталог из актуального списка моделей Relay. Резервные копии профиля и учётных данных хранятся в восстановлении Relay и системном хранилище секретов, вне папки Codex; при переключении профиля и обновлении токена сбрасывается отдельный кэш моделей Codex.
 

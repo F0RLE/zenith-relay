@@ -11,6 +11,7 @@ const MAX_ZENITH_EXPORT_DESCRIPTION_LENGTH = 2_000;
 const accountExportFormats: Array<{ value: AccountExportFormat; label: string; multiple: boolean }> = [
   { value: "zenith", label: "Zenith", multiple: true },
   { value: "sub2api", label: "sub2api", multiple: true },
+  { value: "cockpit", label: "Cockpit Tools", multiple: true },
   { value: "cpa", label: "CPA", multiple: false },
   { value: "9router", label: "9router", multiple: true },
   { value: "codex", label: "ChatGPT", multiple: false },
@@ -70,9 +71,11 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
     onClose={onClose}
     footer={
       <>
-        <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
-        <Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
-        <Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
+        <Button className="account-export-cancel" variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+        <div className="account-export-actions">
+          <Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
+          <Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
+        </div>
       </>
     }
   >

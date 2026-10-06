@@ -300,9 +300,10 @@ test("bulk account export only offers formats that support one JSON document", a
   await page.locator(".account-bulk-menu summary").click();
   await page.getByRole("menuitem", { name: "Export all" }).click();
   const dialog = page.getByRole("dialog", { name: "Export accounts" });
-  await expect(dialog.getByRole("radio")).toHaveCount(4);
+  await expect(dialog.getByRole("radio")).toHaveCount(5);
   await expect(dialog.locator('[role="radio"][data-value="zenith"]')).toBeVisible();
   await expect(dialog.locator('[role="radio"][data-value="sub2api"]')).toBeVisible();
+  await expect(dialog.locator('[role="radio"][data-value="cockpit"]')).toBeVisible();
   await expect(dialog.locator('[role="radio"][data-value="9router"]')).toBeVisible();
   await expect(dialog.locator('[role="radio"][data-value="codex_manager"]')).toBeVisible();
   await expect(dialog.locator('[role="radio"][data-value="cpa"]')).toHaveCount(0);

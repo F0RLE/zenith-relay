@@ -500,6 +500,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         "zenith",
         "cpa",
         "sub2api",
+        "cockpit",
         "9router",
         "codex",
         "axon_hub",
