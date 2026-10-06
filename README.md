@@ -18,6 +18,28 @@
   original configuration for recovery.
 </p>
 
+## Direction
+
+Relay is intended to grow into a user-owned, multi-provider account pool for
+coding clients. The long-term direction is to connect permitted accounts and
+API sources to Codex, OpenCode, Claude Code, and compatible clients, keeping a
+provider's native protocol when possible and using a typed adapter when the
+requested conversion is supported.
+
+This is a roadmap direction, not a claim that every provider or subscription
+connector is supported today. Current behavior is defined by
+[PLANNING.md](docs/project/PLANNING.md); staged work and live acceptance gates
+are tracked in the [roadmap](docs/project/ROADMAP.md).
+
+The server direction uses the desktop as the control plane and Relay Server as
+the data plane. A paired server can receive an explicitly published, encrypted
+configuration revision containing the pool, connections, ordering, model
+policies, and prices, then continue serving requests while the desktop is
+closed. A later hosted mode can add scoped user keys, per-model USD prices,
+quota, balance and usage accounting, and redacted live request telemetry. That
+mode needs its own tenant, billing, and provider-permission contracts; it is a
+separate expansion of the user-managed server path.
+
 ## Download
 
 Download the package for your platform from

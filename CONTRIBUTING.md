@@ -6,52 +6,35 @@ this repository.
 
 ## License and contributor agreement
 
-Zenith Relay is published under **AGPL-3.0-only**, as recorded in [LICENSE](LICENSE)
-and the package manifests. AGPL grants permission to use, modify, and distribute
-the project; it does not transfer a contributor's copyright to the maintainer.
-Keep its standard license text intact.
+Zenith Relay is **AGPL-3.0-only**. Keep the [LICENSE](LICENSE) text intact.
+The assignment terms are only in the
+[Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). Read that file
+before a pull request. This section does not restate them.
 
-Before submitting a PR, read the
-[Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). It assigns copyright
-in your accepted, original Contribution to the Project Owner, `F0RLE`, and
-permits relicensing of rights the Project Owner actually receives. You retain a
-license to reuse your own Contribution. Existing AGPL grants and third-party
-licenses remain in force.
-This agreement does not apply retroactively to earlier contributions or impose
-extra conditions on people who only use, distribute, or fork the project.
+For each pull request, describe the change and the checks, then check the
+single Contributor Agreement checkbox yourself. Keep its wording unchanged.
+A release note may be in the contributor's own language and may include a
+screenshot. If the change is entirely yours and names no other rights holder
+or excluded material, no extra form is required.
 
-For each PR, describe the change and validation, open the agreement linked in
-the template, and check **one Contributor Agreement checkbox** yourself. The
-checkbox covers agreement, assignment, authority, and required disclosures
-together. Keep its wording unchanged. A release note may be written in the
-contributor's own language and may include a screenshot. If the Contribution is
-entirely your own and has no other rights holders or excluded material, no
-extra ownership form or separate consent comment is required by this workflow.
+When it applies, name co-authors, employer ownership, and included third-party
+material with its source and license. Get consent from each relevant rights
+holder. Do not put private identity or employer documents in the pull request.
 
-Only when relevant, list co-authors, employer ownership, and included
-pre-existing or third-party material with its source and license. Obtain
-consent from every relevant rights holder; co-authors can repeat the same
-confirmation in comments under their own accounts. An authorized employer
-representative or a separate signed instrument may be needed. Do not publish
-private identity or employer documents in the PR.
+The checkbox links to the agreement on `main`. Do not add a version or pin a
+release branch. A pull request does not change the accepted agreement until
+that text is on `main`. If the text on `main` changes, read it again and give
+fresh consent before acceptance. To withdraw consent before acceptance, say so
+in the pull request and clear the checkbox.
 
-Use the agreement text in the PR's **base branch**, not changed terms proposed
-by that PR. Keep consent accurate when updating the PR. If the base-branch
-agreement changes, read the updated text and give fresh consent before acceptance.
-To withdraw consent before acceptance, say so explicitly in the PR and clear
-the checkbox.
+`Release context` checks the template and the checkbox. It does not verify
+identity, employer authority, or co-author consent. The maintainer reviews
+those records before acceptance.
 
-The `Release context` check validates the template and confirmation. It does
-not verify legal identity, employer authority, or co-author consent. Before
-acceptance, the maintainer must review those records and retain the agreement
-text, accepted commits, and consent. Complete any legally required separate
-signature or identity formalities privately before accepting the Contribution.
-
-Only dependency maintenance PRs from GitHub's `dependabot[bot]` that touch
-manifests, lockfiles, or Actions workflow files are exempt from the human PR
-template. That exemption does not assign ownership of dependencies or cover
-original work by human authors; the maintainer must review provenance and obtain
-their consent separately. Other bot PRs are not exempt.
+Only `dependabot[bot]` pull requests that change manifests, lockfiles, or
+Actions workflow files skip the human template. That exemption does not assign
+dependency ownership or cover human work. Other bot pull requests are not
+exempt.
 
 ## Repository boundaries
 
@@ -350,12 +333,11 @@ before making the check required. If an Actions event policy blocks
 before relying on the check. Do not enable unreviewed workflows or broaden token
 permissions as a workaround.
 
-Policy changes use the agreement text currently in the base branch and must not
-use their proposed wording to authorize themselves. Keep the template's
-agreement link pointed at the reviewed text in the designated development or
-release branch. When changing that link or agreement terms, update the template,
-validator, and tests together; changes require fresh consent on open PRs. Update
-those PRs against the new base before merging.
+A policy change must not use its own proposed wording to authorize itself.
+The template links to the agreement on `main`, with no version and no
+release-branch pin. Changing the link or the agreement requires the template,
+validator, and tests to change together. Open pull requests need fresh consent
+after the new text is on `main`.
 
 ### Updater changelog for release admins
 

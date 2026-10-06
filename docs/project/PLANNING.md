@@ -264,12 +264,10 @@ Older server snapshots without this field remain readable.
 
 Accounts and API sources use the same pool rotation admission engine and a
 versioned `poolRouting` member order. New profiles use policy version 2 and
-**Automatic**. On the normal 1.1.3 upgrade, desktop and server automatically
-convert version-1 policies (including profiles without a saved policy) before
-building a runtime. No confirmation or migration notification is required.
-The host-refresh and remaining acceptance gates in
-[ROADMAP.md](ROADMAP.md) remain open. The design is a target, not proof of
-full acceptance.
+**Automatic**. Startup converts version-1 policies, including a missing policy,
+before building a runtime. No confirmation is required. The selection rules
+below are implemented behavior. Remaining acceptance is in
+[ROADMAP.md](ROADMAP.md).
 
 Automatic selection first chooses the compatible ready physical members with
 the least normalized load (`in_flight / effective capacity`). This spreads
@@ -455,70 +453,36 @@ its own revision. HTTP and WebSocket payload dispatch validate that revision
 inside the request-budget/scheduler transaction, so a rejected preparation
 does not spend a generation. This is the dispatch start boundary, not a lock
 held through upstream network I/O.
-Desktop and server apply a changed pool policy together with their internal
-gateway key scopes under the same scope/scheduler lock order. A missing key
-leaves both unchanged rather than exposing a partially updated routing graph.
-Server single-account policy edits hold the configuration/build locks;
-permission-changing edits additionally hold a candidate dispatch fence from
-before the durable save through hot apply or replacement. An old pending lease
-cannot send during that gap. Priority/weight-only edits do not fence it. A failed
-rollback/rebuild retires the previous runtime rather than serving stale
-permissions; already started attempts may still settle. Fences are scoped to
-the candidate incarnation, so releasing an old guard cannot unfreeze a
-removed and re-added candidate.
-Server single-source updates and deletion also hold the build lock and fence
-every physical protocol route before changing the credential, endpoint or
-saved permission. Priority/weight-only edits do not fence pending work. A
-failed source credential restoration or an uncertain vault
-delete retires the old runtime. A policy-only save may keep the scheduler;
-transport replacement retires its previous runtime after publication.
-Server batch pool-membership edits validate all members first, then hold the
-configuration/build locks and fence only changed account and physical source
-candidates across the atomic store commit and policy/key-scope update. A failed
-apply restores membership and rebuilds under that same lock; failed restore
-retires the previous runtime. Unchanged membership does not fence requests.
-Server account re-import and deletion fence the old candidate before replacing
-its credential reference or deleting its store row. A failed vault deletion
-restores the record and builds a fresh runtime; an unrecoverable restore retires
-the old runtime rather than reopening its pending dispatches.
-Server common/required proxy policy, per-account proxy and bulk assignment
-edits also hold the configuration/build locks. Before a durable transport
-change, affected account candidates are fenced through the replacement build
-or rollback; an unchanged assignment does not add a dispatch fence. Started
-attempts retain their existing transport until settlement.
-Desktop batch membership, single-account policy and source policy/endpoint/key
-edits also fence affected physical candidates before saving until the live
-scope/policy update or replacement/rollback finishes. Desktop common and
-required proxy settings, individual/bulk assignments and successful source
-model discovery fence the old routes through transport replacement. Applying
-a configuration preset fences its previous pool across both durable writes;
-failure of the second write restores the first. If a desktop replacement build
-fails after a partial hot apply, the restored records produce a fresh runtime
-before dispatch resumes; an unrecoverable restore retires the old runtime.
-Rotating the desktop request key fences the previous physical pool before
-changing the saved principal secret and replacing its listener.
-Desktop re-import and OAuth sign-in fence the previous account candidate before
-committing a replacement login and keep the fence through runtime replacement.
-If OAuth cannot restore a failed account write with certainty, it retires the
-running gateway instead of allowing old pending dispatches.
-Desktop single and batch account deletion fence the old physical candidates
-before touching credentials. If restoring a failed deletion cannot recover
-credentials, profiles, wake state or proxy assignments, the gateway stops and
-is disabled before those fences are released.
-Desktop ownership moves fence local candidates through remote import and its
-verified cleanup. A pending move or remote-linked account is excluded from the
-local runtime and key scope even after a restart. Once remote ownership is
-committed, a failed local runtime replacement leaves the local route disabled
-for recovery instead of reactivating two owners. Returning an account restores
-its previous inactive ownership on failed activation. Remote reconciliation
-also applies a live policy/scope change or replaces the runtime; it never rolls
-back to an erroneously enabled remote-owned record.
-Refresh reads cannot lift a newer live health block unless the durable read
-records a health transition. A superseded server runtime, or a desktop runtime
-being restarted, rejects new admission and pre-dispatch attempts while allowing
-started leases to settle; waiting requests wake without a synthetic retry.
-Other desktop token/login/ownership transitions and delayed-result cases remain
-in the final-dispatch matrix tracked in ROADMAP.
+Desktop and server publish a changed pool policy and the internal gateway key
+scopes together. A missing key leaves both unchanged.
+
+A credential, transport, membership, permission, or ownership change fences
+the affected candidates before the durable write, until the new runtime is
+published or the old runtime is retired. Priority-only and weight-only edits,
+and unchanged assignments, do not fence. A fence belongs to that candidate
+incarnation: releasing an old guard cannot unfreeze a removed and re-added
+candidate. A failed restore retires the old runtime. A started attempt may
+settle and keeps its existing transport.
+
+A configuration preset fences the previous pool across both durable writes.
+Failure of the second write restores the first. If replacement fails after a
+partial hot apply, the restored records build a fresh runtime before dispatch
+resumes. Request-key rotation fences the previous pool before the secret and
+listener change. If OAuth cannot restore a failed account write with
+certainty, it retires the running gateway. If deletion recovery cannot restore
+credentials, profiles, wake state, or proxy assignments, the gateway stops and
+is disabled before the fences are released. A failed vault deletion restores
+the record and builds a fresh runtime.
+
+A pending move or a remote-owned account stays out of the local runtime and
+key scope. A failed replacement leaves the local route disabled. Returning an
+account restores its previous inactive ownership if activation fails.
+Reconciliation never re-enables a remote-owned record. A superseded runtime
+rejects new admission and pre-dispatch attempts, allows started leases to
+settle, and wakes waiting requests without a synthetic retry. A refresh cannot
+lift a newer health block unless the durable read records that transition.
+Remaining token, ownership, and delayed-result acceptance is in
+[ROADMAP.md](ROADMAP.md).
 Desktop quota/model readers also apply observations against the latest record
 behind durable account/configuration revisions. Login/import, secret-backed
 proxy changes, enable/ownership changes and delete/readd retire older reads;
@@ -942,6 +906,13 @@ Automatic rollback never adopts a newer sign-in and stops before replacing it.
 Cross-provider history repair is
 reversible and rolls back if profile application fails. Named ChatGPT recovery
 points are separate explicit restores of configuration/authentication.
+Direct ChatGPT OAuth writes Codex's `auth.json` token fields and clears Relay
+provider/catalog overrides from the root and named profiles so Codex uses its
+native model discovery. Relay pool activation sets the root Relay provider,
+clears named-profile route/catalog overrides, and writes a validated catalog
+from the live Relay model endpoint. Profile backups stay under Relay's recovery
+root; credential snapshots use the OS secret store. Switching profiles and
+refreshing changed OAuth credentials invalidate Codex's separate model cache.
 An external edit to the known managed model-catalog file does not invalidate
 the profile backup: automatic detach restores the previous config/auth but
 leaves that edited file untouched. Refresh still refuses to replace it, and

@@ -284,7 +284,7 @@ Eligibility is checked for the specific model and request format. A working
 pool can therefore lack a route for one model. A temporary restriction on a
 single model does not necessarily block the member's other models.
 
-The 1.1.3 update switches existing profiles to the current pool rotation automatically.
+Startup switches existing profiles to the current pool rotation automatically.
 No separate confirmation or gateway stop is needed. Saved member order, request
 shares, concurrency limits, pool membership and gateway enabled state remain.
 The former Smart mode becomes Automatic. Legacy In order and Round robin

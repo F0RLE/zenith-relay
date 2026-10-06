@@ -8,61 +8,57 @@ release entries are kept concise and link to the corresponding tag.
 
 <!-- relay-notes:en -->
 
-### Changed
-
-- Automatic pool rotation spreads concurrent requests across the least-loaded eligible members, then ranks by fresh quota and provider credits. Session affinity stays until another equally loaded member leads by 15 credits; pool cards show active request counts.
-- Pool rotation now has Automatic and Manual modes. Manual cycles through the saved member order, skips unavailable members and concurrency limits, and wraps to the start; automatic mode retains request weights and per-member limits.
-- In Automatic mode, pool cards with no positive quota window sort by fresh provider-reported credits. API source wallet balances do not affect the order.
-- Quick Setup places the Relay mark between connection sources and compatible applications, with window controls in a frameless, draggable top area.
-- The pool rotation dialog no longer repeats mode explanations; the full behavior remains in Help.
-- Account login notes save in order, keep their fields through reauthentication, and do not show a success message for a failed or closed save. Reauthentication replaces the stored token while preserving local notes and no longer opens the new-account pool setup.
-- Direct ChatGPT launch is disabled for accounts that need sign-in or have a terminal credential, proxy, or health failure. Relay validates credentials before stopping an existing ChatGPT session and restores the session after a failed profile change.
-- Newly signed-in OAuth accounts stay outside the pool until explicitly selected, and the pool option no longer adds a green selection border.
-- Encrypted-context cleanup stays on the account that rejected it. If that account cannot take the retry, Relay drops the temporary binding and can continue with another eligible member.
-- A stale credit reading no longer overrides a proven rate limit. Fresh provider credits can still keep an account with an empty quota window schedulable.
-- Usage price refresh replaces an older row when sample or cache-write counters increase, not only when token counters do.
+- Direct ChatGPT OAuth clears Relay provider and catalog overrides from the root and named Codex profiles, then lets Codex discover its native models. Relay pool activation clears stale named-profile overrides and uses the validated catalog from Relay's live model endpoint. Profile backups and credential snapshots stay in Relay recovery storage and the OS secret store, outside the Codex directory; profile or account-token changes invalidate Codex's model cache.
 
 <!-- relay-notes:ru -->
 
-### Изменения
-
-- Автоматическая ротация распределяет параллельные запросы по наименее загруженным участникам, затем учитывает свежую квоту и кредиты провайдера. Привязка сессии сохраняется, пока другой участник с такой же загрузкой не опередит на 15 кредитов; карточки пула показывают число активных запросов.
-- В ротации пула остались режимы «Автоматически» и «Вручную». Ручной режим циклически проходит сохранённый порядок, пропускает недоступных участников и достигших лимита запросов, а затем начинает сначала; автоматический режим сохраняет долю запросов и индивидуальные лимиты.
-- В автоматическом режиме карточки без положительной квоты сортируются по актуальным кредитам провайдера. Баланс API-источника на порядок не влияет.
-- В быстрой настройке логотип Relay размещён между подключениями и совместимыми приложениями; кнопки окна остаются в перетаскиваемой верхней области без полосы.
-- В окне ротации убраны пояснения режимов; подробное описание осталось в справке.
-- Заметки входа сохраняются последовательно, не пропадают после повторного входа и не показывают успешное сохранение при ошибке или закрытии окна. Повторный вход заменяет сохранённый токен, сохраняет локальные заметки и больше не открывает настройку пула для нового аккаунта.
-- Прямой запуск ChatGPT отключён для аккаунтов, которым нужен повторный вход или у которых есть окончательная ошибка учётных данных, прокси или состояния. Relay проверяет учётные данные до остановки уже запущенного ChatGPT и восстанавливает сессию после неудачной смены профиля.
-- Новые OAuth-аккаунты остаются вне пула, пока их явно не выберут; у варианта пула больше нет зелёной рамки выбора.
-- Очистка отклонённого зашифрованного контекста остаётся на аккаунте, который его отклонил. Если этот аккаунт не может принять повтор, временная привязка снимается и запрос может перейти к другому доступному участнику.
-- Устаревшие кредиты больше не отменяют подтверждённый лимит. Свежие кредиты провайдера по-прежнему оставляют аккаунт без окна квоты доступным для выбора.
-- Обновление цен использования заменяет старую строку, когда растут счётчики семплов или записи кэша, а не только токенов.
+- Прямой вход ChatGPT OAuth очищает провайдеры и каталоги Relay в корневых и именованных профилях Codex, после чего Codex сам получает список своих моделей. При включении пула Relay удаляет устаревшие переопределения в именованных профилях и использует проверенный каталог из актуального списка моделей Relay. Резервные копии профиля и учётных данных хранятся в восстановлении Relay и системном хранилище секретов, вне папки Codex; при переключении профиля и обновлении токена сбрасывается отдельный кэш моделей Codex.
 
 ## [1.1.5] - 2026-10-05
 
 <!-- relay-notes:en -->
 
-Zenith Relay 1.1.5 improves ChatGPT account continuity, makes API errors easier to identify, and expands request usage details.
+Zenith Relay 1.1.5 changes pool rotation, keeps ChatGPT account continuity, labels API errors, and expands request usage details.
 
 ### Changed
 
-- A ChatGPT account retries once after rejecting encrypted reasoning or compaction context from another connection. Relay removes the rejected ciphertext and its bound id, keeps visible summaries and the remaining history, then retries the request once.
+- Automatic pool rotation spreads concurrent requests across the least-loaded eligible members, then ranks by fresh quota and provider credits. Session affinity stays until another equally loaded member leads by 15 credits; pool cards show active request counts.
+- Pool rotation has Automatic and Manual modes. Manual cycles through the saved member order, skips unavailable members and concurrency limits, and wraps to the start. Automatic keeps request weights and per-member limits.
+- In Automatic mode, pool cards with no positive quota window sort by fresh provider-reported credits. API source wallet balances do not affect the order.
+- Quick Setup places the Relay mark between connection sources and compatible applications, with window controls in a frameless, draggable top area.
+- The pool rotation dialog no longer repeats mode explanations. The behavior is in Help.
+- Account login notes save in order, keep their fields through reauthentication, and do not show a success message for a failed or closed save. Reauthentication replaces the stored token, keeps local notes, and does not open new-account pool setup.
+- Direct ChatGPT launch is disabled for accounts that need sign-in or have a terminal credential, proxy, or health failure. Relay validates credentials before stopping an existing ChatGPT session and restores the session after a failed profile change.
+- Newly signed-in OAuth accounts stay outside the pool until explicitly selected. The pool option has no green selection border.
+- If a ChatGPT account rejects encrypted reasoning or compaction context, Relay removes the rejected ciphertext and bound id on that same account, keeps the visible summary and remaining history, and retries once. If that account cannot accept the retry, Relay drops the temporary binding and continues with another eligible member.
 - Basis Points honors `parallel_tool_calls: false`. If the provider returns multiple client tool calls, Relay asks it to regenerate once and returns an error if the next response still violates the serial setting.
 - Chat API errors begin with an English `Account:`, `Provider:`, or `Relay:` prefix in JSON, Messages, Relay Server responses, SSE, WebSocket, route and method failures, and request details.
 - Usage details show whether a request used HTTP or WebSocket and provide an informational API-equivalent estimate from published model rates, observed service tier, and input-context band. Missing prices remain unknown. Account plan labels recognize Pro 100, Pro 200, and Pro 500.
 - Relay no longer applies fixed byte caps to JSON generation, image upload or edit, provider responses, SSE events, translated streams, or alpha search results. Providers may still reject large requests or responses.
+- A stale credit reading no longer overrides a proven rate limit. Fresh provider credits can still keep an account with an empty quota window schedulable.
+- Usage price refresh replaces an older row when sample or cache-write counters increase, not only when token counters do.
 
 <!-- relay-notes:ru -->
 
-Zenith Relay 1.1.5 восстанавливает продолжение чатов ChatGPT, упрощает определение источника ошибки API и добавляет сведения об использовании запросов.
+Zenith Relay 1.1.5 меняет ротацию пула, сохраняет продолжение чатов ChatGPT, помечает источник ошибки API и добавляет сведения об использовании запросов.
 
 ### Изменения
 
-- Если аккаунт ChatGPT отклоняет зашифрованный контекст рассуждений или сжатия из другого подключения, Relay удаляет отклонённый шифротекст и связанный с ним id, сохраняет видимое краткое содержание и оставшуюся историю, затем один раз повторяет запрос.
+- Автоматическая ротация распределяет параллельные запросы по наименее загруженным участникам, затем учитывает свежую квоту и кредиты провайдера. Привязка сессии сохраняется, пока другой участник с такой же загрузкой не опередит на 15 кредитов; карточки пула показывают число активных запросов.
+- В ротации пула два режима: «Автоматически» и «Вручную». Ручной режим проходит сохранённый порядок по кругу, пропускает недоступных участников и достигших лимита запросов. Автоматический режим сохраняет долю запросов и индивидуальные лимиты.
+- В автоматическом режиме карточки без положительной квоты сортируются по актуальным кредитам провайдера. Баланс API-источника на порядок не влияет.
+- В быстрой настройке логотип Relay стоит между подключениями и совместимыми приложениями. Кнопки окна остаются в перетаскиваемой верхней области без полосы.
+- В окне ротации нет пояснений режимов. Поведение описано в справке.
+- Заметки входа сохраняются по порядку, не пропадают после повторного входа и не показывают успешное сохранение при ошибке или закрытии окна. Повторный вход заменяет сохранённый токен, сохраняет локальные заметки и не открывает настройку пула для нового аккаунта.
+- Прямой запуск ChatGPT отключён для аккаунтов, которым нужен повторный вход или у которых есть окончательная ошибка учётных данных, прокси или состояния. Relay проверяет учётные данные до остановки уже запущенного ChatGPT и восстанавливает сессию после неудачной смены профиля.
+- Новые OAuth-аккаунты остаются вне пула, пока их явно не выберут. У варианта пула нет зелёной рамки выбора.
+- Если аккаунт ChatGPT отклоняет зашифрованный контекст рассуждений или сжатия, Relay удаляет отклонённый шифротекст и связанный id на этом же аккаунте, сохраняет видимое краткое содержание и оставшуюся историю и один раз повторяет запрос. Если этот аккаунт не может принять повтор, временная привязка снимается и запрос продолжается другим подходящим участником.
 - Basis Points соблюдает `parallel_tool_calls: false`. Если провайдер возвращает несколько клиентских вызовов инструментов, Relay один раз просит сформировать ответ заново и возвращает ошибку, если следующее сообщение всё ещё нарушает последовательный режим.
 - Ошибки Chat API начинаются с английской метки `Account:`, `Provider:` или `Relay:` в JSON, Messages, ответах Relay Server, SSE, WebSocket, ошибках маршрута и метода, а также сведениях о запросе.
-- В сведениях об использовании указан транспорт запроса — HTTP или WebSocket — и приведена информационная оценка эквивалентной стоимости API по опубликованным ценам модели, сообщённому режиму обслуживания и размеру контекста на входе. Неизвестные цены остаются неизвестными. Метки планов аккаунта распознают Pro 100, Pro 200 и Pro 500.
+- В сведениях об использовании указан транспорт запроса, HTTP или WebSocket, и приведена информационная оценка эквивалентной стоимости API по опубликованным ценам модели, сообщённому режиму обслуживания и размеру контекста на входе. Неизвестные цены остаются неизвестными. Метки планов аккаунта распознают Pro 100, Pro 200 и Pro 500.
 - Relay больше не задаёт фиксированные ограничения размера для JSON-генерации, загрузки и редактирования изображений, ответов провайдера, событий SSE, преобразованных потоков и результатов alpha search. Провайдеры по-прежнему могут отклонить большой запрос или ответ.
+- Устаревшие кредиты больше не отменяют подтверждённый лимит. Свежие кредиты провайдера по-прежнему оставляют аккаунт без окна квоты доступным для выбора.
+- Обновление цен использования заменяет старую строку, когда растут счётчики семплов или записи кэша, а не только токенов.
 
 ## [1.1.4] - 2026-10-03
 
@@ -630,9 +626,9 @@ uses the same compact controls across the launcher.
   redacted logs for errors, crashes, and important operation stages; each
   folder can be opened directly from the app. Detailed operation logging is
   off by default and can be enabled there when troubleshooting.
-- Local Cockpit-compatible account exports now preserve a safe account name
-  and bounded, de-duplicated tags. Import accepts the same metadata without
-  exposing credentials; existing Relay tags remain authoritative on reimport.
+- Portable account imports preserve a safe account name and bounded,
+  de-duplicated tags without exposing credentials; existing Relay tags remain
+  authoritative on reimport.
 
 ### Fixed
 
@@ -955,7 +951,9 @@ Zenith Relay 1.1.3 оставляет аккаунт ChatGPT доступным 
 
 - В настройках есть **Диагностика**. Relay ведёт отдельные ограниченные по размеру и очищенные журналы ошибок, аварийных завершений и важных этапов операций. Каждую папку можно открыть из приложения. Подробный журнал операций выключен по умолчанию и включается там же, когда нужно разобраться в сбое.
 
-- Локальный экспорт аккаунта, совместимый с Cockpit, сохраняет безопасное имя аккаунта и ограниченные неповторяющиеся метки. Импорт принимает те же сведения, не раскрывая учётные данные. При повторном импорте метки Relay остаются главными.
+- Импорт переносимых аккаунтов сохраняет безопасное имя и ограниченные
+  неповторяющиеся метки, не раскрывая учётные данные. При повторном импорте
+  метки Relay остаются главными.
 
 ### Исправления
 
