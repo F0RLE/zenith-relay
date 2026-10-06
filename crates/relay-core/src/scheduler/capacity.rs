@@ -20,7 +20,10 @@ impl CandidateQuota {
     pub fn from_snapshot(quota: &QuotaSnapshot, now_ms: u64, stale_after_ms: u64) -> Self {
         // A proven limit is terminal unless fresh provider credits explicitly
         // say the account can spend beyond the exhausted rate-limit window.
-        if quota.limit_reached && !quota.has_usable_provider_credits() {
+        let snapshot_is_fresh = quota
+            .updated_at_ms
+            .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) <= stale_after_ms);
+        if quota.limit_reached && !(snapshot_is_fresh && quota.has_usable_provider_credits()) {
             return Self::Exhausted;
         }
         if quota
@@ -64,6 +67,22 @@ mod tests {
     fn explicit_provider_limit_stays_exhausted_even_when_the_snapshot_is_stale() {
         let quota = QuotaSnapshot {
             limit_reached: true,
+            updated_at_ms: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            CandidateQuota::from_snapshot(&quota, 10_000, 1),
+            CandidateQuota::Exhausted
+        );
+    }
+
+    #[test]
+    fn stale_provider_credit_observation_cannot_override_a_proven_limit() {
+        let quota = QuotaSnapshot {
+            limit_reached: true,
+            provider_credits_available: true,
+            available_credits_micro_units: Some(500_000_000),
             updated_at_ms: Some(1),
             ..Default::default()
         };
