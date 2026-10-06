@@ -29,7 +29,10 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-          sparse-checkout: .github
+          sparse-checkout-cone-mode: true
+          sparse-checkout: |
+            .github
+            scripts/check
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2

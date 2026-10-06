@@ -308,15 +308,23 @@ behavior.
    after the release checks pass; reserve a <code>production-ready</code> claim
    for the live acceptance gates in <code>docs/project/ROADMAP.md</code>.
 
+### Continuous integration
+
+Pull requests and pushes to <code>main</code> run checks only. They do not build
+installers or publish artifacts. Pushing a <code>v*</code> tag builds the desktop
+installers and, after those checks pass, publishes the GitHub Release, updater
+manifest, and server image. A manual workflow run can build and smoke-test the
+same artifacts, but it does not publish, even when started from a tag.
+
 ### macOS distribution
 
 macOS builds use Tauri's ad-hoc identity (`APPLE_SIGNING_IDENTITY=-`); they do
-not need an Apple Developer Program membership or Apple secrets. CI checks the
-app inside the DMG and the updater archive for a valid ad-hoc signature, then
-publishes after all platform builds succeed. Release assets include SHA-256
-checksums. Ad-hoc signing does not establish a trusted developer identity and
-is not Apple notarization, so downloaded apps still require the one-time macOS
-approval described in the localized Help. Test fresh installation and in-app
+not need an Apple Developer Program membership or Apple secrets. The release
+build checks the app inside the DMG and the updater archive for a valid ad-hoc
+signature before publishing. Release assets include SHA-256 checksums. Ad-hoc
+signing does not establish a trusted developer identity and is not Apple
+notarization, so downloaded apps still require the one-time macOS approval
+described in the localized Help. Test fresh installation and in-app
 updating on separate Intel and Apple Silicon Macs before claiming that those
 flows work end to end. Never remove quarantine from the whole system or all
 downloads. The `TAURI_SIGNING_PRIVATE_KEY` secret remains required for signed

@@ -214,9 +214,16 @@ describe("workflow integration", () => {
     const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(checkout.with.ref).toBe("${{ github.event.pull_request.base.sha }}");
     expect(checkout.with["persist-credentials"]).toBe(false);
+    expect(checkout.with["sparse-checkout-cone-mode"]).toBe(true);
+    const sparse = checkout.with["sparse-checkout"];
+    const sparsePaths = Array.isArray(sparse) ? sparse.join("\n") : String(sparse);
+    expect(sparsePaths).toContain(".github");
+    expect(sparsePaths).toContain("scripts/check");
     expect(steps.find((step) => step.name === "Test policy").run)
       .toBe("bun test ./scripts/check/pr-metadata.test.mjs");
     expect(script).not.toContain("${{");
+    expect(script).toContain("scripts/check/pr-metadata.mjs");
+    expect(script).not.toContain("pull_request.head");
   });
 
   test("current withdrawn consent fails even when the queued event still contains it", async () => {
