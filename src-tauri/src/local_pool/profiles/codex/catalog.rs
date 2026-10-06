@@ -20,7 +20,6 @@ pub(super) use installed::bundled_codex_ultra_models;
 #[cfg(test)]
 use installed::{
     codex_cli_file_name, newest_installed_codex_executable, official_codex_ultra_rows,
-    read_cockpit_codex_catalog, ultra_rows_from_catalogs,
 };
 #[cfg(test)]
 use std::time::SystemTime;
@@ -145,19 +144,11 @@ mod ultra_tests {
     }
 
     #[test]
-    fn cli_catalog_wins_and_a_failed_cli_can_use_the_cockpit_file() {
+    fn installed_codex_cli_is_the_only_external_ultra_metadata_source() {
         let cli = json!({"models": [{"slug": "gpt-6-sol", "supported_reasoning_levels": [
             {"effort": "max"}
         ]}]});
-        let cockpit = json!({"models": [{
-            "slug": "gpt-6-sol",
-            "supported_reasoning_levels": [{"effort": "ultra"}],
-            "multi_agent_version": "v2"
-        }]});
-        assert!(ultra_rows_from_catalogs(Some(&cli), Some(&cockpit)).is_empty());
-        let rows = ultra_rows_from_catalogs(None, Some(&cockpit));
-        assert_eq!(rows["gpt-6-sol"]["multi_agent_version"], "v2");
-        assert!(rows["gpt-6-sol"].get("base_instructions").is_none());
+        assert!(official_codex_ultra_rows(&cli).is_empty());
 
         let root = std::env::temp_dir().join(format!(
             "relay-codex-bin-{}-{}",
@@ -195,18 +186,6 @@ mod ultra_tests {
             Some(newer_cli.as_path())
         );
 
-        let home = root.join("home");
-        fs::create_dir_all(&home).unwrap();
-        fs::write(
-            home.join("cockpit-model-catalog.json"),
-            serde_json::to_vec(&cockpit).unwrap(),
-        )
-        .unwrap();
-        let from_file = read_cockpit_codex_catalog(&home).unwrap();
-        assert_eq!(
-            official_codex_ultra_rows(&from_file)["gpt-6-sol"]["multi_agent_version"],
-            "v2"
-        );
         fs::remove_dir_all(root).unwrap();
     }
 }

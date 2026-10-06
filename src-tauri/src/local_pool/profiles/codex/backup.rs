@@ -13,8 +13,8 @@ pub(super) use account::{
     account_auth_content, account_auth_matches_snapshot, account_auth_matches_tokens,
     account_backup_for_profile, account_backup_path, account_backup_secret_ref,
     account_managed_config_matches, attach_account_config, auth_credential_kind,
-    auth_snapshot_json, binding_from_backup, canonical_profile_dir,
-    cleanup_created_account_backup_secret, credential_kind_locked, ensure_single_profile_backup,
+    auth_snapshot_json, binding_from_backup, canonical_profile_dir, cleanup_account_attach_secrets,
+    credential_kind_locked, ensure_single_profile_backup, fill_missing_account_config,
     parse_account_backup, parse_account_backup_snapshot, restore_account_config,
     rollback_account_backup, serialize_account_backup,
 };

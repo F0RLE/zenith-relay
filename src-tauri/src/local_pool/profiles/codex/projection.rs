@@ -47,6 +47,36 @@ pub(super) fn save(
     Ok(secret_ref)
 }
 
+/// Fork an existing undo record with a new managed config projection while
+/// preserving its original user config and auth snapshots. A new secret
+/// reference keeps the old record intact until the caller commits its file
+/// changes and can roll back safely.
+pub(super) fn fork_with_config_after(
+    secret_ref: &str,
+    config_after: &str,
+    secrets: &impl SecretBackend,
+) -> Result<String> {
+    let mut projection = load(secret_ref, secrets)?;
+    projection.config_after = config_after.to_owned();
+    let next_ref = format!("profile:codex:projection:{}", uuid::Uuid::new_v4());
+    secrets.save(
+        &next_ref,
+        &serde_json::to_string(&projection).map_err(LocalPoolError::invalid_state)?,
+    )?;
+    Ok(next_ref)
+}
+
+pub(super) fn config_after(secret_ref: &str, secrets: &impl SecretBackend) -> Result<String> {
+    Ok(load(secret_ref, secrets)?.config_after)
+}
+
+pub(super) fn config_before(
+    secret_ref: &str,
+    secrets: &impl SecretBackend,
+) -> Result<Option<String>> {
+    Ok(load(secret_ref, secrets)?.config_before)
+}
+
 fn load(secret_ref: &str, secrets: &impl SecretBackend) -> Result<Projection> {
     let content = secrets.load(secret_ref)?.ok_or_else(|| {
         LocalPoolError::new(

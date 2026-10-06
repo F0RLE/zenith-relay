@@ -2,6 +2,100 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn relay_attach_clears_native_selection_and_named_profile_overrides() {
+    let (root, home, backups) = profile_dirs("relay-clears-native-routing");
+    let previous_config = r#"model_provider = "openai"
+model = "gpt-native"
+review_model = "gpt-native-review"
+model_catalog_json = "native-catalog.json"
+chatgpt_base_url = "https://chatgpt.example.com/v1"
+openai_base_url = "https://openai.example.com/v1"
+model_reasoning_effort = "high"
+
+[profiles.work]
+model_provider = "openai"
+model = "profile-native"
+model_catalog_json = "profile-native-catalog.json"
+openai_base_url = "https://profile.example.com/v1"
+"#;
+    fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"vendor/relay-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+
+    let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&attached).as_deref(), Some(PROVIDER_ID));
+    assert!(root_model(&attached).is_none());
+    assert!(root_review_model(&attached).is_none());
+    assert!(root_chatgpt_base_url(&attached).is_none());
+    assert!(root_openai_base_url(&attached).is_none());
+    assert!(attached["profiles"]["work"].get("model").is_none());
+    assert!(attached["profiles"]["work"].get("model_provider").is_none());
+    assert!(attached["profiles"]["work"]
+        .get("model_catalog_json")
+        .is_none());
+    assert!(attached["profiles"]["work"]
+        .get("openai_base_url")
+        .is_none());
+    let providers = attached["model_providers"].as_table_like().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert!(providers.get(PROVIDER_ID).is_some());
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        previous_config
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn relay_attach_deactivates_external_provider_but_keeps_its_definition() {
+    let (root, home, backups) = profile_dirs("relay-clears-active-external-provider");
+    let previous_config = r#"model_provider = "external_provider"
+model = "external-model"
+
+[model_providers.external_provider]
+name = "External Provider"
+base_url = "https://provider.example.com/v1"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://custom.example.com/v1"
+"#;
+    fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"vendor/relay-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+
+    let attached = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(attached.contains("[model_providers.external_provider]"));
+    assert!(attached.contains("[model_providers.custom]"));
+    assert!(attached.contains("[model_providers.zenith_relay_local]"));
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        previous_config
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
     let (root, home, backups) = profile_dirs("model-catalog-restore");
     let previous_catalog_path = root.join("previous-codex-models.json");
@@ -878,7 +972,7 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
     }
 }
 #[test]
-fn account_switch_keeps_the_current_catalog_unless_it_belongs_to_relay() {
+fn account_switch_clears_the_current_catalog_for_native_codex_models() {
     let (root, home, backups) = profile_dirs("oauth-account-native-catalog");
     let secrets = MemorySecrets::default();
     let tokens = TokenSet::new("access", Some("refresh".into()), None, None, 1, 1).unwrap();
@@ -899,12 +993,9 @@ fn account_switch_keeps_the_current_catalog_unless_it_belongs_to_relay() {
     .unwrap();
 
     let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(attached["model"].as_str(), Some("gpt-5.6-sol"));
+    assert!(attached.get("model").is_none());
     assert_eq!(root_model_provider(&attached).as_deref(), Some("openai"));
-    assert_eq!(
-        root_model_catalog_json(&attached).as_deref(),
-        Some("official-catalog.json")
-    );
+    assert!(root_model_catalog_json(&attached).is_none());
     fs::remove_dir_all(root).unwrap();
 }
 #[test]

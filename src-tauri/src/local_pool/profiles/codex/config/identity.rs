@@ -69,8 +69,9 @@ pub(in crate::local_pool::profiles::codex) fn external_account_provider_took_ove
     let config_path = canonical_profile_dir(codex_home)?.join(CONFIG_FILE);
     let config = read_optional_bytes(&config_path)?;
     let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-    Ok(root_model_provider(&document)
-        .is_some_and(|provider| provider != "openai" && provider != PROVIDER_ID))
+    Ok(root_model_provider(&document).is_some_and(|provider| {
+        provider != NATIVE_PROVIDER_ID && !RELAY_PROVIDER_IDS.contains(&provider.as_str())
+    }))
 }
 
 fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {

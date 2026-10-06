@@ -11,30 +11,16 @@ use zenith_relay_core::apply_codex_ultra_from_official_model;
 
 const MAX_BUNDLED_CODEX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 
-pub(in crate::local_pool::profiles::codex) fn bundled_codex_ultra_models(
-    codex_home: &Path,
-) -> HashMap<String, Value> {
+pub(in crate::local_pool::profiles::codex) fn bundled_codex_ultra_models() -> HashMap<String, Value>
+{
     // A desktop session often cannot see `codex` on PATH. Try that command,
-    // then the newest installed CLI, then Codex's cockpit catalog. A parsed
-    // CLI catalog wins even when it has no Ultra rows; only a failed read
-    // falls through. Never invent Ultra for a model the official card omits.
-    let cli_catalog = codex_cli_candidates()
+    // then the newest installed CLI. Relay only consumes bundled metadata
+    // published by Codex itself; another app's catalog must not influence
+    // model capabilities.
+    codex_cli_candidates()
         .into_iter()
-        .find_map(|executable| read_bundled_codex_catalog(&executable));
-    ultra_rows_from_catalogs(
-        cli_catalog.as_ref(),
-        read_cockpit_codex_catalog(codex_home).as_ref(),
-    )
-}
-
-pub(super) fn ultra_rows_from_catalogs(
-    cli_catalog: Option<&Value>,
-    cockpit_catalog: Option<&Value>,
-) -> HashMap<String, Value> {
-    if let Some(catalog) = cli_catalog {
-        return official_codex_ultra_rows(catalog);
-    }
-    cockpit_catalog
+        .find_map(|executable| read_bundled_codex_catalog(&executable))
+        .as_ref()
         .map(official_codex_ultra_rows)
         .unwrap_or_default()
 }
@@ -106,19 +92,6 @@ fn read_bundled_codex_catalog(executable: &OsString) -> Option<Value> {
         return None;
     }
     serde_json::from_slice(&output.stdout).ok()
-}
-
-pub(super) fn read_cockpit_codex_catalog(codex_home: &Path) -> Option<Value> {
-    let path = codex_home.join("cockpit-model-catalog.json");
-    let metadata = fs::metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_BUNDLED_CODEX_CATALOG_BYTES as u64 {
-        return None;
-    }
-    let bytes = fs::read(&path).ok()?;
-    if bytes.len() > MAX_BUNDLED_CODEX_CATALOG_BYTES {
-        return None;
-    }
-    serde_json::from_slice(&bytes).ok()
 }
 
 pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Value> {

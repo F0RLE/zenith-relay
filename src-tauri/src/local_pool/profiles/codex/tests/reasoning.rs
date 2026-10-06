@@ -157,7 +157,6 @@ enabled-reasoning-efforts = ["low", "persistent", "high"]
         "zlr_key",
         None,
         None,
-        None,
         false,
     );
 
@@ -180,7 +179,6 @@ fn attach_enables_ultra_picker_without_replacing_an_explicit_true() {
         "zlr_key",
         None,
         None,
-        None,
         false,
     );
     assert_eq!(
@@ -195,7 +193,6 @@ fn attach_enables_ultra_picker_without_replacing_an_explicit_true() {
         &mut disabled,
         "http://127.0.0.1:14998/v1",
         "zlr_key",
-        None,
         None,
         None,
         false,
@@ -213,7 +210,6 @@ fn attach_enables_ultra_picker_without_replacing_an_explicit_true() {
         &mut enabled,
         "http://127.0.0.1:14998/v1",
         "zlr_key",
-        None,
         None,
         None,
         false,

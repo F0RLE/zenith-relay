@@ -134,7 +134,10 @@ pub(super) fn snapshot_user_profile_with(
             });
         }
         if external_provider_took_over(&document, &backup) {
-            remove_managed_provider(&mut document, &backup.managed_provider_id);
+            remove_relay_provider_tables(&mut document);
+            if !RELAY_PROVIDER_IDS.contains(&backup.managed_provider_id.as_str()) {
+                remove_managed_provider(&mut document, &backup.managed_provider_id);
+            }
             return Ok(UserProfileSnapshot {
                 config: Some(document.to_string()),
                 auth: snapshot_text(&auth, &auth_path)?.map(str::to_string),

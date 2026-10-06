@@ -1,6 +1,15 @@
 use super::super::*;
 
-const AUTH_FIELDS: &[&str] = &["OPENAI_API_KEY", "auth_mode", "tokens", "last_refresh"];
+const AUTH_FIELDS: &[&str] = &[
+    "OPENAI_API_KEY",
+    "auth_mode",
+    "tokens",
+    "last_refresh",
+    "agent_identity",
+    "personal_access_token",
+    "bedrock_api_key",
+    "bedrock_access_keys",
+];
 
 /// Credentials are mutually exclusive; extension fields are not credentials.
 /// Callers must verify credential ownership before restoring a saved login.

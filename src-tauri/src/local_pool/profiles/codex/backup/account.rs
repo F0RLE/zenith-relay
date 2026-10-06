@@ -1,35 +1,45 @@
 use super::super::*;
 
 pub(in crate::local_pool::profiles::codex) fn attach_account_config(document: &mut DocumentMut) {
-    // The login changes here. An official ChatGPT catalog stays untouched.
-    // Relay and any other selected provider are removed so the account uses
-    // the native ChatGPT route; a saved external catalog path is kept.
-    let official = matches!(
-        root_model_provider(document).as_deref(),
-        None | Some("openai")
-    );
-    remove_managed_provider(document, PROVIDER_ID);
-    if !official {
-        let catalog = root_model_catalog_json(document);
-        restore_config(document, PROVIDER_ID, None, catalog.as_deref());
-    }
-    document.remove("openai_base_url");
+    clear_account_routing_overrides(document);
 }
 
 pub(in crate::local_pool::profiles::codex) fn restore_account_config(
     document: &mut DocumentMut,
     backup: &AccountProfileBackup,
 ) {
-    let model_catalog = root_model_catalog_json(document);
-    restore_config(
+    remove_relay_provider_tables(document);
+    restore_root_string(
         document,
-        PROVIDER_ID,
+        "model_provider",
         backup.previous_model_provider.as_deref(),
-        model_catalog.as_deref(),
     );
-    if let Some(base_url) = backup.previous_openai_base_url.as_deref() {
-        document["openai_base_url"] = value(base_url);
-    }
+    restore_root_string(
+        document,
+        "model_catalog_json",
+        backup.previous_model_catalog_json.as_deref(),
+    );
+    restore_root_string(document, "model", backup.previous_model.as_deref());
+    restore_root_string(
+        document,
+        "review_model",
+        backup.previous_review_model.as_deref(),
+    );
+    restore_root_string(
+        document,
+        "chatgpt_base_url",
+        backup.previous_chatgpt_base_url.as_deref(),
+    );
+    restore_root_string(
+        document,
+        "openai_base_url",
+        backup.previous_openai_base_url.as_deref(),
+    );
+    restore_root_string(
+        document,
+        "model_reasoning_effort",
+        backup.previous_model_reasoning_effort.as_deref(),
+    );
 }
 
 pub(in crate::local_pool::profiles::codex) fn account_managed_config_matches(
@@ -37,8 +47,73 @@ pub(in crate::local_pool::profiles::codex) fn account_managed_config_matches(
 ) -> bool {
     matches!(
         root_model_provider(document).as_deref(),
-        None | Some("openai")
-    ) && !document_has_provider(document)
+        None | Some(NATIVE_PROVIDER_ID)
+    ) && root_model_catalog_json(document).is_none()
+        && document.get("model").is_none()
+        && document.get("review_model").is_none()
+        && document.get("chatgpt_base_url").is_none()
+        && root_openai_base_url(document).is_none()
+        && root_model_reasoning_effort(document).is_none()
+        && !document_has_provider(document)
+        && document
+            .get("profiles")
+            .and_then(Item::as_table_like)
+            .is_none_or(|profiles| {
+                profiles.iter().all(|(_, profile)| {
+                    let Some(profile) = profile.as_table_like() else {
+                        return true;
+                    };
+                    profile
+                        .get("model_provider")
+                        .and_then(Item::as_str)
+                        .is_none_or(|provider| provider == NATIVE_PROVIDER_ID)
+                        && profile.get("model_catalog_json").is_none()
+                        && profile.get("model").is_none()
+                        && profile.get("review_model").is_none()
+                        && profile.get("chatgpt_base_url").is_none()
+                        && profile.get("openai_base_url").is_none()
+                })
+            })
+}
+
+pub(in crate::local_pool::profiles::codex) fn fill_missing_account_config(
+    backup: &mut AccountProfileBackup,
+    document: &DocumentMut,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let previous = match backup.projection_secret_ref.as_deref() {
+        Some(secret_ref) => projection::config_before(secret_ref, secrets)?
+            .as_deref()
+            .map(parse_config)
+            .transpose()?,
+        None if !document_has_provider(document) => Some(document.clone()),
+        _ => None,
+    };
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    if backup.previous_model_provider.is_none() {
+        backup.previous_model_provider = root_model_provider(&previous);
+    }
+    if backup.previous_model_catalog_json.is_none() {
+        backup.previous_model_catalog_json = root_model_catalog_json(&previous);
+    }
+    if backup.previous_model.is_none() {
+        backup.previous_model = root_model(&previous);
+    }
+    if backup.previous_review_model.is_none() {
+        backup.previous_review_model = root_review_model(&previous);
+    }
+    if backup.previous_chatgpt_base_url.is_none() {
+        backup.previous_chatgpt_base_url = root_chatgpt_base_url(&previous);
+    }
+    if backup.previous_openai_base_url.is_none() {
+        backup.previous_openai_base_url = root_openai_base_url(&previous);
+    }
+    if backup.previous_model_reasoning_effort.is_none() {
+        backup.previous_model_reasoning_effort = root_model_reasoning_effort(&previous);
+    }
+    Ok(())
 }
 
 pub(in crate::local_pool::profiles::codex) fn account_auth_content(
@@ -54,10 +129,16 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_content(
         "account_id".into(),
         serde_json::Value::String(provider_account_id.to_string()),
     );
-    token_values.insert(
-        "refresh_token".into(),
-        serde_json::Value::String(tokens.refresh_token().unwrap_or_default().to_string()),
-    );
+    // Access-only imports are valid until the access token expires, but an
+    // empty refresh token is not a token. Omitting it keeps auth.json in the
+    // native Codex shape and prevents the client from trying to parse an
+    // empty credential as a refresh secret.
+    if let Some(refresh_token) = tokens.refresh_token() {
+        token_values.insert(
+            "refresh_token".into(),
+            serde_json::Value::String(refresh_token.to_string()),
+        );
+    }
     if let Some(id_token) = tokens.id_token() {
         token_values.insert(
             "id_token".into(),
@@ -71,6 +152,7 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_content(
         .unwrap_or_else(Utc::now)
         .to_rfc3339_opts(SecondsFormat::Millis, true);
     super::serialize_pretty(&serde_json::json!({
+        "auth_mode": "chatgpt",
         "OPENAI_API_KEY": null,
         "last_refresh": last_refresh,
         "tokens": token_values,
@@ -297,6 +379,7 @@ pub(in crate::local_pool::profiles::codex) fn binding_from_backup(
 
 pub(in crate::local_pool::profiles::codex) fn rollback_account_backup(
     created: bool,
+    created_projection_secret: bool,
     backup_path: &Path,
     attempted_content: &str,
     previous_snapshot: &Option<Vec<u8>>,
@@ -304,20 +387,22 @@ pub(in crate::local_pool::profiles::codex) fn rollback_account_backup(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     rollback_file(backup_path, attempted_content, previous_snapshot)?;
-    cleanup_created_account_backup_secret(created, backup, secrets)
+    cleanup_account_attach_secrets(created, created_projection_secret, backup, secrets)
 }
 
-pub(in crate::local_pool::profiles::codex) fn cleanup_created_account_backup_secret(
-    created: bool,
+pub(in crate::local_pool::profiles::codex) fn cleanup_account_attach_secrets(
+    created_backup: bool,
+    created_projection_secret: bool,
     backup: &AccountProfileBackup,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
-    if !created {
-        return Ok(());
-    }
     super::delete_backup_secrets(
-        backup.previous_auth_secret_ref.as_deref(),
-        backup.projection_secret_ref.as_deref(),
+        created_backup
+            .then_some(backup.previous_auth_secret_ref.as_deref())
+            .flatten(),
+        created_projection_secret
+            .then_some(backup.projection_secret_ref.as_deref())
+            .flatten(),
         secrets,
     )
 }

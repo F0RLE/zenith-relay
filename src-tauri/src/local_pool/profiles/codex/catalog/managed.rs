@@ -101,7 +101,15 @@ fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<
     } else {
         codex_home.join(configured_path)
     };
-    let content = fs::read(&path).map_err(|error| io_error_at(&path, error))?;
+    // A stale `model_catalog_json` entry must not block a provider switch. The
+    // path is retained in the recovery snapshot, while the active Relay
+    // catalog can use the native cache or its own validated template. Treat a
+    // missing optional source as empty; surface other filesystem failures.
+    let content = match fs::read(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_error_at(&path, error)),
+    };
     read_catalog_values(&content, false)
 }
 
@@ -176,7 +184,7 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog(
     current_managed_catalog: Option<&[u8]>,
     relay_catalog_json: &str,
 ) -> Result<String> {
-    let bundled = bundled_codex_ultra_models(codex_home);
+    let bundled = bundled_codex_ultra_models();
     build_managed_model_catalog_with_bundled(
         codex_home,
         user_catalog_path,

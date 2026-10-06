@@ -152,6 +152,22 @@ pub(in crate::local_pool::profiles::codex) fn root_model_provider(
         .map(ToOwned::to_owned)
 }
 
+pub(in crate::local_pool::profiles::codex) fn root_model(document: &DocumentMut) -> Option<String> {
+    document
+        .get("model")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
+pub(in crate::local_pool::profiles::codex) fn root_review_model(
+    document: &DocumentMut,
+) -> Option<String> {
+    document
+        .get("review_model")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
 pub(in crate::local_pool::profiles::codex) fn root_model_catalog_json(
     document: &DocumentMut,
 ) -> Option<String> {
@@ -179,13 +195,43 @@ pub(in crate::local_pool::profiles::codex) fn root_openai_base_url(
         .map(ToOwned::to_owned)
 }
 
+pub(in crate::local_pool::profiles::codex) fn root_chatgpt_base_url(
+    document: &DocumentMut,
+) -> Option<String> {
+    document
+        .get("chatgpt_base_url")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
 pub(in crate::local_pool::profiles::codex) fn document_has_provider(
     document: &DocumentMut,
 ) -> bool {
-    document
+    let root_uses_relay_provider = root_model_provider(document)
+        .as_deref()
+        .is_some_and(|provider| RELAY_PROVIDER_IDS.contains(&provider));
+    let profile_uses_relay_provider = document
+        .get("profiles")
+        .and_then(Item::as_table_like)
+        .is_some_and(|profiles| {
+            profiles.iter().any(|(_, profile)| {
+                profile
+                    .as_table_like()
+                    .and_then(|profile| profile.get("model_provider"))
+                    .and_then(Item::as_str)
+                    .is_some_and(|provider| RELAY_PROVIDER_IDS.contains(&provider))
+            })
+        });
+    let defines_relay_provider = document
         .get("model_providers")
-        .and_then(Item::as_table)
-        .is_some_and(|providers| providers.contains_key(PROVIDER_ID))
+        .and_then(Item::as_table_like)
+        .is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|(provider, _)| RELAY_PROVIDER_IDS.contains(&provider))
+        });
+
+    root_uses_relay_provider || profile_uses_relay_provider || defines_relay_provider
 }
 
 pub(in crate::local_pool::profiles::codex) fn key_hash(value: &str) -> String {
