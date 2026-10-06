@@ -15,6 +15,12 @@ release entries are kept concise and link to the corresponding tag.
 - In Automatic mode, pool cards with no positive quota window sort by fresh provider-reported credits. API source wallet balances do not affect the order.
 - Quick Setup places the Relay mark between connection sources and compatible applications, with window controls in a frameless, draggable top area.
 - The pool rotation dialog no longer repeats mode explanations; the full behavior remains in Help.
+- Account login notes save in order, keep their fields through reauthentication, and do not show a success message for a failed or closed save. Reauthentication replaces the stored token while preserving local notes and no longer opens the new-account pool setup.
+- Direct ChatGPT launch is disabled for accounts that need sign-in or have a terminal credential, proxy, or health failure. Relay validates credentials before stopping an existing ChatGPT session and restores the session after a failed profile change.
+- Newly signed-in OAuth accounts stay outside the pool until explicitly selected, and the pool option no longer adds a green selection border.
+- Encrypted-context cleanup stays on the account that rejected it. If that account cannot take the retry, Relay drops the temporary binding and can continue with another eligible member.
+- A stale credit reading no longer overrides a proven rate limit. Fresh provider credits can still keep an account with an empty quota window schedulable.
+- Usage price refresh replaces an older row when sample or cache-write counters increase, not only when token counters do.
 
 <!-- relay-notes:ru -->
 
@@ -25,6 +31,12 @@ release entries are kept concise and link to the corresponding tag.
 - В автоматическом режиме карточки без положительной квоты сортируются по актуальным кредитам провайдера. Баланс API-источника на порядок не влияет.
 - В быстрой настройке логотип Relay размещён между подключениями и совместимыми приложениями; кнопки окна остаются в перетаскиваемой верхней области без полосы.
 - В окне ротации убраны пояснения режимов; подробное описание осталось в справке.
+- Заметки входа сохраняются последовательно, не пропадают после повторного входа и не показывают успешное сохранение при ошибке или закрытии окна. Повторный вход заменяет сохранённый токен, сохраняет локальные заметки и больше не открывает настройку пула для нового аккаунта.
+- Прямой запуск ChatGPT отключён для аккаунтов, которым нужен повторный вход или у которых есть окончательная ошибка учётных данных, прокси или состояния. Relay проверяет учётные данные до остановки уже запущенного ChatGPT и восстанавливает сессию после неудачной смены профиля.
+- Новые OAuth-аккаунты остаются вне пула, пока их явно не выберут; у варианта пула больше нет зелёной рамки выбора.
+- Очистка отклонённого зашифрованного контекста остаётся на аккаунте, который его отклонил. Если этот аккаунт не может принять повтор, временная привязка снимается и запрос может перейти к другому доступному участнику.
+- Устаревшие кредиты больше не отменяют подтверждённый лимит. Свежие кредиты провайдера по-прежнему оставляют аккаунт без окна квоты доступным для выбора.
+- Обновление цен использования заменяет старую строку, когда растут счётчики семплов или записи кэша, а не только токенов.
 
 ## [1.1.5] - 2026-10-05
 
