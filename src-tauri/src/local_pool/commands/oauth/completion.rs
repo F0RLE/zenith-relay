@@ -6,7 +6,8 @@ use crate::local_pool::{
         },
         proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
         quota_refresh::{
-            register_active_authority, AccountQuotaOutcome, AccountQuotaRefreshResponse,
+            register_active_authority, sync_account_profile_bindings, AccountQuotaOutcome,
+            AccountQuotaRefreshResponse,
         },
         quota_service::{apply_quota_failure, apply_quota_success},
         records::new_account_record,
@@ -468,6 +469,55 @@ async fn commit_oauth_completion(
             }
         });
     }
+
+    // Keep the managed ChatGPT profile in lockstep with the committed OAuth
+    // snapshot while the account lock is still held. Otherwise the profile
+    // observer can read the old desktop token after re-authentication, assign
+    // it a newer generation, and overwrite the newly committed token.
+    if let Err(error) = sync_account_profile_bindings(
+        state,
+        &local_account_id,
+        &authority_tokens,
+        &checkpoint.provider_account_id,
+    ) {
+        let profiles_restored = match commit_previous_credentials.as_ref() {
+            Some(previous) => previous
+                .to_token_set()
+                .map(|tokens| {
+                    sync_account_profile_bindings(
+                        state,
+                        &local_account_id,
+                        &tokens,
+                        &checkpoint.provider_account_id,
+                    )
+                    .is_ok()
+                })
+                .unwrap_or(false),
+            // A newly created account has no managed profile binding yet.
+            None => true,
+        };
+        let rollback = rollback_completion_before_authority(
+            state,
+            &credential_store,
+            &local_account_id,
+            commit_previous_credentials.as_ref(),
+            commit_previous_account.as_ref(),
+            &committed_credentials,
+            &record,
+        );
+        drop(commit_guard);
+        return Err(match (profiles_restored, rollback) {
+            (true, Ok(true)) => error,
+            _ => {
+                super::super::fail_closed(
+                    state,
+                    "OAuth completion could not restore the previous account and profile state"
+                        .into(),
+                )
+                .await
+            }
+        });
+    }
     drop(commit_guard);
 
     let registered = register_active_authority(
@@ -532,6 +582,10 @@ fn inherit_session_material(
     mut credentials: StoredCodexCredentials,
     template: &StoredCodexCredentials,
 ) -> LocalResult<StoredCodexCredentials> {
+    // Login notes belong to the local account, not to the OAuth token. Keep
+    // them when a re-authentication replaces the token snapshot; otherwise
+    // completing sign-in silently leaves only the provider email behind.
+    credentials = credentials.fill_missing_login_from(template);
     if let Some(proxy_url) = template.proxy_url() {
         credentials = credentials
             .with_proxy_url(Some(proxy_url.to_string()))

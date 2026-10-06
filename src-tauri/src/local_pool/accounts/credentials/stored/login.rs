@@ -18,10 +18,7 @@ impl StoredCodexCredentials {
         self
     }
 
-    pub(in crate::local_pool::accounts) fn fill_missing_login_from(
-        mut self,
-        previous: &Self,
-    ) -> Self {
+    pub(crate) fn fill_missing_login_from(mut self, previous: &Self) -> Self {
         if self.phone.is_none() {
             self.phone = previous.phone.clone();
         }

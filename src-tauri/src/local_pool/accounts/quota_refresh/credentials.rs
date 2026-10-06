@@ -203,7 +203,7 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
     })
 }
 
-fn sync_account_profile_bindings(
+pub(crate) fn sync_account_profile_bindings(
     state: &DesktopState,
     account_id: &str,
     tokens: &TokenSet,

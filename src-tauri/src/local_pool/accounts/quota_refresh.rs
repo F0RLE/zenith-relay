@@ -55,6 +55,7 @@ mod reads;
 mod types;
 
 pub(in crate::local_pool::accounts) use credentials::reconcile_force_refreshed_account_record;
+pub(crate) use credentials::sync_account_profile_bindings;
 #[cfg(test)]
 pub(in crate::local_pool::accounts) use credentials::{
     restore_force_refreshed_account_record, rollback_force_refreshed_before_authority,
