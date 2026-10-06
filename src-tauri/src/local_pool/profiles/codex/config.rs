@@ -14,8 +14,7 @@ pub(super) use identity::{
     previous_config_matches,
 };
 pub(super) use mutation::{
-    attach_config, clear_account_routing_overrides, clear_named_profile_routing_overrides,
-    clear_relay_routing_overrides, enable_show_ultra_picker, reasoning_effort_for_attach,
-    remove_managed_provider, remove_relay_provider_tables, restore_local_config,
-    restore_root_string, set_managed_websockets,
+    attach_config, clear_account_routing_overrides, enable_show_ultra_picker,
+    reasoning_effort_for_attach, remove_managed_provider, remove_relay_provider_tables,
+    restore_local_config, restore_root_string, set_managed_websockets,
 };
