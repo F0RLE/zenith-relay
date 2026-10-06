@@ -23,8 +23,8 @@ extra conditions on people who only use, distribute, or fork the project.
 For each PR, describe the change and validation, open the agreement linked in
 the template, and check **one Contributor Agreement checkbox** yourself. The
 checkbox covers agreement, assignment, authority, and required disclosures
-together. Keep its wording unchanged. The template shows the English and
-Russian updater notes under Ready-to-publish note. If the Contribution is
+together. Keep its wording unchanged. A release note may be written in the
+contributor's own language and may include a screenshot. If the Contribution is
 entirely your own and has no other rights holders or excluded material, no
 extra ownership form or separate consent comment is required by this workflow.
 
@@ -353,7 +353,9 @@ those PRs against the new base before merging.
 
 The updater changelog is read from the GitHub Release body. In the published
 Release, put each translation after a <code>relay-notes:&lt;locale&gt;</code>
-marker. A section continues until the next marker:
+marker. A section continues until the next marker. A pull request note can stay
+in the contributor's own language and can include a screenshot; add the locale
+markers when publishing the Release, not in the pull request.
 
 ~~~markdown
 <!-- relay-notes:en -->

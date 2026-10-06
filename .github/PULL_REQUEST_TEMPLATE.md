@@ -18,18 +18,12 @@
 
 ## Release Notes
 
-> Check one box. A release-worthy change needs text under both note markers.
+> Check one box. Describe a release-worthy change in your own language. A screenshot is fine.
 
 - [ ] Release-worthy change is described below.
 - [ ] No release note is needed because this is internal-only, documentation-only, or test-only.
 
 ### Ready-to-publish note
-
-<!-- relay-notes:en -->
-
--
-
-<!-- relay-notes:ru -->
 
 -
 
