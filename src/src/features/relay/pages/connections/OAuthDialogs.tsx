@@ -143,7 +143,7 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
   const { t } = useTranslation();
   const { runtime, busy, perform } = useRelayState();
   const { pool } = useProxyPool();
-  const [addToPool, setAddToPool] = useState(true);
+  const [addToPool, setAddToPool] = useState(false);
   const [assignProxy, setAssignProxy] = useState(false);
   const account = runtime?.accounts.find((item) => item.id === accountId);
   const hasAccountProxy = preserveProxy || account?.proxyMode === "account";

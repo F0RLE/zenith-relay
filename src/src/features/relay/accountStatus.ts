@@ -58,6 +58,28 @@ export function requiresAccountReauthentication(account: Pick<AccountSummary, "a
 }
 
 /**
+ * Launching ChatGPT directly needs a usable local credential and a healthy
+ * account state. Pool membership and a temporary quota wait do not prevent a
+ * direct launch, but terminal account failures do.
+ */
+export function canLaunchCodexAccount(account: Pick<AccountSummary, "enabled" | "secretAvailable" | "proxyAvailable" | "authState" | "routingBlockReason" | "clientAuthStatus" | "health">) {
+  if (!account.enabled || !account.secretAvailable || account.proxyAvailable === false || requiresAccountReauthentication(account)) return false;
+  if (account.clientAuthStatus === "login_required") return false;
+  if (account.authState.state === "error" || account.health === "unhealthy" || account.health === "blocked") return false;
+  const terminalBlockReasons = new Set([
+    "disabled",
+    "secret_unavailable",
+    "proxy_unavailable",
+    "auth_error",
+    "checkpoint",
+    "captcha",
+    "subscription_forbidden",
+    "account_unhealthy",
+  ]);
+  return !terminalBlockReasons.has(account.routingBlockReason ?? "");
+}
+
+/**
  * A real sign-in requirement takes precedence over a stale quota refresh
  * result, so every account surface exposes the same available action.
  */
@@ -84,7 +106,7 @@ export function currentAccountErrorCode(account: AccountSummary) {
   // Runtime availability can be false for a route, capacity or a protected
   // quota reserve even when the account itself is healthy. Do not invent an
   // account failure when no account-owned error has been observed.
-  return accountError || quotaError || account.routingBlockReason || null;
+  return accountError || quotaError || (account.routingBlockReason === "subscription_expired" ? null : account.routingBlockReason) || null;
 }
 
 export function accountErrorTranslationKey(code: string) {
@@ -96,15 +118,17 @@ export function accountErrorTranslationKey(code: string) {
   if (/invalid_grant/.test(normalized)) return "accounts.errors.invalidGrant";
   if (/invalid_grant|requires_reauth|refresh_token/.test(normalized)) return "accounts.errors.requiresReauth";
   if (/verification|verify.*account|phone/.test(normalized)) return "accounts.errors.verificationRequired";
+  if (normalized === "checkpoint" || normalized === "captcha") return "accounts.errors.verificationRequired";
   if (/credential|secret/.test(normalized)) return "accounts.errors.credentialsMissing";
   if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return "accounts.errors.blocked";
   if (normalized === "upstream_forbidden") return "usage.errorCategories.upstream_forbidden";
   if (normalized === "models_forbidden") return "accounts.importFailureReasons.modelsForbidden";
   const endpointPermission = normalized === "quota_forbidden" || normalized === "subscription_forbidden";
+  if (normalized === "subscription_forbidden") return "accounts.errors.blocked";
   if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
   if (normalized.startsWith("models_")) return "accounts.errors.models";
-  if (/transport|timeout|network|connect/.test(normalized)) return "accounts.errors.connection";
+  if (/transport|timeout|network|connect|proxy/.test(normalized)) return "accounts.errors.connection";
   if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";
   if (/quota/.test(normalized)) return "accounts.errors.quota";
   if (/auth_error|unauthorized|authentication/.test(normalized)) return "accounts.errors.authorization";

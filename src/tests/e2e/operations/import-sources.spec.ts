@@ -101,13 +101,29 @@ test("OAuth callback offers pool and stored proxy setup for the added account", 
   await expect(dialog).toHaveCount(0);
   await expect(page.locator(".global-feedback.success")).toHaveText("Account added.");
   const setup = page.getByRole("dialog", { name: "Account added" });
-  await expect(setup.getByLabel("Add account to pool")).toBeChecked();
+  await expect(setup.getByLabel("Add account to pool")).not.toBeChecked();
   await expect(setup.getByLabel("Assign a stored proxy")).not.toBeChecked();
   await setup.getByRole("button", { name: "Done" }).click();
   await expect(setup).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["complete_codex_oauth", "set_local_pool_membership"]));
+  expect(calls.map((call) => call.command)).toContain("complete_codex_oauth");
+  expect(calls.some((call) => call.command === "set_local_pool_membership")).toBe(false);
   expect(calls.some((call) => call.command === "assign_free_local_account_proxies")).toBe(false);
+});
+
+test("reauthentication updates the account without reopening pool setup", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountAuthReason: "invalid_grant" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const account = page.locator(".account-card").filter({ hasText: "Personal Plus" });
+  await account.getByRole("button", { name: "Sign-in required", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in" });
+  await expect(dialog).toBeVisible();
+
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Account added" })).toHaveCount(0);
 });
 
 test("local proxy storage warns, detaches accounts, and deletes selected endpoints", async ({ page }) => {

@@ -4,6 +4,7 @@ import {
   accountQuotaRefreshState,
   accountErrorTranslationKey,
   accountSurfaceTone,
+  canLaunchCodexAccount,
   currentAccountErrorCode,
   isCodexOauthAccountEligible,
   operationalStatusTone,
@@ -68,6 +69,27 @@ describe("account status policy", () => {
     }))).toBe("updated");
   });
 
+  test("disables direct ChatGPT launch for terminal account states", () => {
+    expect(canLaunchCodexAccount(account())).toBeTrue();
+    expect(canLaunchCodexAccount(account({
+      authState: { state: "requires_reauth", reason: "invalid_grant" },
+      routingBlockReason: "reauth_required",
+    }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ enabled: false, routingBlockReason: "disabled" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ proxyAvailable: false, routingBlockReason: "proxy_unavailable" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ clientAuthStatus: "login_required" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ health: "unhealthy", routingBlockReason: "account_unhealthy" }))).toBeFalse();
+    expect(canLaunchCodexAccount(account({ inPool: false, routingBlockReason: "not_in_pool" }))).toBeTrue();
+  });
+
+  test("does not surface an expired subscription as a generic account error", () => {
+    expect(currentAccountErrorCode(account({
+      operationalStatus: "unavailable",
+      routingBlockReason: "subscription_expired",
+      subscription: { planType: "plus", activeUntilMs: 1, status: "expired", updatedAtMs: 2 },
+    }))).toBeNull();
+  });
+
   test("keeps the account failure visible when quota monitoring also fails", () => {
     for (const lastErrorCode of ["workspace_disabled", "upstream_unauthorized", "checkpoint", "captcha"]) {
       const unavailable = account({
@@ -90,8 +112,10 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
     expect(accountErrorTranslationKey("models_prepare")).toBe("accounts.errors.models");
     expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.models");
+    expect(accountErrorTranslationKey("proxy_unavailable")).toBe("accounts.errors.connection");
     expect(accountErrorTranslationKey("quota_forbidden")).toBe("accounts.errors.quota");
-    expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.unknown");
+    expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.blocked");
+    expect(accountErrorTranslationKey("checkpoint")).toBe("accounts.errors.verificationRequired");
     expect(accountErrorTranslationKey("deactivated_workspace")).toBe("accounts.errors.blocked");
     expect(accountErrorTranslationKey("account_blocked")).toBe("accounts.errors.blocked");
   });

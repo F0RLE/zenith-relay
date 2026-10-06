@@ -89,6 +89,7 @@ test("connections show the same sign-in action instead of stale quota data", asy
   const signIn = account.getByRole("button", { name: "Sign-in required", exact: true });
   await expect(account.locator(".quota-meter")).toHaveCount(0);
   await expect(signIn).toBeVisible();
+  await expect(account.getByRole("button", { name: "Launch in ChatGPT" })).toBeDisabled();
   await signIn.click();
   await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
   const oauthStart = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth"));

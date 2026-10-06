@@ -595,16 +595,16 @@
   align-items: flex-start;
   gap: 12px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 28%, var(--relay-border));
+  border: 1px solid var(--relay-border);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--relay-accent) 7%, var(--relay-surface));
+  background: color-mix(in srgb, var(--relay-subtle) 72%, var(--relay-surface));
 }
 
 .oauth-account-added > svg {
   width: 20px;
   height: 20px;
   flex: 0 0 auto;
-  color: var(--relay-accent-hover);
+  color: var(--relay-muted);
 }
 
 .oauth-account-added p {
@@ -632,8 +632,8 @@
 }
 
 .post-import-options > label:has(input:checked) {
-  border-color: color-mix(in srgb, var(--relay-accent) 58%, var(--relay-border));
-  background: var(--relay-accent-soft);
+  border-color: var(--relay-border);
+  background: color-mix(in srgb, var(--relay-subtle) 72%, var(--relay-surface));
 }
 
 .post-import-options > label:has(input:disabled) {

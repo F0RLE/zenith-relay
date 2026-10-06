@@ -19,7 +19,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, canLaunchCodexAccount, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import {
   AccountPlanBadge,
@@ -109,6 +109,7 @@ export function AccountCard({
   const quotaStatus = accountQuotaRefreshState(account);
   const clientAuthWarning = account.clientAuthStatus === "login_required";
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
+  const canLaunch = canLaunchCodexAccount(account) && !onServer;
   const indicatorTone = onServer
     ? "info"
     : operationalStatus === "unavailable" || operationalStatus === "disabled"
@@ -284,12 +285,16 @@ export function AccountCard({
             <IconButton
               label={t("accounts.launchAccount")}
               icon={<Play aria-hidden />}
-              disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`}
+              disabled={!canLaunch || busy === `launch-account-${account.id}`}
               title={onServer
                 ? t("accounts.onServerHint")
                 : !account.secretAvailable
                   ? t("accounts.credentialsUnavailable")
-                  : t("accounts.launchAccount")}
+                  : !account.enabled
+                    ? t("common.disabled")
+                  : !canLaunch
+                    ? accountErrorLabel(errorCode ?? account.routingBlockReason ?? "auth_requires_reauth", t)
+                    : t("accounts.launchAccount")}
               onClick={() => void activateCodexProfile(
                 `launch-account-${account.id}`,
                 () => relayCommands.launchCodexAccount(account.id),

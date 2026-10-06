@@ -37,14 +37,27 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [bulkProxyAccountIds, setBulkProxyAccountIds] = useState<string[]>([]);
   const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
   const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
+  const [reauthenticatingAccountId, setReauthenticatingAccountId] = useState<string | null>(null);
   const [signedInWithProxy, setSignedInWithProxy] = useState(false);
   const [proxyRevision, setProxyRevision] = useState(0);
   const proxyChecks = useProxyChecks(mode);
   const oauth = useOAuthSignIn((result) => {
+    const isReauthentication = reauthenticatingAccountId === result.account.id;
+    setReauthenticatingAccountId(null);
+    if (isReauthentication) {
+      // Reauthentication updates an existing account in place. The setup
+      // dialog is only for a newly imported account; showing it here made a
+      // reauth look like a new pool member and invited an accidental toggle.
+      setDialog(null);
+      setOauthAccountId(null);
+      setSignedInWithProxy(false);
+      return;
+    }
     setOauthAccountId(result.account.id);
     setDialog("oauthSetup");
   });
   const startOAuth = () => {
+    setReauthenticatingAccountId(null);
     setSignedInWithProxy(false);
     void oauth.start(false);
   };
@@ -54,6 +67,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     void oauth.start(true, undefined, proxyId);
   };
   const reauthenticateAccount = (account: AccountSummary) => {
+    setReauthenticatingAccountId(account.id);
     setSignedInWithProxy(false);
     void oauth.start(false, account.id);
   };
@@ -75,6 +89,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     setBulkProxyAccountIds([]);
     setExportAccountIds([]);
     setOauthAccountId(null);
+    setReauthenticatingAccountId(null);
   }, [mode]);
 
   useEffect(() => setQuery(""), [mode, view]);

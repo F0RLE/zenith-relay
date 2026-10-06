@@ -8,9 +8,11 @@ pub(super) async fn activate_account_profile(
     let profile_dir = resolve_profile_dir(profile_dir)?;
     let sync_history = history_provider_changed(state, &profile_dir, CodexHistoryProvider::ChatGpt)
         .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
+    // Validate and refresh the account before stopping ChatGPT. A bad or
+    // expired credential must leave the current client session untouched.
+    let prepared = prepare_account_credentials(state, account_id).await?;
     let stopped = stop_codex_and_sync_account_at(state, &profile_dir).await?;
     let result: Result<ProfileActivation, CommandError> = async {
-        let prepared = prepare_account_credentials(state, account_id).await?;
         let history_backup = if sync_history {
             synchronize_history_for_command(state, &profile_dir, CodexHistoryProvider::ChatGpt)?
         } else {
