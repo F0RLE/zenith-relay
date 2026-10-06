@@ -23,7 +23,7 @@ style = "deny"
 pedantic = { level = "allow", priority = -1 }
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
@@ -43,20 +43,20 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 sys-locale = "0.3.2"
 sysinfo = "0.39.6"
-tauri = { version = "2.11.6", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
-tauri-plugin-opener = "2.5.5"
-tauri-plugin-dialog = "2.7.3"
-tauri-plugin-process = "2.3.1"
-tauri-plugin-updater = "2.12.0"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tauri = { version = "2.12.1", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
+tauri-plugin-opener = "2.7.0"
+tauri-plugin-dialog = "2.8.1"
+tauri-plugin-process = "2.4.0"
+tauri-plugin-updater = "2.13.1"
+tokio = { version = "1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 toml_edit = "0.25.15"
 url = "2.5.8"
-uuid = { version = "1.26.1", features = ["v4"] }
+uuid = { version = "1.27.0", features = ["v4"] }
 zenith-relay-core = { path = "../crates/relay-core" }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
-tauri-plugin-single-instance = "2.4.5"
+tauri-plugin-single-instance = "2.5.2"
 
 [profile.release]
 strip = true
