@@ -108,8 +108,9 @@ async fn new_execution_and_capability_fences_revoke_pending_leases_without_dispa
     drop(auth_fence);
 
     let blocked = reserve(&runtime, &budget, WireApi::Responses).await;
-    assert_eq!(blocked.candidate_id(), "source-a");
-    assert!(runtime.block_candidate_capability("source-a", "model-a"));
+    assert_eq!(blocked.candidate_id(), "source-b");
+    let blocked_id = blocked.candidate_id().to_owned();
+    assert!(runtime.block_candidate_capability(&blocked_id, "model-a"));
     assert_eq!(
         blocked.begin_rotation_http_dispatch(),
         Err(RotationDispatchStartError::CandidateChanged)
@@ -119,7 +120,7 @@ async fn new_execution_and_capability_fences_revoke_pending_leases_without_dispa
     drop(blocked);
 
     let alternative = reserve(&runtime, &budget, WireApi::Responses).await;
-    assert_eq!(alternative.candidate_id(), "source-b");
+    assert_eq!(alternative.candidate_id(), "source-a");
     alternative.begin_rotation_http_dispatch().unwrap();
     alternative.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(budget.dispatches(), 1);
@@ -270,6 +271,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
     let runtime = runtime();
     let old_budget = SharedRequestBudget::for_incoming_request(3);
     let old = reserve(&runtime, &old_budget, WireApi::Responses).await;
+    let old_candidate_id = old.candidate_id().to_owned();
     old.begin_rotation_dispatch().unwrap();
     {
         let mut scheduler = runtime.lock_scheduler();
@@ -277,7 +279,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
         scheduler.upsert(original);
     }
     let new_budget = SharedRequestBudget::for_incoming_request(3);
-    let current = reserve(&runtime, &new_budget, WireApi::Responses).await;
+    let current = reserve_from(&runtime, &new_budget, WireApi::Responses, &old_candidate_id).await;
     assert_eq!(old.candidate_id(), current.candidate_id());
     runtime.settle_rotation_failure(
         &old,

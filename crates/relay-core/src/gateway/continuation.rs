@@ -39,6 +39,16 @@ pub(super) fn clear_materialized_continuation(
     *has_unpaired_tool_output = false;
 }
 
+/// Drops the opaque continuation requirement after replay while retaining the
+/// saved owner binding for one same-provider repair attempt.
+pub(super) fn retain_materialized_continuation_owner(
+    requires_affinity_owner: &mut bool,
+    has_unpaired_tool_output: &mut bool,
+) {
+    *requires_affinity_owner = false;
+    *has_unpaired_tool_output = false;
+}
+
 /// Shared ownership facts for HTTP, WebSocket, and account-only execution.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct ContinuationState {

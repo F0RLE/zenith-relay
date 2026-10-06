@@ -71,6 +71,71 @@ pub(super) struct AttemptRepairs {
     pub(super) quota_yield: bool,
     /// An account rejected encrypted Responses history and received one cleanup retry.
     pub(super) encrypted_context: bool,
+    /// Volatile owner binding used to keep that cleanup retry on the same
+    /// account when the incoming history has no response id of its own.
+    pub(super) encrypted_context_repair_key: Option<String>,
+}
+
+/// Keep an encrypted-history cleanup retry on the account that rejected the
+/// foreign ciphertext. Provider history may not carry a Relay response id, so
+/// create a request-scoped volatile binding for the one repair reservation.
+pub(super) fn bind_encrypted_context_repair_owner(
+    repairs: &mut AttemptRepairs,
+    response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+    runtime: &GatewayRuntime,
+    request_id: &str,
+    candidate_id: &str,
+) {
+    if response_affinity_key.is_some() || repairs.encrypted_context_repair_key.is_some() {
+        return;
+    }
+    let repair_response_id = format!("relay-repair:{request_id}");
+    if let Some(key) = runtime.bind_volatile_response_affinity(
+        Some(&repair_response_id),
+        candidate_id,
+        request_id,
+        now_ms(),
+    ) {
+        *response_affinity_key = Some(key.clone());
+        *requires_affinity_owner = true;
+        repairs.encrypted_context_repair_key = Some(key);
+    }
+}
+
+/// Drop the request-scoped encrypted-context binding after its reservation has
+/// been selected or when no repair reservation can be made.
+pub(super) fn release_encrypted_context_repair_owner(
+    repairs: &mut AttemptRepairs,
+    response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+    runtime: &GatewayRuntime,
+) {
+    let Some(key) = repairs.encrypted_context_repair_key.take() else {
+        return;
+    };
+    if response_affinity_key.as_deref() == Some(key.as_str()) {
+        *response_affinity_key = None;
+        *requires_affinity_owner = false;
+    }
+    runtime.invalidate_response_affinity(Some(&key));
+}
+
+/// Remove the temporary binding from the next attempt's request state while
+/// leaving it live long enough for the selected lease to validate ownership.
+pub(super) fn detach_encrypted_context_repair_owner(
+    repairs: &AttemptRepairs,
+    response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+) {
+    if repairs
+        .encrypted_context_repair_key
+        .as_deref()
+        .is_some_and(|key| response_affinity_key.as_deref() == Some(key))
+    {
+        *response_affinity_key = None;
+        *requires_affinity_owner = false;
+    }
 }
 
 /// Records the one allowed model-switch reset and drops the opaque continuation binding.
@@ -140,6 +205,40 @@ pub(super) fn reset_materialized_continuation(
         reset.response_affinity_key,
         reset.requires_affinity_owner,
     )
+}
+
+/// Materializes a provider response history after that same owner rejected its
+/// opaque response id. Keep the owner binding for the repair retry: Manual
+/// rotation must not turn an in-place history repair into an unrelated pool
+/// hop. The binding is released normally if the owner is no longer routable.
+pub(super) fn reset_materialized_continuation_for_owner_retry(
+    attempted: &mut bool,
+    _response_affinity_key: &mut Option<String>,
+    requires_affinity_owner: &mut bool,
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &mut Value,
+    resolved_model: &str,
+) -> bool {
+    if *attempted {
+        return false;
+    }
+    let now = now_ms();
+    if !super::continuation::drop_materialized_previous_response_id(
+        runtime,
+        local_key_id,
+        request,
+        resolved_model,
+        now,
+    ) {
+        return false;
+    }
+    *attempted = true;
+    *requires_affinity_owner = false;
+    // Keep the response-affinity key so the repair reservation remains on the
+    // provider that owns the saved native replay. A later admission miss can
+    // invalidate it and fall back when that owner is truly unavailable.
+    true
 }
 
 /// Accepts one pre-output request repair and lets the same candidate be selected again.

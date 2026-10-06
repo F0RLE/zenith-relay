@@ -1,7 +1,8 @@
 pub(super) use super::super::super::continuation::{
     clear_materialized_continuation, drop_materialized_previous_response_id, previous_response_id,
     recover_stale_tool_history as replay_and_prune_stale_tool_history,
-    RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+    retain_materialized_continuation_owner, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+    RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
 };
 pub(super) use super::super::super::errors::{
     api_error, apply_failure_state, cooldown_error, failure_category_is_request_terminal,
@@ -34,6 +35,10 @@ pub(super) use super::super::bind_responses_turn;
 pub(super) use super::super::AttemptRepairs;
 pub(super) use super::super::{
     attempt_error_response, finish_request_failure, RequestFailureInput,
+};
+pub(super) use super::super::{
+    bind_encrypted_context_repair_owner, detach_encrypted_context_repair_owner,
+    release_encrypted_context_repair_owner,
 };
 pub(super) use super::super::{repair_responses_item_prefixes, ResponsesItemPrefixRepairs};
 pub(super) use super::super::{reset_materialized_continuation, ContinuationReset};

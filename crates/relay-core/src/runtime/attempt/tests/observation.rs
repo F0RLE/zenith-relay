@@ -5,8 +5,8 @@ async fn cooldown_is_visible_to_release_observers_and_revokes_pending_dispatch()
     let runtime = runtime();
     let first_budget = SharedRequestBudget::for_incoming_request(3);
     let pending_budget = SharedRequestBudget::for_incoming_request(3);
-    let first = reserve(&runtime, &first_budget, WireApi::Responses).await;
-    let pending = reserve(&runtime, &pending_budget, WireApi::Responses).await;
+    let first = reserve_from(&runtime, &first_budget, WireApi::Responses, "source-a").await;
+    let pending = reserve_from(&runtime, &pending_budget, WireApi::Responses, "source-a").await;
     assert_eq!(first.candidate_id(), pending.candidate_id());
     first.begin_rotation_dispatch().unwrap();
     let deadline = crate::unix_time_ms() + 60_000;

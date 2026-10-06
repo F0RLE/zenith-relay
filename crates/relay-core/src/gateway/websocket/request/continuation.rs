@@ -60,6 +60,7 @@ impl super::ClientRequest {
         if *attempted || !self.requires_affinity_owner {
             return Ok(false);
         }
+        let owner_key = self.response_affinity_key.clone();
         if !self.replay_native_continuation(
             runtime,
             local_key_id,
@@ -68,6 +69,14 @@ impl super::ClientRequest {
         )? {
             return Ok(false);
         }
+        // The provider rejected only its opaque id. Keep the same owner for
+        // the repaired request; Manual rotation must not turn this repair
+        // into an unrelated pool hop.
+        self.response_affinity_key = owner_key;
+        continuation::retain_materialized_continuation_owner(
+            &mut self.requires_affinity_owner,
+            &mut self.has_unpaired_tool_output,
+        );
         *attempted = true;
         Ok(true)
     }

@@ -63,6 +63,58 @@ async fn invalid_foreign_reasoning_retries_a_native_account_without_ciphertext()
 }
 
 #[tokio::test]
+async fn invalid_foreign_reasoning_repair_stays_on_the_account_in_manual_rotation() {
+    let (account_upstream, account_state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"message":"Encrypted content for item rs_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}),
+        ),
+        success_reply("recovered-response"),
+    ])
+    .await;
+    let (source_upstream, source_state) =
+        spawn_upstream(vec![success_reply("source-must-not-run")]).await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "fallback-source",
+            &source_upstream,
+            "source-key",
+            100,
+        )],
+        vec![account(
+            "relay-account",
+            "provider-account",
+            &account_upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    rotation_policy::set_order(&gateway, &["relay-account", "fallback-source"]);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [
+                {"id":"rs_1","type":"reasoning","encrypted_content":"foreign-ciphertext","summary":[{"type":"summary_text","text":"visible old reasoning"}]},
+                {"role":"user","content":"continue"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(account_state.requests.lock().unwrap().len(), 2);
+    assert!(source_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn invalid_foreign_compaction_retries_without_the_rejected_items() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
@@ -117,6 +169,72 @@ async fn invalid_foreign_compaction_retries_without_the_rejected_items() {
     assert!(retry_input
         .iter()
         .all(|item| item.get("encrypted_content").is_none()));
+}
+
+#[tokio::test]
+async fn invalid_foreign_compaction_repair_stays_on_the_account_in_manual_rotation() {
+    let (owner_upstream, owner_state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"message":"Encrypted content for item cmp_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}),
+        ),
+        Reply::Json(
+            StatusCode::OK,
+            json!({"type":"compaction","items":[],"usage":{"input_tokens":1}}),
+        ),
+    ])
+    .await;
+    let (other_upstream, other_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::OK,
+        json!({"type":"compaction","items":[],"usage":{"input_tokens":1}}),
+    )])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-compaction-account", "owner-access").await;
+    register_ready(&authority, "other-compaction-account", "other-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account(
+                "owner-compaction-account",
+                "provider-owner-compaction",
+                &owner_upstream,
+                10,
+            ),
+            account(
+                "other-compaction-account",
+                "provider-other-compaction",
+                &other_upstream,
+                10,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    rotation_policy::set_order(
+        &gateway,
+        &["owner-compaction-account", "other-compaction-account"],
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [
+                {"id":"cmp_1","type":"compaction","encrypted_content":"foreign-ciphertext"},
+                {"role":"user","content":"continue"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    assert!(other_state.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

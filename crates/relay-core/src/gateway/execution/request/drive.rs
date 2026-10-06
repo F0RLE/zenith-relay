@@ -298,7 +298,6 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
             request: &mut request,
             adapter_is_passthrough,
             repairs,
-            response_affinity_key,
             requires_affinity_owner,
             has_unpaired_tool_output,
             last_failure,

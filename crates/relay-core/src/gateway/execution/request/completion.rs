@@ -36,7 +36,6 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) requires_affinity_owner: &'a mut bool,
     pub(super) has_unpaired_tool_output: &'a mut bool,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
@@ -84,7 +83,6 @@ pub(super) async fn complete_buffered_response(
         request,
         adapter_is_passthrough,
         repairs,
-        response_affinity_key,
         requires_affinity_owner,
         has_unpaired_tool_output,
         last_failure,
@@ -143,7 +141,6 @@ pub(super) async fn complete_buffered_response(
             has_previous_response_id,
             selected_error_origin,
             native_replay_attempted,
-            response_affinity_key,
             requires_affinity_owner,
             has_unpaired_tool_output,
             tried,
@@ -347,7 +344,6 @@ struct CompletedBodyRead<'a> {
     has_previous_response_id: bool,
     selected_error_origin: ErrorOrigin,
     native_replay_attempted: &'a mut bool,
-    response_affinity_key: &'a mut Option<String>,
     requires_affinity_owner: &'a mut bool,
     has_unpaired_tool_output: &'a mut bool,
     tried: &'a mut HashSet<String>,
@@ -412,8 +408,7 @@ async fn read_completed_body(
                     read.native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        clear_materialized_continuation(
-                            read.response_affinity_key,
+                        retain_materialized_continuation_owner(
                             read.requires_affinity_owner,
                             read.has_unpaired_tool_output,
                         );

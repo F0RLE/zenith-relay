@@ -147,6 +147,12 @@ pub(in crate::gateway::execution) async fn execute_request(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            release_encrypted_context_repair_owner(
+                &mut repairs,
+                &mut response_affinity_key,
+                &mut requires_affinity_owner,
+                &runtime,
+            );
             match handle_selection_miss(SelectionMissInput {
                 budget: &budget,
                 runtime: &runtime,
@@ -182,6 +188,11 @@ pub(in crate::gateway::execution) async fn execute_request(
                 SelectionMiss::Respond(response) => return response,
             }
         };
+        detach_encrypted_context_repair_owner(
+            &repairs,
+            &mut response_affinity_key,
+            &mut requires_affinity_owner,
+        );
         let driven = drive_selected_attempt(DriveAttemptInput {
             selected,
             lease,
@@ -220,7 +231,15 @@ pub(in crate::gateway::execution) async fn execute_request(
         })
         .await;
         let kept = match driven {
-            DrivenAttempt::Respond(response) => return response,
+            DrivenAttempt::Respond(response) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                return response;
+            }
             DrivenAttempt::Continue(kept) => kept,
             DrivenAttempt::Break(AttemptCarry {
                 request: next_request,
@@ -228,6 +247,12 @@ pub(in crate::gateway::execution) async fn execute_request(
                 requested_model: next_requested_model,
                 prompt_affinity_key: _,
             }) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
                 request = next_request;
                 request_id = next_request_id;
                 requested_model = next_requested_model;
@@ -239,6 +264,13 @@ pub(in crate::gateway::execution) async fn execute_request(
         requested_model = kept.requested_model;
         prompt_affinity_key = kept.prompt_affinity_key;
     }
+
+    release_encrypted_context_repair_owner(
+        &mut repairs,
+        &mut response_affinity_key,
+        &mut requires_affinity_owner,
+        &runtime,
+    );
 
     if allow_previous_response_reset
         && request_has_previous_response_id(client_wire_api, &request)

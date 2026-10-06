@@ -20,7 +20,7 @@ pub(super) fn retryable_disconnect_request(
         return None;
     }
     if in_flight.request.has_previous_response_id() {
-        return replay_in_flight_continuation(runtime, state);
+        return replay_in_flight_continuation(runtime, state, false);
     }
     if in_flight.request.has_unpaired_tool_output() {
         return None;
@@ -31,9 +31,11 @@ pub(super) fn retryable_disconnect_request(
 fn replay_in_flight_continuation(
     runtime: &GatewayRuntime,
     state: &BridgeState,
+    retain_owner: bool,
 ) -> Option<ClientRequest> {
     let in_flight = state.in_flight.as_ref()?;
     let mut request = in_flight.request.clone();
+    let owner_key = request.response_affinity_key.clone();
     request
         .replay_native_continuation(
             runtime,
@@ -43,6 +45,16 @@ fn replay_in_flight_continuation(
         )
         .ok()?
         .then_some(request)
+        .map(|mut request| {
+            if retain_owner {
+                request.response_affinity_key = owner_key;
+                crate::gateway::continuation::retain_materialized_continuation_owner(
+                    &mut request.requires_affinity_owner,
+                    &mut request.has_unpaired_tool_output,
+                );
+            }
+            request
+        })
 }
 
 pub(super) fn retryable_terminal_request(
@@ -67,7 +79,7 @@ pub(super) fn retryable_terminal_request(
     let status = super::super::super::errors::canonical_upstream_status(status, category);
     if in_flight.request.has_previous_response_id() {
         return super::super::super::errors::retryable_failure(status, category, true)
-            .then(|| replay_in_flight_continuation(runtime, state))
+            .then(|| replay_in_flight_continuation(runtime, state, false))
             .flatten();
     }
     if in_flight.request.has_unpaired_tool_output()
@@ -92,7 +104,7 @@ pub(super) fn repairable_terminal_request(
         if in_flight.client_visible_output {
             return None;
         }
-        let request = replay_in_flight_continuation(runtime, state)?;
+        let request = replay_in_flight_continuation(runtime, state, true)?;
         return Some(request);
     }
     let body = match message {

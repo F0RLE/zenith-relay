@@ -30,6 +30,13 @@ async fn principal_scope_revocation_between_reserve_and_dispatch_spends_no_gener
 #[tokio::test]
 async fn principal_scope_revision_revokes_an_aba_edit_but_not_an_unchanged_save() {
     let runtime = runtime();
+    assert!(runtime.update_key_scope(
+        "key",
+        CandidateScope {
+            source_ids: Some(["source-a".into()].into()),
+            ..CandidateScope::default()
+        },
+    ));
     let key = key(&runtime);
     let original = key.scope_snapshot();
     let budget = SharedRequestBudget::for_incoming_request(3);
@@ -163,8 +170,8 @@ async fn candidate_permission_revision_revokes_an_aba_policy_edit_but_not_weight
     drop(pending);
 
     let current = reserve(&runtime, &budget, WireApi::Responses).await;
-    assert_eq!(current.candidate_id(), "source-a");
-    assert!(runtime.update_source_policy("source-a", policy(true, 2), 0));
+    assert_eq!(current.candidate_id(), "source-b");
+    assert!(runtime.update_source_policy("source-b", policy(true, 2), 0));
     current.begin_rotation_http_dispatch().unwrap();
     current.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(budget.dispatches(), 1);

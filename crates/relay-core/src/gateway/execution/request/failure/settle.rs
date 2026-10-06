@@ -76,8 +76,7 @@ pub(super) fn settle_collected_rejection(
             native_replay_attempted,
         ) {
             Ok(true) => {
-                clear_materialized_continuation(
-                    response_affinity_key,
+                retain_materialized_continuation_owner(
                     requires_affinity_owner,
                     has_unpaired_tool_output,
                 );

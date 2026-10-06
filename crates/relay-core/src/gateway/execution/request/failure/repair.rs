@@ -206,6 +206,14 @@ pub(super) fn repair_collected_rejection(
             || super::super::super::account::drop_rejected_encrypted_context(request),
         )
     {
+        bind_encrypted_context_repair_owner(
+            repairs,
+            response_affinity_key,
+            requires_affinity_owner,
+            runtime,
+            request_id,
+            &route.candidate_id,
+        );
         emit_usage(runtime, event.clone());
         *last_failure = Some(failure);
         *last_failure_origin = selected_error_origin;

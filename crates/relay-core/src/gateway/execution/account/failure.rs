@@ -14,7 +14,8 @@ use super::super::super::turn_state::relay_account_response_header;
 use super::super::request::recover_stale_tool_history;
 use super::super::AttemptRepairs;
 use super::super::{
-    repair_once, repair_responses_item_prefixes, reset_materialized_continuation,
+    bind_encrypted_context_repair_owner, repair_once, repair_responses_item_prefixes,
+    reset_materialized_continuation, reset_materialized_continuation_for_owner_retry,
     ContinuationReset, ResponsesItemPrefixRepairs,
 };
 use crate::error_codes;
@@ -191,6 +192,14 @@ fn repair_classified_account_failure(
                 || super::drop_rejected_encrypted_context(request),
             )
         {
+            bind_encrypted_context_repair_owner(
+                input.repairs,
+                input.response_affinity_key,
+                input.requires_affinity_owner,
+                input.runtime,
+                input.request_id,
+                candidate_id,
+            );
             emit_usage(input.runtime, classified.event.clone());
             *input.last_failure = Some(classified.failure);
             *input.last_failure_origin = input.selected_error_origin;
@@ -288,13 +297,10 @@ fn settle_account_failure(
     if affinity_miss {
         event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
         emit_usage(runtime, event);
-        if reset_materialized_continuation(
-            &mut ContinuationReset {
-                attempted: &mut repairs.model_switch_reset,
-                response_affinity_key,
-                requires_affinity_owner,
-            },
-            true,
+        if reset_materialized_continuation_for_owner_retry(
+            &mut repairs.model_switch_reset,
+            response_affinity_key,
+            requires_affinity_owner,
             runtime,
             &key.id,
             request,

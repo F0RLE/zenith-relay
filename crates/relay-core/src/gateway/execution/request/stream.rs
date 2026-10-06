@@ -228,6 +228,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                             last_failure,
                             last_failure_origin,
                             selected_error_origin,
+                            failure.category == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND,
                             retry(request, request_id, requested_model, prompt_affinity_key),
                         );
                     }
@@ -263,6 +264,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                     last_failure,
                     last_failure_origin,
                     selected_error_origin,
+                    false,
                     retry(request, request_id, requested_model, prompt_affinity_key),
                 );
             }
@@ -322,13 +324,18 @@ fn continue_after_history_repair(
     last_failure: &mut Option<AttemptFailure>,
     last_failure_origin: &mut ErrorOrigin,
     selected_error_origin: ErrorOrigin,
+    retain_owner: bool,
     retry: StreamRetryState,
 ) -> OpenedStream {
-    clear_materialized_continuation(
-        response_affinity_key,
-        requires_affinity_owner,
-        has_unpaired_tool_output,
-    );
+    if retain_owner {
+        retain_materialized_continuation_owner(requires_affinity_owner, has_unpaired_tool_output);
+    } else {
+        clear_materialized_continuation(
+            response_affinity_key,
+            requires_affinity_owner,
+            has_unpaired_tool_output,
+        );
+    }
     tried.remove(candidate_id);
     lease.allow_rotation_repair();
     emit_usage(runtime, event);
