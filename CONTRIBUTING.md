@@ -23,9 +23,10 @@ extra conditions on people who only use, distribute, or fork the project.
 For each PR, describe the change and validation, open the agreement linked in
 the template, and check **one Contributor Agreement checkbox** yourself. The
 checkbox covers agreement, assignment, authority, and required disclosures
-together. Keep its wording unchanged. If the Contribution is entirely your own
-and has no other rights holders or excluded material, no extra ownership form
-or separate consent comment is required by this workflow.
+together. Keep its wording unchanged. The template shows the English and
+Russian updater notes under Ready-to-publish note. If the Contribution is
+entirely your own and has no other rights holders or excluded material, no
+extra ownership form or separate consent comment is required by this workflow.
 
 Only when relevant, list co-authors, employer ownership, and included
 pre-existing or third-party material with its source and license. Obtain

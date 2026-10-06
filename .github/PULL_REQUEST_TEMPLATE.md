@@ -1,39 +1,41 @@
 ## Contributor Agreement
 
-<!-- Read the linked agreement, then check this box yourself. Keep the wording unchanged. -->
+> Read the linked agreement, then check this box yourself. Keep the wording unchanged.
 
 - [ ] I have read and agree to the [Contributor Agreement](https://github.com/F0RLE/zenith-relay/blob/main/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.
 
-<!-- Only if applicable: list co-authors, employer-owned or pre-existing material, third-party sources/licenses, and their consent below. Otherwise leave this blank. Keep private identity and employer documents out of the PR. -->
+> Name any co-author, employer-owned work, or third-party material here only when it applies.
 
 ## Summary
 
-<!-- Required: explain the change in a few concrete sentences. -->
-
-Describe what changed and why.
+> One short paragraph: what changed and why.
 
 ## User-visible changes
 
-<!-- Required: write what a user will notice, or explain why there is no user-visible change. -->
+> One bullet per thing a person will notice. If nobody will notice, leave the line below.
 
--
+- None.
 
 ## Release Notes
 
-<!-- Required: choose one option and complete the release note when applicable. -->
+> Check one box. A release-worthy change needs text under both note markers.
 
 - [ ] Release-worthy change is described below.
 - [ ] No release note is needed because this is internal-only, documentation-only, or test-only.
 
 ### Ready-to-publish note
 
-<!-- Write 1-3 concise bullets that can be copied into the GitHub Release body. -->
+<!-- relay-notes:en -->
 
 -
 
-<!-- For in-app updater text, use the release body markers documented in CONTRIBUTING.md, such as relay-notes:en and relay-notes:ru. -->
+<!-- relay-notes:ru -->
+
+-
 
 ## Validation
+
+> Check the commands you ran. Explain anything left unchecked.
 
 - [ ] `cd src && bun run verify`
 - [ ] `cd src && bun run test:e2e`
@@ -41,13 +43,11 @@ Describe what changed and why.
 
 ## Compatibility and migration
 
+> Check one box. Describe a migration, config change, or updater impact under the second box.
+
 - [ ] No migration, config, updater, or compatibility impact.
 - [ ] Impact is described below.
 
-Details:
-
 ## Risk and rollout
 
-<!-- Mention packaging, updater behavior, Codex config writes, rollback, or operational risks. -->
-
-Describe the risk and the rollout or rollback plan.
+> What can go wrong, and how to roll it out or back.
