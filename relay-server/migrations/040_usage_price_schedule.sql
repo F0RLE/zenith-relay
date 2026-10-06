@@ -82,8 +82,13 @@ LEFT JOIN (
     AND fresh.candidate_id = old.candidate_id
     AND fresh.model = old.model
 WHERE old.input_tokens > COALESCE(fresh.input_tokens, 0)
+    OR old.input_samples > COALESCE(fresh.input_samples, 0)
+    OR old.cached_input_samples > COALESCE(fresh.cached_input_samples, 0)
+    OR old.cache_write_input_samples > COALESCE(fresh.cache_write_input_samples, 0)
     OR old.output_tokens > COALESCE(fresh.output_tokens, 0)
+    OR old.output_samples > COALESCE(fresh.output_samples, 0)
     OR old.total_tokens > COALESCE(fresh.total_tokens, 0)
+    OR old.total_samples > COALESCE(fresh.total_samples, 0)
     OR old.cached_input_tokens > COALESCE(fresh.cached_input_tokens, 0)
     OR old.cache_write_input_tokens > COALESCE(fresh.cache_write_input_tokens, 0)
 ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO UPDATE SET
