@@ -20,7 +20,6 @@ pub enum AccountExportFormat {
     Zenith,
     Cpa,
     Sub2api,
-    Cockpit,
     #[serde(rename = "9router")]
     NineRouter,
     Codex,
@@ -29,12 +28,11 @@ pub enum AccountExportFormat {
 }
 
 impl AccountExportFormat {
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 7] {
         [
             Self::Zenith,
             Self::Cpa,
             Self::Sub2api,
-            Self::Cockpit,
             Self::NineRouter,
             Self::Codex,
             Self::AxonHub,
@@ -47,7 +45,6 @@ impl AccountExportFormat {
             Self::Zenith => "zenith",
             Self::Cpa => "cpa",
             Self::Sub2api => "sub2api",
-            Self::Cockpit => "cockpit",
             Self::NineRouter => "9router",
             Self::Codex => "codex",
             Self::AxonHub => "axonhub",
@@ -118,7 +115,7 @@ pub struct AccountExportCredential {
     pub created_at_ms: u64,
     pub priority: i32,
     pub enabled: bool,
-    /// User metadata preserved by the Cockpit portable format.
+    /// User metadata retained for imported account records.
     pub tags: BTreeSet<String>,
 }
 

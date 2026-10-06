@@ -78,7 +78,7 @@ export type AccountTotpPreview = {
   expiresAtMs: number | null;
 };
 
-export type AccountExportFormat = "zenith" | "cpa" | "sub2api" | "cockpit" | "9router" | "codex" | "axon_hub" | "codex_manager";
+export type AccountExportFormat = "zenith" | "cpa" | "sub2api" | "9router" | "codex" | "axon_hub" | "codex_manager";
 
 export type AccountExportInput = {
   accountIds: string[];

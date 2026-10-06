@@ -766,7 +766,6 @@ const relayEn = {
       zenith: "A Zenith account package with a Markdown description.",
       sub2api: "A versioned account bundle for importing into sub2api.",
       cpa: "A single-account JSON file for CLIProxyAPI.",
-      cockpit: "Portable JSON for importing into Cockpit Tools.",
       "9router": "An OAuth connection in the 9router bulk-import format.",
       codex: "A standard ChatGPT auth.json file.",
       axon_hub: "A ChatGPT authentication file for AxonHub.",

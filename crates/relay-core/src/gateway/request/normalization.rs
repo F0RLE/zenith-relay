@@ -125,7 +125,7 @@ pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServic
 /// it does not control.
 ///
 /// `priority` is the upstream OpenAI spelling for Fast. Standard deliberately
-/// remains implicit, matching the Codex/Cockpit behavior and preserving
+/// remains implicit, matching native Codex behavior and preserving
 /// arbitrary client-owned values such as `flex`.
 pub(in crate::gateway) fn apply_default_service_tier_if_missing(
     request: &mut Value,

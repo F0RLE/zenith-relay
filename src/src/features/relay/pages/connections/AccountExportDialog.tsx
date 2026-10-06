@@ -12,7 +12,6 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string; m
   { value: "zenith", label: "Zenith", multiple: true },
   { value: "sub2api", label: "sub2api", multiple: true },
   { value: "cpa", label: "CPA", multiple: false },
-  { value: "cockpit", label: "Cockpit Tools", multiple: true },
   { value: "9router", label: "9router", multiple: true },
   { value: "codex", label: "ChatGPT", multiple: false },
   { value: "axon_hub", label: "AxonHub", multiple: false },

@@ -107,12 +107,6 @@ mod tests {
                 Some("synthetic-round-trip-access"),
                 "{format:?}"
             );
-            if format == AccountExportFormat::Cockpit {
-                assert_eq!(
-                    parsed.items[0].tags,
-                    std::collections::BTreeSet::from(["team".to_string(), "work".to_string()])
-                );
-            }
         }
     }
 

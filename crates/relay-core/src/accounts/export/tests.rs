@@ -41,27 +41,6 @@ fn sub2api_matches_the_versioned_popular_export_container() {
 }
 
 #[test]
-fn cockpit_export_carries_safe_name_and_tags() {
-    let document = build_account_export(
-        AccountExportFormat::Cockpit,
-        &[fixture()],
-        1_788_000_000_000,
-        None,
-    )
-    .unwrap();
-    let value: Value = serde_json::from_str(&document.content).unwrap();
-
-    assert_eq!(value["account_name"], "Synthetic Plus");
-    assert_eq!(value["tags"], json!(["team", "work"]));
-
-    let parsed = crate::accounts::parse_import(&document.content, None, &[]).unwrap();
-    assert_eq!(
-        parsed.items[0].tags,
-        BTreeSet::from(["team".to_string(), "work".to_string()])
-    );
-}
-
-#[test]
 fn single_exports_are_objects_and_bulk_exports_are_arrays() {
     for format in AccountExportFormat::all().into_iter().filter(|format| {
         !matches!(

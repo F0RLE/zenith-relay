@@ -766,7 +766,6 @@ const relayRu = {
       zenith: "Пакет аккаунтов Zenith с описанием в Markdown.",
       sub2api: "Версионируемый пакет учётных записей для импорта в sub2api.",
       cpa: "Отдельный JSON учётной записи для CLIProxyAPI.",
-      cockpit: "Переносимый JSON для импорта в Cockpit Tools.",
       "9router": "OAuth-подключение в формате массового импорта 9router.",
       codex: "Обычный файл auth.json для ChatGPT.",
       axon_hub: "Файл авторизации ChatGPT для AxonHub.",

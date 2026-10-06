@@ -1,4 +1,3 @@
-use super::super::{MAX_ACCOUNT_TAGS, MAX_ACCOUNT_TAG_BYTES, MAX_ACCOUNT_TAG_CHARS};
 use super::build::{object, optional_timestamp, strip_nulls, timestamp};
 use super::{AccountExportCredential, AccountExportFormat};
 use crate::error_codes;
@@ -50,7 +49,6 @@ pub(super) fn account_value(
         AccountExportFormat::Zenith => zenith_account_value(&values),
         AccountExportFormat::Cpa => cpa_account_value(&values),
         AccountExportFormat::Sub2api => sub2api_account_value(&values),
-        AccountExportFormat::Cockpit => cockpit_account_value(&values),
         AccountExportFormat::NineRouter => nine_router_account_value(&values),
         AccountExportFormat::Codex => codex_account_value(&values),
         AccountExportFormat::AxonHub => axon_hub_account_value(&values),
@@ -145,67 +143,6 @@ fn sub2api_account_value(values: &AccountExportValues<'_>) -> Value {
         "concurrency": 0,
         "priority": account.priority,
     })
-}
-
-fn cockpit_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
-    let mut value = json!({
-        "type": "codex",
-        "id_token": account.id_token,
-        "access_token": account.access_token,
-        "refresh_token": account.refresh_token.as_deref().unwrap_or(""),
-        "account_id": account.account_id,
-        "last_refresh": values.exported_at,
-        "email": account.email,
-        error_codes::EXPIRED: values.expires_at,
-    });
-    if let Value::Object(object) = &mut value {
-        // Cockpit v1.3.52+ uses account_name/tags as portable, optional
-        // metadata. Relay has no account-folder model, so only copy the
-        // metadata that has a native representation here.
-        object.insert(
-            "account_name".to_string(),
-            Value::String(account.label.clone()),
-        );
-        let tags = safe_cockpit_tags(account);
-        if !tags.is_empty() {
-            object.insert("tags".to_string(), json!(tags));
-        }
-    }
-    value
-}
-
-fn safe_cockpit_tags(account: &AccountExportCredential) -> Vec<String> {
-    let sensitive_values = [
-        Some(account.access_token.as_str()),
-        account.refresh_token.as_deref(),
-        account.id_token.as_deref(),
-        account.email.as_deref(),
-        account.account_id.as_deref(),
-        account.user_id.as_deref(),
-        account.organization_id.as_deref(),
-    ];
-    let mut tags = Vec::new();
-    let mut total_bytes = 0usize;
-    for raw in account.tags.iter().take(MAX_ACCOUNT_TAGS) {
-        let tag = raw.trim();
-        if tag.is_empty()
-            || tag.chars().count() > MAX_ACCOUNT_TAG_CHARS
-            || tag.chars().any(char::is_control)
-            || sensitive_values
-                .iter()
-                .flatten()
-                .filter(|sensitive| sensitive.len() >= 4)
-                .any(|sensitive| tag.contains(sensitive))
-            || tags.iter().any(|existing| existing == tag)
-            || total_bytes.saturating_add(tag.len()) > MAX_ACCOUNT_TAG_BYTES
-        {
-            continue;
-        }
-        total_bytes = total_bytes.saturating_add(tag.len());
-        tags.push(tag.to_string());
-    }
-    tags
 }
 
 fn nine_router_account_value(values: &AccountExportValues<'_>) -> Value {

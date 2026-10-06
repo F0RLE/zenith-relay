@@ -111,7 +111,7 @@ fn usage_payload_has_one_normalized_shape() {
 }
 
 #[test]
-fn provider_credits_follow_the_explicit_cockpit_ledger_shapes() {
+fn provider_credits_follow_the_explicit_ledger_shapes() {
     for (body, micro_units, available, unlimited) in [
         (r#"{}"#, None, false, false),
         (r#"{"credits":{"balance":"0"}}"#, Some(0), false, false),
