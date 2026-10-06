@@ -2,11 +2,9 @@ const agreementConfirmation = "I have read and agree to the [Contributor Agreeme
 
 const requiredHeadings = [
   "Contributor Agreement",
-  "Summary",
-  "User-visible changes",
+  "What changed",
   "Release Notes",
-  "Validation",
-  "Risk and rollout",
+  "Checks",
 ];
 
 const dependencyFiles = new Set([
@@ -106,12 +104,12 @@ export function validatePullRequest(pullRequest, files = []) {
   if (releaseWorthy === noReleaseNote) {
     errors.push("select exactly one Release Notes checkbox");
   }
-  const noteStart = releaseLines.findIndex((line) => /^ {0,3}###[ \t]+Ready-to-publish note\s*$/i.test(line));
+  const noteStart = releaseLines.findIndex((line) => /^ {0,3}###[ \t]+Note\s*$/i.test(line));
   const noteEnd = releaseLines.findIndex((line, index) => index > noteStart && /^ {0,3}###[ \t]/.test(line));
   const note = noteStart < 0 ? "" : releaseLines.slice(noteStart + 1, noteEnd < 0 ? undefined : noteEnd).join("\n");
   const noteText = note.replace(/-\s*\[[ xX]\].*/g, "").replace(/[_* >#-]/g, "").trim();
   if (releaseWorthy && noteText.length < 12) {
-    errors.push("write a non-empty ready-to-publish release note");
+    errors.push("write the release note");
   }
 
   return { errors, dependencyAutomation: false };

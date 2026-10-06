@@ -82,7 +82,7 @@ describe("contributor consent", () => {
 
   test("confirmations from another section are rejected", () => {
     const body = completed.replace(confirmations.join("\n"), "")
-      .replace("## Validation", `## Validation\n${confirmations.join("\n")}`);
+      .replace("## Checks", `## Checks\n${confirmations.join("\n")}`);
     expect(check(body).filter((error) => error.includes("Contributor Agreement"))).toHaveLength(1);
   });
 
@@ -117,16 +117,16 @@ describe("release metadata", () => {
     const release = completed
       .replace("- [x] No release note", "- [ ] No release note")
       .replace("- [ ] Release-worthy", "- [x] Release-worthy");
-    expect(check(release)).toContain("write a non-empty ready-to-publish release note");
-    expect(check(release.replace("### Ready-to-publish note", "### Ready-to-publish note\n\n- Correct pool rotation when a participant is unavailable.")))
+    expect(check(release)).toContain("write the release note");
+    expect(check(release.replace("### Note", "### Note\n\n- Correct pool rotation when a participant is unavailable.")))
       .toEqual([]);
-    expect(check(release.replace("### Ready-to-publish note", "### Ready-to-publish note\n<!-- a long hidden note is not a release note -->")))
-      .toContain("write a non-empty ready-to-publish release note");
+    expect(check(release.replace("### Note", "### Note\n<!-- a long hidden note is not a release note -->")))
+      .toContain("write the release note");
   });
 
   test("section names inside prose do not replace required headings", () => {
-    expect(check(completed.replace("## Risk and rollout", "The template normally says ## Risk and rollout here.")))
-      .toContain("include exactly one ## Risk and rollout section");
+    expect(check(completed.replace("## Checks", "The template normally says ## Checks here.")))
+      .toContain("include exactly one ## Checks section");
   });
 });
 
