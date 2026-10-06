@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { repoRoot, tauriInvocation, withZenithRustEnv } from "./tauri-env.mjs";
+import { repoRoot, tauriInvocation, withZenithRustEnv } from "../lib/tauri-env.mjs";
 
 const cliArgs = process.argv.slice(2);
 const args = ["build", ...cliArgs, "--config", "src-tauri/tauri.conf.json"];

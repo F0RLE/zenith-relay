@@ -98,10 +98,16 @@ read the [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md): accepted
 original contributions are assigned to the project owner, with a license back
 to their authors. Existing AGPL grants and third-party rights remain unchanged.
 
-```powershell
+```sh
 cd src
-bun install
-bun run verify
-bun run test:e2e
-bun run screenshots
+bun run setup
+bun run app:dev
 ```
+
+`bun run setup` installs the locked frontend and Rust dependencies on Windows,
+macOS, and Linux. Install Bun 1.4.2 or newer, rustup, and the native desktop
+libraries first; the setup command does not install those system tools. Add
+`bun run setup:browsers` when Playwright Chromium is needed for end-to-end
+tests. Run `bun run verify` for the frontend and desktop verification gate.
+Before a pull request, run the guardrail and duplicate-code checks in
+[CONTRIBUTING.md](CONTRIBUTING.md).

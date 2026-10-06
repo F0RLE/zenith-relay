@@ -26,7 +26,7 @@ jobs:
         with:
           bun-version: 1.4.2
       - name: Test proposed PR metadata policy
-        run: bun test ./.github/tools/pr-metadata.test.mjs
+        run: bun test ./scripts/check/pr-metadata.test.mjs
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
@@ -53,11 +53,9 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
       - name: Agent guardrails
-        shell: pwsh
-        run: ./scripts/check-agent-guardrails.ps1
+        run: bun ./scripts/check/check-agent-guardrails.mjs
       - name: No new duplicate code
-        shell: pwsh
-        run: ./scripts/check-duplicate-code.ps1
+        run: bun ./scripts/check/check-duplicate-code.mjs
       - run: cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked
@@ -175,7 +173,7 @@ jobs:
           mkdir -p "$mount_point"
           # The DMG license agreement cancels a non-interactive attach. The
           # helper answers it, and this watchdog covers a helper that itself hangs.
-          python3 -B .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
+          python3 -B scripts/release/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
           attach_pid=$!
           (
             sleep 120
@@ -369,7 +367,7 @@ jobs:
           if (-not $releaseNotes) {
             throw "Release notes are empty"
           }
-          .github/tools/publish-updater-manifest.ps1 `
+          scripts/release/publish-updater-manifest.ps1 `
             -TagName "${{ github.ref_name }}" `
             -Repository "${{ github.repository }}" `
             -ArtifactsDir "release-artifacts" `

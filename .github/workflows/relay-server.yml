@@ -45,9 +45,11 @@ jobs:
       - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
       - run: cargo check --manifest-path relay-server/Cargo.toml --locked
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
       - name: Agent guardrails
-        shell: pwsh
-        run: ./scripts/check-agent-guardrails.ps1
+        run: bun ./scripts/check/check-agent-guardrails.mjs
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
 

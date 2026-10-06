@@ -34,13 +34,13 @@ jobs:
         with:
           bun-version: 1.4.2
       - name: Test policy
-        run: bun test ./.github/tools/pr-metadata.test.mjs
+        run: bun test ./scripts/check/pr-metadata.test.mjs
       - name: Require contributor agreement and release context
         uses: actions/github-script@v9
         with:
           script: |
             const { validatePullRequest } = await import(
-              `${process.env.GITHUB_WORKSPACE}/.github/tools/pr-metadata.mjs`
+              `${process.env.GITHUB_WORKSPACE}/scripts/check/pr-metadata.mjs`
             );
             const pullNumber = context.payload.pull_request.number;
             // Read current metadata, not an older event's potentially stale consent.

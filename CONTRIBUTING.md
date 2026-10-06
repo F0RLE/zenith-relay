@@ -108,6 +108,35 @@ headers, prompts, response bodies, or provider session material.
 Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
 [ROADMAP.md](docs/project/ROADMAP.md) before changing a cross-cutting behavior.
 
+## Development setup
+
+Clone this repository. The commands below are the same on Windows, macOS, and
+Linux. Install the system tools first; `bun run setup` does not install them:
+
+- [Bun](https://bun.sh) 1.4.2 or newer.
+- [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
+  Rust version.
+- Native libraries for the desktop shell:
+  - Windows: Microsoft C++ build tools with the MSVC toolchain, and the
+    WebView2 runtime.
+  - macOS: Xcode Command Line Tools.
+  - Linux: GTK 3, WebKitGTK 4.1, librsvg, and a secret service such as
+    gnome-keyring. The Build workflow lists the packages CI installs.
+
+Then install the locked frontend packages and fetch the Rust crates:
+
+~~~sh
+cd src
+bun run setup
+bun run app:dev
+~~~
+
+Playwright browsers are optional and kept out of the default setup:
+
+~~~sh
+bun run setup:browsers
+~~~
+
 ## Documentation policy
 
 The tracked human-facing documentation is deliberately small:
@@ -179,10 +208,22 @@ Run the narrowest relevant checks while iterating. Before a commit that changes
 the frontend, desktop host, shared runtime, or server, run the corresponding
 commands below.
 
+These two checks are the same ones CI runs. They need Bun, not PowerShell.
+Pass the branch you branched from; CI selects that base automatically:
+
+~~~sh
+git fetch origin
+bun ./scripts/check/check-agent-guardrails.mjs origin/main
+bun ./scripts/check/check-duplicate-code.mjs origin/main
+~~~
+
+From `src`, the same commands are `bun run check:guardrails -- origin/main`
+and `bun run check:duplicates -- origin/main`.
+
 For PR template or metadata-workflow changes, run the isolated policy tests:
 
 ~~~powershell
-bun test ./.github/tools/pr-metadata.test.mjs
+bun test ./scripts/check/pr-metadata.test.mjs
 ~~~
 
 The metadata workflow loads its validator from the PR's base commit. It must

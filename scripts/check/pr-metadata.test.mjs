@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { validatePullRequest } from "./pr-metadata.mjs";
 
-const template = readFileSync(new URL("../PULL_REQUEST_TEMPLATE.md", import.meta.url), "utf8");
+const template = readFileSync(new URL("../../.github/PULL_REQUEST_TEMPLATE.md", import.meta.url), "utf8");
 const completed = template
   .replaceAll("- [ ] I ", "- [x] I ")
   .replace("- [ ] No release note", "- [x] No release note");
@@ -172,7 +172,7 @@ describe("dependency automation exception", () => {
 });
 
 describe("workflow integration", () => {
-  const workflow = Bun.YAML.parse(readFileSync(new URL("../workflows/pr-metadata.yml", import.meta.url), "utf8"));
+  const workflow = Bun.YAML.parse(readFileSync(new URL("../../.github/workflows/pr-metadata.yml", import.meta.url), "utf8"));
   const steps = workflow.jobs.metadata.steps;
   const script = steps.find((step) => step.uses?.startsWith("actions/github-script@"))?.with.script;
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -215,7 +215,7 @@ describe("workflow integration", () => {
     expect(checkout.with.ref).toBe("${{ github.event.pull_request.base.sha }}");
     expect(checkout.with["persist-credentials"]).toBe(false);
     expect(steps.find((step) => step.name === "Test policy").run)
-      .toBe("bun test ./.github/tools/pr-metadata.test.mjs");
+      .toBe("bun test ./scripts/check/pr-metadata.test.mjs");
     expect(script).not.toContain("${{");
   });
 

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { repoRoot, tauriInvocation, withZenithRustEnv } from "./tauri-env.mjs";
+import { repoRoot, tauriInvocation, withZenithRustEnv } from "../lib/tauri-env.mjs";
 
 const invocation = tauriInvocation(["dev", "--config", "src-tauri/tauri.conf.json"]);
 const result = spawnSync(invocation.command, invocation.args, {

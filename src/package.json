@@ -8,20 +8,23 @@
     "bun": ">=1.4.2"
   },
   "scripts": {
+    "setup": "bun ../scripts/setup/setup-dev.mjs",
+    "setup:browsers": "bun ../scripts/setup/setup-dev.mjs --with-browsers",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
-    "check:bundle-size": "bun ../.github/tools/check-frontend-bundle.mjs",
-    "test:unit": "bun test tests/accountEconomics.test.ts tests/accountIdentity.test.ts tests/accountLoginDraft.test.ts tests/accountPlans.test.ts tests/accountQuotaRefresh.test.ts tests/accountStatus.test.ts tests/accountTableModel.test.ts tests/apiProviderModel.test.ts tests/automationModel.test.ts tests/connectionViewState.test.ts tests/feedback.test.ts tests/i18n.test.ts tests/latestRequestGate.test.ts tests/memberPickerStatus.test.ts tests/modelPricing.test.ts tests/modelReasoningPolicy.test.ts tests/modelRulesModel.test.ts tests/numberFormatting.test.ts tests/overviewAnalyticsCache.test.ts tests/overviewAnalyticsModel.test.ts tests/platform.test.ts tests/poolFormatting.test.ts tests/poolHelpers.test.ts tests/poolMemberEditorModel.test.ts tests/poolMembersModel.test.ts tests/poolMembership.test.ts tests/quotaFormatting.test.ts tests/refreshPolicy.test.ts tests/relativeTimeClock.test.ts tests/relayOperationModel.test.ts tests/relayPreferences.test.ts tests/runtimeDisplay.test.ts tests/snapshotLoader.test.ts tests/sourceStatsModel.test.ts tests/sourcePriceEditorModel.test.ts tests/sourceProtocolBindings.test.ts tests/sourceRefresh.test.ts tests/sourceTableModel.test.ts tests/updateReleaseNotes.test.ts tests/usageBreakdown.test.ts tests/usageData.test.ts tests/usageSpeed.test.ts",
+    "check:bundle-size": "bun ../scripts/check/check-frontend-bundle.mjs",
+    "check:guardrails": "bun ../scripts/check/check-agent-guardrails.mjs",
+    "check:duplicates": "bun ../scripts/check/check-duplicate-code.mjs",
+    "test:unit": "bun test tests --path-ignore-patterns=\"tests/e2e/**\" --path-ignore-patterns=\"tests/docs/**\"",
     "test:e2e": "playwright test",
     "screenshots": "playwright test --config playwright.docs.config.ts",
-    "clean": "bun ../.github/tools/clean.mjs",
-    "clean:all": "bun ../.github/tools/clean.mjs --all",
+    "clean": "bun ../scripts/maintenance/clean.mjs",
+    "clean:all": "bun ../scripts/maintenance/clean.mjs --all",
     "verify": "bun run test:unit && bun run build && bun run check:bundle-size && cargo test --manifest-path ../src-tauri/Cargo.toml --locked -- --test-threads=1",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
-    "tauri": "tauri",
-    "app:dev": "bun ../.github/tools/tauri-dev.mjs",
-    "app:build": "bun ../.github/tools/tauri-build.mjs"
+    "app:dev": "bun ../scripts/build/tauri-dev.mjs",
+    "app:build": "bun ../scripts/build/tauri-build.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
