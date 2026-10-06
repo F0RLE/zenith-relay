@@ -128,7 +128,7 @@
 }
 
 .setup-language-menu .relay-option-trigger:focus-visible {
-  outline: 2px solid var(--relay-accent);
+  outline: 2px solid var(--relay-border-strong);
   outline-offset: 2px;
 }
 
@@ -311,7 +311,7 @@
 .setup-progress li small { font-size: 11px; line-height: 1.4; color: var(--relay-muted); }
 .setup-progress li > span svg { width: 14px; height: 14px; }
 .setup-progress li.active { color: var(--relay-text); }
-.setup-progress li.active > span { border-color: var(--relay-accent); background: var(--relay-accent); color: var(--relay-surface); }
+.setup-progress li.active > span { border-color: transparent; background: var(--relay-accent); color: var(--relay-surface); }
 .setup-progress li.complete > span { border-color: transparent; background: var(--relay-accent-soft); color: var(--relay-accent-hover); }
 
 .setup-body {
@@ -424,7 +424,7 @@
 .mode-options button.selected,
 .client-options button.selected,
 .api-provider-options button.selected {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
@@ -669,7 +669,7 @@
   align-items: center;
   gap: 10px;
   padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--relay-success) 28%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: color-mix(in srgb, var(--relay-success-soft) 72%, var(--relay-surface));
 }
@@ -1183,7 +1183,7 @@
   display: grid;
   place-items: center;
   margin-bottom: 14px;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 48%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 50%;
   background: var(--relay-accent-soft);
 }
@@ -1251,7 +1251,7 @@
   height: 48px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 48%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 50%;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);

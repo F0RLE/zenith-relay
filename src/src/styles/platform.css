@@ -256,7 +256,7 @@ html:not([data-startup-ready="true"]) .app > .titlebar .titlebar-drag > *,
 }
 
 .mode-switch button.active {
-  box-shadow: inset 0 0 0 1px var(--relay-accent);
+  box-shadow: none;
 }
 
 .save-button.saved:not(:disabled) {
@@ -312,18 +312,22 @@ svg {
   white-space: nowrap;
 }
 
-.tabs button.active,
+.tabs button.active {
+  border-color: transparent;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
 .tabs button:hover:not(:disabled),
 .section-header button:hover:not(:disabled),
 .history-actions button:hover:not(:disabled) {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .status-dot.active {
   background: var(--relay-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--relay-success) 16%, transparent);
 }
 
 .error-text {
@@ -356,15 +360,19 @@ svg {
   white-space: nowrap;
 }
 
+.top-up-presets button.selected {
+  border-color: transparent;
+  background: var(--relay-accent-soft);
+}
+
 .top-up-presets button:hover:not(:disabled),
-.top-up-presets button.selected,
 .top-up-submit:hover:not(:disabled) {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
 .status-badge.success {
-  border-color: color-mix(in srgb, var(--relay-success) 48%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-success-soft);
   color: var(--relay-success);
 }

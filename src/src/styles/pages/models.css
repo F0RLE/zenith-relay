@@ -114,7 +114,7 @@
 }
 
 .model-rules-table .model-group-row[data-drop-target="true"] th {
-  box-shadow: inset 0 0 0 2px var(--relay-accent);
+  box-shadow: none;
   background: color-mix(in srgb, var(--relay-accent) 10%, var(--relay-subtle));
 }
 
@@ -179,7 +179,8 @@
 }
 
 .model-rules-table tr[data-model-id][data-drop-target="true"] td {
-  box-shadow: inset 0 2px 0 var(--relay-accent), inset 0 -2px 0 var(--relay-accent);
+  box-shadow: none;
+  background: var(--relay-accent-soft);
 }
 
 .model-group-row th > svg {
@@ -406,7 +407,7 @@
 
 .model-rule-actions .relay-icon-button:hover:not(:disabled),
 .model-rule-actions .relay-icon-button:focus-visible {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent);
 }
@@ -486,7 +487,7 @@
 }
 
 .model-reasoning-options button:hover:not(:disabled) {
-  border-color: var(--relay-focus);
+  border-color: transparent;
   background: var(--relay-subtle);
 }
 
@@ -495,7 +496,7 @@
 }
 
 .model-reasoning-options button.selected {
-  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent);
 }

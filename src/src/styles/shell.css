@@ -230,7 +230,7 @@
 }
 
 .mode-picker > button[aria-expanded="true"] {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
@@ -304,7 +304,7 @@
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
   font-weight: 650;
-  box-shadow: inset 3px 0 0 var(--relay-accent);
+  box-shadow: none;
 }
 
 .relay-sidebar svg,
@@ -361,7 +361,7 @@
 .sidebar-update {
   position: relative;
   min-height: 34px !important;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border)) !important;
+  border: 1px solid transparent !important;
   background: var(--relay-accent-soft) !important;
   color: var(--relay-accent-hover) !important;
   font-size: 12px;
@@ -550,7 +550,7 @@
 .relay-render-error button {
   min-height: 34px;
   padding: 0 16px;
-  border: 1px solid var(--relay-accent);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-accent);
   color: var(--relay-on-accent, #fff);
@@ -688,37 +688,37 @@
 }
 
 .relay-button.primary {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent);
   color: var(--relay-on-accent);
   box-shadow: 0 1px 2px rgb(5 78 58 / 22%);
 }
 
 .relay-button.primary:hover:not(:disabled) {
-  border-color: var(--relay-accent-hover);
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
 :root[data-theme="dark"] .relay-button.primary {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent);
   color: var(--relay-on-accent);
 }
 
 :root[data-theme="dark"] .relay-button.primary:hover:not(:disabled) {
-  border-color: var(--relay-accent-hover);
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] .relay-button.primary {
-    border-color: var(--relay-accent);
+    border-color: transparent;
     background: var(--relay-accent);
     color: var(--relay-on-accent);
   }
 
   :root[data-theme="system"] .relay-button.primary:hover:not(:disabled) {
-    border-color: var(--relay-accent-hover);
+    border-color: transparent;
     background: var(--relay-accent-hover);
   }
 }
@@ -805,7 +805,8 @@ textarea:focus-visible {
 }
 
 .relay-tabs button.active {
-  border-bottom-color: var(--relay-accent);
+  border-bottom-color: transparent;
+  background: var(--relay-accent-soft);
   color: var(--relay-text);
   font-weight: 600;
 }
@@ -1132,7 +1133,7 @@ textarea:focus-visible {
 }
 
 .help-contents-list a[aria-current] {
-  border-left-color: var(--relay-accent);
+  border-left-color: transparent;
   color: var(--relay-accent-hover);
   background: var(--relay-accent-soft);
   font-weight: 600;

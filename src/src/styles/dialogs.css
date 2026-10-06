@@ -192,7 +192,7 @@
   flex: 0 0 36px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 30%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
@@ -380,7 +380,7 @@
   align-content: center;
   gap: 5px;
   padding: 16px;
-  border: 1px dashed color-mix(in srgb, var(--relay-accent) 48%, var(--relay-border));
+  border: 1px dashed transparent;
   border-radius: 6px;
   background: color-mix(in srgb, var(--relay-accent) 5%, var(--relay-surface));
   color: var(--relay-text);
@@ -389,7 +389,7 @@
 
 .import-file-source:hover:not(:disabled),
 .import-file-source:focus-visible {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
@@ -824,7 +824,7 @@
   height: 54px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 34%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 50%;
   background: color-mix(in srgb, var(--relay-accent) 10%, var(--relay-surface));
   color: var(--relay-accent-hover);
@@ -868,7 +868,7 @@
   height: 38px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 34%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 50%;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
@@ -927,7 +927,7 @@
   place-content: center;
   justify-items: center;
   gap: 12px;
-  border: 2px dashed var(--relay-accent);
+  border: 2px dashed transparent;
   margin: 18px;
   background: var(--relay-overlay);
   color: var(--relay-accent-hover);
@@ -941,8 +941,6 @@
 
 @keyframes import-drop-pulse {
   50% {
-    border-color: var(--relay-accent);
-    box-shadow: 0 0 0 8px color-mix(in srgb, var(--relay-accent) 10%, transparent);
     transform: translateY(-3px);
   }
 }

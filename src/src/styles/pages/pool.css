@@ -307,7 +307,7 @@
 }
 
 .account-calculation-toggle[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -359,29 +359,21 @@
 }
 
 .pool-member-card.selected {
-  border-color: var(--relay-accent);
+  border-color: var(--relay-border);
 }
 
 .pool-member-card.current {
-  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  border-color: var(--relay-border);
   background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
   box-shadow: var(--relay-shadow-soft);
 }
 
 .pool-member-card.last-used:not(.current) {
-  border-color: color-mix(in srgb, var(--relay-accent) 28%, var(--relay-border));
+  border-color: var(--relay-border);
 }
 
 .pool-member-card.current::before {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 3px;
-  background: var(--relay-accent);
-  pointer-events: none;
-  content: "";
+  display: none;
 }
 
 .pool-member-card.next:not(.current)::before {
@@ -830,7 +822,7 @@
 
 .pool-connection-option:hover:not(:disabled),
 .pool-connection-option:focus-visible:not(:disabled) {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent-soft) 45%, var(--relay-surface));
   box-shadow: 0 6px 16px rgb(0 0 0 / 10%);
   outline: none;
@@ -911,7 +903,7 @@
 .pool-routing-member { min-width: 0; padding: 12px 8px; border-bottom: 1px solid var(--relay-border); }
 .pool-routing-member:first-child { border-top: 1px solid var(--relay-border); }
 .pool-routing-member[data-dragging] { background: var(--relay-accent-soft); }
-.pool-routing-member[data-drop-target] { outline: 2px solid var(--relay-accent); outline-offset: -2px; }
+.pool-routing-member[data-drop-target] { outline: none; background: var(--relay-accent-soft); }
 .pool-routing-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pool-routing-identity > svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--relay-muted); }
 .pool-routing-handle { display: grid; place-items: center; width: 24px; height: 32px; flex-shrink: 0; padding: 0; border: 0; background: transparent; color: var(--relay-muted); cursor: grab; touch-action: none; user-select: none; }
@@ -1106,31 +1098,31 @@
 }
 
 .pool-picker-health button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .pool-picker-health button[data-health="cooldown"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-warning) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-warning) 10%, var(--relay-surface));
   color: var(--relay-warning);
 }
 
 .pool-picker-health button[data-health="error"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-error) 9%, var(--relay-surface));
   color: var(--relay-error);
 }
 
 .pool-picker-health button[data-health="disabled"][aria-pressed="true"] {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
 
 .pool-picker-health button[data-health="info"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-info) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-info) 10%, var(--relay-surface));
   color: var(--relay-info);
 }

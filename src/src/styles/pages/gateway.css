@@ -627,7 +627,7 @@
 }
 
 .post-import-options > label:hover {
-  border-color: color-mix(in srgb, var(--relay-accent) 58%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
 }
 
@@ -694,7 +694,7 @@
 }
 
 .proxy-route-options > button.selected {
-  border-color: color-mix(in srgb, var(--relay-accent) 65%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
@@ -1036,7 +1036,7 @@
 }
 
 .setting-toggle:has(input:checked) {
-  border-color: color-mix(in srgb, var(--relay-accent) 38%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 7%, var(--relay-subtle));
 }
 

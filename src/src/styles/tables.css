@@ -256,7 +256,7 @@
 
 .reset-credits-control:hover:not(:disabled),
 .reset-credits-control:focus-visible {
-  border-color: color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 6%, var(--relay-surface));
 }
 

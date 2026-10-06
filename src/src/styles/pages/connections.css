@@ -197,7 +197,7 @@
 }
 
 .account-group-toggle[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -320,13 +320,13 @@
 }
 
 .account-plan-filters button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .account-plan-filters button.error[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-error) 9%, var(--relay-surface));
   color: var(--relay-error);
 }
@@ -433,7 +433,7 @@
 }
 
 .account-card.selected {
-  border-color: var(--relay-accent);
+  border-color: var(--relay-border);
 }
 
 .account-card-main {
@@ -587,14 +587,14 @@
 }
 
 .account-card-header-actions .account-select-button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .account-card-header-actions .account-select-button[aria-pressed="true"]:hover:not(:disabled),
 .account-card-header-actions .account-select-button[aria-pressed="true"]:focus-visible {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -1046,7 +1046,7 @@
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--relay-success) 35%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 6px;
   background: color-mix(in srgb, var(--relay-success) 7%, var(--relay-surface));
   color: var(--relay-secondary);
@@ -1202,7 +1202,7 @@
   min-height: 34px;
   display: flex;
   align-items: stretch;
-  border: 1px solid var(--relay-accent);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-accent);
   color: var(--relay-on-accent);
@@ -1210,7 +1210,7 @@
 }
 
 .oauth-open-with-lock:hover:not(.is-disabled) {
-  border-color: var(--relay-accent-hover);
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
@@ -1689,19 +1689,18 @@
 
 .account-export-formats {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .account-export-formats button {
   min-width: 0;
-  min-height: 40px;
-  position: relative;
+  min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
   overflow: hidden;
-  padding: 10px 32px 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--relay-border);
   border-radius: 6px;
   background: var(--relay-surface);
@@ -1719,20 +1718,29 @@
 }
 
 .account-export-formats button[aria-checked="true"] {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
+  font-weight: 650;
 }
 
 .account-export-formats button span {
   overflow-wrap: anywhere;
 }
 
-.account-export-formats button svg {
-  position: absolute;
-  right: 8px;
-  width: 15px;
-  height: 15px;
+.account-export-formats button:focus-visible {
+  outline: 2px solid var(--relay-border-strong);
+  outline-offset: 2px;
+}
+
+.relay-dialog.account-export-dialog > footer {
+  justify-content: space-between;
+}
+
+.account-export-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .account-export-description {
@@ -1855,6 +1863,19 @@
 @media (max-width: 620px) {
   .account-export-formats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .relay-dialog.account-export-dialog > footer {
+    justify-content: flex-end;
+  }
+
+  .account-export-cancel {
+    margin-right: auto;
+  }
+
+  .account-export-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 }
 .source-probe-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
