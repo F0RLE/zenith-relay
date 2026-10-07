@@ -84,7 +84,7 @@ impl ModelMetadataCatalog {
             entries.insert(key.clone(), metadata);
 
             // Supplemental hosting catalogs must not make a canonical model
-            // lose its unqualified identity. Equal-priority collisions remain
+            // lose its unqualified identity. Equal-priority conflicts remain
             // ambiguous; exact qualified IDs always resolve independently.
             let priority = reference::identity_priority(value);
             match leaf_priorities.get(&leaf) {
@@ -102,8 +102,21 @@ impl ModelMetadataCatalog {
             }
             if let Some(previous) = leaf_matches.insert(leaf.clone(), key.clone()) {
                 if previous != key {
-                    leaf_matches.remove(&leaf);
-                    ambiguous_leaves.insert(leaf);
+                    // Share metadata only when descriptive identity and every
+                    // parsed field agree. Exact provider IDs remain separate;
+                    // this never merges routes or participant inventories.
+                    let current = &entries[&key];
+                    let mut other = entries[&previous].clone();
+                    other.provider.clone_from(&current.provider);
+                    if current.name.is_some()
+                        && (current.family.is_some() || current.release_date.is_some())
+                        && other == *current
+                    {
+                        leaf_matches.insert(leaf, previous);
+                    } else {
+                        leaf_matches.remove(&leaf);
+                        ambiguous_leaves.insert(leaf);
+                    }
                 }
             }
         }

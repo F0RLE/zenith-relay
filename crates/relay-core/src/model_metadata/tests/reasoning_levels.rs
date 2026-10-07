@@ -6,6 +6,43 @@ fn catalog(raw: &str) -> ModelMetadataCatalog {
 }
 
 #[test]
+fn equivalent_reference_records_publish_reasoning_without_merging_conflicting_metadata() {
+    use serde_json::json;
+    for id in ["synthetic-future-a", "synthetic-future-b"] {
+        let first = format!("source-a/{id}");
+        let second = format!("source-b/{id}");
+        let record = json!({"name":"Synthetic Future","family":"future","reasoning":true,"reasoning_effort_levels":["low","high","max"],
+            "default_reasoning_effort":"high"});
+        let mut records = json!({});
+        records[&first] = record.clone();
+        records[&second] = record;
+        let metadata = catalog(&records.to_string());
+        assert!(metadata.resolve(id).is_some());
+        assert!(metadata.resolve(&first).is_some());
+        assert!(metadata.resolve(&second).is_some());
+        let mut card = json!({"slug":id});
+        metadata.apply_codex_capabilities(id, &mut card);
+        assert_eq!(card["default_reasoning_level"], "high");
+        assert_eq!(
+            card["supported_reasoning_levels"],
+            json!([
+                {"effort":"low","description":"low"},
+                {"effort":"high","description":"high"},
+                {"effort":"max","description":"max"}
+            ])
+        );
+
+        records[&second]["reasoning_effort_levels"] = json!(["high"]);
+        assert!(catalog(&records.to_string()).resolve(id).is_none());
+        records[&second] = records[&first].clone();
+        records[format!("other/{id}")] = records[&first].clone();
+        assert!(catalog(&records.to_string()).resolve(id).is_some());
+        records[format!("other/{id}")]["name"] = json!("Different Model");
+        assert!(catalog(&records.to_string()).resolve(id).is_none());
+    }
+}
+
+#[test]
 fn merges_openrouter_reasoning_levels_over_litellm_and_models_dev() {
     let models = serde_json::json!({
         "openai/gpt-test": {"reasoning": true}
