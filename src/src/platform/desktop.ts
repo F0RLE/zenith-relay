@@ -50,10 +50,12 @@ export function toggleMaximizeWindow() {
   return getCurrentWindow().toggleMaximize();
 }
 
-export async function toggleFullscreenWindow() {
-  const currentWindow = getCurrentWindow();
-  const fullscreen = await currentWindow.isFullscreen();
-  return currentWindow.setFullscreen(!fullscreen);
+export async function watchWindowFullscreen(onChange: (fullscreen: boolean) => void) {
+  const window = getCurrentWindow();
+  const refresh = () => window.isFullscreen().then(onChange).catch(() => undefined);
+  const unlisten = await window.onResized(() => { void refresh(); });
+  await refresh();
+  return unlisten;
 }
 
 export function closeWindow() {

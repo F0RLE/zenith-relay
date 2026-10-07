@@ -2,6 +2,8 @@ import type { Page } from "../bun-playwright";
 import type { ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask, ToolPolicy, ToolPolicyUpdate } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
+  platform?: "windows" | "macos" | "linux";
+  fullscreen?: boolean;
   locale?: "en" | "ru";
   onboarding?: boolean;
   mode?: "local" | "remote" | "zenith";
@@ -546,9 +548,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
     let nextCallback = 1;
+    let fullscreen = input.fullscreen ?? false;
     const eventListeners = new Map<number, { event: string; handler: number }>();
     let nextEventListener = 1;
     const emitEvent = (event: string, payload: unknown) => {
+      if (event === "tauri://resize" && typeof (payload as { fullscreen?: unknown })?.fullscreen === "boolean") {
+        fullscreen = (payload as { fullscreen: boolean }).fullscreen;
+      }
       for (const [id, listener] of eventListeners) {
         if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
       }
@@ -577,7 +583,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         invocations.push({ command, args: recordedArgs });
         switch (command) {
           case "get_system_locale": return locale;
-          case "get_platform": return "windows";
+          case "get_platform": return input.platform ?? "windows";
           case "get_state": return { providerActive: readyActive, codexRunning: false, hasSavedApiKey: Boolean(readyKey) };
           case "get_saved_key_models": return ["gpt-5.4", "gpt-5.4-mini"];
           case "create_saved_top_up_intent_and_open": return null;
@@ -1125,6 +1131,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };
           case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", vaultKey: "c3ludGhldGljLXZhdWx0LWtleS0wMDAwMDAwMDA=", composeCommand: "docker compose up -d" };
           case "execute_remote_server_action": return remoteAction(args);
+          case "plugin:window|is_fullscreen": return fullscreen;
+          case "plugin:window|close":
+          case "plugin:window|minimize":
+          case "plugin:window|toggle_maximize": return null;
           case "plugin:event|listen": {
             const eventId = nextEventListener++;
             eventListeners.set(eventId, { event: String(args.event), handler: Number(args.handler) });
