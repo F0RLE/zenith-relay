@@ -219,10 +219,15 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
         .find(|window| window.label == MAIN_WINDOW_LABEL)
         .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
     let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
-    let window = WebviewWindowBuilder::from_config(app, config)?
+    let builder = WebviewWindowBuilder::from_config(app, config)?
         .data_directory(webview_data)
-        .visible(false)
-        .build()?;
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+    let window = builder.build()?;
     if let Some(state) = app.try_state::<DesktopState>() {
         state.set_background_session_active(true);
     }

@@ -160,8 +160,8 @@ button {
   padding-right: 14px;
 }
 
-.titlebar-macos .titlebar-logo {
-  order: 1;
+.titlebar-macos.titlebar-fullscreen .titlebar-native-controls {
+  display: none;
 }
 
 /* Keep the setup screens free of a title strip while retaining their window controls. */
@@ -188,50 +188,10 @@ html:not([data-startup-ready="true"]) .app > .titlebar .titlebar-drag > *,
   display: none;
 }
 
-.window-controls-macos {
-  gap: 8px;
-  flex: 0 0 auto;
-  padding-right: 6px;
-}
-
-.window-controls-macos button {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  color: rgba(0, 0, 0, 0.72);
-}
-
-.window-controls-macos .close {
-  background: #ff5f57;
-}
-
-.window-controls-macos .minimize {
-  background: #ffbd2e;
-}
-
-.window-controls-macos .zoom {
-  background: #28c840;
-}
-
-.window-controls-macos button:hover {
-  filter: brightness(0.94);
-}
-
-.window-controls-macos button svg {
-  width: 8px;
-  height: 8px;
-  opacity: 0;
-  stroke: rgba(0, 0, 0, 0.65);
-  fill: none;
-  stroke-width: 1.4px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.window-controls-macos:hover button svg,
-.window-controls-macos button:focus-visible svg {
-  opacity: 1;
+.titlebar-native-controls {
+  width: 66px;
+  flex: 0 0 66px;
+  pointer-events: none;
 }
 
 .window-controls-linux {

@@ -11,6 +11,10 @@ release entries are kept concise and link to the corresponding tag.
 - ChatGPT account discovery and Codex model catalog requests accept up to 4 MiB,
   so larger official model catalogs do not leave the pool without models.
   ([#86](https://github.com/F0RLE/zenith-relay/pull/86))
+- macOS uses system window buttons, including the native move and resize menu.
+  The logo and title stay on the right, while full-screen mode removes the
+  reserved space for the native buttons.
+  ([#85](https://github.com/F0RLE/zenith-relay/pull/85))
 
 <!-- relay-notes:en -->
 
