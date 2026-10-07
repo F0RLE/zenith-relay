@@ -149,6 +149,29 @@ async fn discovers_unique_account_slugs_with_codex_request_contract() {
 }
 
 #[tokio::test]
+async fn discovers_models_from_a_catalog_larger_than_512_kib() {
+    let (endpoint, server) = spawn(Router::new().route(
+        "/backend-api/codex/models",
+        get(|| async {
+            Json(json!({
+                "models": [{
+                    "slug": "gpt-5",
+                    "base_instructions": "x".repeat(600 * 1024)
+                }]
+            }))
+        }),
+    ))
+    .await;
+    let models = CodexModelsClient::with_endpoint(endpoint)
+        .unwrap()
+        .discover("synthetic-access", "synthetic-account", "1.0.0")
+        .await
+        .unwrap();
+    assert_eq!(models, vec!["gpt-5"]);
+    server.abort();
+}
+
+#[tokio::test]
 async fn malformed_oversized_and_http_errors_are_redacted() {
     for (handler, expected, retryable) in [
         (

@@ -17,7 +17,7 @@ pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/m
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_MODEL_SLUG_BYTES: usize = 256;
 const MAX_MODELS: usize = 4_096;
-const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_MODELS_RESPONSE_BYTES: usize = crate::transport::MAX_MODEL_CATALOG_BODY_BYTES;
 
 #[derive(Clone)]
 pub struct CodexModelsClient {
