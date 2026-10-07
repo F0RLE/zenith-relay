@@ -162,35 +162,41 @@ impl SourceProtocolConfig {
         base_url: &str,
         models: &[String],
         legacy_bindings: &[SourceProtocolBinding],
-        fallback: WireApi,
+        fallback_protocol: WireApi,
     ) -> Result<Vec<SourceProtocolBinding>> {
-        let mut capabilities = BTreeMap::<_, Vec<_>>::new();
+        let mut capabilities_by_model = BTreeMap::<_, Vec<_>>::new();
+        let mut unsupported_protocols = BTreeMap::<_, BTreeSet<_>>::new();
         for capability in self.effective_capabilities(base_url, models) {
             if capability.status.available() {
-                capabilities
+                capabilities_by_model
                     .entry(crate::model_id_key(&capability.model_id))
                     .or_default()
                     .push(capability);
+            } else if capability.status == CapabilityStatus::Unsupported {
+                unsupported_protocols
+                    .entry(crate::model_id_key(&capability.model_id))
+                    .or_default()
+                    .insert(capability.upstream_wire_api);
             }
         }
-        let endpoint_fallback = self
+        let configured_protocol = self
             .endpoint_hint
             .or_else(|| endpoint_url_protocol(base_url))
             .or_else(|| service_protocol(base_url));
-        let mut legacy_by_model = BTreeMap::<_, Vec<_>>::new();
+        let mut legacy_protocols_by_model = BTreeMap::<_, Vec<_>>::new();
         for binding in legacy_bindings {
-            let upstream = binding
+            let protocol = binding
                 .adapter
                 .upstream_protocol(binding.wire_api)
                 .wire_api();
             for model in &binding.model_ids {
-                legacy_by_model
+                legacy_protocols_by_model
                     .entry(crate::model_id_key(model))
                     .or_default()
-                    .push(upstream);
+                    .push(protocol);
             }
         }
-        let single_legacy = if legacy_bindings.len() == 1 {
+        let legacy_fallback_protocols = if legacy_bindings.len() == 1 {
             let binding = &legacy_bindings[0];
             vec![binding
                 .adapter
@@ -208,46 +214,32 @@ impl SourceProtocolConfig {
             }
             // Keep old physical endpoints as hints, without retaining their
             // client-protocol restrictions or requiring generation probes.
-            let legacy_upstreams = legacy_by_model
+            let legacy_protocols = legacy_protocols_by_model
                 .get(&key)
                 .map(Vec::as_slice)
-                .unwrap_or(&single_legacy);
-            let available = capabilities
+                .unwrap_or(&legacy_fallback_protocols);
+            let available_capabilities = capabilities_by_model
                 .get(&key)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            for client in WireApi::ALL {
-                // Resolve each client protocol independently. If the model
-                // accepts that protocol upstream, keep it native. Otherwise
-                // use the strongest available catalog evidence and bridge to
-                // it. If protocol evidence is absent, the configured source
-                // protocol is the fallback; catalog membership remains
-                // routable regardless of legacy diagnostic probes.
-                let upstream = available
-                    .iter()
-                    .find(|capability| capability.upstream_wire_api == client)
-                    .or_else(|| {
-                        available.iter().max_by_key(|capability| {
-                            (
-                                capability.status == CapabilityStatus::Confirmed,
-                                capability.checked_at_ms,
-                                std::cmp::Reverse(capability.upstream_wire_api),
-                            )
-                        })
-                    })
-                    .map(|capability| capability.upstream_wire_api)
-                    .unwrap_or_else(|| {
-                        endpoint_fallback.unwrap_or_else(|| {
-                            legacy_upstreams
-                                .iter()
-                                .find(|upstream| **upstream == client)
-                                .or_else(|| legacy_upstreams.first())
-                                .copied()
-                                .unwrap_or(fallback)
-                        })
-                    });
-                if let Some(adapter) = SourceAdapter::between(client, upstream) {
-                    let model_ids = routes.entry((client, adapter)).or_insert_with(Vec::new);
+            // Pick one physical upstream contract for the model before
+            // projecting any client-facing contract. A model must not reach
+            // Responses for one harness and Messages/Gemini for another just
+            // because the client wire API changed. The source profile or
+            // explicit endpoint hint wins when the catalog does not reject
+            // it; otherwise the strongest per-model route evidence wins.
+            let selected_protocol = select_upstream_protocol(
+                configured_protocol,
+                available_capabilities,
+                unsupported_protocols.get(&key),
+                legacy_protocols,
+                fallback_protocol,
+            );
+            for client_protocol in WireApi::ALL {
+                if let Some(adapter) = SourceAdapter::between(client_protocol, selected_protocol) {
+                    let model_ids = routes
+                        .entry((client_protocol, adapter))
+                        .or_insert_with(Vec::new);
                     model_ids.push(model.clone());
                 }
             }
@@ -267,6 +259,41 @@ impl SourceProtocolConfig {
             })
             .collect())
     }
+}
+
+fn select_upstream_protocol(
+    configured_protocol: Option<WireApi>,
+    available_capabilities: &[ModelEndpointCapability],
+    unsupported_protocols: Option<&BTreeSet<WireApi>>,
+    legacy_protocols: &[WireApi],
+    fallback_protocol: WireApi,
+) -> WireApi {
+    if let Some(protocol) = configured_protocol {
+        let is_unsupported =
+            unsupported_protocols.is_some_and(|protocols| protocols.contains(&protocol));
+        if !is_unsupported {
+            return protocol;
+        }
+    }
+    available_capabilities
+        .iter()
+        .max_by_key(|capability| {
+            (
+                capability.status == CapabilityStatus::Confirmed,
+                capability.checked_at_ms,
+                std::cmp::Reverse(capability.upstream_wire_api),
+            )
+        })
+        .map(|capability| capability.upstream_wire_api)
+        .or_else(|| {
+            legacy_protocols
+                .iter()
+                .find(|protocol| **protocol == fallback_protocol)
+                .or_else(|| legacy_protocols.first())
+                .copied()
+        })
+        .or(configured_protocol)
+        .unwrap_or(fallback_protocol)
 }
 
 /// Field view shared by stored source records.

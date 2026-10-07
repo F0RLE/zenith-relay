@@ -99,21 +99,13 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
     let client = runtime.request_client(&route.candidate_id);
-    let mut upstream_headers = if basis_points_route {
-        HeaderMap::new()
-    } else if adapter_request.requires_bridge_headers() {
-        match route.adapter.upstream_protocol(client_wire_api) {
-            crate::UpstreamProtocol::Messages => {
-                forwarded_bridge_messages_headers(forwarded_headers)
-            }
-            crate::UpstreamProtocol::GeminiGenerateContent => {
-                forwarded_bridge_gemini_headers(forwarded_headers)
-            }
-            _ => HeaderMap::new(),
-        }
-    } else {
-        forwarded_headers.clone()
-    };
+    let mut upstream_headers = upstream_headers_for_route(
+        account_route,
+        basis_points_route,
+        adapter_request.requires_bridge_headers(),
+        route.adapter.upstream_protocol(client_wire_api),
+        forwarded_headers,
+    );
     for (name, value) in &route.upstream_headers {
         upstream_headers.insert(name.clone(), value.clone());
     }
@@ -224,4 +216,144 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         response_headers,
         started,
     }))
+}
+
+/// Keep client identity at the local gateway boundary. Source credentials and
+/// protocol headers are added by the selected source route; Codex/OpenAI
+/// headers must not be copied to an unrelated Messages or Gemini provider.
+/// Account routes retain their existing forwarded-header behavior.
+fn upstream_headers_for_route(
+    is_account_route: bool,
+    is_basis_points_route: bool,
+    needs_bridge_headers: bool,
+    provider_protocol: crate::UpstreamProtocol,
+    client_headers: &HeaderMap,
+) -> HeaderMap {
+    if is_basis_points_route {
+        return HeaderMap::new();
+    }
+
+    if needs_bridge_headers {
+        // A translated request is already a complete upstream contract. Keep
+        // only metadata that belongs to that contract; never copy incoming
+        // credentials or OpenAI/Codex-only headers to another provider.
+        return match provider_protocol {
+            crate::UpstreamProtocol::Messages => forwarded_bridge_messages_headers(client_headers),
+            crate::UpstreamProtocol::GeminiGenerateContent => {
+                forwarded_bridge_gemini_headers(client_headers)
+            }
+            crate::UpstreamProtocol::Responses | crate::UpstreamProtocol::ChatCompletions => {
+                HeaderMap::new()
+            }
+        };
+    }
+
+    if is_account_route {
+        client_headers.clone()
+    } else {
+        // Native Messages callers may provide valid Anthropic beta/session
+        // metadata. Filter again at the source boundary so a future caller
+        // cannot accidentally pass Codex/OpenAI headers through this path.
+        // Other native source protocols do not need client identity headers
+        // to authenticate or dispatch.
+        match provider_protocol {
+            crate::UpstreamProtocol::Messages => forwarded_messages_headers(client_headers),
+            crate::UpstreamProtocol::Responses
+            | crate::UpstreamProtocol::ChatCompletions
+            | crate::UpstreamProtocol::GeminiGenerateContent => HeaderMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_headers_for_route;
+    use crate::UpstreamProtocol;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
+
+    fn codex_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("Codex Desktop/1.0"));
+        headers.insert(
+            "x-codex-session-id",
+            HeaderValue::from_static("codex-session"),
+        );
+        headers.insert(
+            CLAUDE_CODE_SESSION_HEADER,
+            HeaderValue::from_static("codex-session"),
+        );
+        headers.insert("openai-beta", HeaderValue::from_static("responses=v1"));
+        headers
+    }
+
+    #[test]
+    fn source_bridge_keeps_only_upstream_metadata() {
+        let messages = upstream_headers_for_route(
+            false,
+            false,
+            true,
+            UpstreamProtocol::Messages,
+            &codex_headers(),
+        );
+        assert_eq!(
+            messages.get(CLAUDE_CODE_SESSION_HEADER),
+            Some(&HeaderValue::from_static("codex-session"))
+        );
+        assert_eq!(
+            messages.get("user-agent"),
+            Some(&HeaderValue::from_static("Codex Desktop/1.0"))
+        );
+        assert!(!messages.contains_key("openai-beta"));
+        assert!(!messages.contains_key("x-codex-session-id"));
+
+        let gemini = upstream_headers_for_route(
+            false,
+            false,
+            true,
+            UpstreamProtocol::GeminiGenerateContent,
+            &codex_headers(),
+        );
+        assert_eq!(
+            gemini.get("user-agent"),
+            Some(&HeaderValue::from_static("Codex Desktop/1.0"))
+        );
+        assert!(!gemini.contains_key(CLAUDE_CODE_SESSION_HEADER));
+        assert!(!gemini.contains_key("openai-beta"));
+    }
+
+    #[test]
+    fn account_headers_keep_existing_bridge_policy() {
+        let forwarded = upstream_headers_for_route(
+            true,
+            false,
+            true,
+            UpstreamProtocol::Messages,
+            &codex_headers(),
+        );
+        assert_eq!(
+            forwarded.get(CLAUDE_CODE_SESSION_HEADER),
+            Some(&HeaderValue::from_static("codex-session"))
+        );
+        assert!(!forwarded.contains_key("openai-beta"));
+        assert!(!forwarded.contains_key("x-codex-session-id"));
+    }
+
+    #[test]
+    fn native_messages_source_keeps_filtered_messages_metadata() {
+        let forwarded = upstream_headers_for_route(
+            false,
+            false,
+            false,
+            UpstreamProtocol::Messages,
+            &codex_headers(),
+        );
+        assert_eq!(
+            forwarded.get(CLAUDE_CODE_SESSION_HEADER),
+            Some(&HeaderValue::from_static("codex-session"))
+        );
+        assert!(!forwarded.contains_key("openai-beta"));
+        assert!(!forwarded.contains_key("x-codex-session-id"));
+    }
 }

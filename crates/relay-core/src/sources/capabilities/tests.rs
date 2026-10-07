@@ -122,7 +122,7 @@ fn endpoint_metadata_and_gemini_methods_are_scoped_declarations() {
 }
 
 #[test]
-fn each_client_protocol_prefers_its_native_upstream() {
+fn one_model_uses_one_upstream_contract_across_clients() {
     let models = vec!["mixed".into()];
     let mut config = SourceProtocolConfig::default();
     config.merge_catalog(catalog_capabilities(
@@ -136,17 +136,55 @@ fn each_client_protocol_prefers_its_native_upstream() {
     let routes = config
         .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
         .unwrap();
-    let responses = routes
+    assert_eq!(routes.len(), WireApi::ALL.len());
+    let upstreams = routes
         .iter()
-        .find(|route| route.wire_api == WireApi::Responses)
-        .unwrap();
-    let messages = routes
-        .iter()
-        .find(|route| route.wire_api == WireApi::Messages)
-        .unwrap();
+        .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(upstreams, BTreeSet::from([WireApi::Responses]));
+    assert_eq!(
+        routes
+            .iter()
+            .find(|route| route.wire_api == WireApi::Responses)
+            .unwrap()
+            .adapter,
+        SourceAdapter::Native
+    );
+    assert_eq!(
+        routes
+            .iter()
+            .find(|route| route.wire_api == WireApi::Messages)
+            .unwrap()
+            .adapter,
+        SourceAdapter::MessagesToResponses
+    );
+}
 
-    assert_eq!(responses.adapter, SourceAdapter::Native);
-    assert_eq!(messages.adapter, SourceAdapter::Native);
+#[test]
+fn source_profile_selects_one_native_upstream_over_catalog_superset() {
+    let models = vec!["claude-test".into()];
+    let mut config = SourceProtocolConfig::automatic("https://api.anthropic.com/v1");
+    config.merge_catalog(catalog_capabilities(
+        &json!({"data":[{
+            "id":"claude-test",
+            "supported_endpoint_types":["responses", "messages"]
+        }]}),
+        42,
+    ));
+
+    let routes = config
+        .resolve(
+            "https://api.anthropic.com/v1",
+            &models,
+            &[],
+            WireApi::Responses,
+        )
+        .unwrap();
+    let upstreams = routes
+        .iter()
+        .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(upstreams, BTreeSet::from([WireApi::Messages]));
 }
 
 #[test]
@@ -334,4 +372,43 @@ fn known_responses_service_keeps_unprobed_catalog_models_routable() {
             WireApi::Responses
         );
     }
+}
+
+#[test]
+fn direct_anthropic_service_uses_messages_for_every_client_contract() {
+    let models = vec!["claude-sonnet-test".into()];
+    let config = SourceProtocolConfig::automatic("https://api.anthropic.com/v1");
+    let routes = config
+        .resolve(
+            "https://api.anthropic.com/v1",
+            &models,
+            &[],
+            WireApi::Responses,
+        )
+        .unwrap();
+
+    assert_eq!(routes.len(), WireApi::ALL.len());
+    assert!(routes.iter().all(|route| {
+        route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Messages
+    }));
+}
+
+#[test]
+fn direct_gemini_service_uses_generate_content_for_every_client_contract() {
+    let models = vec!["gemini-flash-test".into()];
+    let config =
+        SourceProtocolConfig::automatic("https://generativelanguage.googleapis.com/v1beta");
+    let routes = config
+        .resolve(
+            "https://generativelanguage.googleapis.com/v1beta",
+            &models,
+            &[],
+            WireApi::Responses,
+        )
+        .unwrap();
+
+    assert_eq!(routes.len(), WireApi::ALL.len());
+    assert!(routes.iter().all(|route| {
+        route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Gemini
+    }));
 }

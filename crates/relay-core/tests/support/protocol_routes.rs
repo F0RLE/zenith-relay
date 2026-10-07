@@ -445,7 +445,7 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
 }
 
 #[tokio::test]
-async fn legacy_protocol_bindings_do_not_filter_automatic_routes() {
+async fn automatic_routes_keep_one_upstream_contract_per_model() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let mut mixed = source(
         "mixed",
@@ -561,7 +561,7 @@ async fn legacy_protocol_bindings_do_not_filter_automatic_routes() {
         paths,
         [
             "/v1/responses",
-            "/v1/messages",
+            "/v1/responses",
             "/v1/messages",
             "/v1/responses"
         ]
@@ -580,10 +580,17 @@ async fn legacy_protocol_bindings_do_not_filter_automatic_routes() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.wire_api == WireApi::Messages)
+            .filter(|event| {
+                event.wire_api == WireApi::Messages
+                    && event.candidate_id.as_deref() == Some("mixed::messages_to_responses")
+            })
             .count(),
-        3
+        2
     );
+    assert!(events.iter().any(|event| {
+        event.wire_api == WireApi::Messages
+            && event.candidate_id.as_deref() == Some("mixed::messages")
+    }));
 }
 
 #[tokio::test]
