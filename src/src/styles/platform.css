@@ -156,8 +156,8 @@ button {
 }
 
 .titlebar-macos .titlebar-drag {
-  justify-content: flex-start;
-  padding-left: 12px;
+  justify-content: flex-end;
+  padding-right: 14px;
 }
 
 .titlebar-macos.titlebar-fullscreen .titlebar-native-controls {

@@ -11,11 +11,13 @@ test("macOS leaves space for system buttons without drawing duplicates", async (
     await page.setViewportSize({ width, height: 900 });
     const logo = titlebar.locator(".titlebar-logo");
     const normal = await logo.boundingBox();
-    expect(normal!.x).toBeGreaterThan(66);
+    const frame = await titlebar.boundingBox();
+    expect(frame).not.toBeNull();
+    expect(normal!.x).toBeGreaterThan(frame!.x + frame!.width / 2);
     await emitTauriEvent(page, "tauri://resize", { width, height: 900, fullscreen: true });
     await expect(titlebar).toHaveClass(/titlebar-fullscreen/);
     await expect(titlebar.locator(".titlebar-native-controls")).toBeHidden();
-    expect((await logo.boundingBox())!.x).toBeLessThan(30);
+    expect((await logo.boundingBox())!.x).toBeGreaterThan(frame!.x + frame!.width / 2);
     await emitTauriEvent(page, "tauri://resize", { width, height: 900, fullscreen: false });
     await expect(titlebar).not.toHaveClass(/titlebar-fullscreen/);
     expect((await logo.boundingBox())!.x).toBeCloseTo(normal!.x, 1);
