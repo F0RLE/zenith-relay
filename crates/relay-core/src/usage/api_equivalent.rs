@@ -307,7 +307,7 @@ impl ApiEquivalentUsage {
     /// Historical rollups never stored output or total sample counts, so they
     /// leave that flag false and keep those summed values.
     pub fn from_observed_sums(sums: ObservedUsageSums) -> Self {
-        let measured = |samples: u64, tokens: Option<u64>| {
+        let measured_tokens = |samples: u64, tokens: Option<u64>| {
             if sums.gate_measured_buckets {
                 (samples > 0).then_some(tokens).flatten()
             } else {
@@ -315,18 +315,19 @@ impl ApiEquivalentUsage {
             }
         };
         let cache_writes = sums.cache_write_samples > 0;
-        let write = |tokens: Option<u64>| cache_writes.then(|| tokens.unwrap_or_default());
+        let cache_write_tokens =
+            |tokens: Option<u64>| cache_writes.then(|| tokens.unwrap_or_default());
         Self {
-            input_tokens: measured(sums.input_samples, sums.input_tokens),
+            input_tokens: measured_tokens(sums.input_samples, sums.input_tokens),
             cached_input_tokens: (sums.input_samples > 0
                 && sums.cached_samples == sums.input_samples)
                 .then_some(sums.cached_input_tokens)
                 .flatten(),
-            cache_write_5m_tokens: write(sums.cache_write_5m_tokens),
-            cache_write_1h_tokens: write(sums.cache_write_1h_tokens),
-            unknown_cache_write_tokens: write(sums.unknown_cache_write_tokens),
-            output_tokens: measured(sums.output_samples, sums.output_tokens),
-            total_tokens: measured(sums.total_samples, sums.total_tokens),
+            cache_write_5m_tokens: cache_write_tokens(sums.cache_write_5m_tokens),
+            cache_write_1h_tokens: cache_write_tokens(sums.cache_write_1h_tokens),
+            unknown_cache_write_tokens: cache_write_tokens(sums.unknown_cache_write_tokens),
+            output_tokens: measured_tokens(sums.output_samples, sums.output_tokens),
+            total_tokens: measured_tokens(sums.total_samples, sums.total_tokens),
             price_class: UsagePriceClass::Standard,
             context_band: UsageContextBand::Base,
         }

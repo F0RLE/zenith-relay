@@ -91,15 +91,15 @@ pub(super) fn bind_encrypted_context_repair_owner(
         return;
     }
     let repair_response_id = format!("relay-repair:{request_id}");
-    if let Some(key) = runtime.bind_volatile_response_affinity(
+    if let Some(repair_affinity_key) = runtime.bind_volatile_response_affinity(
         Some(&repair_response_id),
         candidate_id,
         request_id,
         now_ms(),
     ) {
-        *response_affinity_key = Some(key.clone());
+        *response_affinity_key = Some(repair_affinity_key.clone());
         *requires_affinity_owner = true;
-        repairs.encrypted_context_repair_key = Some(key);
+        repairs.encrypted_context_repair_key = Some(repair_affinity_key);
     }
 }
 
@@ -111,14 +111,14 @@ pub(super) fn release_encrypted_context_repair_owner(
     requires_affinity_owner: &mut bool,
     runtime: &GatewayRuntime,
 ) {
-    let Some(key) = repairs.encrypted_context_repair_key.take() else {
+    let Some(repair_affinity_key) = repairs.encrypted_context_repair_key.take() else {
         return;
     };
-    if response_affinity_key.as_deref() == Some(key.as_str()) {
+    if response_affinity_key.as_deref() == Some(repair_affinity_key.as_str()) {
         *response_affinity_key = None;
         *requires_affinity_owner = false;
     }
-    runtime.invalidate_response_affinity(Some(&key));
+    runtime.invalidate_response_affinity(Some(&repair_affinity_key));
 }
 
 /// Remove the temporary binding from the next attempt's request state while
@@ -158,12 +158,12 @@ pub(super) fn mark_model_switch_reset(
 /// and candidate retry remain with the caller.
 fn reset_opaque_continuation(
     attempted: &mut bool,
-    eligible: bool,
+    reset_allowed: bool,
     drop_previous: impl FnOnce() -> bool,
     response_affinity_key: &mut Option<String>,
     requires_affinity_owner: &mut bool,
 ) -> bool {
-    if *attempted || !eligible || !drop_previous() {
+    if *attempted || !reset_allowed || !drop_previous() {
         return false;
     }
     mark_model_switch_reset(attempted, response_affinity_key, requires_affinity_owner);

@@ -121,23 +121,24 @@ pub(super) fn prepare_request_attempt(input: RequestPrepareInput<'_>) -> Request
     if let Some(step) = normalize_prepared_responses_lite(request, route_responses_lite.is_some()) {
         return step;
     }
-    let previous = match load_prepared_continuation(runtime, &route, &key.id, request) {
-        Ok(previous) => previous,
+    let previous_continuation = match load_prepared_continuation(runtime, &route, &key.id, request)
+    {
+        Ok(previous_continuation) => previous_continuation,
         Err(response) => return RequestPrepare::Respond(response),
     };
     let client_stream = stream;
-    let compaction = match prepare_attempt_compaction(
+    let compaction_plan = match prepare_attempt_compaction(
         client_wire_api,
         route.adapter.is_passthrough(),
         request,
         last_adapter_error,
     ) {
-        Ok(compaction) => compaction,
+        Ok(compaction_plan) => compaction_plan,
         Err(step) => return step,
     };
-    let summarize = compaction.summarize();
-    let stream = if summarize { false } else { stream };
-    if summarize && client_stream {
+    let should_summarize = compaction_plan.summarize();
+    let upstream_stream = if should_summarize { false } else { stream };
+    if should_summarize && client_stream {
         if let Some(resolved) = runtime.executor_route(
             &route.candidate_id,
             resolved_model,
@@ -152,11 +153,11 @@ pub(super) fn prepare_request_attempt(input: RequestPrepareInput<'_>) -> Request
     let mut adapter_request = match translate_prepared_request(
         &route,
         client_wire_api,
-        &compaction,
+        &compaction_plan,
         request,
         &source_model,
-        stream,
-        previous,
+        upstream_stream,
+        previous_continuation,
         request_id,
         last_adapter_error,
     ) {
@@ -201,8 +202,8 @@ pub(super) fn prepare_request_attempt(input: RequestPrepareInput<'_>) -> Request
         basis_points_route,
         route_responses_lite,
         client_stream,
-        stream,
-        summarize,
+        stream: upstream_stream,
+        summarize: should_summarize,
         adapter_request,
         basis_points_request,
         reasoning_effort,

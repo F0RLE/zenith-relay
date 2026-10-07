@@ -54,7 +54,7 @@ export function UsagePage() {
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState(false);
-  const [selected, setSelected] = useState<UsageRow | null>(null);
+  const [selectedRequest, setSelectedRequest] = useState<UsageRow | null>(null);
   const [summaryMetrics, setSummaryMetrics] = useState(loadUsageSummaryMetrics);
   const [summarySettingsOpen, setSummarySettingsOpen] = useState(false);
   const appliedUsageRevision = useRef(usageRevision);
@@ -100,22 +100,22 @@ export function UsagePage() {
       setUsageLoading(false);
       return;
     }
-    let active = true;
+    let isActive = true;
     const usageChanged = appliedUsageRevision.current !== usageRevision;
     appliedUsageRevision.current = usageRevision;
     setUsageLoading(true);
     setUsageError(false);
-    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    load(usageQuery, { force: usageChanged })
-      .catch(() => active && setUsageError(true))
-      .finally(() => active && setUsageLoading(false));
-    return () => { active = false; };
+    const loadUsage = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+    loadUsage(usageQuery, { force: usageChanged })
+      .catch(() => isActive && setUsageError(true))
+      .finally(() => isActive && setUsageLoading(false));
+    return () => { isActive = false; };
   }, [mode, runtimeReady, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
 
   useEffect(() => {
     setPage(1);
-    setSelected(null);
+    setSelectedRequest(null);
     setSelectedAccountId("");
   }, [mode]);
 
@@ -142,11 +142,11 @@ export function UsagePage() {
     });
   }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   useEffect(() => {
-    if (!selected) return;
-    const current = rows.find((row) => row.id === selected.id)
-      ?? (selected.requestId ? rows.find((row) => row.requestId === selected.requestId) : undefined);
-    if (current !== selected) setSelected(current ?? null);
-  }, [rows, selected]);
+    if (!selectedRequest) return;
+    const currentRow = rows.find((row) => row.id === selectedRequest.id)
+      ?? (selectedRequest.requestId ? rows.find((row) => row.requestId === selectedRequest.requestId) : undefined);
+    if (currentRow !== selectedRequest) setSelectedRequest(currentRow ?? null);
+  }, [rows, selectedRequest]);
   const cutoff = useMemo(() => range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000, [range]);
   const filtered = useMemo(() => {
     if (mode !== "zenith") return rows;
@@ -177,8 +177,8 @@ export function UsagePage() {
   }, [summaryMetrics]);
   const timeFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
   const formatTime = useCallback((value: string) => timeFormatter.format(new Date(value)), [timeFormatter]);
-  const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
-  const changePage = (next: number) => { setPage(next); setSelected(null); };
+  const resetPage = (work: () => void) => { work(); setPage(1); setSelectedRequest(null); };
+  const changePage = (nextPage: number) => { setPage(nextPage); setSelectedRequest(null); };
   const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({
     time: row.time,
     success: row.success,
@@ -213,8 +213,8 @@ export function UsagePage() {
     setUsageLoading(true);
     setUsageError(false);
     try {
-      const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-      await load(usageQuery, { force: true });
+      const loadUsage = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+      await loadUsage(usageQuery, { force: true });
     } catch {
       setUsageError(true);
     } finally {
@@ -253,7 +253,7 @@ export function UsagePage() {
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
-    setPage(1); setSelected(null);
+    setPage(1); setSelectedRequest(null);
   };
 
   if (mode === "remote" && !remoteUsageSupported) {
@@ -265,7 +265,7 @@ export function UsagePage() {
       title={t("nav.usage")}
       navigation={<Tabs
         value={view}
-        onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }}
+        onChange={(id) => { setView(id as View); setPage(1); setSelectedRequest(null); }}
         label={t("usage.views")}
         items={[
           { id: "requests", label: t("usage.requests") },
@@ -347,11 +347,11 @@ export function UsagePage() {
       setRequestQuery={(value) => resetPage(() => setRequestQuery(value))}
       clearFilters={clearFilters}
       formatTime={formatTime}
-      onSelect={setSelected}
+      onSelect={setSelectedRequest}
     /> : null}
     {view === "models" ? <AggregateView rows={filtered} {...(modelGroups ? { groups: modelGroups } : {})} field="model" empty={t("usage.empty")} /> : null}
     {view === "connections" ? <AggregateView rows={filtered} {...(poolMemberGroups ? { groups: poolMemberGroups } : {})} field="connection" empty={t("usage.empty")} /> : null}
-    {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelected} /> : null}
+    {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelectedRequest} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? (
       <UsagePagination
@@ -362,7 +362,7 @@ export function UsagePage() {
         onPageChange={changePage}
       />
     ) : null}
-    {selected ? <RequestDetails row={selected} local={mode === "local"} onClose={() => setSelected(null)} /> : null}
+    {selectedRequest ? <RequestDetails row={selectedRequest} local={mode === "local"} onClose={() => setSelectedRequest(null)} /> : null}
     {summarySettingsOpen ? (
       <UsageSummarySettings
         metrics={summaryMetrics}

@@ -14,7 +14,7 @@ pub(super) fn parse_entry(
         .get("litellm_provider")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|provider_name| !provider_name.is_empty())
         .map(str::to_ascii_lowercase);
     let token = parse_token_price(object)?;
     let image = parse_image_price(object)?;
@@ -134,12 +134,12 @@ fn optional_token(
     object: &serde_json::Map<String, Value>,
     key: &str,
 ) -> Result<Option<u64>, PricingError> {
-    let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+    let Some(raw_price) = object.get(key).filter(|value| !value.is_null()) else {
         return Ok(None);
     };
-    let value = usd_per_token_to_micro_usd_per_million(value)?;
-    (value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-        .then_some(Some(value))
+    let micro_usd_per_million = usd_per_token_to_micro_usd_per_million(raw_price)?;
+    (micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+        .then_some(Some(micro_usd_per_million))
         .ok_or(PricingError::Overflow)
 }
 
@@ -147,19 +147,19 @@ fn optional_request(
     object: &serde_json::Map<String, Value>,
     key: &str,
 ) -> Result<Option<u64>, PricingError> {
-    let Some(value) = object.get(key).filter(|value| !value.is_null()) else {
+    let Some(raw_price) = object.get(key).filter(|value| !value.is_null()) else {
         return Ok(None);
     };
-    let value = usd_per_request_to_micro_usd(value)?;
-    (value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-        .then_some(Some(value))
+    let micro_usd_per_request = usd_per_request_to_micro_usd(raw_price)?;
+    (micro_usd_per_request <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+        .then_some(Some(micro_usd_per_request))
         .ok_or(PricingError::Overflow)
 }
 
 fn optional_micro_request(
     object: &serde_json::Map<String, Value>,
 ) -> Result<Option<u64>, PricingError> {
-    let value = [
+    let raw_request_price = [
         "input_cost_per_request",
         "output_cost_per_request",
         "cost_per_request",
@@ -167,12 +167,12 @@ fn optional_micro_request(
     ]
     .iter()
     .find_map(|key| object.get(*key));
-    let Some(value) = value.filter(|value| !value.is_null()) else {
+    let Some(raw_request_price) = raw_request_price.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
-    let value = usd_per_request_to_micro_usd(value)?;
-    (value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-        .then_some(Some(value))
+    let micro_usd_per_request = usd_per_request_to_micro_usd(raw_request_price)?;
+    (micro_usd_per_request <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+        .then_some(Some(micro_usd_per_request))
         .ok_or(PricingError::Overflow)
 }
 

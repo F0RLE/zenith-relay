@@ -110,104 +110,112 @@ pub(crate) fn api_error_with_parameter(
     response
 }
 
-pub(crate) fn prefix_error_value(value: &mut Value, origin: ErrorOrigin) -> bool {
-    let message = if value
+pub(crate) fn prefix_error_value(error_payload: &mut Value, origin: ErrorOrigin) -> bool {
+    let message_field = if error_payload
         .pointer("/response/error/message")
         .and_then(Value::as_str)
         .is_some()
     {
-        value.pointer_mut("/response/error/message")
-    } else if value
+        error_payload.pointer_mut("/response/error/message")
+    } else if error_payload
         .pointer("/error/message")
         .and_then(Value::as_str)
         .is_some()
     {
-        value.pointer_mut("/error/message")
-    } else if value
+        error_payload.pointer_mut("/error/message")
+    } else if error_payload
         .pointer("/error/errors/0/message")
         .and_then(Value::as_str)
         .is_some()
     {
-        value.pointer_mut("/error/errors/0/message")
-    } else if value
+        error_payload.pointer_mut("/error/errors/0/message")
+    } else if error_payload
         .pointer("/errors/0/message")
         .and_then(Value::as_str)
         .is_some()
     {
-        value.pointer_mut("/errors/0/message")
-    } else if value.get("message").and_then(Value::as_str).is_some() {
-        value.get_mut("message")
-    } else if value.get("detail").and_then(Value::as_str).is_some() {
-        value.get_mut("detail")
-    } else if value
+        error_payload.pointer_mut("/errors/0/message")
+    } else if error_payload
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        error_payload.get_mut("message")
+    } else if error_payload
+        .get("detail")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        error_payload.get_mut("detail")
+    } else if error_payload
         .get("error_description")
         .and_then(Value::as_str)
         .is_some()
     {
-        value.get_mut("error_description")
-    } else if value
+        error_payload.get_mut("error_description")
+    } else if error_payload
         .pointer("/response/error")
         .and_then(Value::as_str)
         .is_some()
     {
-        value.pointer_mut("/response/error")
-    } else if value
+        error_payload.pointer_mut("/response/error")
+    } else if error_payload
         .get("error")
         .and_then(Value::as_str)
         .is_some_and(|error| !looks_like_error_code(error))
     {
-        value.get_mut("error")
+        error_payload.get_mut("error")
     } else {
         None
     };
-    if let Some(message) = message {
-        let Some(text) = message.as_str() else {
+    if let Some(message_value) = message_field {
+        let Some(original_message) = message_value.as_str() else {
             return false;
         };
-        let prefixed = origin.prefix_message(text);
-        if prefixed == text {
+        let prefixed_message = origin.prefix_message(original_message);
+        if prefixed_message == original_message {
             return false;
         }
-        *message = Value::String(prefixed);
+        *message_value = Value::String(prefixed_message);
         return true;
     }
     false
 }
 
-fn looks_like_error_code(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty()
-        && value
+fn looks_like_error_code(candidate_code: &str) -> bool {
+    let trimmed_code = candidate_code.trim();
+    !trimmed_code.is_empty()
+        && trimmed_code
             .chars()
             .any(|character| matches!(character, '_' | '-'))
-        && value
+        && trimmed_code
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
-pub(crate) fn prefix_error_body(body: &[u8], origin: ErrorOrigin) -> Vec<u8> {
-    if body.is_empty() {
+pub(crate) fn prefix_error_body(response_body: &[u8], origin: ErrorOrigin) -> Vec<u8> {
+    if response_body.is_empty() {
         return Vec::new();
     }
-    if let Ok(mut value) = serde_json::from_slice::<Value>(body) {
-        if let Some(message) = value.as_str() {
-            let prefixed = origin.prefix_message(message);
-            if let Ok(body) = serde_json::to_vec(&prefixed) {
-                return body;
+    if let Ok(mut error_payload) = serde_json::from_slice::<Value>(response_body) {
+        if let Some(message) = error_payload.as_str() {
+            let prefixed_message = origin.prefix_message(message);
+            if let Ok(serialized_body) = serde_json::to_vec(&prefixed_message) {
+                return serialized_body;
             }
         }
-        if prefix_error_value(&mut value, origin) {
-            if let Ok(body) = serde_json::to_vec(&value) {
-                return body;
+        if prefix_error_value(&mut error_payload, origin) {
+            if let Ok(serialized_body) = serde_json::to_vec(&error_payload) {
+                return serialized_body;
             }
         }
-        return body.to_vec();
+        return response_body.to_vec();
     }
 
-    let Ok(message) = std::str::from_utf8(body) else {
-        return body.to_vec();
+    let Ok(body_text) = std::str::from_utf8(response_body) else {
+        return response_body.to_vec();
     };
-    origin.prefix_message(message).into_bytes()
+    origin.prefix_message(body_text).into_bytes()
 }
 
 pub(crate) fn api_error_type(status: StatusCode, code: &str) -> &'static str {

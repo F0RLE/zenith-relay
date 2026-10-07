@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 const IDENTITY_PRIORITY: &str = "_relay_identity_priority";
 
-pub(super) fn identity_priority(value: &Value) -> u64 {
-    value
+pub(super) fn identity_priority(record: &Value) -> u64 {
+    record
         .get(IDENTITY_PRIORITY)
         .and_then(Value::as_u64)
         .unwrap_or(0)
@@ -20,101 +20,108 @@ pub(super) fn merge_reference_records(
     openrouter: Option<&Value>,
     litellm: Option<&Value>,
 ) -> BTreeMap<String, Value> {
-    let mut records = BTreeMap::new();
-    for (id, value) in validate_payload(primary).unwrap_or_default() {
-        insert(&mut records, &id, value.clone(), 0);
+    let mut merged_records = BTreeMap::new();
+    for (source_id, source_record) in validate_payload(primary).unwrap_or_default() {
+        insert(&mut merged_records, &source_id, source_record.clone(), 0);
     }
-    for (provider, data) in details.and_then(Value::as_object).into_iter().flatten() {
-        for (id, record) in data
+    for (provider_name, provider_record) in details.and_then(Value::as_object).into_iter().flatten()
+    {
+        for (source_id, model_record) in provider_record
             .get("models")
             .and_then(Value::as_object)
             .into_iter()
             .flatten()
         {
-            let id = record
+            let model_id = model_record
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.trim().is_empty())
-                .unwrap_or(id);
-            let qualified = if id.contains('/') {
-                id.to_owned()
+                .unwrap_or(source_id);
+            let qualified_id = if model_id.contains('/') {
+                model_id.to_owned()
             } else {
-                format!("{provider}/{id}")
+                format!("{provider_name}/{model_id}")
             };
-            insert(&mut records, &qualified, record.clone(), 3);
+            insert(&mut merged_records, &qualified_id, model_record.clone(), 3);
         }
     }
-    for record in openrouter
+    for route_record in openrouter
         .and_then(|v| v.get("data"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
     {
-        if let Some(id) = record.get("id").and_then(Value::as_str) {
-            let mut record = record.clone();
+        if let Some(route_model_id) = route_record.get("id").and_then(Value::as_str) {
+            let mut projected_record = route_record.clone();
             // Normalize the reference's field names before supplementing a
             // primary row. Otherwise an empty modalities/limit field could
             // shadow the useful fallback under architecture/context_length.
-            let mut limits = Map::new();
-            if let Some(context) = record
+            let mut route_limits = Map::new();
+            if let Some(context) = projected_record
                 .get("context_length")
                 .and_then(Value::as_u64)
                 .filter(|v| *v > 0)
             {
-                limits.insert("context".into(), json!(context));
+                route_limits.insert("context".into(), json!(context));
             }
-            if let Some(output) = record
+            if let Some(output) = projected_record
                 .pointer("/top_provider/max_completion_tokens")
                 .and_then(Value::as_u64)
                 .filter(|v| *v > 0)
             {
-                limits.insert("output".into(), json!(output));
+                route_limits.insert("output".into(), json!(output));
             }
-            if !limits.is_empty() {
-                record["limit"] = Value::Object(limits);
+            if !route_limits.is_empty() {
+                projected_record["limit"] = Value::Object(route_limits);
             }
             for (from, to) in [
                 ("input_modalities", "input"),
                 ("output_modalities", "output"),
             ] {
-                if let Some(modalities) = record
+                if let Some(modalities) = projected_record
                     .get("architecture")
                     .and_then(|a| a.get(from))
                     .cloned()
                 {
-                    if !record.get("modalities").is_some_and(Value::is_object) {
-                        record["modalities"] = json!({});
+                    if !projected_record
+                        .get("modalities")
+                        .is_some_and(Value::is_object)
+                    {
+                        projected_record["modalities"] = json!({});
                     }
-                    record["modalities"][to] = modalities;
+                    projected_record["modalities"][to] = modalities;
                 }
             }
-            insert(&mut records, id, record, 1);
+            insert(&mut merged_records, route_model_id, projected_record, 1);
         }
     }
-    for (id, record) in litellm.and_then(Value::as_object).into_iter().flatten() {
-        if id == "sample_spec" {
+    for (model_id, pricing_record) in litellm.and_then(Value::as_object).into_iter().flatten() {
+        if model_id == "sample_spec" {
             continue;
         }
-        let Some(provider) = record.get("litellm_provider").and_then(Value::as_str) else {
+        let Some(integration_provider) = pricing_record
+            .get("litellm_provider")
+            .and_then(Value::as_str)
+        else {
             continue;
         };
-        let id = if id.contains('/') {
-            id.clone()
+        let qualified_id = if model_id.contains('/') {
+            model_id.clone()
         } else {
-            format!("{provider}/{id}")
+            format!("{integration_provider}/{model_id}")
         };
-        let mut projected = Map::new();
+        let mut projected_record = Map::new();
         for (from, to) in [
             ("supports_function_calling", "tool_call"),
             ("supports_response_schema", "structured_output"),
             ("supports_vision", "attachment"),
             ("supports_reasoning", "reasoning"),
         ] {
-            if let Some(value) = record.get(from).and_then(Value::as_bool) {
-                projected.insert(to.into(), json!(value));
+            if let Some(flag) = pricing_record.get(from).and_then(Value::as_bool) {
+                projected_record.insert(to.into(), json!(flag));
             }
         }
-        let mut limits = Map::new();
+        let mut token_limits = Map::new();
         // LiteLLM's `max_tokens` is a legacy provider parameter. Its sample
         // specification uses it as an output fallback, so it cannot establish
         // a context window. Only the explicit input/output fields have stable
@@ -123,36 +130,53 @@ pub(super) fn merge_reference_records(
             ("max_input_tokens", "input"),
             ("max_output_tokens", "output"),
         ] {
-            if let Some(value) = record.get(from).and_then(Value::as_u64).filter(|v| *v > 0) {
-                limits.insert(to.into(), json!(value));
+            if let Some(limit) = pricing_record
+                .get(from)
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+            {
+                token_limits.insert(to.into(), json!(limit));
             }
         }
-        if !limits.is_empty() {
-            projected.insert("limit".into(), Value::Object(limits));
+        if !token_limits.is_empty() {
+            projected_record.insert("limit".into(), Value::Object(token_limits));
         }
-        insert(&mut records, &id, Value::Object(projected), 2);
+        insert(
+            &mut merged_records,
+            &qualified_id,
+            Value::Object(projected_record),
+            2,
+        );
     }
-    records
+    merged_records
 }
 
-fn insert(records: &mut BTreeMap<String, Value>, id: &str, mut value: Value, priority: u64) {
-    if !crate::is_valid_model_token(id) || !value.is_object() {
+fn insert(
+    merged_records: &mut BTreeMap<String, Value>,
+    model_id: &str,
+    mut metadata_record: Value,
+    priority: u64,
+) {
+    if !crate::is_valid_model_token(model_id) || !metadata_record.is_object() {
         return;
     }
-    let id = normalize(id);
-    value[IDENTITY_PRIORITY] = json!(priority);
-    if value.get("reasoning").is_some() && value.get("reasoning_source").is_none() {
-        value["reasoning_source"] = json!(match priority {
+    let normalized_model_id = normalize(model_id);
+    metadata_record[IDENTITY_PRIORITY] = json!(priority);
+    if metadata_record.get("reasoning").is_some()
+        && metadata_record.get("reasoning_source").is_none()
+    {
+        metadata_record["reasoning_source"] = json!(match priority {
             1 => "openrouter",
             2 => "litellm",
             _ => "models_dev",
         });
     }
-    if let Some(record) = records.get_mut(&id) {
-        record[IDENTITY_PRIORITY] = json!(identity_priority(record).min(priority));
-        fill_missing(record, value);
-    } else if records.len() < MAX_RECORDS {
-        records.insert(id, value);
+    if let Some(existing_record) = merged_records.get_mut(&normalized_model_id) {
+        existing_record[IDENTITY_PRIORITY] =
+            json!(identity_priority(existing_record).min(priority));
+        fill_missing(existing_record, metadata_record);
+    } else if merged_records.len() < MAX_RECORDS {
+        merged_records.insert(normalized_model_id, metadata_record);
     }
 }
 

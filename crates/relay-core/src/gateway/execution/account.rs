@@ -191,7 +191,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         let retry_until_available = runtime.route_recovery_enabled();
         let wait_for_candidate_availability =
             wait_for_candidate_availability && retry_until_available;
-        let Some((selected, lease)) = runtime
+        let Some((selected_candidate, lease)) = runtime
             .select_and_reserve_operation_with_budget(
                 &key,
                 &resolved_model,
@@ -246,9 +246,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             &mut response_affinity_key,
             &mut requires_affinity_owner,
         );
-        tried.insert(selected.candidate_id.clone());
-        let response_affinity_hit = selected.response_affinity_hit;
-        let prepared = match prepare_account_attempt(AccountPrepareInput {
+        tried.insert(selected_candidate.candidate_id.clone());
+        let response_affinity_hit = selected_candidate.response_affinity_hit;
+        let prepared_attempt = match prepare_account_attempt(AccountPrepareInput {
             runtime: &runtime,
             key: &key,
             request: &mut request,
@@ -259,9 +259,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             automatic_responses_lite,
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
-            candidate_id: &selected.candidate_id,
-            half_open_probe: selected.half_open_probe,
-            diagnostics: selected.diagnostics,
+            candidate_id: &selected_candidate.candidate_id,
+            half_open_probe: selected_candidate.half_open_probe,
+            diagnostics: selected_candidate.diagnostics,
             client_context_id: &client_context_id,
             basis_points_relay_retry_parameter,
             last_failure: &mut last_failure,
@@ -297,9 +297,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             request_body,
             reasoning_effort,
             tool_use,
-        } = prepared;
+        } = prepared_attempt;
 
-        let dispatched = match dispatch_account_attempt(AccountDispatchInput {
+        let dispatched_attempt = match dispatch_account_attempt(AccountDispatchInput {
             runtime: &runtime,
             key: &key,
             lease: &lease,
@@ -357,7 +357,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             tool_use,
             selected_error_origin,
             basis_points_route,
-        } = dispatched;
+        } = dispatched_attempt;
         if !status.is_success() {
             match handle_account_status_failure(AccountStatusFailureInput {
                 status,

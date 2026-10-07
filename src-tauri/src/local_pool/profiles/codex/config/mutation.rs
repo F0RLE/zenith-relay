@@ -36,13 +36,13 @@ pub(in crate::local_pool::profiles::codex) fn attach_config(
         document["model_providers"] = Item::Table(Table::new());
     }
     document["model_providers"][PROVIDER_ID] = Item::Table(Table::new());
-    let provider = &mut document["model_providers"][PROVIDER_ID];
-    provider["name"] = value("Zenith Relay Local");
-    provider["base_url"] = value(base_url);
-    provider["wire_api"] = value("responses");
-    provider["requires_openai_auth"] = value(true);
-    provider["experimental_bearer_token"] = value(local_key);
-    provider["supports_websockets"] = value(supports_websockets);
+    let relay_provider = &mut document["model_providers"][PROVIDER_ID];
+    relay_provider["name"] = value("Zenith Relay Local");
+    relay_provider["base_url"] = value(base_url);
+    relay_provider["wire_api"] = value("responses");
+    relay_provider["requires_openai_auth"] = value(true);
+    relay_provider["experimental_bearer_token"] = value(local_key);
+    relay_provider["supports_websockets"] = value(supports_websockets);
     // Ultra is an orchestration mode. Codex hides it in the model slider
     // until this desktop switch is on; an absent key means off.
     enable_show_ultra_picker(document);
@@ -275,17 +275,17 @@ pub(in crate::local_pool::profiles::codex) fn reasoning_effort_for_attach(
     document: &DocumentMut,
     catalog_json: Option<&str>,
 ) -> Option<String> {
-    let current = root_model_reasoning_effort(document);
+    let current_effort = root_model_reasoning_effort(document);
     let Some(selected_model) = document.get("model").and_then(Item::as_str) else {
-        return current;
+        return current_effort;
     };
     let Some(catalog_json) = catalog_json else {
-        return current;
+        return current_effort;
     };
     let Ok(catalog) = serde_json::from_str::<Value>(catalog_json) else {
-        return current;
+        return current_effort;
     };
-    let model = catalog
+    let model_entry = catalog
         .get("models")
         .and_then(Value::as_array)
         .and_then(|models| {
@@ -296,13 +296,13 @@ pub(in crate::local_pool::profiles::codex) fn reasoning_effort_for_attach(
                     .is_some_and(|slug| slug.eq_ignore_ascii_case(selected_model))
             })
         });
-    let Some(model) = model else {
-        return current;
+    let Some(model_entry) = model_entry else {
+        return current_effort;
     };
-    let supported_levels = model
+    let supported_levels = model_entry
         .get("supported_reasoning_levels")
         .and_then(Value::as_array)?;
-    let supports = |effort: &str| {
+    let supports_effort = |effort: &str| {
         supported_levels.iter().any(|level| {
             level
                 .get("effort")
@@ -310,13 +310,13 @@ pub(in crate::local_pool::profiles::codex) fn reasoning_effort_for_attach(
                 .is_some_and(|candidate| candidate.eq_ignore_ascii_case(effort))
         })
     };
-    if let Some(current) = current.filter(|effort| supports(effort)) {
-        return Some(current);
+    if let Some(current_effort) = current_effort.filter(|effort| supports_effort(effort)) {
+        return Some(current_effort);
     }
-    model
+    model_entry
         .get("default_reasoning_level")
         .and_then(Value::as_str)
-        .filter(|effort| supports(effort))
+        .filter(|effort| supports_effort(effort))
         .map(ToOwned::to_owned)
 }
 
@@ -337,7 +337,7 @@ pub(in crate::local_pool::profiles::codex) fn remove_managed_provider(
     document: &mut DocumentMut,
     provider_id: &str,
 ) {
-    let empty = {
+    let providers_empty = {
         let Some(model_providers) = document
             .get_mut("model_providers")
             .and_then(Item::as_table_like_mut)
@@ -347,7 +347,7 @@ pub(in crate::local_pool::profiles::codex) fn remove_managed_provider(
         model_providers.remove(provider_id);
         model_providers.is_empty()
     };
-    if empty {
+    if providers_empty {
         document.remove("model_providers");
     }
 }

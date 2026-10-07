@@ -33,37 +33,38 @@ impl PoolScheduler {
         &self,
         candidate: &RuntimeCandidate,
     ) -> Option<RotationCandidate> {
-        let first_model = candidate.models.iter().next()?.clone();
-        let first_key = Self::rotation_route_key(&first_model, RotationOperation::Text);
-        let mut result = RotationCandidate::new(&candidate.id, first_key, first_model);
-        result.capacity_key = members::member_key(candidate);
-        result.priority = self
+        let primary_model = candidate.models.iter().next()?.clone();
+        let primary_route_key = Self::rotation_route_key(&primary_model, RotationOperation::Text);
+        let mut rotation_candidate =
+            RotationCandidate::new(&candidate.id, primary_route_key, primary_model);
+        rotation_candidate.capacity_key = members::member_key(candidate);
+        rotation_candidate.priority = self
             .member_policy(candidate)
             .map_or(candidate.priority, |(rank, _)| {
                 -i32::try_from(rank).unwrap_or(i32::MAX)
             });
-        result.weight = self.member_weight(candidate).clamp(1, 100);
-        result.capacity_limit = self
+        rotation_candidate.weight = self.member_weight(candidate).clamp(1, 100);
+        rotation_candidate.capacity_limit = self
             .member_policy(candidate)
             .and_then(|(_, member)| (member.max_concurrency > 0).then_some(member.max_concurrency))
             .unwrap_or_default();
-        result.provider_credits_micro_units = candidate.provider_credits_micro_units;
-        result.provider_credits_unlimited = candidate.provider_credits_unlimited;
-        result.provider_credits_observed_at_ms = candidate.quota_updated_at_ms;
-        result.enabled = candidate.enabled;
-        result.draining = candidate.draining;
-        result.routes.clear();
-        result.route_rates.clear();
+        rotation_candidate.provider_credits_micro_units = candidate.provider_credits_micro_units;
+        rotation_candidate.provider_credits_unlimited = candidate.provider_credits_unlimited;
+        rotation_candidate.provider_credits_observed_at_ms = candidate.quota_updated_at_ms;
+        rotation_candidate.enabled = candidate.enabled;
+        rotation_candidate.draining = candidate.draining;
+        rotation_candidate.routes.clear();
+        rotation_candidate.route_rates.clear();
         for model in &candidate.models {
             if crate::runtime::is_image_model_id(model) {
-                result.add_route(
+                rotation_candidate.add_route(
                     Self::rotation_route_key(model, RotationOperation::Image),
                     model,
                     RotationOperation::Image,
                 );
                 continue;
             }
-            result.add_route(
+            rotation_candidate.add_route(
                 Self::rotation_route_key(model, RotationOperation::Text),
                 model,
                 RotationOperation::Text,
@@ -71,14 +72,14 @@ impl PoolScheduler {
             if candidate.kind == CandidateKind::OAuthAccount
                 && candidate.protocol == WireApi::Responses
             {
-                result.add_route(
+                rotation_candidate.add_route(
                     Self::rotation_route_key(model, RotationOperation::Compaction),
                     model,
                     RotationOperation::Compaction,
                 );
             }
         }
-        Some(result)
+        Some(rotation_candidate)
     }
 
     pub(super) fn sync_all_rotation_candidates(&mut self) {
@@ -97,9 +98,9 @@ impl PoolScheduler {
             let Some(rotation_candidate) = self.rotation_candidate(candidate) else {
                 continue;
             };
-            let id = rotation_candidate.id.clone();
+            let candidate_id = rotation_candidate.id.clone();
             let _ = self.rotation.upsert(rotation_candidate);
-            let auth = if candidate.health.is_eligible() {
+            let auth_state = if candidate.health.is_eligible() {
                 RotationAuthState::Ready
             } else {
                 RotationAuthState::Blocked
@@ -126,25 +127,29 @@ impl PoolScheduler {
                 ),
             };
             let global_not_before_ms = candidate.cooldowns.get("*").copied().filter(|_| {
-                self.cooldown_reasons.get(&(id.clone(), "*".into()))
+                self.cooldown_reasons
+                    .get(&(candidate_id.clone(), "*".into()))
                     != Some(&CooldownReason::Transient)
             });
-            let rate = global_not_before_ms.map_or(RotationRateState::Ready, |not_before_ms| {
-                RotationRateState::Limited { not_before_ms }
-            });
+            let global_rate = global_not_before_ms
+                .map_or(RotationRateState::Ready, |not_before_ms| {
+                    RotationRateState::Limited { not_before_ms }
+                });
             let _ = self.rotation.sync_candidate_state(
-                &id,
+                &candidate_id,
                 candidate.enabled,
                 candidate.draining,
-                auth,
+                auth_state,
                 quota,
-                rate,
+                global_rate,
             );
-            let _ =
-                self.rotation
-                    .set_quota_remaining(&id, remaining, candidate.quota_updated_at_ms);
+            let _ = self.rotation.set_quota_remaining(
+                &candidate_id,
+                remaining,
+                candidate.quota_updated_at_ms,
+            );
             let _ = self.rotation.set_provider_credits(
-                &id,
+                &candidate_id,
                 candidate.provider_credits_micro_units,
                 candidate.provider_credits_unlimited,
                 candidate.quota_updated_at_ms,
@@ -155,12 +160,13 @@ impl PoolScheduler {
                     .iter()
                     .filter(|(scope, _)| scope.as_str() == "*" || scope.eq_ignore_ascii_case(model))
                     .filter(|(scope, _)| {
-                        self.cooldown_reasons.get(&(id.clone(), (*scope).clone()))
+                        self.cooldown_reasons
+                            .get(&(candidate_id.clone(), (*scope).clone()))
                             != Some(&CooldownReason::Transient)
                     })
                     .map(|(_, not_before_ms)| *not_before_ms)
                     .max();
-                let rate = not_before_ms.map_or(RotationRateState::Ready, |not_before_ms| {
+                let route_rate = not_before_ms.map_or(RotationRateState::Ready, |not_before_ms| {
                     RotationRateState::Limited { not_before_ms }
                 });
                 for operation in [
@@ -169,9 +175,11 @@ impl PoolScheduler {
                     RotationOperation::Image,
                 ] {
                     let route_key = Self::rotation_route_key(model, operation);
-                    let _ = self
-                        .rotation
-                        .sync_candidate_route_rate(&id, &route_key, rate);
+                    let _ = self.rotation.sync_candidate_route_rate(
+                        &candidate_id,
+                        &route_key,
+                        route_rate,
+                    );
                 }
             }
         }

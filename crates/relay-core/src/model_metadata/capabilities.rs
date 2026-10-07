@@ -63,7 +63,7 @@ impl ModelCapabilities {
         &self,
     ) -> std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus> {
         use crate::{CapabilityStatus, ProtocolFeature};
-        let status = |value| match value {
+        let capability_status = |value| match value {
             Some(true) => CapabilityStatus::Declared,
             Some(false) => CapabilityStatus::Unsupported,
             None => CapabilityStatus::Unknown,
@@ -71,14 +71,23 @@ impl ModelCapabilities {
         std::collections::BTreeMap::from([
             (ProtocolFeature::Text, CapabilityStatus::Declared),
             (ProtocolFeature::Streaming, CapabilityStatus::Declared),
-            (ProtocolFeature::Images, status(self.attachment)),
-            (ProtocolFeature::FunctionTools, status(self.tool_call)),
-            (ProtocolFeature::ToolChoice, status(self.tool_call)),
+            (ProtocolFeature::Images, capability_status(self.attachment)),
+            (
+                ProtocolFeature::FunctionTools,
+                capability_status(self.tool_call),
+            ),
+            (
+                ProtocolFeature::ToolChoice,
+                capability_status(self.tool_call),
+            ),
             (
                 ProtocolFeature::StructuredOutput,
-                status(self.structured_output),
+                capability_status(self.structured_output),
             ),
-            (ProtocolFeature::Reasoning, status(self.reasoning)),
+            (
+                ProtocolFeature::Reasoning,
+                capability_status(self.reasoning),
+            ),
         ])
     }
 
@@ -95,9 +104,9 @@ impl ModelCapabilities {
     ) -> std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus> {
         use crate::{CapabilityStatus, ProtocolFeature};
 
-        let reference = self.clone().with_defaults().protocol_features();
+        let reference_features = self.clone().with_defaults().protocol_features();
         let Some(route) = route else {
-            return reference;
+            return reference_features;
         };
         if route.status == CapabilityStatus::Unsupported {
             return ProtocolFeature::ALL
@@ -109,18 +118,18 @@ impl ModelCapabilities {
         ProtocolFeature::ALL
             .into_iter()
             .map(|feature| {
-                let reference_status = reference
+                let reference_feature_status = reference_features
                     .get(&feature)
                     .copied()
                     .unwrap_or(CapabilityStatus::Unknown);
-                let route_status = route
+                let route_feature_status = route
                     .features
                     .get(&feature)
                     .copied()
                     .unwrap_or(CapabilityStatus::Unknown);
                 (
                     feature,
-                    merge_route_capability_status(reference_status, route_status),
+                    merge_route_capability_status(reference_feature_status, route_feature_status),
                 )
             })
             .collect()
@@ -135,16 +144,16 @@ impl ModelCapabilities {
     ) -> Vec<String> {
         use crate::{CapabilityStatus, ProtocolFeature};
 
-        let reference = self.clone().with_defaults();
+        let reference_capabilities = self.clone().with_defaults();
         let Some(route) = route else {
-            return reference.reasoning_effort_levels;
+            return reference_capabilities.reasoning_effort_levels;
         };
         // A route catalog can describe the protocol it exposes, but it cannot
         // revive reasoning that the trusted model reference explicitly marks
         // as unsupported. Keep this invariant in the level projection too;
         // callers such as management snapshots do not always inspect the
         // feature map first.
-        if reference.reasoning == Some(false) {
+        if reference_capabilities.reasoning == Some(false) {
             return Vec::new();
         }
         if route.status == CapabilityStatus::Unsupported
@@ -156,15 +165,15 @@ impl ModelCapabilities {
 
         let route_levels = crate::canonicalize_reasoning_levels(&route.reasoning_efforts);
         if route_levels.is_empty() {
-            return reference.reasoning_effort_levels;
+            return reference_capabilities.reasoning_effort_levels;
         }
-        if reference.reasoning_effort_levels.is_empty() {
+        if reference_capabilities.reasoning_effort_levels.is_empty() {
             return route_levels;
         }
         route_levels
             .into_iter()
             .filter(|level| {
-                reference
+                reference_capabilities
                     .reasoning_effort_levels
                     .iter()
                     .any(|reference_level| reference_level.eq_ignore_ascii_case(level))

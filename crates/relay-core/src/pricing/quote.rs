@@ -230,18 +230,18 @@ impl PricingSourceSummary {
     where
         I: IntoIterator<Item = PriceSource>,
     {
-        let mut result = None;
+        let mut resolved_source = None;
         for source in sources {
             if source == PriceSource::Unpriced {
                 continue;
             }
-            result = Some(match result {
+            resolved_source = Some(match resolved_source {
                 None => source,
-                Some(previous) if previous == source => previous,
+                Some(previous_source) if previous_source == source => previous_source,
                 Some(_) => return Self::Mixed,
             });
         }
-        match result {
+        match resolved_source {
             Some(PriceSource::Provider) => Self::Provider,
             Some(PriceSource::LiteLlmExact) => Self::LiteLlmExact,
             Some(PriceSource::LiteLlmCanonical) => Self::LiteLlmCanonical,
@@ -278,14 +278,14 @@ impl PricingMetadata {
         source: PricingSourceSummary,
         unpriced_tokens: u64,
     ) -> Self {
-        let status = if catalog.stale {
+        let catalog_status = if catalog.stale {
             CatalogStatus::Stale
         } else if catalog.revision.is_some() {
             CatalogStatus::Current
         } else {
             CatalogStatus::Unloaded
         };
-        Self::for_catalog_with_status(catalog, status, source, unpriced_tokens)
+        Self::for_catalog_with_status(catalog, catalog_status, source, unpriced_tokens)
     }
 
     pub fn for_catalog_with_status(

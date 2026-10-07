@@ -56,8 +56,9 @@ impl ModelMetadataCatalog {
     }
 
     pub fn from_models_dev_json(raw: &str) -> Result<Self, ModelMetadataError> {
-        let payload = serde_json::from_str(raw).map_err(|_| ModelMetadataError::InvalidCatalog)?;
-        Self::from_payload(&payload, None, None, false)
+        let catalog_payload =
+            serde_json::from_str(raw).map_err(|_| ModelMetadataError::InvalidCatalog)?;
+        Self::from_payload(&catalog_payload, None, None, false)
     }
 
     pub(super) fn from_payload(
@@ -67,53 +68,61 @@ impl ModelMetadataCatalog {
         stale: bool,
     ) -> Result<Self, ModelMetadataError> {
         let records = parsing::validate_payload(payload)?;
-        let mut entries = BTreeMap::new();
+        let mut metadata_entries = BTreeMap::new();
         let mut leaf_matches = BTreeMap::new();
         let mut ambiguous_leaves = BTreeSet::new();
         let mut leaf_priorities = BTreeMap::new();
 
-        for (source_id, value) in records {
-            let provider = source_id
+        for (source_id, metadata_record) in records {
+            let provider_namespace = source_id
                 .split_once('/')
                 .map_or("", |(provider, _)| provider);
-            let Some(metadata) = parsing::parse_metadata(&source_id, provider, value) else {
+            let Some(metadata) =
+                parsing::parse_metadata(&source_id, provider_namespace, metadata_record)
+            else {
                 continue;
             };
-            let key = order::normalize(&source_id);
-            let leaf = order::model_leaf(&key).to_string();
-            entries.insert(key.clone(), metadata);
+            let normalized_model_id = order::normalize(&source_id);
+            let leaf = order::model_leaf(&normalized_model_id).to_string();
+            metadata_entries.insert(normalized_model_id.clone(), metadata);
 
             // Supplemental hosting catalogs must not make a canonical model
             // lose its unqualified identity. Equal-priority conflicts remain
             // ambiguous unless their semantic metadata is equivalent; exact
             // qualified IDs always resolve independently.
-            let priority = reference::identity_priority(value);
+            let priority = reference::identity_priority(metadata_record);
             match leaf_priorities.get(&leaf) {
                 Some(previous) if *previous < priority => continue,
                 Some(previous) if *previous == priority => {}
                 _ => {
                     leaf_priorities.insert(leaf.clone(), priority);
                     ambiguous_leaves.remove(&leaf);
-                    leaf_matches.insert(leaf, key);
+                    leaf_matches.insert(leaf, normalized_model_id);
                     continue;
                 }
             }
             if ambiguous_leaves.contains(&leaf) {
                 continue;
             }
-            if let Some(previous) = leaf_matches.insert(leaf.clone(), key.clone()) {
-                if previous != key {
+            if let Some(previous_model_id) =
+                leaf_matches.insert(leaf.clone(), normalized_model_id.clone())
+            {
+                if previous_model_id != normalized_model_id {
                     // Share metadata only when descriptive identity and every
                     // semantic field agree. The reference source ID is kept
                     // for identity/provenance, but is not a semantic
                     // capability field. Exact provider IDs remain separate;
                     // this never merges routes or participant inventories.
-                    let current = &entries[&key];
-                    if current.name.is_some()
-                        && (current.family.is_some() || current.release_date.is_some())
-                        && equivalent_reference_metadata(&entries[&previous], current)
+                    let current_metadata = &metadata_entries[&normalized_model_id];
+                    if current_metadata.name.is_some()
+                        && (current_metadata.family.is_some()
+                            || current_metadata.release_date.is_some())
+                        && equivalent_reference_metadata(
+                            &metadata_entries[&previous_model_id],
+                            current_metadata,
+                        )
                     {
-                        leaf_matches.insert(leaf, previous);
+                        leaf_matches.insert(leaf, previous_model_id);
                     } else {
                         leaf_matches.remove(&leaf);
                         ambiguous_leaves.insert(leaf);
@@ -122,7 +131,7 @@ impl ModelMetadataCatalog {
             }
         }
 
-        if entries.is_empty() {
+        if metadata_entries.is_empty() {
             return Err(ModelMetadataError::InvalidCatalog);
         }
 
@@ -131,7 +140,7 @@ impl ModelMetadataCatalog {
             fetched_at_ms,
             stale,
             sources: BTreeMap::new(),
-            entries,
+            entries: metadata_entries,
             leaf_matches,
             ambiguous_leaves,
         })
@@ -140,11 +149,11 @@ impl ModelMetadataCatalog {
     /// Resolve exact catalog IDs first. An unqualified or Relay-qualified ID
     /// may use its leaf only when that leaf identifies one catalog record.
     pub fn resolve(&self, model: &str) -> Option<&ModelMetadata> {
-        let key = order::normalize(model);
-        if let Some(metadata) = self.entries.get(&key) {
+        let normalized_model_id = order::normalize(model);
+        if let Some(metadata) = self.entries.get(&normalized_model_id) {
             return Some(metadata);
         }
-        let leaf = order::model_leaf(&key);
+        let leaf = order::model_leaf(&normalized_model_id);
         if self.ambiguous_leaves.contains(leaf) {
             return None;
         }
@@ -167,8 +176,8 @@ impl ModelMetadataCatalog {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let source = crate::normalize_model_ids(models);
-        let mut indexed = source.into_iter().enumerate().collect::<Vec<_>>();
+        let source_model_ids = crate::normalize_model_ids(models);
+        let mut indexed = source_model_ids.into_iter().enumerate().collect::<Vec<_>>();
         indexed.sort_by(|(left_position, left_id), (right_position, right_id)| {
             order::compare_metadata(
                 left_id,
@@ -189,48 +198,48 @@ impl ModelMetadataCatalog {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let source = crate::normalize_model_ids(models);
-        let available = source
+        let source_model_ids = crate::normalize_model_ids(models);
+        let available_model_ids = source_model_ids
             .iter()
             .map(|id| order::normalize(id))
             .collect::<BTreeSet<_>>();
-        let catalog_order = self.order_model_ids(source);
+        let catalog_order = self.order_model_ids(source_model_ids);
         if !saved_order
             .iter()
-            .any(|id| available.contains(&order::normalize(id)))
+            .any(|id| available_model_ids.contains(&order::normalize(id)))
         {
             return catalog_order;
         }
 
-        let positions = catalog_order
+        let catalog_positions = catalog_order
             .iter()
             .enumerate()
             .map(|(position, id)| (order::normalize(id), position))
             .collect::<BTreeMap<_, _>>();
-        let mut saved = BTreeSet::new();
-        let mut ordered = Vec::with_capacity(catalog_order.len());
+        let mut saved_model_ids = BTreeSet::new();
+        let mut ordered_model_ids = Vec::with_capacity(catalog_order.len());
 
         for id in saved_order {
-            let key = order::normalize(id);
-            if saved.insert(key.clone()) {
-                if let Some(position) = positions.get(&key) {
-                    ordered.push(catalog_order[*position].clone());
+            let normalized_id = order::normalize(id);
+            if saved_model_ids.insert(normalized_id.clone()) {
+                if let Some(position) = catalog_positions.get(&normalized_id) {
+                    ordered_model_ids.push(catalog_order[*position].clone());
                 }
             }
         }
         for id in catalog_order {
-            let key = order::normalize(&id);
-            if saved.contains(&key) {
+            let normalized_id = order::normalize(&id);
+            if saved_model_ids.contains(&normalized_id) {
                 continue;
             }
-            let position = positions[&key];
-            let insertion = ordered
+            let position = catalog_positions[&normalized_id];
+            let insertion_index = ordered_model_ids
                 .iter()
-                .position(|existing| positions[&order::normalize(existing)] > position)
-                .unwrap_or(ordered.len());
-            ordered.insert(insertion, id);
+                .position(|existing| catalog_positions[&order::normalize(existing)] > position)
+                .unwrap_or(ordered_model_ids.len());
+            ordered_model_ids.insert(insertion_index, id);
         }
-        ordered
+        ordered_model_ids
     }
 }
 
