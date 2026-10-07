@@ -6,6 +6,11 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+### Changed
+
+- ChatGPT account discovery and Codex model catalog requests accept up to 4 MiB,
+  so larger official model catalogs do not leave the pool without models.
+
 <!-- relay-notes:en -->
 
 - Account import recognizes Cockpit Tools JSON, and account export can create Cockpit Tools files with safe account metadata.

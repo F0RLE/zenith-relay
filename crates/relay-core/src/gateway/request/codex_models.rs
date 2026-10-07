@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
+const MAX_CODEX_MODELS_BODY_BYTES: usize = crate::transport::MAX_MODEL_CATALOG_BODY_BYTES;
 const CODEX_MODELS_FETCH_CONCURRENCY: usize = 4;
 const CODEX_MODELS_FETCH_BUDGET: Duration = Duration::from_secs(12);
 
