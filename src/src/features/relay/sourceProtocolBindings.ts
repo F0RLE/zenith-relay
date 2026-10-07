@@ -15,13 +15,13 @@ export const sourceWireApis = [
   "gemini",
 ] as const satisfies readonly SourceWireApi[];
 
-function isSourceWireApi(value: string): value is SourceWireApi {
-  return sourceWireApis.includes(value as SourceWireApi);
+function isSourceWireApi(wireApiValue: string): wireApiValue is SourceWireApi {
+  return sourceWireApis.includes(wireApiValue as SourceWireApi);
 }
 
-function normalizedCacheWriteTtl(value: SourceProtocolBinding): CacheWriteTtl {
-  return value.cacheWriteTtl === "5m" || value.cacheWriteTtl === "1h"
-    ? value.cacheWriteTtl
+function normalizedCacheWriteTtl(binding: SourceProtocolBinding): CacheWriteTtl {
+  return binding.cacheWriteTtl === "5m" || binding.cacheWriteTtl === "1h"
+    ? binding.cacheWriteTtl
     : "provider";
 }
 
@@ -40,8 +40,8 @@ export function upstreamWireApi(binding: SourceProtocolBinding): SourceWireApi {
 }
 
 export function normalizedReasoningMode(
-  _binding: SourceProtocolBinding,
-  adapter = normalizedAdapter(_binding),
+  binding: SourceProtocolBinding,
+  adapter = normalizedAdapter(binding),
 ): MessagesReasoningMode {
   // Reasoning is selected by the client and constrained in Pool -> Model
   // Rules. Keep accepting the legacy field on read; Relay derives the adapter
@@ -50,16 +50,16 @@ export function normalizedReasoningMode(
 }
 
 export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
-  const knownModels = new Map(
+  const availableModelsById = new Map(
     availableModels.map((model) => [modelIdKey(model), model] as const),
   );
-  const seen = new Set<string>();
-  return modelIds.flatMap((model) => {
-    const normalized = modelIdKey(model);
-    const known = knownModels.get(normalized);
-    if (!known || seen.has(normalized)) return [];
-    seen.add(normalized);
-    return [known];
+  const seenModelIds = new Set<string>();
+  return modelIds.flatMap((modelId) => {
+    const normalizedModelId = modelIdKey(modelId);
+    const availableModelId = availableModelsById.get(normalizedModelId);
+    if (!availableModelId || seenModelIds.has(normalizedModelId)) return [];
+    seenModelIds.add(normalizedModelId);
+    return [availableModelId];
   });
 }
 
@@ -67,12 +67,12 @@ export function normalizedBindings(
   bindings: readonly SourceProtocolBinding[],
   availableModels: readonly string[],
 ): SourceProtocolBinding[] {
-  const seen = new Set<string>();
+  const seenRouteKeys = new Set<string>();
   return bindings.flatMap((binding) => {
     const adapter = normalizedAdapter(binding);
     const routeKey = `${binding.wireApi}:${adapter}`;
-    if (!isSourceWireApi(binding.wireApi) || seen.has(routeKey)) return [];
-    seen.add(routeKey);
+    if (!isSourceWireApi(binding.wireApi) || seenRouteKeys.has(routeKey)) return [];
+    seenRouteKeys.add(routeKey);
     const modelIds = binding.modelIds.length
       ? normalizedModelIds(binding.modelIds, availableModels)
       : [];
@@ -128,13 +128,13 @@ export function sourceModelsForWireApi(
   wireApi: SourceWireApi,
 ) {
   const bindings = runtimeSourceProtocolBindings(source);
-  const seen = new Set<string>();
+  const seenModelIds = new Set<string>();
   return bindings.flatMap((binding) => {
     if (binding.wireApi !== wireApi) return [];
     return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = modelIdKey(model);
-      if (seen.has(normalized)) return false;
-      seen.add(normalized);
+      const normalizedModelId = modelIdKey(model);
+      if (seenModelIds.has(normalizedModelId)) return false;
+      seenModelIds.add(normalizedModelId);
       return true;
     });
   });
@@ -146,14 +146,14 @@ export function sourceModelsForWireApi(
  */
 export function sourceModelsWithCacheWritePricing(source: ProtocolBindingSource) {
   const bindings = runtimeSourceProtocolBindings(source);
-  const seen = new Set<string>();
+  const seenModelIds = new Set<string>();
   return bindings.flatMap((binding) => {
     const messagesUpstream = upstreamWireApi(binding) === "messages";
     if (!messagesUpstream) return [];
     return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = modelIdKey(model);
-      if (seen.has(normalized)) return false;
-      seen.add(normalized);
+      const normalizedModelId = modelIdKey(model);
+      if (seenModelIds.has(normalizedModelId)) return false;
+      seenModelIds.add(normalizedModelId);
       return true;
     });
   });

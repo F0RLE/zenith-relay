@@ -101,17 +101,17 @@ export function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {
 
 export function lineSegments(values: Array<number | null>, max: number) {
   const segments: string[] = [];
-  let current = "";
-  values.forEach((value, index) => {
-    if (value == null) {
-      if (current) segments.push(current);
-      current = "";
+  let pathSegment = "";
+  values.forEach((pointValue, index) => {
+    if (pointValue == null) {
+      if (pathSegment) segments.push(pathSegment);
+      pathSegment = "";
       return;
     }
     const x = (index + 0.5) / values.length * 100;
-    const y = (1 - value / max) * 100;
-    current += `${current ? " L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`;
+    const y = (1 - pointValue / max) * 100;
+    pathSegment += `${pathSegment ? " L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`;
   });
-  if (current) segments.push(current);
+  if (pathSegment) segments.push(pathSegment);
   return segments;
 }

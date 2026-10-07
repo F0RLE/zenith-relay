@@ -37,12 +37,12 @@ export function HelpContents({ documentRef, language }: {
       const offset = firstHeading ? Number.parseFloat(getComputedStyle(firstHeading).scrollMarginTop) || 0 : 0;
       const readingTop = scroller.getBoundingClientRect().top + offset + 8;
       const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 2;
-      let current = nextSections[0];
+      let activeSection = nextSections[0];
       for (const section of nextSections) {
         if (!atEnd && section.target.getBoundingClientRect().top > readingTop) break;
-        current = section;
+        activeSection = section;
       }
-      setActiveId(current?.id ?? "");
+      setActiveId(activeSection?.id ?? "");
     };
     const scheduleUpdate = () => {
       if (!frame) frame = requestAnimationFrame(update);

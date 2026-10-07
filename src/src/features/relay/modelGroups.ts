@@ -20,8 +20,8 @@ type GroupModelsOptions<T> = {
 const OTHER_PROVIDER = "other";
 
 /** Model ids compare trimmed and case-insensitively. Callers keep the original spelling. */
-export function modelIdKey(value: string) {
-  return value.trim().toLowerCase();
+export function modelIdKey(modelId: string) {
+  return modelId.trim().toLowerCase();
 }
 
 /** Older servers expose metadata only on operational model rows. */
@@ -65,10 +65,10 @@ export function groupModels<T>(
 
 /** Deduplicate model IDs without applying a second presentation order. */
 export function uniqueModelIds(models: readonly string[]) {
-  const seen = new Set<string>();
+  const seenModelIds = new Set<string>();
   return models.filter((model) => {
     const key = modelIdKey(model);
-    return Boolean(key) && !seen.has(key) && seen.add(key);
+    return Boolean(key) && !seenModelIds.has(key) && seenModelIds.add(key);
   });
 }
 
@@ -85,20 +85,20 @@ export function orderModelIdsBySnapshot(
   const ordered = summaries
     .map((model) => byId.get(modelIdKey(model.id)))
     .filter((model): model is string => Boolean(model));
-  const known = new Set(ordered.map((model) => modelIdKey(model)));
-  const unknown = unique.filter((model) => !known.has(modelIdKey(model)));
-  return [...ordered, ...unknown];
+  const knownModelIds = new Set(ordered.map((model) => modelIdKey(model)));
+  const unknownModels = unique.filter((model) => !knownModelIds.has(modelIdKey(model)));
+  return [...ordered, ...unknownModels];
 }
 
-function normalizeCatalogValue(value: string | null | undefined) {
-  const normalized = value?.trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === "x-ai" || normalized === "x_ai") return "xai";
-  return normalized;
+function normalizeCatalogValue(catalogValue: string | null | undefined) {
+  const normalizedProvider = catalogValue?.trim().toLowerCase();
+  if (!normalizedProvider) return null;
+  if (normalizedProvider === "x-ai" || normalizedProvider === "x_ai") return "xai";
+  return normalizedProvider;
 }
 
-function displayCatalogValue(value: string) {
-  return value
+function displayCatalogValue(providerId: string) {
+  return providerId
     .split(/[-_]+/)
     .filter(Boolean)
     .map(displayCatalogPart)
