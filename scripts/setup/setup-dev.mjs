@@ -65,6 +65,10 @@ const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
 try {
   run("check Bun", bun, ["--version"], root, env);
   run("check Rust", cargo, ["--version"], root, env);
+  if (process.platform === "win32") {
+    run("check MSVC", "cl.exe", [], root, env);
+    run("check CMake", "cmake.exe", ["--version"], root, env);
+  }
   run("install frontend dependencies", bun, ["install", "--frozen-lockfile"], frontendRoot, env);
 
   for (const manifest of [
@@ -79,7 +83,7 @@ try {
     run("install Playwright Chromium", bun, ["x", "playwright", "install", "chromium"], frontendRoot, env);
   }
 
-  console.log("[setup] ready — run `bun run app:dev` to start Relay.");
+  console.log("[setup] ready — run `bun scripts/setup/start-dev.mjs` to start Relay.");
 } catch (error) {
   console.error(`[setup] ${error instanceof Error ? error.message : String(error)}`);
   if (error instanceof Error && error.message.includes("Rust")) {

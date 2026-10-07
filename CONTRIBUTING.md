@@ -95,14 +95,15 @@ Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
 ## Development setup
 
 Clone this repository. The commands below are the same on Windows, macOS, and
-Linux. Install the system tools first; `bun run setup` does not install them:
+Linux. Install the host tools first; `bun run setup` does not install them:
 
 - [Bun](https://bun.sh) 1.4.2 or newer.
 - [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
   Rust version.
 - Native libraries for the desktop shell:
-  - Windows: Microsoft C++ build tools with the MSVC toolchain, and the
-    WebView2 runtime.
+  - Windows: the portable MSVC/Windows SDK bundle described below, and the
+    WebView2 runtime. A regular MSVC installation is supported when no
+    portable bundle is present.
   - macOS: Xcode Command Line Tools.
   - Linux: GTK 3, WebKitGTK 4.1, librsvg, and a secret service such as
     gnome-keyring. The Build workflow lists the packages CI installs.
@@ -110,9 +111,23 @@ Linux. Install the system tools first; `bun run setup` does not install them:
 Then install the locked frontend packages and fetch the Rust crates:
 
 ~~~sh
-cd src
-bun run setup
-bun run app:dev
+bun scripts/setup/start-dev.mjs
+~~~
+
+`bun run start` installs the locked frontend and Rust dependencies, then starts
+the desktop app. The same command from `src` is `bun run start`. Use
+`bun run setup` when you only want to prepare the checkout.
+On Windows, Relay's scripts prefer the portable toolchain in
+`%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
+the Windows SDK, CMake, and MSBuild together. Keep the SDK in
+`%USERPROFILE%\Development\windows-sdk` or set `ZENITH_WINDOWS_SDK_ROOT` to
+its portable location. When portable MSVC is present, the scripts do not fall
+back to a system Windows SDK. Set `ZENITH_MSVC_ROOT` when the portable MSVC
+bundle is stored elsewhere. Rust checks should use the repository wrapper so
+the same environment is applied:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
 ~~~
 
 Playwright browsers are optional and kept out of the default setup:
@@ -250,19 +265,19 @@ bun run app:build
 ### Shared runtime
 
 ~~~powershell
-cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
-cargo check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
-cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
-cargo test --manifest-path crates/relay-core/Cargo.toml --locked
+bun scripts/build/cargo.mjs fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
+bun scripts/build/cargo.mjs check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
+bun scripts/build/cargo.mjs clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
 ~~~
 
 ### User-managed server
 
 ~~~powershell
-cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
-cargo check --manifest-path relay-server/Cargo.toml --all-targets --locked
-cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
-cargo test --manifest-path relay-server/Cargo.toml --locked
+bun scripts/build/cargo.mjs fmt --manifest-path relay-server/Cargo.toml --all -- --check
+bun scripts/build/cargo.mjs check --manifest-path relay-server/Cargo.toml --all-targets --locked
+bun scripts/build/cargo.mjs clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
+bun scripts/build/cargo.mjs test --manifest-path relay-server/Cargo.toml --locked
 ~~~
 
 Use the real server acceptance gate in

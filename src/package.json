@@ -10,6 +10,8 @@
   "scripts": {
     "setup": "bun ../scripts/setup/setup-dev.mjs",
     "setup:browsers": "bun ../scripts/setup/setup-dev.mjs --with-browsers",
+    "start": "bun ../scripts/setup/start-dev.mjs",
+    "start:browsers": "bun ../scripts/setup/start-dev.mjs --with-browsers",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
@@ -21,7 +23,7 @@
     "screenshots": "playwright test --config playwright.docs.config.ts",
     "clean": "bun ../scripts/maintenance/clean.mjs",
     "clean:all": "bun ../scripts/maintenance/clean.mjs --all",
-    "verify": "bun run test:unit && bun run build && bun run check:bundle-size && cargo test --manifest-path ../src-tauri/Cargo.toml --locked -- --test-threads=1",
+    "verify": "bun run test:unit && bun run build && bun run check:bundle-size && bun ../scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "app:dev": "bun ../scripts/build/tauri-dev.mjs",
     "app:build": "bun ../scripts/build/tauri-build.mjs"

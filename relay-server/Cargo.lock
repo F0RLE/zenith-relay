@@ -2997,7 +2997,6 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chacha20poly1305",
- "chrono",
  "fs2",
  "futures-util",
  "hex",

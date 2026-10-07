@@ -121,15 +121,14 @@ original contributions are assigned to the project owner, with a license back
 to their authors. Existing AGPL grants and third-party rights remain unchanged.
 
 ```sh
-cd src
-bun run setup
-bun run app:dev
+bun scripts/setup/start-dev.mjs
 ```
 
-`bun run setup` installs the locked frontend and Rust dependencies on Windows,
-macOS, and Linux. Install Bun 1.4.2 or newer, rustup, and the native desktop
-libraries first; the setup command does not install those system tools. Add
-`bun run setup:browsers` when Playwright Chromium is needed for end-to-end
-tests. Run `bun run verify` for the frontend and desktop verification gate.
+`bun run start` installs the locked frontend and Rust dependencies, then starts
+the desktop app on Windows, macOS, and Linux. The same command from `src` is
+`bun run start`. Install Bun 1.4.2 or newer, rustup, and the native desktop
+libraries first; the script does not install those platform tools. Add
+`--with-browsers` when Playwright Chromium is needed for end-to-end tests. Run
+`bun run verify` for the frontend and desktop verification gate.
 Before a pull request, run the guardrail and duplicate-code checks in
 [CONTRIBUTING.md](CONTRIBUTING.md).
