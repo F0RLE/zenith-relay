@@ -596,12 +596,12 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
     register_ready(&authority, "ready-account", "ready-access").await;
-    let mut stale = account("stale-account", "stale-provider", &upstream, 10);
-    stale.models.push("gpt-extra".to_string());
+    let mut stale_account = account("stale-account", "stale-provider", &upstream, 10);
+    stale_account.models.push("gpt-extra".to_string());
     let ready = account("ready-account", "ready-provider", &upstream, 10);
     let (gateway, _, _, _) = spawn_mixed_gateway(
         Vec::new(),
-        vec![stale, ready],
+        vec![stale_account, ready],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),

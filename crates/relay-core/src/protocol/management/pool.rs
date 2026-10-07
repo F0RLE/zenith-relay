@@ -136,16 +136,21 @@ fn model_summary(
     quote: Option<TokenPrice>,
     image_request_prices: Vec<ImageRequestPrice>,
 ) -> ModelSummary {
-    let (input, cached, cache_write_5m, cache_write_1h, output) =
-        quote.map_or((None, None, None, None, None), |price| {
-            (
-                Some(price.input),
-                price.cache_read,
-                price.cache_write_5m,
-                price.cache_write_1h,
-                Some(price.output),
-            )
-        });
+    let (
+        input_price,
+        cache_read_price,
+        short_cache_write_price,
+        long_cache_write_price,
+        output_price,
+    ) = quote.map_or((None, None, None, None, None), |price| {
+        (
+            Some(price.input),
+            price.cache_read,
+            price.cache_write_5m,
+            price.cache_write_1h,
+            Some(price.output),
+        )
+    });
     ModelSummary {
         enabled,
         protocol_routes: Vec::new(),
@@ -177,11 +182,11 @@ fn model_summary(
         catalog_context_limit: None,
         catalog_input_limit: None,
         catalog_output_limit: None,
-        input_micro_usd_per_million: input,
-        cached_input_micro_usd_per_million: cached,
-        cache_write_5m_micro_usd_per_million: cache_write_5m,
-        cache_write_1h_micro_usd_per_million: cache_write_1h,
-        output_micro_usd_per_million: output,
+        input_micro_usd_per_million: input_price,
+        cached_input_micro_usd_per_million: cache_read_price,
+        cache_write_5m_micro_usd_per_million: short_cache_write_price,
+        cache_write_1h_micro_usd_per_million: long_cache_write_price,
+        output_micro_usd_per_million: output_price,
         image_request_prices,
         custom_price: false,
         reasoning_levels: Vec::new(),

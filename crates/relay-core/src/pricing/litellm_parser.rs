@@ -49,13 +49,14 @@ fn parse_token_price(
         return Ok(None);
     };
     let cache_read = optional_token(object, "cache_read_input_token_cost")?;
-    let cache_write_5m = optional_token(object, "cache_creation_input_token_cost")?;
-    let cache_write_1h = optional_token(object, "cache_creation_input_token_cost_above_1hr")?;
+    let short_cache_write_price = optional_token(object, "cache_creation_input_token_cost")?;
+    let long_cache_write_price =
+        optional_token(object, "cache_creation_input_token_cost_above_1hr")?;
     Ok(Some(TokenPrice {
         input,
         cache_read,
-        cache_write_5m,
-        cache_write_1h,
+        cache_write_5m: short_cache_write_price,
+        cache_write_1h: long_cache_write_price,
         output,
         flex: rate_set(object, "_flex")?,
         priority: rate_set(object, "_priority")?,

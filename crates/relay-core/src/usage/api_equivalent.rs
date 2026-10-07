@@ -343,7 +343,7 @@ impl ApiEquivalentUsage {
         output_tokens: Option<u64>,
         total_tokens: Option<u64>,
     ) -> Self {
-        let (cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens) =
+        let (short_cache_write_tokens, long_cache_write_tokens, unknown_cache_write_tokens) =
             match cache_write_ttl {
                 Some("5m") => (cache_write_input_tokens, Some(0), Some(0)),
                 Some("1h") => (Some(0), cache_write_input_tokens, Some(0)),
@@ -352,8 +352,8 @@ impl ApiEquivalentUsage {
         Self {
             input_tokens,
             cached_input_tokens,
-            cache_write_5m_tokens,
-            cache_write_1h_tokens,
+            cache_write_5m_tokens: short_cache_write_tokens,
+            cache_write_1h_tokens: long_cache_write_tokens,
             unknown_cache_write_tokens,
             output_tokens,
             total_tokens,

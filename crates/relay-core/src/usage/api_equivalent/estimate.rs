@@ -11,20 +11,32 @@ use std::collections::BTreeMap;
 
 impl ApiModelPriceOverride {
     pub fn from_optional_fields(
-        input: Option<u64>,
-        cached_input: Option<u64>,
-        cache_write_5m: Option<u64>,
-        cache_write_1h: Option<u64>,
-        output: Option<u64>,
+        input_price: Option<u64>,
+        cache_read_price: Option<u64>,
+        short_cache_write_price: Option<u64>,
+        long_cache_write_price: Option<u64>,
+        output_price: Option<u64>,
     ) -> Result<Option<Self>, &'static str> {
-        match (input, cached_input, cache_write_5m, cache_write_1h, output) {
-            (Some(input), cached_input, cache_write_5m, cache_write_1h, Some(output)) => {
+        match (
+            input_price,
+            cache_read_price,
+            short_cache_write_price,
+            long_cache_write_price,
+            output_price,
+        ) {
+            (
+                Some(input_price),
+                cache_read_price,
+                short_cache_write_price,
+                long_cache_write_price,
+                Some(output_price),
+            ) => {
                 let price = Self {
-                    input_micro_usd_per_million: input,
-                    cached_input_micro_usd_per_million: cached_input,
-                    cache_write_5m_micro_usd_per_million: cache_write_5m,
-                    cache_write_1h_micro_usd_per_million: cache_write_1h,
-                    output_micro_usd_per_million: output,
+                    input_micro_usd_per_million: input_price,
+                    cached_input_micro_usd_per_million: cache_read_price,
+                    cache_write_5m_micro_usd_per_million: short_cache_write_price,
+                    cache_write_1h_micro_usd_per_million: long_cache_write_price,
+                    output_micro_usd_per_million: output_price,
                 };
                 price
                     .is_valid()
@@ -123,12 +135,12 @@ pub fn normalize_model_price_overrides(
     prices: BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<BTreeMap<String, ApiModelPriceOverride>, &'static str> {
     let mut normalized = BTreeMap::new();
-    for (model, price) in prices {
-        let model = model.trim();
-        if !is_valid_model_id(model) || !price.is_valid() {
+    for (model_id, price_override) in prices {
+        let model_id = model_id.trim();
+        if !is_valid_model_id(model_id) || !price_override.is_valid() {
             return Err("model price override is invalid");
         }
-        normalized.insert(model_id_key(model), price);
+        normalized.insert(model_id_key(model_id), price_override);
     }
     Ok(normalized)
 }
@@ -141,57 +153,71 @@ pub fn estimate_api_equivalent_with_token_price(
     usage: ApiEquivalentUsage,
     quote: Option<TokenPrice>,
 ) -> ApiEquivalentSummary {
-    let input = usage.input_tokens;
-    let output = usage.output_tokens;
-    let cached = usage
+    let input_tokens = usage.input_tokens;
+    let output_tokens = usage.output_tokens;
+    let cache_read_tokens = usage
         .cached_input_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-    let write_5m = usage
+        .map(|value| value.min(input_tokens.unwrap_or(value)));
+    let short_cache_write_tokens = usage
         .cache_write_5m_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-    let write_1h = usage
+        .map(|value| value.min(input_tokens.unwrap_or(value)));
+    let long_cache_write_tokens = usage
         .cache_write_1h_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-    let unknown = usage
+        .map(|value| value.min(input_tokens.unwrap_or(value)));
+    let unknown_cache_write_tokens = usage
         .unknown_cache_write_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
+        .map(|value| value.min(input_tokens.unwrap_or(value)));
 
-    let (uncached, cached, write_5m, write_1h, unknown) = if let Some(input) = input {
-        let mut remaining = input;
-        let cached = cached.map(|value| value.min(remaining)).unwrap_or_default();
-        remaining = remaining.saturating_sub(cached);
-        let write_5m = write_5m
-            .map(|value| value.min(remaining))
+    let (
+        uncached_input_tokens,
+        cache_read_tokens,
+        short_cache_write_tokens,
+        long_cache_write_tokens,
+        unknown_cache_write_tokens,
+    ) = if let Some(input_tokens) = input_tokens {
+        let mut remaining_input_tokens = input_tokens;
+        let cache_read_tokens = cache_read_tokens
+            .map(|value| value.min(remaining_input_tokens))
             .unwrap_or_default();
-        remaining = remaining.saturating_sub(write_5m);
-        let write_1h = write_1h
-            .map(|value| value.min(remaining))
+        remaining_input_tokens = remaining_input_tokens.saturating_sub(cache_read_tokens);
+        let short_cache_write_tokens = short_cache_write_tokens
+            .map(|value| value.min(remaining_input_tokens))
             .unwrap_or_default();
-        remaining = remaining.saturating_sub(write_1h);
-        let unknown = unknown
-            .map(|value| value.min(remaining))
+        remaining_input_tokens = remaining_input_tokens.saturating_sub(short_cache_write_tokens);
+        let long_cache_write_tokens = long_cache_write_tokens
+            .map(|value| value.min(remaining_input_tokens))
             .unwrap_or_default();
-        remaining = remaining.saturating_sub(unknown);
-        (Some(remaining), cached, write_5m, write_1h, unknown)
+        remaining_input_tokens = remaining_input_tokens.saturating_sub(long_cache_write_tokens);
+        let unknown_cache_write_tokens = unknown_cache_write_tokens
+            .map(|value| value.min(remaining_input_tokens))
+            .unwrap_or_default();
+        remaining_input_tokens = remaining_input_tokens.saturating_sub(unknown_cache_write_tokens);
+        (
+            Some(remaining_input_tokens),
+            cache_read_tokens,
+            short_cache_write_tokens,
+            long_cache_write_tokens,
+            unknown_cache_write_tokens,
+        )
     } else {
         (
             None,
-            cached.unwrap_or_default(),
-            write_5m.unwrap_or_default(),
-            write_1h.unwrap_or_default(),
-            unknown.unwrap_or_default(),
+            cache_read_tokens.unwrap_or_default(),
+            short_cache_write_tokens.unwrap_or_default(),
+            long_cache_write_tokens.unwrap_or_default(),
+            unknown_cache_write_tokens.unwrap_or_default(),
         )
     };
 
-    let measured_input = if input.is_some() {
-        input.unwrap_or_default()
+    let measured_input_tokens = if input_tokens.is_some() {
+        input_tokens.unwrap_or_default()
     } else {
-        cached
-            .saturating_add(write_5m)
-            .saturating_add(write_1h)
-            .saturating_add(unknown)
+        cache_read_tokens
+            .saturating_add(short_cache_write_tokens)
+            .saturating_add(long_cache_write_tokens)
+            .saturating_add(unknown_cache_write_tokens)
     };
-    let measured_tokens = measured_input.saturating_add(output.unwrap_or_default());
+    let measured_tokens = measured_input_tokens.saturating_add(output_tokens.unwrap_or_default());
     let total_tokens = usage
         .total_tokens
         .unwrap_or(measured_tokens)
@@ -211,12 +237,12 @@ pub fn estimate_api_equivalent_with_token_price(
     };
 
     let components = [
-        (uncached, rates.input),
-        (Some(cached), rates.cache_read),
-        (Some(write_5m), rates.cache_write_5m),
-        (Some(write_1h), rates.cache_write_1h),
-        (Some(unknown), None),
-        (output, rates.output),
+        (uncached_input_tokens, rates.input),
+        (Some(cache_read_tokens), rates.cache_read),
+        (Some(short_cache_write_tokens), rates.cache_write_5m),
+        (Some(long_cache_write_tokens), rates.cache_write_1h),
+        (Some(unknown_cache_write_tokens), None),
+        (output_tokens, rates.output),
     ];
     let mut priced_tokens = 0_u64;
     let mut micro_usd = 0_u64;

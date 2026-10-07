@@ -252,7 +252,7 @@ pub(super) fn merge_route_model_price(
     {
         return None;
     }
-    let cache_write_5m = match (
+    let short_cache_write_price = match (
         left.cache_write_5m_micro_usd_per_million,
         right.cache_write_5m_micro_usd_per_million,
     ) {
@@ -260,7 +260,7 @@ pub(super) fn merge_route_model_price(
         (Some(value), _) | (_, Some(value)) => Some(value),
         (None, None) => None,
     };
-    let cache_write_1h = match (
+    let long_cache_write_price = match (
         left.cache_write_1h_micro_usd_per_million,
         right.cache_write_1h_micro_usd_per_million,
     ) {
@@ -271,8 +271,8 @@ pub(super) fn merge_route_model_price(
     Some(ApiModelPriceOverride {
         input_micro_usd_per_million: left.input_micro_usd_per_million,
         cached_input_micro_usd_per_million: left.cached_input_micro_usd_per_million,
-        cache_write_5m_micro_usd_per_million: cache_write_5m,
-        cache_write_1h_micro_usd_per_million: cache_write_1h,
+        cache_write_5m_micro_usd_per_million: short_cache_write_price,
+        cache_write_1h_micro_usd_per_million: long_cache_write_price,
         output_micro_usd_per_million: left.output_micro_usd_per_million,
     })
 }
@@ -289,7 +289,7 @@ pub(super) fn parse_upstream_models(
     protocol: UpstreamProtocol,
     body: &Value,
 ) -> Option<Vec<(String, Option<ApiModelPriceOverride>)>> {
-    let models = match protocol {
+    let model_records = match protocol {
         UpstreamProtocol::GeminiGenerateContent => body
             .get("models")
             .or_else(|| body.get("data"))?
@@ -301,13 +301,13 @@ pub(super) fn parse_upstream_models(
             .or_else(|| body.get("models"))?
             .as_array()?,
     };
-    let mut seen = HashSet::new();
+    let mut seen_model_ids = HashSet::new();
     Some(
-        models
+        model_records
             .iter()
-            .filter_map(|model| {
-                let id = match protocol {
-                    UpstreamProtocol::GeminiGenerateContent => model
+            .filter_map(|model_record| {
+                let model_id = match protocol {
+                    UpstreamProtocol::GeminiGenerateContent => model_record
                         .get("supportedGenerationMethods")
                         .and_then(Value::as_array)
                         .filter(|methods| {
@@ -315,23 +315,36 @@ pub(super) fn parse_upstream_models(
                                 .iter()
                                 .any(|method| method.as_str() == Some("generateContent"))
                         })
-                        .and_then(|_| model.get("name").or_else(|| model.get("id")))?
+                        .and_then(|_| model_record.get("name").or_else(|| model_record.get("id")))?
                         .as_str()
-                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
+                        .map(|raw_model_name| {
+                            raw_model_name
+                                .strip_prefix("models/")
+                                .unwrap_or(raw_model_name)
+                        }),
                     UpstreamProtocol::Responses
                     | UpstreamProtocol::ChatCompletions
-                    | UpstreamProtocol::Messages => model
+                    | UpstreamProtocol::Messages => model_record
                         .get("id")
-                        .or_else(|| model.get("name"))?
+                        .or_else(|| model_record.get("name"))?
                         .as_str()
-                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
+                        .map(|raw_model_name| {
+                            raw_model_name
+                                .strip_prefix("models/")
+                                .unwrap_or(raw_model_name)
+                        }),
                 }?;
-                seen.insert(crate::model_id_key(id)).then(|| {
-                    (
-                        id.to_string(),
-                        detected_model_price(model, protocol == UpstreamProtocol::Messages),
-                    )
-                })
+                seen_model_ids
+                    .insert(crate::model_id_key(model_id))
+                    .then(|| {
+                        (
+                            model_id.to_string(),
+                            detected_model_price(
+                                model_record,
+                                protocol == UpstreamProtocol::Messages,
+                            ),
+                        )
+                    })
             })
             .collect(),
     )

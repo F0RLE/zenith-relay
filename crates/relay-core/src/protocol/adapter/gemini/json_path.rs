@@ -26,27 +26,27 @@ pub(in crate::protocol::adapter) fn apply_partial_args(
     let patches = partial_args
         .as_array()
         .ok_or_else(AdapterError::invalid_request)?;
-    for patch in patches {
-        let Some(patch) = patch.as_object() else {
+    for partial_patch in patches {
+        let Some(patch_object) = partial_patch.as_object() else {
             return Err(AdapterError::invalid_request());
         };
-        let Some(path) = patch.get("jsonPath").and_then(Value::as_str) else {
+        let Some(json_path) = patch_object.get("jsonPath").and_then(Value::as_str) else {
             return Err(AdapterError::invalid_request());
         };
-        let Some(value) = partial_arg_value(patch) else {
+        let Some(argument_value) = partial_arg_value(patch_object) else {
             continue;
         };
         // Vertex emits an empty string patch after a value while it is still
         // assembling the argument. Do not erase the last non-empty value.
-        if value.as_str().is_some_and(str::is_empty) {
+        if argument_value.as_str().is_some_and(str::is_empty) {
             continue;
         }
-        set_json_path(target, path, value)?;
+        set_json_path(target, json_path, argument_value)?;
     }
     Ok(())
 }
 
-fn partial_arg_value(patch: &Map<String, Value>) -> Option<Value> {
+fn partial_arg_value(patch_object: &Map<String, Value>) -> Option<Value> {
     for key in [
         "stringValue",
         "numberValue",
@@ -56,7 +56,7 @@ fn partial_arg_value(patch: &Map<String, Value>) -> Option<Value> {
         "jsonValue",
         "value",
     ] {
-        if let Some(value) = patch.get(key) {
+        if let Some(value) = patch_object.get(key) {
             if key == "jsonValue" {
                 if let Some(text) = value.as_str() {
                     return serde_json::from_str(text).ok();
