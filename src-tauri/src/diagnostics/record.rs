@@ -11,23 +11,23 @@ use std::sync::atomic::Ordering;
 /// Record a native operation breadcrumb.  The latest breadcrumb is copied to
 /// a crash report, so a panic can be tied to the last known stage even when no
 /// normal error response reaches the UI.
-pub(crate) fn breadcrumb(operation: &str, stage: &str, details: &[(&str, String)]) {
-    let state = persist::state();
+pub(crate) fn breadcrumb(operation: &str, operation_stage: &str, details: &[(&str, String)]) {
+    let diagnostic_state = persist::state();
     let mut values = BTreeMap::new();
     for (key, value) in details {
         values.insert((*key).to_string(), safe_detail(value));
     }
-    let value = Breadcrumb {
+    let breadcrumb = Breadcrumb {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         operation: safe_text(operation, 120),
-        stage: safe_text(stage, 120),
+        stage: safe_text(operation_stage, 120),
         details: values,
     };
-    if let Ok(mut current) = state.breadcrumb.lock() {
-        *current = Some(value.clone());
+    if let Ok(mut current_breadcrumb) = diagnostic_state.breadcrumb.lock() {
+        *current_breadcrumb = Some(breadcrumb.clone());
     }
     if SESSION_ACTIVE.load(Ordering::Acquire) {
-        persist::persist_last_stage(&value);
+        persist::persist_last_stage(&breadcrumb);
     }
 }
 

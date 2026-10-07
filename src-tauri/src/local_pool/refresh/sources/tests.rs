@@ -92,15 +92,18 @@ async fn stats_readers_join_cache_and_project_without_a_second_provider_poll() {
     );
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 
-    let stale = request_stats(&state, &source.id, true).await.unwrap();
-    assert_eq!(stale.as_of_ms, good.as_of_ms);
-    assert_eq!(stale.balance_micro_usd, good.balance_micro_usd);
-    assert_eq!(stale.refresh_error, Some(SourceStatsStatus::RateLimited));
-    assert!(stale.stale);
+    let stale_stats = request_stats(&state, &source.id, true).await.unwrap();
+    assert_eq!(stale_stats.as_of_ms, good.as_of_ms);
+    assert_eq!(stale_stats.balance_micro_usd, good.balance_micro_usd);
+    assert_eq!(
+        stale_stats.refresh_error,
+        Some(SourceStatsStatus::RateLimited)
+    );
+    assert!(stale_stats.stale);
     let stale_inputs = state.snapshot_inputs().await.unwrap();
     assert_eq!(
         stale_inputs.source_refresh[&source.id].stats,
-        Some(stale.clone())
+        Some(stale_stats.clone())
     );
     assert_eq!(
         stale_inputs.source_refresh[&source.id].state.balance,
@@ -142,12 +145,12 @@ async fn missing_credentials_do_not_erase_a_same_scope_cached_observation() {
         .unwrap()
         .source_refresh_scope(&source.id)
         .unwrap();
-    let stats = zenith_relay_core::SourceProviderStats::empty(
+    let empty_stats = zenith_relay_core::SourceProviderStats::empty(
         zenith_relay_core::SourceStatsProvider::Zenith,
         SourceStatsStatus::Available,
     )
     .observed(None, 123);
-    let observation = SourceStatsObservation::new(source.base_url.clone(), stats.clone());
+    let observation = SourceStatsObservation::new(source.base_url.clone(), empty_stats.clone());
     state
         .refresh
         .register(
@@ -187,7 +190,7 @@ async fn missing_credentials_do_not_erase_a_same_scope_cached_observation() {
         ErrorCode::NotFound
     );
     let cached = cached_stats(&state, &fence, &source.base_url).unwrap();
-    assert_eq!(cached.as_of_ms, stats.as_of_ms);
+    assert_eq!(cached.as_of_ms, empty_stats.as_of_ms);
     assert!(cached.stale);
     cleanup(state).await;
 }

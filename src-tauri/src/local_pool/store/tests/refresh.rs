@@ -77,7 +77,7 @@ fn account_refresh_revisions_survive_reopen_and_do_not_contain_credentials() {
 
 #[test]
 fn account_scope_changes_retire_reads_even_if_the_record_is_restored() {
-    let changes: [fn(&mut LocalAccountRecord); 7] = [
+    let account_mutations: [fn(&mut LocalAccountRecord); 7] = [
         |account| account.account.enabled = false,
         |account| account.account.source_id = "different-source".into(),
         |account| account.account.identity = account_record("other").account.identity,
@@ -91,13 +91,13 @@ fn account_scope_changes_retire_reads_even_if_the_record_is_restored() {
             })
         },
     ];
-    for change in changes {
+    for mutate_account in account_mutations {
         let (root, mut store) = seeded();
         let (original, fence) = store.account_refresh_scope("account-a").unwrap();
         let (_, unrelated) = store.account_refresh_scope("account-b").unwrap();
-        let mut changed = original.clone();
-        change(&mut changed);
-        store.upsert_account(changed).unwrap();
+        let mut updated_account = original.clone();
+        mutate_account(&mut updated_account);
+        store.upsert_account(updated_account).unwrap();
         assert!(store.ensure_account_refresh_current(&fence).is_err());
         store.upsert_account(original).unwrap();
         assert!(store.ensure_account_refresh_current(&fence).is_err());
@@ -182,18 +182,18 @@ fn ownership_transaction_and_reset_invalidate_account_reads() {
 
 #[test]
 fn relevant_gateway_changes_and_secret_backed_proxy_changes_retire_reads() {
-    let changes: [fn(&mut GatewaySettings); 3] = [
+    let gateway_mutations: [fn(&mut GatewaySettings); 3] = [
         |gateway| gateway.common_proxy_configured = true,
         |gateway| gateway.account_proxy_required = true,
         |gateway| gateway.quota_request_timeout_seconds = 10,
     ];
-    for change in changes {
+    for mutate_gateway in gateway_mutations {
         let (root, mut store) = seeded();
         let (_, fence) = store.account_refresh_scope("account-a").unwrap();
         let original = store.gateway().clone();
-        let mut changed = original.clone();
-        change(&mut changed);
-        store.replace_gateway(changed).unwrap();
+        let mut updated_gateway = original.clone();
+        mutate_gateway(&mut updated_gateway);
+        store.replace_gateway(updated_gateway).unwrap();
         store.replace_gateway(original).unwrap();
         assert!(store.ensure_account_refresh_current(&fence).is_err());
         let (_, next) = store.account_refresh_scope("account-a").unwrap();

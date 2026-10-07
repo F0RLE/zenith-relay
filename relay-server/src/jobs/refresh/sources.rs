@@ -86,8 +86,8 @@ fn register(
                         {
                             RefreshOutcome::Success
                         }
-                        Ok(RefreshRead::SourceStats(stats)) => {
-                            source_stats_outcome(&stats.stats, state.refresh.now_ms())
+                        Ok(RefreshRead::SourceStats(source_stats)) => {
+                            source_stats_outcome(&source_stats.stats, state.refresh.now_ms())
                         }
                         _ => RefreshOutcome::retry_after(state.refresh.now_ms(), None),
                     };

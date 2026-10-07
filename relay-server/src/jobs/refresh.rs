@@ -106,18 +106,22 @@ pub(crate) fn cache_observation(value: &RefreshReadResult) -> bool {
 
 pub(super) fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut changes = state.store.refresh_changes();
+        let mut refresh_changes = state.store.refresh_changes();
         loop {
             if *shutdown.borrow() {
                 break;
             }
             // Subscribe before reconciliation so an edit during the scan cannot
             // leave a stale registration asleep until its old periodic timer.
-            changes.borrow_and_update();
+            refresh_changes.borrow_and_update();
             let _ = reconcile(&state);
             tokio::select! {
-                changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
-                changed = changes.changed() => { if changed.is_err() { break; } }
+                shutdown_changed = shutdown.changed() => {
+                    if shutdown_changed.is_err() || *shutdown.borrow() { break; }
+                }
+                refresh_signal = refresh_changes.changed() => {
+                    if refresh_signal.is_err() { break; }
+                }
             }
         }
         state.refresh.shutdown().await;
