@@ -80,7 +80,15 @@ pub enum ReasoningMethod {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelMetadata {
+    /// The identifier supplied by the reference source. Keep it separate
+    /// from a hosted route ID or a canonical provider model ID.
+    #[serde(default)]
+    pub source_model_id: String,
     pub provider: String,
+    /// A registry-provided relation to the underlying provider model. This is
+    /// advisory identity metadata and never grants a runtime route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_model_id: Option<String>,
     pub family: Option<String>,
     pub name: Option<String>,
     pub release_date: Option<String>,

@@ -406,17 +406,12 @@ rotation controls connection selection. The application's model list is also
 limited by client compatibility.
 
 **Reset model order** in the pool toolbar clears manual model and group positions.
-Companies start with OpenAI, Anthropic, Google and xAI, followed by the others
-alphabetically. Within each company, known families keep a fixed order: OpenAI
-is Astra, Sol, Terra, then Luna; Anthropic is Fable, Opus, Sonnet, then Haiku.
-A new version joins its catalog family without a separate model-ID list. A later
-release does not move a lower family above a higher one. Other families stay
-after that lineup. When they share one numbered generation, they use that
-generation's newest release, then the family name. Versions within a family run
-newest first. If the release dates match, the update date is used, then the
-model ID. Models without a family follow known families; undated versions follow
-dated versions in their family. Newly discovered models and families follow
-these rules automatically.
+Providers start with OpenAI, Anthropic, Google and xAI, followed by the others
+alphabetically. Models inside each provider stay in the order returned by the
+connected account or API source. Relay's metadata catalog supplies provider and
+family labels only; it does not reorder versions by release date, family name,
+or model ID. Newly discovered models follow the same provider-block and source
+order rules automatically.
 Reset leaves model switches, prices, reasoning and rotation settings intact.
 On a remote pool, the button requires a server supporting order reset.
 

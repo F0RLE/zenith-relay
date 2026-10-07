@@ -30,7 +30,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   const { t } = useTranslation();
   const { runtime } = useRelayState();
   const compactRows = presentation === "member" || presentation === "tab";
-  const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? [], { unknownOrder: "stable-id" });
+  const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? []);
   const catalogModels = new Map(
     (runtime?.gateway.models ?? []).map((model) => [modelIdKey(model.id), model]),
   );

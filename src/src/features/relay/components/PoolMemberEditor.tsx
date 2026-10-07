@@ -34,7 +34,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
   const filteredModels = modelIds.filter((model) => modelIdKey(model).includes(search.trim().toLowerCase()));
   const catalog = memberModelCatalog(runtime?.gateway);
-  const orderedModels = orderModelIdsBySnapshot(filteredModels, runtime?.gateway.models ?? [], { unknownOrder: "stable-id" });
+  const orderedModels = orderModelIdsBySnapshot(filteredModels, runtime?.gateway.models ?? []);
   const modelGroups = groupModels(orderedModels, {
     metadata: (model) => catalog.get(modelIdKey(model)),
     isNativeChatGpt: () => member.kind === "account",

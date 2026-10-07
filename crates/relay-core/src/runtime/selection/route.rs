@@ -88,6 +88,11 @@ impl GatewayRuntime {
         let source = self.sources.get(&binding.source_id)?;
         let source_binding = source.binding_for(binding.binding_key)?;
         let source_model = source.canonical_model_for(binding.binding_key, model)?;
+        let route_capability = binding
+            .capabilities
+            .get(&crate::model_id_key(&source_model))
+            .or_else(|| binding.capabilities.get(&crate::model_id_key(model)))
+            .cloned();
         Some(ExecutorRoute {
             candidate_id: candidate_id.to_string(),
             source_id: binding.source_id.clone(),
@@ -104,6 +109,7 @@ impl GatewayRuntime {
             account_transport: AccountTransport::NativeResponses,
             client_transport: crate::UsageTransport::Http,
             source_model,
+            route_capability,
             half_open_probe: false,
             routing: None,
         })
@@ -155,6 +161,7 @@ impl GatewayRuntime {
             account_transport,
             client_transport: crate::UsageTransport::Http,
             source_model,
+            route_capability: None,
             half_open_probe: false,
             routing: None,
         }

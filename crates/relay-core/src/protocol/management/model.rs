@@ -94,6 +94,12 @@ pub struct ModelSummary {
     pub codex_display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_provider: Option<String>,
+    /// Reference identity only. It does not rewrite the source model ID or
+    /// make a hosted alias executable on another provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_source_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_canonical_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_family: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,6 +120,12 @@ pub struct ModelSummary {
     pub catalog_reasoning_effort_levels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_default_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_reasoning_budget_min_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_reasoning_budget_max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_reasoning_budget_default_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_tool_call: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

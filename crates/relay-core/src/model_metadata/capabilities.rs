@@ -82,6 +82,96 @@ impl ModelCapabilities {
         ])
     }
 
+    /// Resolve the capabilities that are safe to use for one selected route.
+    ///
+    /// Reference metadata describes the model family, while the route record
+    /// describes the exact upstream protocol exposed by a source. Explicit
+    /// unsupported evidence from either layer is a hard deny. Route evidence
+    /// may fill an unknown reference field, but it cannot turn a reference
+    /// exclusion into support.
+    pub(crate) fn protocol_features_for_route(
+        &self,
+        route: Option<&crate::ModelEndpointCapability>,
+    ) -> std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus> {
+        use crate::{CapabilityStatus, ProtocolFeature};
+
+        let reference = self.clone().with_defaults().protocol_features();
+        let Some(route) = route else {
+            return reference;
+        };
+        if route.status == CapabilityStatus::Unsupported {
+            return ProtocolFeature::ALL
+                .into_iter()
+                .map(|feature| (feature, CapabilityStatus::Unsupported))
+                .collect();
+        }
+
+        ProtocolFeature::ALL
+            .into_iter()
+            .map(|feature| {
+                let reference_status = reference
+                    .get(&feature)
+                    .copied()
+                    .unwrap_or(CapabilityStatus::Unknown);
+                let route_status = route
+                    .features
+                    .get(&feature)
+                    .copied()
+                    .unwrap_or(CapabilityStatus::Unknown);
+                (
+                    feature,
+                    merge_route_capability_status(reference_status, route_status),
+                )
+            })
+            .collect()
+    }
+
+    /// Return reasoning effort levels that are valid for the selected route.
+    /// An exact route list narrows the reference list; when the reference does
+    /// not publish levels, the route list is still useful evidence.
+    pub(crate) fn reasoning_effort_levels_for_route(
+        &self,
+        route: Option<&crate::ModelEndpointCapability>,
+    ) -> Vec<String> {
+        use crate::{CapabilityStatus, ProtocolFeature};
+
+        let reference = self.clone().with_defaults();
+        let Some(route) = route else {
+            return reference.reasoning_effort_levels;
+        };
+        // A route catalog can describe the protocol it exposes, but it cannot
+        // revive reasoning that the trusted model reference explicitly marks
+        // as unsupported. Keep this invariant in the level projection too;
+        // callers such as management snapshots do not always inspect the
+        // feature map first.
+        if reference.reasoning == Some(false) {
+            return Vec::new();
+        }
+        if route.status == CapabilityStatus::Unsupported
+            || route.features.get(&ProtocolFeature::Reasoning)
+                == Some(&CapabilityStatus::Unsupported)
+        {
+            return Vec::new();
+        }
+
+        let route_levels = crate::canonicalize_reasoning_levels(&route.reasoning_efforts);
+        if route_levels.is_empty() {
+            return reference.reasoning_effort_levels;
+        }
+        if reference.reasoning_effort_levels.is_empty() {
+            return route_levels;
+        }
+        route_levels
+            .into_iter()
+            .filter(|level| {
+                reference
+                    .reasoning_effort_levels
+                    .iter()
+                    .any(|reference_level| reference_level.eq_ignore_ascii_case(level))
+            })
+            .collect()
+    }
+
     /// Replace model capability fields, including stale fields from provider
     /// templates. Routing IDs and native transport settings are left intact.
     pub fn apply_to_codex(&self, entry: &mut Value) {
@@ -153,6 +243,23 @@ impl ModelCapabilities {
     }
 }
 
+fn merge_route_capability_status(
+    reference: crate::CapabilityStatus,
+    route: crate::CapabilityStatus,
+) -> crate::CapabilityStatus {
+    use crate::CapabilityStatus;
+    if reference == CapabilityStatus::Unsupported || route == CapabilityStatus::Unsupported {
+        return CapabilityStatus::Unsupported;
+    }
+    if reference == CapabilityStatus::Confirmed || route == CapabilityStatus::Confirmed {
+        return CapabilityStatus::Confirmed;
+    }
+    if reference == CapabilityStatus::Declared || route == CapabilityStatus::Declared {
+        return CapabilityStatus::Declared;
+    }
+    CapabilityStatus::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +329,91 @@ mod tests {
         assert_eq!(entry["supports_parallel_tool_calls"], true);
         assert!(entry.get("context_window").is_none());
         assert!(crate::codex_catalog_entry_is_compatible(&entry));
+    }
+
+    #[test]
+    fn route_evidence_narrows_reference_features_and_reasoning_levels() {
+        let reference = ModelCapabilities {
+            reasoning: Some(true),
+            reasoning_effort_levels: vec!["low".into(), "high".into()],
+            tool_call: Some(false),
+            ..ModelCapabilities::default()
+        };
+        let route = crate::ModelEndpointCapability {
+            model_id: "claude-sonnet".into(),
+            upstream_wire_api: crate::WireApi::Messages,
+            status: crate::CapabilityStatus::Declared,
+            origin: crate::CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: std::collections::BTreeMap::from([
+                (
+                    crate::ProtocolFeature::FunctionTools,
+                    crate::CapabilityStatus::Declared,
+                ),
+                (
+                    crate::ProtocolFeature::Reasoning,
+                    crate::CapabilityStatus::Declared,
+                ),
+            ]),
+            reasoning_efforts: vec!["low".into(), "max".into()],
+        };
+        let features = reference.protocol_features_for_route(Some(&route));
+        assert_eq!(
+            features.get(&crate::ProtocolFeature::FunctionTools),
+            Some(&crate::CapabilityStatus::Unsupported)
+        );
+        assert_eq!(
+            features.get(&crate::ProtocolFeature::Reasoning),
+            Some(&crate::CapabilityStatus::Declared)
+        );
+        assert_eq!(
+            reference.reasoning_effort_levels_for_route(Some(&route)),
+            ["low"]
+        );
+    }
+
+    #[test]
+    fn explicit_route_exclusion_overrides_optimistic_unknown_baseline() {
+        let route = crate::ModelEndpointCapability {
+            model_id: "gemini-flash".into(),
+            upstream_wire_api: crate::WireApi::Gemini,
+            status: crate::CapabilityStatus::Declared,
+            origin: crate::CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: std::collections::BTreeMap::from([(
+                crate::ProtocolFeature::Images,
+                crate::CapabilityStatus::Unsupported,
+            )]),
+            reasoning_efforts: Vec::new(),
+        };
+        let features = ModelCapabilities::default().protocol_features_for_route(Some(&route));
+        assert_eq!(
+            features.get(&crate::ProtocolFeature::Images),
+            Some(&crate::CapabilityStatus::Unsupported)
+        );
+    }
+
+    #[test]
+    fn explicit_reference_reasoning_exclusion_cannot_be_revived_by_route_levels() {
+        let reference = ModelCapabilities {
+            reasoning: Some(false),
+            reasoning_effort_levels: vec!["low".into(), "high".into()],
+            ..ModelCapabilities::default()
+        };
+        let route = crate::ModelEndpointCapability {
+            model_id: "text-model".into(),
+            upstream_wire_api: crate::WireApi::Messages,
+            status: crate::CapabilityStatus::Declared,
+            origin: crate::CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: std::collections::BTreeMap::from([(
+                crate::ProtocolFeature::Reasoning,
+                crate::CapabilityStatus::Declared,
+            )]),
+            reasoning_efforts: vec!["low".into(), "high".into()],
+        };
+        assert!(reference
+            .reasoning_effort_levels_for_route(Some(&route))
+            .is_empty());
     }
 }

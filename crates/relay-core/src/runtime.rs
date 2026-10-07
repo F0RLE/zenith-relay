@@ -233,6 +233,10 @@ pub(crate) struct ExecutorRoute {
     pub(crate) account_transport: AccountTransport,
     pub(crate) client_transport: crate::UsageTransport,
     pub(crate) source_model: String,
+    /// Source-local capability evidence for the selected route. OAuth account
+    /// routes currently rely on the shared reference catalog and keep this
+    /// unset until the account endpoint reports model capabilities.
+    pub(crate) route_capability: Option<crate::ModelEndpointCapability>,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
 }
@@ -245,6 +249,9 @@ struct SourceCandidateBinding {
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
     cache_write_ttl: CacheWriteTtl,
+    /// Capability evidence for this exact upstream model route. Reference
+    /// metadata remains separate and is merged only during request admission.
+    capabilities: BTreeMap<String, crate::ModelEndpointCapability>,
 }
 
 pub(crate) struct PreparedAuthorization {

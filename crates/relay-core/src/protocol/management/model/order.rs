@@ -11,7 +11,7 @@ pub fn apply_model_display_order(models: &mut [ModelSummary], saved_order: &[Str
 }
 
 /// Applies saved presentation order while placing new models through the
-/// catalog's stable release/update ordering. This changes presentation only;
+/// catalog's provider-block/source ordering. This changes presentation only;
 /// routing and eligibility continue to use the live pool evidence.
 pub fn apply_model_display_order_with_catalog(
     models: &mut [ModelSummary],
@@ -104,6 +104,9 @@ pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadata
         let metadata = catalog.resolve(&model.id);
         model.codex_display_name = catalog.codex_display_name(&model.id);
         model.catalog_provider = metadata.map(|metadata| metadata.provider.clone());
+        model.catalog_source_model_id = metadata.map(|metadata| metadata.source_model_id.clone());
+        model.catalog_canonical_model_id =
+            metadata.and_then(|metadata| metadata.canonical_model_id.clone());
         model.catalog_family = metadata.and_then(|metadata| metadata.family.clone());
         model.catalog_name = metadata.and_then(|metadata| metadata.name.clone());
         model.catalog_release_date = metadata.and_then(|metadata| metadata.release_date.clone());
@@ -114,6 +117,10 @@ pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadata
         model.catalog_reasoning_method = capabilities.reasoning_method;
         model.catalog_reasoning_effort_levels = capabilities.reasoning_effort_levels;
         model.catalog_default_reasoning_effort = capabilities.default_reasoning_effort;
+        model.catalog_reasoning_budget_min_tokens = capabilities.reasoning_budget_min_tokens;
+        model.catalog_reasoning_budget_max_tokens = capabilities.reasoning_budget_max_tokens;
+        model.catalog_reasoning_budget_default_tokens =
+            capabilities.reasoning_budget_default_tokens;
         model.catalog_tool_call = capabilities.tool_call;
         model.catalog_structured_output = capabilities.structured_output;
         model.catalog_attachment = capabilities.attachment;

@@ -33,8 +33,9 @@ export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefin
 }
 
 /**
- * Group models by provider. Within each provider, preserve the snapshot order;
- * catalog families do not create a second presentation order.
+ * Group models by provider. The runtime snapshot already carries the
+ * provider-block order from the backend; preserve it, including an explicit
+ * manual order, and keep the source order inside each block.
  */
 export function groupModels<T>(
   items: readonly T[],
@@ -72,13 +73,12 @@ export function uniqueModelIds(models: readonly string[]) {
 }
 
 /**
- * Put IDs known by the current snapshot in backend order. IDs found only in
- * usage history follow in their first-seen order.
+ * Put IDs known by the current snapshot in backend order. IDs found only in a
+ * member or usage inventory follow that inventory's first-seen order.
  */
 export function orderModelIdsBySnapshot(
   models: readonly string[],
   summaries: readonly ModelSummary[],
-  options: { unknownOrder?: "first-seen" | "stable-id" } = {},
 ) {
   const unique = uniqueModelIds(models);
   const byId = new Map(unique.map((model) => [modelIdKey(model), model]));
@@ -87,21 +87,14 @@ export function orderModelIdsBySnapshot(
     .filter((model): model is string => Boolean(model));
   const known = new Set(ordered.map((model) => modelIdKey(model)));
   const unknown = unique.filter((model) => !known.has(modelIdKey(model)));
-  if (options.unknownOrder === "stable-id") {
-    unknown.sort(compareModelIds);
-  }
   return [...ordered, ...unknown];
-}
-
-function compareModelIds(left: string, right: string) {
-  const leftKey = modelIdKey(left);
-  const rightKey = modelIdKey(right);
-  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : left < right ? -1 : left > right ? 1 : 0;
 }
 
 function normalizeCatalogValue(value: string | null | undefined) {
   const normalized = value?.trim().toLowerCase();
-  return normalized || null;
+  if (!normalized) return null;
+  if (normalized === "x-ai" || normalized === "x_ai") return "xai";
+  return normalized;
 }
 
 function displayCatalogValue(value: string) {

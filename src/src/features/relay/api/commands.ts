@@ -165,7 +165,7 @@ export const relayCommands = {
   setModelPrice: (modelId: string, inputMicroUsdPerMillion: number | null, cachedInputMicroUsdPerMillion: number | null, cacheWrite5mMicroUsdPerMillion: number | null, cacheWrite1hMicroUsdPerMillion: number | null, outputMicroUsdPerMillion: number | null) => invoke("set_local_model_price", { input: { modelId, inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion } }),
   setModelReasoning: (modelId: string, allowedLevels: string[]) => invoke("set_local_model_reasoning", { input: { modelId, allowedLevels } }),
   setModelServiceTier: (modelId: string, serviceTier: DefaultServiceTier) => invoke("set_local_model_service_tier", { input: { modelId, serviceTier } }),
-  /** An empty list clears manual positions and restores catalog ordering. */
+  /** An empty list clears manual positions and restores provider-block order. */
   setModelDisplayOrder: (modelIds: string[]) => invoke("set_local_model_display_order", { input: { modelIds } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   previewLocalConfigurationPreset: () => invoke<ConfigurationPresetPreview | null>("preview_local_configuration_preset"),

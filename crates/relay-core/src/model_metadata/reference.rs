@@ -115,8 +115,11 @@ pub(super) fn merge_reference_records(
             }
         }
         let mut limits = Map::new();
+        // LiteLLM's `max_tokens` is a legacy provider parameter. Its sample
+        // specification uses it as an output fallback, so it cannot establish
+        // a context window. Only the explicit input/output fields have stable
+        // semantics here.
         for (from, to) in [
-            ("max_tokens", "context"),
             ("max_input_tokens", "input"),
             ("max_output_tokens", "output"),
         ] {
@@ -208,6 +211,29 @@ mod tests {
             Some("New")
         );
         assert!(catalog.resolve("not-in-references").is_none());
+    }
+
+    #[test]
+    fn legacy_litellm_max_tokens_does_not_become_context_limit() {
+        let records = merge_reference_records(
+            &json!({}),
+            None,
+            None,
+            Some(&json!({
+                "gpt-synthetic": {
+                    "litellm_provider": "openai",
+                    "max_tokens": 999,
+                    "max_output_tokens": 128
+                }
+            })),
+        );
+        let catalog = super::super::ModelMetadataCatalog::from_models_dev_json(
+            &serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        let capabilities = catalog.capabilities_for("openai/gpt-synthetic");
+        assert_eq!(capabilities.context_limit, None);
+        assert_eq!(capabilities.output_limit, Some(128));
     }
 
     #[test]

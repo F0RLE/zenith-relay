@@ -67,7 +67,8 @@ pub fn configured_source_model_ids<'a>(
 
 /// Complete a partial display order without losing inventory absent from a
 /// stale client. Empty input resets the override; stale saved IDs are ignored.
-/// New IDs follow deterministically, preserving canonical configured casing.
+/// New IDs follow the configured inventory sequence, preserving canonical
+/// casing instead of introducing a second alphabetical order.
 pub fn complete_model_display_order<'a>(
     model_ids: impl IntoIterator<Item = &'a String>,
     requested_ids: &[String],
@@ -77,8 +78,13 @@ pub fn complete_model_display_order<'a>(
         return Ok(Vec::new());
     }
     let mut remaining = BTreeMap::new();
+    let mut inventory_order = Vec::new();
     for id in model_ids {
-        remaining.entry(model_id_key(id)).or_insert(id);
+        let key = model_id_key(id);
+        if let std::collections::btree_map::Entry::Vacant(entry) = remaining.entry(key.clone()) {
+            entry.insert(id);
+            inventory_order.push(key);
+        }
     }
 
     let mut order = Vec::with_capacity(remaining.len());
@@ -96,7 +102,11 @@ pub fn complete_model_display_order<'a>(
             order.push(canonical.clone());
         }
     }
-    order.extend(remaining.into_values().cloned());
+    for key in inventory_order {
+        if let Some(canonical) = remaining.remove(&key) {
+            order.push(canonical.clone());
+        }
+    }
     Ok(order)
 }
 
@@ -183,7 +193,7 @@ mod tests {
         let saved = ids(&["stale", "hidden", "HIDDEN", "model-a"]);
         assert_eq!(
             complete_model_display_order(&inventory, &requested, &saved),
-            Ok(ids(&["model-b", "model-a", "hidden", "new-c", "new-z"]))
+            Ok(ids(&["model-b", "model-a", "hidden", "new-z", "new-c"]))
         );
     }
 

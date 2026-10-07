@@ -110,7 +110,7 @@ fn ambiguous_leaf_ids_are_not_guessed() {
 }
 
 #[test]
-fn default_company_order_preserves_manual_override_and_unknown_models() {
+fn provider_blocks_preserve_source_order_and_manual_override() {
     let catalog = catalog(
         r#"{
         "xai/model-x":{"family":"line-x"},
@@ -134,8 +134,9 @@ fn default_company_order_preserves_manual_override_and_unknown_models() {
         catalog.order_model_ids(inventory)
     );
 }
+
 #[test]
-fn order_uses_release_dates_and_keeps_unknown_models_last() {
+fn provider_order_does_not_use_release_dates() {
     let catalog = catalog(
         r#"{
             "openai/old":{"name":"Old","family":"gpt","release_date":"2025-01-01"},
@@ -144,339 +145,55 @@ fn order_uses_release_dates_and_keeps_unknown_models_last() {
     );
     assert_eq!(
         catalog.order_model_ids(["unknown", "old", "new"]),
+        ["old", "new", "unknown"]
+    );
+    assert_eq!(
+        catalog.order_model_ids(["unknown", "new", "old"]),
         ["new", "old", "unknown"]
     );
 }
 
 #[test]
-fn same_generation_families_use_stable_family_order_not_release_date() {
-    let catalog = catalog(
-        r#"{
-            "openai/gpt-6-sol":{"name":"GPT-6 Sol","family":"gpt-sol","release_date":"2026-09-22"},
-            "openai/gpt-6-sol-max":{"name":"GPT-6 Sol","family":"gpt-sol","release_date":"2026-09-22"},
-            "openai/gpt-5.6-sol":{"name":"GPT-5.6 Sol","family":"gpt-sol","release_date":"2026-07-09"},
-            "openai/gpt-5.6-sol-max":{"name":"GPT-5.6 Sol","family":"gpt-sol","release_date":"2026-07-09"},
-            "openai/gpt-6-astra":{"name":"GPT-6 Astra","family":"gpt-astra","release_date":"2026-09-04"},
-            "openai/gpt-6.1-sol":{"name":"GPT-6.1 Sol","family":"gpt-sol","release_date":"2026-09-29"},
-            "openai/gpt-7-sol":{"name":"GPT-7 Sol","family":"gpt-sol","release_date":"2027-01-15"},
-            "openai/gpt-6.2-luna":{"name":"GPT-6.2 Luna","family":"gpt-luna","release_date":"2026-10-01"},
-            "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","family":"gpt-luna","release_date":"2026-07-09"},
-            "openai/gpt-5.6-terra":{"name":"GPT-5.6 Terra","family":"gpt-terra","release_date":"2026-07-09"},
-            "openai/gpt-9-nova":{"name":"GPT-9 Nova","family":"gpt-nova","release_date":"2028-01-01"}
-        }"#,
-    );
-    let expected = [
-        "gpt-6-astra",
-        "gpt-7-sol",
-        "gpt-6.1-sol",
-        "gpt-6-sol",
-        "gpt-6-sol-max",
-        "gpt-5.6-sol",
-        "gpt-5.6-sol-max",
-        "gpt-5.6-terra",
-        "gpt-6.2-luna",
-        "gpt-5.6-luna",
-        "gpt-9-nova",
-    ];
-    assert_eq!(
-        catalog.order_model_ids(expected.into_iter().rev()),
-        expected
-    );
-    assert_eq!(catalog.order_model_ids(expected), expected);
-}
-
-#[test]
-fn product_tiers_survive_a_shared_or_missing_family() {
-    let shared_family = catalog(
-        r#"{
-            "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","family":"gpt","release_date":"2026-08-01"},
-            "openai/gpt-5.6-sol":{"name":"GPT-5.6 Sol","family":"gpt","release_date":"2026-07-09"},
-            "openai/gpt-8-terra":{"name":"GPT-8 Terra","family":"gpt","release_date":"2028-01-01"},
-            "openai/gpt-4o":{"name":"GPT-4o","family":"gpt","release_date":"2024-05-13"}
-        }"#,
-    );
-    assert_eq!(
-        shared_family.order_model_ids(["gpt-5.6-luna", "gpt-4o", "gpt-8-terra", "gpt-5.6-sol",]),
-        ["gpt-5.6-sol", "gpt-8-terra", "gpt-5.6-luna", "gpt-4o"]
-    );
-
-    let long_family = catalog(
-        r#"{
-            "openai/gpt-6.2-luna":{"name":"GPT-6.2 Luna","family":"gpt-6.2-luna","release_date":"2026-10-01"},
-            "openai/gpt-5.6-sol":{"name":"GPT-5.6 Sol","family":"gpt-5.6-sol","release_date":"2026-07-09"}
-        }"#,
-    );
-    assert_eq!(
-        long_family.order_model_ids(["gpt-6.2-luna", "gpt-5.6-sol"]),
-        ["gpt-5.6-sol", "gpt-6.2-luna"]
-    );
-
-    let unlabeled = catalog(
-        r#"{
-            "openai/gpt-5.6-luna":{"name":"GPT-5.6 Luna","release_date":"2026-09-01"},
-            "openai/gpt-9-sol":{"name":"GPT-9 Sol","release_date":"2028-02-01"},
-            "anthropic/claude-haiku-9":{"name":"Claude Haiku 9","release_date":"2028-03-01"},
-            "anthropic/claude-opus-9":{"name":"Claude Opus 9","release_date":"2027-01-01"}
-        }"#,
-    );
-    assert_eq!(
-        unlabeled.order_model_ids([
-            "claude-haiku-9",
-            "gpt-5.6-luna",
-            "claude-opus-9",
-            "gpt-9-sol",
-        ]),
-        [
-            "gpt-9-sol",
-            "gpt-5.6-luna",
-            "claude-opus-9",
-            "claude-haiku-9"
-        ]
-    );
-}
-
-#[test]
-fn image_generation_models_follow_text_models_from_the_same_company() {
-    let catalog = catalog(
-        r#"{
-            "openai/gpt-6-luna":{"name":"GPT-6 Luna","family":"gpt-luna","release_date":"2026-09-01"},
-            "openai/gpt-5.6-terra":{"name":"GPT-5.6 Terra","family":"gpt-terra","release_date":"2026-07-09"},
-            "openai/gpt-image-2.5-flare":{"name":"GPT Image 2.5 Flare","family":"gpt-image","release_date":"2026-09-20"},
-            "openai/gpt-image-2.5-sunburst":{"name":"GPT Image 2.5 Sunburst","family":"gpt-image","release_date":"2026-09-10"},
-            "openai/gpt-image-2":{"name":"GPT-Image-2","family":"gpt-image","release_date":"2026-04-21"},
-            "openai/gpt-5.5":{"name":"GPT-5.5","family":"gpt","release_date":"2026-04-01"},
-            "openai/codex-auto-review":{"name":"Codex Auto Review","family":"codex","release_date":"2026-03-01"},
-            "openai/gpt-4o":{"name":"GPT-4o","family":"gpt","release_date":"2024-05-13","architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}}
-        }"#,
-    );
+fn inferred_provider_blocks_match_native_model_ids() {
+    let catalog = catalog(r#"{"openai/placeholder":{}}"#);
     assert_eq!(
         catalog.order_model_ids([
-            "gpt-image-2",
-            "gpt-4o",
-            "codex-auto-review",
-            "gpt-5.5",
-            "gpt-image-2.5-sunburst",
-            "gpt-5.6-terra",
-            "gpt-image-2.5-flare",
-            "gpt-6-luna",
-        ]),
-        [
-            "gpt-5.6-terra",
-            "gpt-6-luna",
-            "gpt-5.5",
-            "gpt-4o",
-            "codex-auto-review",
-            "gpt-image-2.5-sunburst",
-            "gpt-image-2.5-flare",
-            "gpt-image-2",
-        ]
-    );
-}
-
-#[test]
-fn unresolved_company_text_models_stay_before_images() {
-    let catalog = catalog(
-        r#"{
-            "openai/gpt-5.5":{"name":"GPT-5.5","family":"gpt","release_date":"2026-04-01"},
-            "openai/gpt-image-2.5-sunburst":{"name":"GPT Image 2.5 Sunburst","family":"gpt-image","release_date":"2026-09-10"},
-            "openai/gpt-image-2":{"name":"GPT-Image-2","family":"gpt-image","release_date":"2026-04-21"}
-        }"#,
-    );
-    assert_eq!(
-        catalog.order_model_ids([
-            "gpt-reserve",
+            "grok-4",
             "mystery-model",
-            "gpt-image-2",
-            "codex-auto-review",
-            "gpt-5.5",
-            "gpt-image-2.5-sunburst",
+            "gemini-2.5",
+            "claude-sonnet-5",
+            "gpt-6-luna",
+            "o3",
         ]),
         [
-            "gpt-5.5",
-            "codex-auto-review",
-            "gpt-reserve",
-            "gpt-image-2.5-sunburst",
-            "gpt-image-2",
+            "gpt-6-luna",
+            "o3",
+            "claude-sonnet-5",
+            "gemini-2.5",
+            "grok-4",
             "mystery-model",
         ]
     );
 }
 
 #[test]
-fn company_blocks_do_not_merge_matching_family_names() {
+fn other_provider_blocks_are_alphabetical_and_stable() {
     let catalog = catalog(
         r#"{
-            "alpha/shared-new":{"name":"Shared New","family":"shared","release_date":"2026-01-01"},
-            "alpha/shared-old":{"name":"Shared Old","family":"shared","release_date":"2024-01-01"},
-            "beta/shared-model":{"name":"Shared Model","family":"shared","release_date":"2025-01-01"}
+            "beta/model-b":{},
+            "alpha/model-a2":{},
+            "alpha/model-a1":{},
+            "openai/model-o":{}
         }"#,
     );
     assert_eq!(
-        catalog.order_model_ids(["shared-old", "shared-model", "shared-new"]),
-        ["shared-new", "shared-old", "shared-model"]
+        catalog.order_model_ids(["model-b", "model-a2", "model-a1", "model-o"]),
+        ["model-o", "model-a2", "model-a1", "model-b"]
     );
 }
 
 #[test]
-fn catalog_families_group_versions_for_every_company_without_name_rules() {
-    let catalog = catalog(
-        r#"{
-            "anthropic/fable-new":{"family":"claude-fable","release_date":"2026-09-01"},
-            "anthropic/fable-old":{"family":"claude-fable","release_date":"2026-06-09"},
-            "anthropic/opus-new":{"family":"claude-opus","release_date":"2026-07-24"},
-            "anthropic/opus-old":{"family":"claude-opus","release_date":"2026-02-05"},
-            "anthropic/sonnet":{"family":"claude-sonnet","release_date":"2026-06-30"},
-            "anthropic/haiku":{"family":"claude-haiku","release_date":"2025-10-15"},
-            "google/flash-new":{"family":"gemini-flash","release_date":"2026-09-10"},
-            "google/flash-old":{"family":"gemini-flash","release_date":"2025-01-01"},
-            "google/pro":{"family":"gemini-pro","release_date":"2026-02-19"},
-            "openai/full-new":{"family":"gpt","release_date":"2026-09-04"},
-            "openai/full-old":{"family":"gpt","release_date":"2025-01-01"},
-            "openai/mini":{"family":"gpt-mini","release_date":"2026-03-05"},
-            "future-company/next-new":{"family":" NEW-LINE ","release_date":"2028-01-01"},
-            "future-company/next-old":{"family":"new-line","release_date":"2024-01-01"},
-            "future-company/mid":{"family":"other-line","release_date":"2027-01-01"}
-        }"#,
-    );
-    let expected = [
-        "full-new",
-        "full-old",
-        "mini",
-        "fable-new",
-        "fable-old",
-        "opus-new",
-        "opus-old",
-        "sonnet",
-        "haiku",
-        "flash-new",
-        "flash-old",
-        "pro",
-        "next-new",
-        "next-old",
-        "mid",
-    ];
-    assert_eq!(
-        catalog.order_model_ids(expected.into_iter().rev()),
-        expected
-    );
-    assert_eq!(
-        catalog.merge_display_order(expected.into_iter().rev(), &[]),
-        expected
-    );
-}
-
-#[test]
-fn anthropic_families_use_stable_tier_order_before_release_dates() {
-    let catalog = catalog(
-        r#"{
-            "anthropic/claude-opus-5-5":{"family":"claude-opus","release_date":"2026-09-22"},
-            "anthropic/claude-opus-5":{"family":"claude-opus","release_date":"2026-07-24"},
-            "anthropic/claude-fable-5-1":{"family":"claude-fable","release_date":"2026-09-01"},
-            "anthropic/claude-fable-5":{"family":"claude-fable","release_date":"2026-06-09"},
-            "anthropic/claude-sonnet-5":{"family":"claude-sonnet","release_date":"2026-06-30"},
-            "anthropic/claude-sonnet-4-6":{"family":"claude-sonnet","release_date":"2026-02-17"},
-            "anthropic/claude-haiku-4-5":{"family":"claude-haiku","release_date":"2025-10-15"},
-            "anthropic/claude-next-1":{"family":"claude-next","release_date":"2027-01-01"}
-        }"#,
-    );
-
-    assert_eq!(
-        catalog.order_model_ids([
-            "claude-opus-5-5",
-            "claude-haiku-4-5",
-            "claude-fable-5",
-            "claude-sonnet-4-6",
-            "claude-opus-5",
-            "claude-fable-5-1",
-            "claude-sonnet-5",
-            "claude-next-1",
-        ]),
-        [
-            "claude-fable-5-1",
-            "claude-fable-5",
-            "claude-opus-5-5",
-            "claude-opus-5",
-            "claude-sonnet-5",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5",
-            "claude-next-1",
-        ]
-    );
-}
-
-#[test]
-fn company_order_keeps_families_together_and_missing_families_last() {
-    let catalog = catalog(
-        r#"{
-            "alpha/new":{"family":"large","release_date":"2026-06-01"},
-            "alpha/old":{"family":"large","release_date":"2024-01-01"},
-            "alpha/middle":{"family":"small","release_date":"2026-01-01"},
-            "alpha/no-family":{"release_date":"2026-03-01"},
-            "alpha/undated":{"family":"small"},
-            "beta/other":{"family":"large","release_date":"2025-01-01"}
-        }"#,
-    );
-    assert_eq!(
-        catalog.order_model_ids([
-            "unknown",
-            "old",
-            "other",
-            "undated",
-            "middle",
-            "no-family",
-            "new"
-        ]),
-        [
-            "new",
-            "old",
-            "middle",
-            "undated",
-            "no-family",
-            "other",
-            "unknown"
-        ]
-    );
-}
-
-#[test]
-fn equal_dates_use_stable_family_and_model_ids() {
-    let catalog = catalog(
-        r#"{
-            "alpha/first":{"family":"small","release_date":"2026-01-01"},
-            "alpha/second":{"family":"large","release_date":"2026-01-01"},
-            "alpha/third":{"family":"small","release_date":"2026-01-01"}
-        }"#,
-    );
-    assert_eq!(
-        catalog.order_model_ids(["first", "second", "third"]),
-        ["second", "first", "third"]
-    );
-    assert_eq!(
-        catalog.order_model_ids(["third", "first", "second"]),
-        ["second", "first", "third"]
-    );
-}
-
-#[test]
-fn invalid_or_missing_dates_use_stable_ids_and_unknown_models_stay_last() {
-    let catalog = catalog(
-        r#"{
-            "alpha/first":{"name":"First","family":"alpha","release_date":"not-a-date"},
-            "alpha/second":{"name":"Second","family":"alpha"}
-        }"#,
-    );
-    assert_eq!(
-        catalog.order_model_ids(["second", "first", "unknown"]),
-        ["first", "second", "unknown"]
-    );
-    assert_eq!(
-        catalog.order_model_ids(["unknown", "first", "second"]),
-        ["first", "second", "unknown"]
-    );
-}
-
-#[test]
-fn clearing_saved_order_restores_catalog_groups_and_newest_models_first() {
+fn clearing_saved_order_restores_provider_blocks() {
     let catalog = catalog(
         r#"{
             "anthropic/claude-old":{"release_date":"2025-10-15","last_updated":"2026-09-19"},
@@ -504,13 +221,13 @@ fn clearing_saved_order_restores_catalog_groups_and_newest_models_first() {
     assert_eq!(
         reset,
         [
-            "gpt-new",
             "gpt-old",
-            "claude-new",
+            "gpt-new",
             "claude-old",
-            "gemini-new",
-            "gemini-old",
+            "claude-new",
             "gemini-undated",
+            "gemini-old",
+            "gemini-new",
             "unknown",
         ]
     );
@@ -530,7 +247,7 @@ fn saved_models_keep_their_relative_order() {
         ["old", "middle", "new"],
         &["old".to_string(), "new".to_string()],
     );
-    assert_eq!(ordered, ["middle", "old", "new"]);
+    assert_eq!(ordered, ["old", "middle", "new"]);
     assert_eq!(
         ordered
             .iter()
@@ -538,6 +255,24 @@ fn saved_models_keep_their_relative_order() {
             .map(String::as_str)
             .collect::<Vec<_>>(),
         ["old", "new"]
+    );
+}
+
+#[test]
+fn keeps_source_and_canonical_model_identity_separate() {
+    let catalog = catalog(
+        r#"{
+            "google-vertex/claude-sonnet-6-1": {
+                "name": "Claude Sonnet",
+                "canonical_model_id": "anthropic/claude-sonnet-6-1"
+            }
+        }"#,
+    );
+    let metadata = catalog.resolve("google-vertex/claude-sonnet-6-1").unwrap();
+    assert_eq!(metadata.source_model_id, "google-vertex/claude-sonnet-6-1");
+    assert_eq!(
+        metadata.canonical_model_id.as_deref(),
+        Some("anthropic/claude-sonnet-6-1")
     );
 }
 

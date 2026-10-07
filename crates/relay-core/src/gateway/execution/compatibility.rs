@@ -51,11 +51,13 @@ pub(super) fn incompatible_routes(
                 }
             }
 
-            // Reference model capabilities constrain conversions, never the
-            // participant's optional /models fields. Native payloads pass through.
+            // Reference model capabilities and exact source-route evidence
+            // constrain conversions. A raw /models listing alone is not
+            // capability evidence. Native payloads still pass through.
             if !route.adapter.is_passthrough() {
                 let capability = runtime.model_capabilities(&route.source_model);
-                let supported = capability.protocol_features();
+                let supported =
+                    capability.protocol_features_for_route(route.route_capability.as_ref());
                 if let Some(feature) = features
                     .iter()
                     .find(|feature| supported.get(feature) == Some(&CapabilityStatus::Unsupported))
@@ -71,9 +73,10 @@ pub(super) fn incompatible_routes(
                     }));
                 }
                 if effort.as_ref().is_some_and(|effort| {
-                    !capability.reasoning_effort_levels.is_empty()
-                        && !capability
-                            .reasoning_effort_levels
+                    let levels = capability
+                        .reasoning_effort_levels_for_route(route.route_capability.as_ref());
+                    !levels.is_empty()
+                        && !levels
                             .iter()
                             .any(|level| level.eq_ignore_ascii_case(effort))
                 }) {

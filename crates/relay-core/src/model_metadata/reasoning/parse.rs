@@ -86,6 +86,7 @@ pub(in crate::model_metadata) fn parse_reasoning_object(value: Option<&Value>) -
     let number = |keys: &[&str], nested_key: &str| {
         keys.iter()
             .find_map(|key| object.get(*key).and_then(Value::as_u64))
+            .or_else(|| object.get(nested_key).and_then(Value::as_u64))
             .or_else(|| {
                 budget_object
                     .and_then(|v| v.get(nested_key))

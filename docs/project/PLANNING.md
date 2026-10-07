@@ -173,28 +173,19 @@ source hash validation remain unchanged. Each merge indexes model versions and
 provider-scoped leaves once; persistence and publication reuse the same merged payload.
 Cache-file equality checks use a bounded buffer instead of reading a second
 complete file into memory.
-Backend ordering places OpenAI, Anthropic, Google,
-then xAI first, followed by other companies alphabetically. Within a company,
-stable provider family precedence is used where the provider has a canonical
-product-tier order: OpenAI is Astra, Sol, Terra, then Luna; Anthropic is Fable,
-Opus, Sonnet, then Haiku. A later release does not move a lower tier ahead of a
-higher one, and a new version inherits its place from the catalog family label
-rather than a model-ID list. Unknown families follow known families. Families
-that share the same numbered model generation and have no canonical tier form a
-cohort and use the newest release in that cohort, then normalized family IDs.
-Release/update dates order versions within a family. Missing families follow known families; missing dates
-follow dated versions in the same family. Equal dates use normalized family and
-model IDs as deterministic tie-breakers, so provider inventory order cannot
-change catalog ranking. Company/family ordering comes from validated catalog
-metadata except for the documented company and provider-family presentation
-orders; no model-version lists are maintained. Selectors show catalog families within each
-company while preserving backend order. Explicit manual order takes precedence.
-The model-order editor keeps the supplied sequence and company blocks draggable;
+Backend presentation groups OpenAI, Anthropic, Google and xAI first, followed by
+other providers alphabetically. Within a provider, Relay preserves the sequence
+returned by the connected account or API source. The metadata catalog supplies
+provider and family labels but never ranks versions by release date, family name,
+or model ID. Selectors show provider groups in backend order while preserving
+that source sequence. Explicit manual order takes precedence. The model-order
+editor keeps the supplied sequence and provider blocks draggable;
 selection and price editors first align member inventory to snapshot order, then
-show metadata families. IDs absent from that snapshot follow in stable ID order.
+show metadata families. IDs absent from that snapshot follow their inventory's
+first-seen order.
 An empty model
 order update clears the persisted override in desktop and server, restoring
-catalog ordering for existing and future models. Remote clients offer reset
+provider-block ordering for existing and future models. Remote clients offer reset
 only when the server advertises `model_order_reset`. Both hosts use the shared
 `relay-core` model-edit policy for canonical ID lookup, partial-order completion,
 and reasoning overrides. Storage, locking, rollback and transport error mapping
@@ -202,7 +193,7 @@ stay in the owning host. Member snapshots apply that same metadata/manual
 ordering to their complete discovered inventory,
 independently of membership and allow/deny rules. React appends configured IDs
 missing from inventory without moving discovered models. `gateway.modelCatalog`
-provides advisory company/family metadata for the complete member inventory and
+provides advisory provider/family metadata for the complete member inventory and
 saved rules/prices, so excluded models keep their group. It never grants routes;
 older snapshots fall back to metadata on operational model rows. Member editors open on
 model selection, with source prices and secondary settings on separate tabs. A later model missing from an exact saved allow/deny snapshot stays enabled unless it was explicitly excluded; editors persist only exclusions, and a `*` rule still limits the set.

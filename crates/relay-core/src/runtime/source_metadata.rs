@@ -182,9 +182,11 @@ impl GatewayRuntime {
         model: &str,
         client: WireApi,
     ) -> Vec<String> {
-        let fallback = self.model_capabilities(model).reasoning_effort_levels;
         let mut levels = Vec::new();
         for route in self.configured_executor_routes(key, model, &[client], false) {
+            let fallback = self
+                .model_capabilities(&route.source_model)
+                .reasoning_effort_levels_for_route(route.route_capability.as_ref());
             levels.extend(
                 fallback
                     .iter()

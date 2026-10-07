@@ -42,6 +42,18 @@ pub enum ProtocolFeature {
     Reasoning,
 }
 
+impl ProtocolFeature {
+    pub const ALL: [Self; 7] = [
+        Self::Text,
+        Self::Streaming,
+        Self::Images,
+        Self::FunctionTools,
+        Self::ToolChoice,
+        Self::StructuredOutput,
+        Self::Reasoning,
+    ];
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEndpointCapability {

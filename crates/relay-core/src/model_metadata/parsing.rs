@@ -8,7 +8,11 @@ use crate::model_metadata::reasoning::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub(super) fn parse_metadata(provider: &str, value: &Value) -> Option<ModelMetadata> {
+pub(super) fn parse_metadata(
+    source_model_id: &str,
+    provider: &str,
+    value: &Value,
+) -> Option<ModelMetadata> {
     let object = value.as_object()?;
     let string = |key: &str| {
         object
@@ -84,7 +88,9 @@ pub(super) fn parse_metadata(provider: &str, value: &Value) -> Option<ModelMetad
     reasoning_effort_levels = normalize_external_levels(reasoning_effort_levels);
 
     Some(ModelMetadata {
+        source_model_id: source_model_id.to_string(),
         provider: provider.to_string(),
+        canonical_model_id: string("canonical_model_id").or_else(|| string("canonicalModelId")),
         family: string("family").or_else(|| string("model_family")),
         name,
         release_date: string("release_date").filter(|date| order::date_key(date).is_some()),
@@ -98,13 +104,16 @@ pub(super) fn parse_metadata(provider: &str, value: &Value) -> Option<ModelMetad
             reasoning_method,
             reasoning_budget_min_tokens: object
                 .get("reasoning_budget_min_tokens")
-                .and_then(Value::as_u64),
+                .and_then(Value::as_u64)
+                .or(reasoning_options.budget[0]),
             reasoning_budget_max_tokens: object
                 .get("reasoning_budget_max_tokens")
-                .and_then(Value::as_u64),
+                .and_then(Value::as_u64)
+                .or(reasoning_options.budget[1]),
             reasoning_budget_default_tokens: object
                 .get("reasoning_budget_default_tokens")
-                .and_then(Value::as_u64),
+                .and_then(Value::as_u64)
+                .or(reasoning_options.budget[2]),
             reasoning_effort_levels,
             default_reasoning_effort: string("default_reasoning_effort")
                 .or_else(|| string("defaultReasoningEffort")),

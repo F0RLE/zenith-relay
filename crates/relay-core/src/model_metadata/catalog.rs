@@ -76,7 +76,7 @@ impl ModelMetadataCatalog {
             let provider = source_id
                 .split_once('/')
                 .map_or("", |(provider, _)| provider);
-            let Some(metadata) = parsing::parse_metadata(provider, value) else {
+            let Some(metadata) = parsing::parse_metadata(&source_id, provider, value) else {
                 continue;
             };
             let key = order::normalize(&source_id);
@@ -84,8 +84,9 @@ impl ModelMetadataCatalog {
             entries.insert(key.clone(), metadata);
 
             // Supplemental hosting catalogs must not make a canonical model
-            // lose its unqualified identity. Equal-priority collisions remain
-            // ambiguous; exact qualified IDs always resolve independently.
+            // lose its unqualified identity. Equal-priority conflicts remain
+            // ambiguous unless their semantic metadata is equivalent; exact
+            // qualified IDs always resolve independently.
             let priority = reference::identity_priority(value);
             match leaf_priorities.get(&leaf) {
                 Some(previous) if *previous < priority => continue,
@@ -102,8 +103,21 @@ impl ModelMetadataCatalog {
             }
             if let Some(previous) = leaf_matches.insert(leaf.clone(), key.clone()) {
                 if previous != key {
-                    leaf_matches.remove(&leaf);
-                    ambiguous_leaves.insert(leaf);
+                    // Share metadata only when descriptive identity and every
+                    // semantic field agree. The reference source ID is kept
+                    // for identity/provenance, but is not a semantic
+                    // capability field. Exact provider IDs remain separate;
+                    // this never merges routes or participant inventories.
+                    let current = &entries[&key];
+                    if current.name.is_some()
+                        && (current.family.is_some() || current.release_date.is_some())
+                        && equivalent_reference_metadata(&entries[&previous], current)
+                    {
+                        leaf_matches.insert(leaf, previous);
+                    } else {
+                        leaf_matches.remove(&leaf);
+                        ambiguous_leaves.insert(leaf);
+                    }
                 }
             }
         }
@@ -144,35 +158,32 @@ impl ModelMetadataCatalog {
             .map(|metadata| metadata.capabilities.reasoning_effort_levels.clone())
     }
 
-    /// Keep companies and catalog families together. Provider family precedence
-    /// is applied where the catalog has a stable product-tier order; release /
-    /// update dates then order versions inside each family. Presentation never
-    /// determines eligibility.
+    /// Keep provider blocks together while preserving the order supplied by
+    /// the account or API source inside each block. Presentation never
+    /// determines eligibility and the catalog must not invent a model ranking
+    /// from release dates, family names, or model IDs.
     pub fn order_model_ids<I, S>(&self, models: I) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let source = crate::normalize_model_ids(models);
-        let family_order = order::family_order(self, &source);
-        let mut indexed = source.into_iter().collect::<Vec<_>>();
-        indexed.sort_by(|left_id, right_id| {
+        let mut indexed = source.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by(|(left_position, left_id), (right_position, right_id)| {
             order::compare_metadata(
                 left_id,
                 self.resolve(left_id),
                 right_id,
                 self.resolve(right_id),
-                &family_order,
             )
-            .then_with(|| order::normalize(left_id).cmp(&order::normalize(right_id)))
-            .then_with(|| left_id.cmp(right_id))
+            .then_with(|| left_position.cmp(right_position))
         });
-        indexed
+        indexed.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Preserve the relative order explicitly saved by the user. Newly
-    /// discovered models are inserted at their catalog position around those
-    /// anchors instead of resetting the complete list.
+    /// discovered models are inserted at their provider-block position around
+    /// those anchors instead of resetting the complete list.
     pub fn merge_display_order<I, S>(&self, models: I, saved_order: &[String]) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
@@ -221,4 +232,18 @@ impl ModelMetadataCatalog {
         }
         ordered
     }
+}
+
+/// Compare catalog semantics while keeping source identity and provenance
+/// independent from the metadata used to resolve an unqualified display name.
+/// Canonical identity remains part of the comparison: two aliases are
+/// equivalent only when they point at the same canonical model (or both omit
+/// that relation).
+fn equivalent_reference_metadata(left: &ModelMetadata, right: &ModelMetadata) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.source_model_id.clear();
+    right.source_model_id.clear();
+    left.provider = right.provider.clone();
+    left == right
 }

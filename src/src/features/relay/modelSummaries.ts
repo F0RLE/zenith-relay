@@ -150,6 +150,8 @@ function mergeModelSummary(existing: ModelSummary, incoming: ModelSummary): Mode
     ? incoming.codexDisplayName
     : existing.codexDisplayName;
   merged.catalogProvider = preferIncoming(existing.catalogProvider, incoming.catalogProvider) ?? null;
+  merged.catalogSourceModelId = preferIncoming(existing.catalogSourceModelId, incoming.catalogSourceModelId) ?? null;
+  merged.catalogCanonicalModelId = preferIncoming(existing.catalogCanonicalModelId, incoming.catalogCanonicalModelId) ?? null;
   merged.catalogFamily = preferIncoming(existing.catalogFamily, incoming.catalogFamily) ?? null;
   merged.catalogName = preferIncoming(existing.catalogName, incoming.catalogName) ?? null;
   merged.catalogReleaseDate = preferIncoming(existing.catalogReleaseDate, incoming.catalogReleaseDate) ?? null;
@@ -194,6 +196,8 @@ function fallbackModelSummary(id: string): ModelSummary {
     codexVisible: false,
     codexDisplayName: id,
     catalogProvider: null,
+    catalogSourceModelId: null,
+    catalogCanonicalModelId: null,
     catalogFamily: null,
     catalogName: null,
     catalogReleaseDate: null,
