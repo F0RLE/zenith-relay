@@ -228,7 +228,7 @@
   min-width: 17px;
   height: 17px;
   padding: 0 4px;
-  border: 1px solid var(--relay-surface);
+  border: 1px solid transparent;
   border-radius: 9px;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
@@ -273,7 +273,8 @@
 .usage-pagination-form .relay-button { min-height: 34px; }
 
 .usage-pagination-form input[aria-invalid="true"] {
-  border-color: var(--relay-error);
+  border-color: transparent;
+  background: var(--relay-error-soft);
 }
 
 .usage-pagination-error {
@@ -666,7 +667,7 @@
 .request-details-error {
   margin-top: 16px;
   padding: 12px 14px 2px;
-  border: 1px solid color-mix(in srgb, var(--relay-error) 42%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: color-mix(in srgb, var(--relay-error) 7%, var(--relay-surface));
 }

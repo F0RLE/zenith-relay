@@ -218,7 +218,7 @@
 
 .mode-picker > button {
   background: var(--relay-surface);
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   color: var(--relay-text);
   font-weight: 650;
   box-shadow: var(--relay-shadow-soft);
@@ -393,7 +393,7 @@
 .sidebar-footer .relay-icon-button {
   width: 34px;
   flex: 0 0 34px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   background: var(--relay-surface);
 }
 
@@ -438,7 +438,7 @@
   min-height: 34px;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   background: var(--relay-surface);
 }
 
@@ -568,7 +568,7 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-text);
@@ -576,7 +576,7 @@
   line-height: 18px;
   font-weight: 500;
   cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
 
 .relay-button {
@@ -677,13 +677,13 @@
 }
 
 .relay-icon-button.danger:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-error-soft);
 }
 
 .relay-button:hover:not(:disabled),
 .relay-icon-button:hover:not(:disabled) {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-subtle);
 }
 
@@ -725,7 +725,7 @@
 
 .relay-button.primary:disabled,
 :root[data-theme="dark"] .relay-button.primary:disabled {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-border);
   color: var(--relay-secondary);
   box-shadow: none;
@@ -734,7 +734,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] .relay-button.primary:disabled {
-    border-color: var(--relay-border-strong);
+    border-color: transparent;
     background: var(--relay-border);
     color: var(--relay-secondary);
     box-shadow: none;
@@ -749,7 +749,7 @@
 }
 
 .relay-button.danger {
-  border-color: var(--relay-error);
+  border-color: transparent;
   color: var(--relay-error);
   background: transparent;
 }
@@ -1516,7 +1516,7 @@ textarea:focus-visible {
   align-items: flex-start;
   gap: 10px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--relay-error) 34%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-error-soft);
   color: var(--relay-error);

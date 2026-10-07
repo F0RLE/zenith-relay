@@ -128,8 +128,7 @@
 }
 
 .setup-language-menu .relay-option-trigger:focus-visible {
-  outline: 2px solid var(--relay-border-strong);
-  outline-offset: 2px;
+  outline: 0;
 }
 
 .relay-option-list.setup-language-options button[aria-selected="true"] {
@@ -369,7 +368,7 @@
   align-items: center;
   gap: 14px;
   padding: 16px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 8px;
   background: var(--relay-surface);
   color: var(--relay-text);
@@ -409,7 +408,7 @@
   height: 22px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--relay-border);
+  border: 0;
   border-radius: 50%;
   color: var(--relay-accent-hover);
   font-style: normal;
@@ -675,12 +674,12 @@
 }
 
 .source-connection-check-error {
-  border-color: color-mix(in srgb, var(--relay-danger) 32%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-danger-soft) 66%, var(--relay-surface));
 }
 
 .source-connection-check-warning {
-  border-color: color-mix(in srgb, var(--relay-warning) 32%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-warning-soft) 66%, var(--relay-surface));
 }
 
@@ -1036,7 +1035,7 @@
 }
 
 .source-price-input:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
 }
 
 .source-price-currency {
@@ -1072,7 +1071,8 @@
 }
 
 .source-price-input:has(input[aria-invalid="true"]) {
-  border-color: var(--relay-error);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--relay-error-soft) 72%, var(--relay-surface));
 }
 
 .source-price-row .icon-button,
@@ -1152,7 +1152,7 @@
 .mode-options button:not(.selected):hover,
 .api-provider-options button:not(.selected):hover,
 .client-options button:not(.selected):hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-subtle);
 }
 
@@ -1305,7 +1305,7 @@
   justify-content: center;
   gap: 7px;
   padding: 0 13px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-text);
@@ -1322,7 +1322,7 @@
 }
 
 .setup-oauth-reopen:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-subtle);
 }
 
@@ -1332,7 +1332,7 @@
 }
 
 .setup-current-profile-status.failed .setup-current-profile-mark {
-  border-color: color-mix(in srgb, var(--relay-error) 48%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-error-soft);
   color: var(--relay-error);
 }

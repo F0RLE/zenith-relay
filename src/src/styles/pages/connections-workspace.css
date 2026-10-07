@@ -81,8 +81,8 @@
 .proxy-select-all, .proxy-row-select { width: 20px; flex: 0 0 20px; display: grid; place-items: center; }
 .proxy-selected-count { color: var(--relay-muted); font-size: 12px; }
 .proxy-storage-list { display: grid; gap: 10px; }
-.proxy-storage-row { min-width: 0; display: grid; grid-template-columns: 20px minmax(180px, 1.4fr) minmax(160px, 1fr) minmax(110px, .7fr) auto; align-items: center; gap: 18px; padding: 18px; border: 1px solid var(--relay-border); border-radius: 10px; background: var(--relay-surface); }
-.proxy-storage-row.selected { border-color: var(--relay-border); background: color-mix(in srgb, var(--relay-accent-soft) 40%, var(--relay-surface)); }
+.proxy-storage-row { min-width: 0; display: grid; grid-template-columns: 20px minmax(180px, 1.4fr) minmax(160px, 1fr) minmax(110px, .7fr) auto; align-items: center; gap: 18px; padding: 18px; border: 1px solid transparent; border-radius: 10px; background: var(--relay-surface); }
+.proxy-storage-row.selected { border-color: transparent; background: color-mix(in srgb, var(--relay-accent-soft) 40%, var(--relay-surface)); }
 .proxy-storage-endpoint { min-width: 0; display: grid; gap: 7px; }
 .proxy-storage-endpoint > div { display: flex; align-items: center; min-width: 0; gap: 8px; }
 .proxy-storage-endpoint svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--relay-muted); }

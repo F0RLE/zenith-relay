@@ -262,7 +262,7 @@ svg {
   gap: 7px;
   min-width: 0;
   padding: 0 10px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-surface);
   color: var(--relay-secondary);
@@ -338,13 +338,13 @@ svg {
 }
 
 .status-badge.warning {
-  border-color: color-mix(in srgb, var(--relay-warning) 52%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-warning-soft);
   color: var(--relay-warning);
 }
 
 .status-badge.error {
-  border-color: color-mix(in srgb, var(--relay-error) 52%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-error-soft);
   color: var(--relay-error);
 }

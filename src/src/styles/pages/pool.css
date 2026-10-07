@@ -88,7 +88,7 @@
   align-items: center;
   gap: 2px;
   padding: 3px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-subtle);
   color: var(--relay-muted);
@@ -147,7 +147,7 @@
   padding: 0 6px;
   background: var(--relay-surface);
   color: var(--pool-speed-color);
-  box-shadow: var(--relay-shadow-soft);
+  box-shadow: none;
 }
 
 .pool-speed-control button.active span {
@@ -264,7 +264,7 @@
   gap: 9px;
   margin: -4px 0 12px;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--relay-danger) 36%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: color-mix(in srgb, var(--relay-danger) 8%, var(--relay-surface));
   color: var(--relay-danger);
@@ -318,7 +318,7 @@
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(82px, 1fr) auto auto auto;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-surface);
   box-shadow: var(--relay-shadow-soft);
@@ -355,21 +355,22 @@
 }
 
 .pool-member-card:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
 }
 
 .pool-member-card.selected {
-  border-color: var(--relay-border);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--relay-accent-soft) 55%, var(--relay-surface));
 }
 
 .pool-member-card.current {
-  border-color: var(--relay-border);
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
   box-shadow: var(--relay-shadow-soft);
 }
 
 .pool-member-card.last-used:not(.current) {
-  border-color: var(--relay-border);
+  border-color: transparent;
 }
 
 .pool-member-card.current::before {
@@ -812,7 +813,7 @@
   justify-content: center;
   gap: 8px;
   padding: 14px 12px;
-  border: 1px solid color-mix(in srgb, var(--relay-border) 86%, var(--relay-text));
+  border: 1px solid transparent;
   border-radius: 8px;
   background: var(--relay-surface);
   color: var(--relay-text);
@@ -824,7 +825,7 @@
 .pool-connection-option:focus-visible:not(:disabled) {
   border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent-soft) 45%, var(--relay-surface));
-  box-shadow: 0 6px 16px rgb(0 0 0 / 10%);
+  box-shadow: none;
   outline: none;
 }
 
@@ -838,7 +839,7 @@
   height: 52px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 10px;
   background: var(--relay-bg);
   color: var(--relay-text);
@@ -870,7 +871,7 @@
   min-height: 42px;
   margin-top: 14px;
   padding: 9px 11px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 8px;
   background: color-mix(in srgb, var(--relay-subtle) 55%, var(--relay-surface));
   color: var(--relay-text);
@@ -1084,7 +1085,7 @@
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 5px;
   background: var(--relay-surface);
   color: var(--relay-muted);
@@ -1093,7 +1094,7 @@
 }
 
 .pool-picker-health button:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   color: var(--relay-text);
 }
 

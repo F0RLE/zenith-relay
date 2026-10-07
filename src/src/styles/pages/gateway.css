@@ -620,7 +620,7 @@
   align-items: flex-start;
   gap: 10px;
   padding: 10px 11px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-surface);
   cursor: pointer;
@@ -632,7 +632,7 @@
 }
 
 .post-import-options > label:has(input:checked) {
-  border-color: var(--relay-border);
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-subtle) 72%, var(--relay-surface));
 }
 
@@ -758,7 +758,7 @@
   display: inline-flex;
   min-height: 36px;
   padding: 3px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-subtle);
 }
@@ -775,7 +775,7 @@
 .segmented button.active {
   background: var(--relay-surface);
   color: var(--relay-text);
-  box-shadow: var(--relay-shadow-soft);
+  box-shadow: none;
 }
 
 .pool-policy-form {
@@ -924,7 +924,7 @@
   align-items: center;
   gap: 8px;
   padding: 3px 6px 3px 10px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-subtle);
   cursor: grab;
@@ -932,7 +932,7 @@
 }
 
 .subscription-plan-order-row:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
 }
 
 .subscription-plan-order-row[data-dragging="true"] {
@@ -1024,7 +1024,7 @@
   align-items: center;
   gap: 16px;
   padding: 10px 12px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-subtle);
   cursor: pointer;
@@ -1032,7 +1032,7 @@
 }
 
 .setting-toggle:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
 }
 
 .setting-toggle:has(input:checked) {
@@ -1041,7 +1041,7 @@
 }
 
 .setting-toggle.warning {
-  border-color: color-mix(in srgb, var(--relay-warning) 42%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-warning) 6%, var(--relay-subtle));
 }
 
@@ -1074,7 +1074,7 @@
 
 .setting-toggle.codex-feature-toggle:has(input:checked),
 .setting-toggle.oauth-binding-reserve-toggle:has(input:checked) {
-  border-color: var(--relay-border);
+  border-color: transparent;
   background: transparent;
 }
 
