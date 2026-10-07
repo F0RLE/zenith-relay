@@ -13,6 +13,7 @@ release entries are kept concise and link to the corresponding tag.
   ([#86](https://github.com/F0RLE/zenith-relay/pull/86))
 - macOS uses system window buttons, including the native move and resize menu.
   The logo and title align left without reserving button space in full-screen mode.
+  ([#85](https://github.com/F0RLE/zenith-relay/pull/85))
 
 <!-- relay-notes:en -->
 
