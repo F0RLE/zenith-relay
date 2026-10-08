@@ -27,7 +27,7 @@ impl CodexTurnStateStore {
                 scope.model,
             ]
             .iter()
-            .any(|value| value.is_empty())
+            .any(|session_id| session_id.is_empty())
         {
             return None;
         }

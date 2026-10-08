@@ -95,21 +95,26 @@ pub(super) fn incompatible_routes(
                     .map(drop);
             }
 
-            let previous = if route.adapter.uses_local_continuation_state() {
+            let continuation_state = if route.adapter.uses_local_continuation_state() {
                 request
                     .get("previous_response_id")
                     .and_then(Value::as_str)
-                    .filter(|id| !id.trim().is_empty())
-                    .map(|id| {
-                        runtime.load_messages_bridge_state(&key.id, id, &route.candidate_id, now_ms)
+                    .filter(|response_id| !response_id.trim().is_empty())
+                    .map(|response_id| {
+                        runtime.load_messages_bridge_state(
+                            &key.id,
+                            response_id,
+                            &route.candidate_id,
+                            now_ms,
+                        )
                     })
                     .transpose()?
             } else {
                 None
             };
-            let mut body = request.clone();
+            let mut candidate_request = request.clone();
             tier_policy.prepare_for_candidate(
-                &mut body,
+                &mut candidate_request,
                 tier_policy.select_for_model(runtime, &route.source_model),
                 client,
             );
@@ -117,12 +122,12 @@ pub(super) fn incompatible_routes(
                 .adapter
                 .prepare_request(AdapterRequestContext {
                     client_wire_api: client,
-                    request: &body,
+                    request: &candidate_request,
                     model: &route.source_model,
                     stream,
                     reasoning_mode: route.reasoning_mode,
                     cache_write_ttl: route.cache_write_ttl,
-                    previous,
+                    previous: continuation_state,
                     response_scope: &route.candidate_id,
                     response_id_seed: "admission",
                 })
@@ -173,9 +178,9 @@ pub(super) fn basis_points_admission_error(
 }
 
 fn requested_features(request: &Value, stream: bool) -> Vec<ProtocolFeature> {
-    let mut result = vec![ProtocolFeature::Text];
+    let mut requested_features = vec![ProtocolFeature::Text];
     if stream {
-        result.push(ProtocolFeature::Streaming);
+        requested_features.push(ProtocolFeature::Streaming);
     }
     if request
         .get("tools")
@@ -183,75 +188,81 @@ fn requested_features(request: &Value, stream: bool) -> Vec<ProtocolFeature> {
         .is_some_and(|tools| !tools.is_empty())
         || ["input", "messages", "contents"]
             .iter()
-            .any(|key| request.get(key).is_some_and(has_tool))
+            .any(|field_name| request.get(field_name).is_some_and(has_tool))
     {
-        result.push(ProtocolFeature::FunctionTools);
+        requested_features.push(ProtocolFeature::FunctionTools);
     }
-    let present = |value: Option<&Value>| value.is_some_and(|v| !v.is_null());
+    let present =
+        |field_value: Option<&Value>| field_value.is_some_and(|field_value| !field_value.is_null());
     if present(request.get("tool_choice")) || present(request.get("toolConfig")) {
-        result.push(ProtocolFeature::ToolChoice);
+        requested_features.push(ProtocolFeature::ToolChoice);
     }
-    let structured = |value: Option<&Value>| {
-        value.is_some_and(|v| !v.is_null() && v.get("type").and_then(Value::as_str) != Some("text"))
+    let structured = |format_value: Option<&Value>| {
+        format_value.is_some_and(|format_value| {
+            !format_value.is_null()
+                && format_value.get("type").and_then(Value::as_str) != Some("text")
+        })
     };
     if structured(request.get("response_format"))
         || structured(request.pointer("/text/format"))
         || structured(request.pointer("/output_config/format"))
         || request
             .pointer("/generationConfig/responseMimeType")
-            .is_some_and(|v| !v.is_null() && v != "text/plain")
+            .is_some_and(|response_mime_type| {
+                !response_mime_type.is_null() && response_mime_type != "text/plain"
+            })
     {
-        result.push(ProtocolFeature::StructuredOutput);
+        requested_features.push(ProtocolFeature::StructuredOutput);
     }
     if present(request.pointer("/reasoning/effort"))
         || present(request.get("reasoning_effort"))
         || present(request.get("thinking"))
         || present(request.pointer("/generationConfig/thinkingConfig"))
     {
-        result.push(ProtocolFeature::Reasoning);
+        requested_features.push(ProtocolFeature::Reasoning);
     }
     if ["input", "messages", "contents"]
         .iter()
-        .any(|key| request.get(key).is_some_and(has_image))
+        .any(|field_name| request.get(field_name).is_some_and(has_image))
     {
-        result.push(ProtocolFeature::Images);
+        requested_features.push(ProtocolFeature::Images);
     }
-    result
+    requested_features
 }
 
-fn has_tool(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(has_tool),
-        Value::Object(object) => {
-            object.contains_key("tool_calls")
-                || object.contains_key("functionCall")
-                || object.contains_key("functionResponse")
-                || object.get("role").and_then(Value::as_str) == Some("tool")
+fn has_tool(request_value: &Value) -> bool {
+    match request_value {
+        Value::Array(request_items) => request_items.iter().any(has_tool),
+        Value::Object(request_object) => {
+            request_object.contains_key("tool_calls")
+                || request_object.contains_key("functionCall")
+                || request_object.contains_key("functionResponse")
+                || request_object.get("role").and_then(Value::as_str) == Some("tool")
                 || matches!(
-                    object.get("type").and_then(Value::as_str),
+                    request_object.get("type").and_then(Value::as_str),
                     Some("function_call" | "function_call_output" | "tool_use" | "tool_result")
                 )
                 || ["content", "parts"]
                     .iter()
-                    .any(|key| object.get(*key).is_some_and(has_tool))
+                    .any(|field_name| request_object.get(*field_name).is_some_and(has_tool))
         }
         _ => false,
     }
 }
 
-fn has_image(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(has_image),
-        Value::Object(object) => {
-            object.contains_key("inlineData")
-                || object.contains_key("fileData")
+fn has_image(request_value: &Value) -> bool {
+    match request_value {
+        Value::Array(request_items) => request_items.iter().any(has_image),
+        Value::Object(request_object) => {
+            request_object.contains_key("inlineData")
+                || request_object.contains_key("fileData")
                 || matches!(
-                    object.get("type").and_then(Value::as_str),
+                    request_object.get("type").and_then(Value::as_str),
                     Some("input_image" | "image_url" | "image")
                 )
                 || ["content", "parts"]
                     .iter()
-                    .any(|key| object.get(*key).is_some_and(has_image))
+                    .any(|field_name| request_object.get(*field_name).is_some_and(has_image))
         }
         _ => false,
     }

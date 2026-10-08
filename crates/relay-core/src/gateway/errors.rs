@@ -130,21 +130,21 @@ pub(super) struct PreservedUpstreamError {
 /// Preserves only the bounded, redacted error envelope across retries and bridges.
 pub(super) fn preserved_upstream_error(
     failure: &AttemptFailure,
-    body: &[u8],
+    response_body: &[u8],
 ) -> Option<PreservedUpstreamError> {
     preserved_error_details(
         failure,
-        crate::usage::UpstreamErrorDetails::from_body(None, body),
+        crate::usage::UpstreamErrorDetails::from_response_body(None, response_body),
     )
 }
 
 pub(super) fn preserved_upstream_error_value(
     failure: &AttemptFailure,
-    value: &Value,
+    error_payload: &Value,
 ) -> Option<PreservedUpstreamError> {
     preserved_error_details(
         failure,
-        crate::usage::UpstreamErrorDetails::from_value(None, value),
+        crate::usage::UpstreamErrorDetails::from_value(None, error_payload),
     )
 }
 
@@ -201,7 +201,7 @@ pub(super) fn canonical_upstream_status(status: StatusCode, category: &str) -> S
         upstream_failure_status(category)
     }
 }
-pub(super) fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
+pub(super) fn upstream_status_from_value(error_payload: &Value) -> Option<StatusCode> {
     [
         "/status",
         "/status_code",
@@ -217,11 +217,15 @@ pub(super) fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
         "/response/error/status_code",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path))
-    .find_map(|value| {
-        value
+    .filter_map(|path| error_payload.pointer(path))
+    .find_map(|status_value| {
+        status_value
             .as_u64()
-            .or_else(|| value.as_str().and_then(|status| status.trim().parse().ok()))
+            .or_else(|| {
+                status_value
+                    .as_str()
+                    .and_then(|status| status.trim().parse().ok())
+            })
             .and_then(|status| u16::try_from(status).ok())
             .filter(|status| *status > 0)
             .and_then(|status| StatusCode::from_u16(status).ok())
@@ -230,19 +234,25 @@ pub(super) fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
 
 pub(super) fn upstream_event_failure_category(
     event_type: Option<&str>,
-    value: &Value,
+    event_payload: &Value,
 ) -> Option<&'static str> {
     let event_type = if ["/error", "/response/error", "/body/error"]
         .iter()
-        .any(|path| value.pointer(path).is_some_and(|error| !error.is_null()))
-    {
+        .any(|path| {
+            event_payload
+                .pointer(path)
+                .is_some_and(|error| !error.is_null())
+        }) {
         Some("error")
     } else {
         event_type
     };
     match event_type {
         Some("response.completed" | "response.done") => {
-            match value.pointer("/response/status").and_then(Value::as_str) {
+            match event_payload
+                .pointer("/response/status")
+                .and_then(Value::as_str)
+            {
                 Some("failed" | "cancelled" | "canceled") => Some(error_codes::UPSTREAM_TERMINAL),
                 Some("incomplete") => Some(error_codes::RESPONSE_INCOMPLETE),
                 Some("completed") | None => None,
@@ -253,12 +263,12 @@ pub(super) fn upstream_event_failure_category(
         Some("response.cancelled" | "response.canceled") => Some(error_codes::UPSTREAM_CANCELLED),
         Some("response.failed" | "error") => {
             let classification = classify_upstream_error_value(
-                upstream_status_from_value(value).unwrap_or(StatusCode::BAD_GATEWAY),
-                value,
+                upstream_status_from_value(event_payload).unwrap_or(StatusCode::BAD_GATEWAY),
+                event_payload,
             );
             Some(
                 if classification.category == error_codes::UPSTREAM_BAD_GATEWAY
-                    && upstream_status_from_value(value).is_none()
+                    && upstream_status_from_value(event_payload).is_none()
                 {
                     error_codes::UPSTREAM_TERMINAL
                 } else {

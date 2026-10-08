@@ -25,24 +25,24 @@ pub(super) fn read_states(
 ) -> ([SourceState; 4], [Option<Value>; 4]) {
     let mut states = std::array::from_fn(|_| SourceState::new(None, None, now, age));
     let mut parsed = std::array::from_fn(|_| None);
-    let raw = match catalog_io::read_bytes(path, MAX_CACHE_BYTES) {
-        Ok(Some(raw)) => raw,
+    let cache_bytes = match catalog_io::read_bytes(path, MAX_CACHE_BYTES) {
+        Ok(Some(cache_bytes)) => cache_bytes,
         Ok(None) => return (states, parsed),
         Err(error) => {
             states[0] = loaded_state(Err(map_io_error(error, true)), now, age);
             return (states, parsed);
         }
     };
-    let header = match serde_json::from_slice::<CacheHeader<'_>>(&raw) {
+    let header = match serde_json::from_slice::<CacheHeader<'_>>(&cache_bytes) {
         Ok(header) => header,
-        Err(error) if error.is_data() => return read_legacy_states(path, &raw, now, age),
+        Err(error) if error.is_data() => return read_legacy_states(path, &cache_bytes, now, age),
         Err(_) => {
             states[0] = loaded_state(Err(ModelMetadataError::InvalidCache), now, age);
             return (states, parsed);
         }
     };
     if header.format.as_deref() != Some(CACHE_FORMAT) {
-        return read_legacy_states(path, &raw, now, age);
+        return read_legacy_states(path, &cache_bytes, now, age);
     }
     if header.schema_version.as_u64() != Some(2) {
         states[0] = loaded_state(Err(ModelMetadataError::InvalidCache), now, age);
@@ -50,13 +50,13 @@ pub(super) fn read_states(
     }
     // Borrow each source envelope from the bounded input. Do not allocate the
     // stored merged tree: it is only a derivative and never trusted on reload.
-    let sources = header
-        .sources
-        .and_then(|raw| serde_json::from_str::<BTreeMap<String, &RawValue>>(raw.get()).ok());
+    let sources = header.sources.and_then(|source_map_raw| {
+        serde_json::from_str::<BTreeMap<String, &RawValue>>(source_map_raw.get()).ok()
+    });
     if let Some(sources) = sources {
         for (i, state) in states.iter_mut().enumerate() {
-            if let Some(raw) = sources.get(SOURCES[i]) {
-                let envelope = serde_json::from_str::<SourceEnvelope>(raw.get())
+            if let Some(source_envelope_raw) = sources.get(SOURCES[i]) {
+                let envelope = serde_json::from_str::<SourceEnvelope>(source_envelope_raw.get())
                     .map_err(|_| ModelMetadataError::InvalidCache)
                     .and_then(|envelope| {
                         parsed[i] = Some(envelope.validate(i)?);
@@ -72,17 +72,17 @@ pub(super) fn read_states(
 
 fn read_legacy_states(
     path: &Path,
-    raw: &[u8],
+    cache_bytes: &[u8],
     now: u64,
     age: u64,
 ) -> ([SourceState; 4], [Option<Value>; 4]) {
     let mut states = std::array::from_fn(|_| SourceState::new(None, None, now, age));
     let mut parsed = std::array::from_fn(|_| None);
-    let envelope = serde_json::from_slice::<MetadataCacheEnvelope>(raw)
+    let envelope = serde_json::from_slice::<MetadataCacheEnvelope>(cache_bytes)
         .map_err(|_| ModelMetadataError::InvalidCache)
         .and_then(|envelope| {
             envelope.validate()?;
-            let payload = serde_json::value::to_raw_value(&envelope.payload)
+            let legacy_payload = serde_json::value::to_raw_value(&envelope.payload)
                 .map(Arc::from)
                 .map_err(|_| ModelMetadataError::InvalidCache)?;
             parsed[0] = Some(envelope.payload);
@@ -93,7 +93,7 @@ fn read_legacy_states(
                 last_modified: envelope.last_modified,
                 fetched_at_ms: envelope.fetched_at_ms,
                 stale: envelope.stale,
-                payload,
+                payload: legacy_payload,
             })
         });
     states[0] = loaded_state(envelope, now, age);
@@ -102,8 +102,8 @@ fn read_legacy_states(
             &path.with_file_name(file),
             MAX_AUXILIARY_RESPONSE_BYTES,
         ) {
-            let validated = envelope.validate(i).map(|payload| {
-                parsed[i] = Some(payload);
+            let validated = envelope.validate(i).map(|validated_payload| {
+                parsed[i] = Some(validated_payload);
                 envelope
             });
             states[i] = loaded_state(validated, now, age);

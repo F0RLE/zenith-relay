@@ -126,22 +126,22 @@ fn known_non_native_model_publishes_reference_context_for_auto_compact() {
         .unwrap();
     let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
     let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
-    let entry = &response["models"][0];
-    assert_eq!(entry["input_modalities"], json!(["text"]));
-    assert_eq!(entry["context_window"], 64_000);
-    assert_eq!(entry["max_context_window"], 64_000);
-    assert_eq!(entry["auto_compact_token_limit"], 57_600);
-    assert_eq!(entry["effective_context_window_percent"], 95);
-    assert_eq!(entry["supports_parallel_tool_calls"], true);
-    assert_eq!(entry["default_reasoning_level"], "high");
+    let model_row = &response["models"][0];
+    assert_eq!(model_row["input_modalities"], json!(["text"]));
+    assert_eq!(model_row["context_window"], 64_000);
+    assert_eq!(model_row["max_context_window"], 64_000);
+    assert_eq!(model_row["auto_compact_token_limit"], 57_600);
+    assert_eq!(model_row["effective_context_window_percent"], 95);
+    assert_eq!(model_row["supports_parallel_tool_calls"], true);
+    assert_eq!(model_row["default_reasoning_level"], "high");
     assert_eq!(
-        entry["supported_reasoning_levels"]
+        model_row["supported_reasoning_levels"]
             .as_array()
             .unwrap()
             .len(),
         2
     );
-    assert!(codex_catalog_entry_is_compatible(entry));
+    assert!(codex_catalog_entry_is_compatible(model_row));
 }
 #[test]
 fn messages_bridge_does_not_invent_codex_ultra_from_max() {

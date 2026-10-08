@@ -49,7 +49,7 @@ fn responses_lite_header(
                 runtime
                     .codex_model_responses_lite_candidates(resolved_model)
                     .iter()
-                    .any(|id| id == candidate_id)
+                    .any(|available_candidate_id| available_candidate_id == candidate_id)
             }))
         .then(|| HeaderValue::from_static("true"))
     })
@@ -279,7 +279,7 @@ pub(super) struct ResponsesItemPrefixRepairs<'a> {
 /// closed with `settle_rotation_repair` before any rejection settlement.
 pub(super) fn repair_responses_item_prefixes(
     request: &mut Value,
-    body: &[u8],
+    error_response_body: &[u8],
     enabled: bool,
     repairs: &mut ResponsesItemPrefixRepairs<'_>,
     tried: &mut HashSet<String>,
@@ -289,21 +289,21 @@ pub(super) fn repair_responses_item_prefixes(
     enabled
         && (repair_once(
             repairs.function_ids,
-            responses_function_item_id_requires_fc_prefix(body),
+            responses_function_item_id_requires_fc_prefix(error_response_body),
             tried,
             candidate_id,
             lease,
             || repair_call_prefixed_function_item_ids(request),
         ) || repair_once(
             repairs.custom_tool_ids,
-            responses_custom_tool_item_id_requires_ctc_prefix(body),
+            responses_custom_tool_item_id_requires_ctc_prefix(error_response_body),
             tried,
             candidate_id,
             lease,
             || repair_custom_tool_item_ids(request),
         ) || repair_once(
             repairs.message_ids,
-            responses_message_item_id_requires_msg_prefix(body),
+            responses_message_item_id_requires_msg_prefix(error_response_body),
             tried,
             candidate_id,
             lease,
@@ -329,7 +329,9 @@ pub(super) struct RequestFailureInput<'a> {
     pub(super) request_id: &'a str,
 }
 
-pub(super) fn finish_request_failure(input: RequestFailureInput<'_>) -> Response<Body> {
+pub(super) fn finish_request_failure(
+    request_failure_input: RequestFailureInput<'_>,
+) -> Response<Body> {
     let RequestFailureInput {
         runtime,
         key,
@@ -342,7 +344,7 @@ pub(super) fn finish_request_failure(input: RequestFailureInput<'_>) -> Response
         preserved,
         failure_origin,
         request_id,
-    } = input;
+    } = request_failure_input;
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
         if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             key,
@@ -507,10 +509,10 @@ pub(super) fn bind_responses_turn(
     candidate_id: &str,
     request: &Value,
     source_model: &str,
-    body: &[u8],
+    response_body: &[u8],
     capture_replay: bool,
 ) {
-    if let Ok(response) = serde_json::from_slice::<Value>(body) {
+    if let Ok(response) = serde_json::from_slice::<Value>(response_body) {
         if capture_replay {
             runtime.capture_native_responses_replay(
                 local_key_id,
@@ -526,7 +528,7 @@ pub(super) fn bind_responses_turn(
         }
     }
     runtime.bind_response_affinity(
-        response_id_from_bytes(body).as_deref(),
+        response_id_from_bytes(response_body).as_deref(),
         candidate_id,
         now_ms(),
     );

@@ -72,7 +72,9 @@ pub(super) struct CollectedRejection<'a> {
 
 /// Classify one unsuccessful upstream response. Repairs and recoverable route
 /// failures continue the attempt loop; a terminal response leaves it.
-pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> FailureStep {
+pub(super) async fn handle_upstream_failure(
+    upstream_failure_input: UpstreamFailureInput<'_>,
+) -> FailureStep {
     let UpstreamFailureInput {
         upstream,
         status,
@@ -113,7 +115,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
                 account_route,
                 forwarded_headers,
             },
-    } = input;
+    } = upstream_failure_input;
     let mut event = usage_event(
         UsageAttempt {
             request_id,
@@ -134,7 +136,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         Err(_) if retryable_status(status, has_previous_response_id) => {
             let failure = AttemptFailure::status_with_body(status, None);
             event.error_category = Some(failure.category.to_string());
-            let state = settle_status_failure(
+            let failure_state = settle_status_failure(
                 runtime,
                 lease,
                 source_model,
@@ -143,7 +145,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
                 response_headers,
                 None,
             );
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;

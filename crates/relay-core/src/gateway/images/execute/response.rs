@@ -34,12 +34,12 @@ pub(super) fn handle_collected_image(
 ) -> ImageAttemptStep {
     if !status.is_success() {
         let upstream_error =
-            crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
+            crate::usage::UpstreamErrorDetails::from_response_body(Some(status.as_u16()), &bytes);
         let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
         super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
         if retryable_failure(status, failure.category, false) || capability_failure {
-            let state = if capability_failure {
+            let failure_state = if capability_failure {
                 settle_image_capability_failure(
                     runtime,
                     lease,
@@ -67,7 +67,7 @@ pub(super) fn handle_collected_image(
                 }),
             );
             event.upstream_error = Some(upstream_error);
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(failure);
         }
@@ -76,7 +76,7 @@ pub(super) fn handle_collected_image(
         event.upstream_error = Some(upstream_error);
         emit_usage(runtime, event);
         let origin = route_error_origin(route).for_category(failure.category);
-        let response = super::super::super::response::proxy_error_response(
+        let error_response = super::super::super::response::proxy_error_response(
             status,
             &response_headers,
             &bytes,
@@ -84,7 +84,7 @@ pub(super) fn handle_collected_image(
             failure.category,
             Some(observed.request_id),
         );
-        return ImageAttemptStep::Respond(response);
+        return ImageAttemptStep::Respond(error_response);
     }
 
     if !account_route {
@@ -119,7 +119,7 @@ pub(super) fn handle_collected_image(
             ) {
                 lease.settle_rotation_unknown(now_ms());
             }
-            let state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
+            let failure_state = if failure.category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
                 settle_image_capability_failure(
                     runtime,
                     lease,
@@ -143,7 +143,7 @@ pub(super) fn handle_collected_image(
                 details.http_status = Some(status.as_u16());
                 *details
             });
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(AttemptFailure::classified_with_hint(
                 failure.status,

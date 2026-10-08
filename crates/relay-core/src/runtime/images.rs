@@ -4,24 +4,24 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeSet;
 
 pub(crate) fn is_image_model_id(model: &str) -> bool {
-    let model = crate::model_id_key(model);
-    model.starts_with("gpt-image-") || model.starts_with("dall-e-")
+    let model_id = crate::model_id_key(model);
+    model_id.starts_with("gpt-image-") || model_id.starts_with("dall-e-")
 }
 
-pub fn normalize_image_base_model(value: Option<String>) -> Result<Option<String>> {
-    let Some(value) = value else {
+pub fn normalize_image_base_model(model_id: Option<String>) -> Result<Option<String>> {
+    let Some(model_id) = model_id else {
         return Ok(None);
     };
-    let value = value.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+    let model_id = model_id.trim();
+    if model_id.is_empty() || model_id.eq_ignore_ascii_case("auto") {
         return Ok(None);
     }
-    if !is_valid_model_id(value) {
+    if !is_valid_model_id(model_id) {
         return Err(Error::Validation(
             "image base model id is invalid".to_string(),
         ));
     }
-    Ok(Some(value.to_string()))
+    Ok(Some(model_id.to_string()))
 }
 
 #[cfg(test)]
@@ -94,7 +94,7 @@ fn image_auto_model_is_supported(model: &str) -> bool {
     let major = version
         .split(|character: char| !character.is_ascii_digit())
         .next()
-        .and_then(|value| value.parse::<u32>().ok());
+        .and_then(|version_text| version_text.parse::<u32>().ok());
     major.is_some_and(|major| major >= 5) && image_main_model_is_compatible(model)
 }
 

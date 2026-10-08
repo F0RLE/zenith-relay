@@ -7,7 +7,7 @@ pub(super) struct AssembleImport<'a> {
     pub(super) ordinal: usize,
     pub(super) format: ImportFormat,
     pub(super) source_file: Option<&'a str>,
-    pub(super) object: &'a Map<String, Value>,
+    pub(super) import_object: &'a Map<String, Value>,
     pub(super) meta: Option<&'a Map<String, Value>>,
     pub(super) tags_value: Option<&'a Value>,
     pub(super) use_api_key: bool,
@@ -26,12 +26,14 @@ pub(super) struct AssembleImport<'a> {
     pub(super) warnings: Vec<ImportWarning>,
 }
 
-pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedItem, ImportIssue> {
+pub(super) fn assemble_parsed_item(
+    import_input: AssembleImport<'_>,
+) -> Result<ParsedItem, ImportIssue> {
     let AssembleImport {
         ordinal,
         format,
         source_file,
-        object,
+        import_object,
         meta,
         tags_value,
         use_api_key,
@@ -67,7 +69,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
                 metadata_rejected,
             },
         mut warnings,
-    } = input;
+    } = import_input;
     let email_value = email.as_deref();
     let ImportIdentity {
         identity_key,
@@ -97,7 +99,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         _ => format!("Account {}", ordinal + 1),
     };
     let label_value = string_field(
-        object,
+        import_object,
         &[
             "name",
             "label",
@@ -107,7 +109,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
             "apiProviderName",
         ],
     )
-    .or_else(|| meta.and_then(|data| string_field(data, &["name", "label"])));
+    .or_else(|| meta.and_then(|metadata_object| string_field(metadata_object, &["name", "label"])));
     let mut label = safe_label(label_value).unwrap_or_else(|| identity.clone());
     if label == "unknown" || label.is_empty() {
         label = fallback_label;
@@ -199,7 +201,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         existing: false,
         warnings,
     };
-    let item = ParsedImportItem {
+    let parsed_import_item = ParsedImportItem {
         item_id,
         identity_key,
         label,
@@ -219,5 +221,8 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         totp_secret: totp_secret.map(RedactedValue::new),
         secrets,
     };
-    Ok(ParsedItem { preview, item })
+    Ok(ParsedItem {
+        preview,
+        parsed_item: parsed_import_item,
+    })
 }

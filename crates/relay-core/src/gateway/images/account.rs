@@ -55,13 +55,13 @@ impl ImageAttempt<'_> {
 }
 
 pub(super) fn direct_request_body(request: &PreparedImageRequest, source_model: &str) -> Vec<u8> {
-    if request
-        .content_type
-        .to_str()
-        .is_ok_and(|value| value.to_ascii_lowercase().starts_with("application/json"))
-    {
-        let mut fields = request.fields.clone();
-        fields.insert("model".to_string(), Value::String(source_model.to_string()));
+    if request.content_type.to_str().is_ok_and(|content_type| {
+        content_type
+            .to_ascii_lowercase()
+            .starts_with("application/json")
+    }) {
+        let mut request_fields = request.fields.clone();
+        request_fields.insert("model".to_string(), Value::String(source_model.to_string()));
         // GPT Image models always return base64 image data. Older clients may
         // still send the legacy Image API response_format switch; forwarding
         // it makes current GPT Image providers reject an otherwise valid
@@ -69,9 +69,9 @@ pub(super) fn direct_request_body(request: &PreparedImageRequest, source_model: 
         // public format, so it is safe to omit this provider-incompatible
         // field for the new family.
         if crate::model_id_key(source_model).starts_with("gpt-image-") {
-            fields.remove("response_format");
+            request_fields.remove("response_format");
         }
-        return serde_json::to_vec(&fields).unwrap_or_else(|_| request.raw_body.to_vec());
+        return serde_json::to_vec(&request_fields).unwrap_or_else(|_| request.raw_body.to_vec());
     }
     request.raw_body.to_vec()
 }
@@ -81,16 +81,16 @@ pub(super) fn build_account_request(
     endpoint: ImageEndpoint,
     main_model: &str,
 ) -> Value {
-    let mut tool = Map::new();
-    tool.insert(
+    let mut image_tool = Map::new();
+    image_tool.insert(
         "type".to_string(),
         Value::String("image_generation".to_string()),
     );
-    tool.insert(
+    image_tool.insert(
         "action".to_string(),
         Value::String(endpoint.action().to_string()),
     );
-    tool.insert(
+    image_tool.insert(
         "model".to_string(),
         Value::String(request.resolved_model.clone()),
     );
@@ -104,24 +104,31 @@ pub(super) fn build_account_request(
     if endpoint == ImageEndpoint::Edits {
         string_fields.push("input_fidelity");
     }
-    for name in string_fields {
-        if let Some(value) = request
+    for field_name in string_fields {
+        if let Some(field_text) = request
             .fields
-            .get(name)
+            .get(field_name)
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|field_text| !field_text.is_empty())
         {
-            tool.insert(name.to_string(), Value::String(value.to_string()));
+            image_tool.insert(
+                field_name.to_string(),
+                Value::String(field_text.to_string()),
+            );
         }
     }
-    for name in ["n", "output_compression", "partial_images"] {
-        if let Some(value) = request.fields.get(name).filter(|value| value.is_number()) {
-            tool.insert(name.to_string(), value.clone());
+    for field_name in ["n", "output_compression", "partial_images"] {
+        if let Some(numeric_field) = request
+            .fields
+            .get(field_name)
+            .filter(|field_value| field_value.is_number())
+        {
+            image_tool.insert(field_name.to_string(), numeric_field.clone());
         }
     }
     if let Some(mask) = request.mask_image.as_ref() {
-        tool.insert("input_image_mask".to_string(), json!({"image_url": mask}));
+        image_tool.insert("input_image_mask".to_string(), json!({"image_url": mask}));
     }
 
     let mut content = vec![json!({
@@ -148,7 +155,7 @@ pub(super) fn build_account_request(
             "role": "user",
             "content": content,
         }],
-        "tools": [Value::Object(tool)],
+        "tools": [Value::Object(image_tool)],
     })
 }
 

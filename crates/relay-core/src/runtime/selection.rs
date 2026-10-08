@@ -15,14 +15,17 @@ impl GatewayRuntime {
         stream: bool,
     ) -> Vec<ExecutorRoute> {
         let scope = key.scope_snapshot();
-        let ids = self
+        let candidate_ids = self
             .lock_scheduler()
             .candidates()
             .filter(|candidate| candidate.is_configured(model, protocols, &scope))
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
-        ids.iter()
-            .filter_map(|id| self.executor_route(id, model, &scope, protocols, stream))
+        candidate_ids
+            .iter()
+            .filter_map(|candidate_id| {
+                self.executor_route(candidate_id, model, &scope, protocols, stream)
+            })
             .collect()
     }
 

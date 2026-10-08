@@ -61,7 +61,7 @@ pub(super) struct OpenStreamInput<'a> {
 
 /// Open a client SSE response, or repair a bootstrap failure before any output
 /// bytes are forwarded.
-pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedStream {
+pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> OpenedStream {
     let OpenStreamInput {
         upstream,
         status,
@@ -96,7 +96,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
         last_failure,
         last_failure_origin,
         last_preserved_upstream_error,
-    } = input;
+    } = stream_input;
     let legacy_call_id_repair_attempted = &mut repairs.legacy_call_id;
     let native_replay_attempted = &mut repairs.native_replay;
     let stale_tool_history_recovered = &mut repairs.stale_tool_history;
@@ -303,11 +303,11 @@ fn respond_opened_stream(
     remaining: UpstreamStream,
     account_route: bool,
 ) -> OpenedStream {
-    let mut response = execution.into_response(status, headers.clone(), first, remaining);
+    let mut stream_response = execution.into_response(status, headers.clone(), first, remaining);
     if account_route {
-        relay_account_response_header(forwarded_headers, &headers, &mut response);
+        relay_account_response_header(forwarded_headers, &headers, &mut stream_response);
     }
-    OpenedStream::Respond(response)
+    OpenedStream::Respond(stream_response)
 }
 
 #[allow(clippy::too_many_arguments)]

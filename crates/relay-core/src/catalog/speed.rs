@@ -6,17 +6,17 @@ use crate::DefaultServiceTier;
 /// sources. Existing family identity handles future versions and namespaces;
 /// source tier lists, availability and cooldowns do not change these choices.
 pub fn model_service_tiers(model: &str, provider: Option<&str>) -> &'static [DefaultServiceTier] {
-    let model = model.trim();
-    if !is_valid_model_token(model) {
+    let model_id = model.trim();
+    if !is_valid_model_token(model_id) {
         return &[];
     }
     let openai = provider
         .filter(|provider| !provider.trim().is_empty())
         .map_or_else(
-            || reasoning_policy_key(model) == "group:openai",
+            || reasoning_policy_key(model_id) == "group:openai",
             |provider| provider.eq_ignore_ascii_case("openai"),
         );
-    if openai && codex_model_is_picker_eligible(model) {
+    if openai && codex_model_is_picker_eligible(model_id) {
         &[
             DefaultServiceTier::Standard,
             DefaultServiceTier::Fast,

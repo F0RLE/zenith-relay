@@ -5,13 +5,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 pub(in crate::protocol::adapter) fn bridged_namespace_tool_name(
     namespace: &str,
-    name: &str,
+    tool_name: &str,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update((namespace.len() as u64).to_le_bytes());
     hasher.update(namespace.as_bytes());
-    hasher.update((name.len() as u64).to_le_bytes());
-    hasher.update(name.as_bytes());
+    hasher.update((tool_name.len() as u64).to_le_bytes());
+    hasher.update(tool_name.as_bytes());
     let digest = hasher.finalize();
     format!("relay_ns_{}", hex::encode(&digest[..12]))
 }
@@ -21,27 +21,30 @@ pub(in crate::protocol::adapter) fn bridged_namespace_tool_name(
 /// bridges need to combine those with the root catalog before they translate
 /// their distinct upstream contracts.
 pub(in crate::protocol::adapter) fn request_tool_catalog(
-    object: &Map<String, Value>,
+    request_object: &Map<String, Value>,
 ) -> AdapterResult<Option<Vec<Value>>> {
     let mut declared = false;
     let mut tools = Vec::new();
-    if let Some(root) = object.get("tools") {
+    if let Some(root_tools) = request_object.get("tools") {
         declared = true;
         tools.extend(
-            root.as_array()
+            root_tools
+                .as_array()
                 .ok_or_else(AdapterError::invalid_request)?
                 .iter()
                 .cloned(),
         );
     }
-    if let Some(input) = object.get("input").and_then(Value::as_array) {
-        for item in input {
-            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+    if let Some(input_items) = request_object.get("input").and_then(Value::as_array) {
+        for additional_tools_item in input_items {
+            if additional_tools_item.get("type").and_then(Value::as_str) != Some("additional_tools")
+            {
                 continue;
             }
             declared = true;
             tools.extend(
-                item.get("tools")
+                additional_tools_item
+                    .get("tools")
                     .and_then(Value::as_array)
                     .ok_or_else(AdapterError::invalid_request)?
                     .iter()
@@ -90,7 +93,7 @@ impl ResponsesToolKind {
             None if tool
                 .get("name")
                 .and_then(Value::as_str)
-                .is_some_and(|name| !name.trim().is_empty()) =>
+                .is_some_and(|tool_name| !tool_name.trim().is_empty()) =>
             {
                 Ok(Self::Function)
             }
@@ -99,9 +102,9 @@ impl ResponsesToolKind {
     }
 
     pub(in crate::protocol::adapter) fn from_call_item(
-        item: &Map<String, Value>,
+        call_item: &Map<String, Value>,
     ) -> AdapterResult<Self> {
-        match item.get("type").and_then(Value::as_str) {
+        match call_item.get("type").and_then(Value::as_str) {
             Some("function_call") => Ok(Self::Function),
             Some("custom_tool_call") => Ok(Self::Custom),
             _ => Err(AdapterError::invalid_request()),
@@ -109,9 +112,9 @@ impl ResponsesToolKind {
     }
 
     pub(in crate::protocol::adapter) fn from_output_item(
-        item: &Map<String, Value>,
+        output_item: &Map<String, Value>,
     ) -> AdapterResult<Self> {
-        match item.get("type").and_then(Value::as_str) {
+        match output_item.get("type").and_then(Value::as_str) {
             Some("function_call_output") => Ok(Self::Function),
             Some("custom_tool_call_output") => Ok(Self::Custom),
             _ => Err(AdapterError::invalid_request()),

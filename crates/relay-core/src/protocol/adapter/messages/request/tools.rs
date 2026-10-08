@@ -23,7 +23,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|namespace_name| !namespace_name.is_empty())
                 else {
                     continue;
                 };
@@ -31,7 +31,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
                     .get("description")
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|value| !value.is_empty());
+                    .filter(|description_text| !description_text.is_empty());
                 let Some(children) = tool.get("tools").and_then(Value::as_array) else {
                     continue;
                 };
@@ -73,15 +73,15 @@ fn translate_client_tool(
     namespace_description: Option<&str>,
 ) -> AdapterResult<()> {
     let kind = ResponsesToolKind::from_definition(tool)?;
-    let name = tool
+    let tool_name = tool
         .get("name")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|tool_name| !tool_name.is_empty())
         .ok_or_else(AdapterError::unsupported_tool)?;
     let upstream_name = namespace
-        .map(|namespace| bridged_namespace_tool_name(namespace, name))
-        .unwrap_or_else(|| name.to_string());
+        .map(|namespace| bridged_namespace_tool_name(namespace, tool_name))
+        .unwrap_or_else(|| tool_name.to_string());
     if client_tools.contains_key(&upstream_name) {
         return Err(AdapterError::unsupported_tool());
     }
@@ -106,7 +106,10 @@ fn translate_client_tool(
                 _ => return Err(AdapterError::unsupported_tool()),
             }
             translated.insert("input_schema".to_string(), Value::Object(schema.clone()));
-            if let Some(strict) = tool.get("strict").filter(|value| !value.is_null()) {
+            if let Some(strict) = tool
+                .get("strict")
+                .filter(|strict_value| !strict_value.is_null())
+            {
                 if !strict.is_boolean() {
                     return Err(AdapterError::invalid_request());
                 }
@@ -131,9 +134,9 @@ fn translate_client_tool(
         .get("description")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .filter(|description_text| !description_text.is_empty());
     if let Some(namespace) = namespace {
-        let mut description = format!("Codex namespace `{namespace}` tool `{name}`.");
+        let mut description = format!("Codex namespace `{namespace}` tool `{tool_name}`.");
         if let Some(namespace_description) = namespace_description {
             description.push_str(&format!(" {namespace_description}"));
         }
@@ -151,7 +154,7 @@ fn translate_client_tool(
         upstream_name,
         ClientToolTarget {
             kind,
-            name: name.to_string(),
+            name: tool_name.to_string(),
             namespace: namespace.map(str::to_string),
         },
     );
@@ -162,26 +165,27 @@ fn translate_client_tool(
 pub(in crate::protocol::adapter) fn custom_tool_input_schema(
     tool: &Map<String, Value>,
 ) -> AdapterResult<Value> {
-    let mut input = Map::from_iter([("type".to_string(), Value::String("string".to_string()))]);
-    if let Some(format) = tool.get("format") {
-        let format = format
+    let mut input_schema =
+        Map::from_iter([("type".to_string(), Value::String("string".to_string()))]);
+    if let Some(format_value) = tool.get("format") {
+        let format_object = format_value
             .as_object()
             .ok_or_else(AdapterError::unsupported_tool)?;
-        match format.get("type").and_then(Value::as_str) {
+        match format_object.get("type").and_then(Value::as_str) {
             Some("text") => {}
             Some("grammar") => {
-                let syntax = format
+                let syntax = format_object
                     .get("syntax")
                     .and_then(Value::as_str)
                     .filter(|syntax| matches!(*syntax, "lark" | "regex"))
                     .ok_or_else(AdapterError::unsupported_tool)?;
-                let definition = format
+                let definition = format_object
                     .get("definition")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|definition| !definition.is_empty())
                     .ok_or_else(AdapterError::unsupported_tool)?;
-                input.insert(
+                input_schema.insert(
                     "description".to_string(),
                     Value::String(format!(
                         "Raw tool input. It must satisfy this {syntax} grammar:\n{definition}"
@@ -193,7 +197,7 @@ pub(in crate::protocol::adapter) fn custom_tool_input_schema(
     }
     Ok(json!({
         "type": "object",
-        "properties": {"input": Value::Object(input)},
+        "properties": {"input": Value::Object(input_schema)},
         "required": ["input"],
         "additionalProperties": false,
     }))
@@ -201,7 +205,7 @@ pub(in crate::protocol::adapter) fn custom_tool_input_schema(
 
 #[derive(Debug)]
 pub(super) struct TranslatedToolChoice {
-    pub(super) value: Option<Value>,
+    pub(super) translated_choice: Option<Value>,
     pub(super) allowed_names: Option<BTreeSet<String>>,
 }
 

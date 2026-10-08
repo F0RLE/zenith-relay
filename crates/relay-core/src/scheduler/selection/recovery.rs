@@ -82,7 +82,7 @@ impl PoolScheduler {
         } else {
             request.scope.to_ascii_lowercase()
         };
-        let previous = self
+        let existing_deadline = self
             .candidates
             .get(candidate_id)
             .and_then(|candidate| candidate.cooldowns.get(&scope).copied());
@@ -90,9 +90,9 @@ impl PoolScheduler {
             .cooldown_reasons
             .get(&(candidate_id.to_string(), scope.clone()))
             .copied();
-        let should_store_reason = previous.is_none_or(|current| {
-            request.retry_at_ms > current
-                || (request.retry_at_ms == current
+        let should_store_reason = existing_deadline.is_none_or(|current_deadline| {
+            request.retry_at_ms > current_deadline
+                || (request.retry_at_ms == current_deadline
                     && request.reason == CooldownReason::RateLimit
                     && previous_reason != Some(CooldownReason::Mandatory))
                 || (request.reason == CooldownReason::Mandatory
@@ -105,7 +105,9 @@ impl PoolScheduler {
             candidate
                 .cooldowns
                 .entry(scope.clone())
-                .and_modify(|current| *current = (*current).max(request.retry_at_ms))
+                .and_modify(|cooldown_deadline_ms| {
+                    *cooldown_deadline_ms = (*cooldown_deadline_ms).max(request.retry_at_ms)
+                })
                 .or_insert(request.retry_at_ms);
         }
         if should_store_reason {

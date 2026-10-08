@@ -202,8 +202,8 @@ pub struct ImportPreview {
 pub struct RedactedValue(String);
 
 impl RedactedValue {
-    fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    fn new(secret_text: impl Into<String>) -> Self {
+        Self(secret_text.into())
     }
 
     pub fn expose(&self) -> &str {
@@ -382,7 +382,7 @@ impl fmt::Debug for ParsedImport {
 
 pub(super) struct ParsedItem {
     pub(super) preview: ImportPreviewRow,
-    pub(super) item: ParsedImportItem,
+    pub(super) parsed_item: ParsedImportItem,
 }
 pub use item::chatgpt_token_identity_key;
 pub(in crate::accounts::import) use parse::{check_item_count, ensure_depth};

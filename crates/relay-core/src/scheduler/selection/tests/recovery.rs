@@ -143,10 +143,15 @@ fn due_recovery_never_overrides_auth_quota_or_request_scope() {
 fn old_request_release_and_success_cannot_release_a_running_recovery_trial() {
     let mut scheduler = PoolScheduler::new();
     scheduler.upsert(candidate("only"));
-    let old = start(&mut scheduler, "only", 0);
+    let previous_attempt = start(&mut scheduler, "only", 0);
     fail(&mut scheduler, "only", 0);
     let probe = start(&mut scheduler, "only", 250);
-    finish(&mut scheduler, old, HealthObservation::Success, 251);
+    finish(
+        &mut scheduler,
+        previous_attempt,
+        HealthObservation::Success,
+        251,
+    );
     assert!(at(&mut scheduler, 251).is_none());
     assert_eq!(scheduler.active_request_count("only"), 1);
     assert_eq!(circuit(&scheduler, "only").state, CircuitState::HalfOpen);

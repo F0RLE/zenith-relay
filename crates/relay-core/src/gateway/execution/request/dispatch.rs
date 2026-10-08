@@ -43,7 +43,9 @@ pub(super) struct RequestDispatchInput<'a> {
 
 /// Send one prepared attempt. A transport failure stays retryable until the
 /// provider may already have accepted the request.
-pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) -> RequestDispatch {
+pub(super) async fn dispatch_request_attempt(
+    request_dispatch_input: RequestDispatchInput<'_>,
+) -> RequestDispatch {
     let RequestDispatchInput {
         runtime,
         key,
@@ -67,7 +69,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         attempt,
         last_failure,
         last_failure_origin,
-    } = input;
+    } = request_dispatch_input;
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -78,7 +80,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         )
         .await
         {
-            Ok(body) => body,
+            Ok(upstream_response_body) => upstream_response_body,
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return RequestDispatch::Respond(attempt_error_response(
                     failure,
@@ -98,7 +100,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
     };
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
-    let client = runtime.request_client(&route.candidate_id);
+    let request_client = runtime.request_client(&route.candidate_id);
     let mut upstream_headers = upstream_headers_for_route(
         account_route,
         basis_points_route,
@@ -106,8 +108,8 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         route.adapter.upstream_protocol(client_wire_api),
         forwarded_headers,
     );
-    for (name, value) in &route.upstream_headers {
-        upstream_headers.insert(name.clone(), value.clone());
+    for (name, header_value) in &route.upstream_headers {
+        upstream_headers.insert(name.clone(), header_value.clone());
     }
     let turn_scope = (account_route
         && !basis_points_route
@@ -132,7 +134,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
             route.service_tier,
         );
     }
-    let mut upstream_request = client
+    let mut upstream_request = request_client
         .post(route.upstream_url.clone())
         .header(CONTENT_TYPE, "application/json")
         .headers(upstream_headers);
@@ -140,8 +142,9 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
     }
     if account_route && !basis_points_route {
-        if let Some(value) = route_responses_lite.as_ref() {
-            upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value);
+        if let Some(responses_lite_header) = route_responses_lite.as_ref() {
+            upstream_request =
+                upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header);
         }
     }
     let upstream = runtime
@@ -198,21 +201,21 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
                     request_id,
                 ));
             }
-            let state =
+            let failure_state =
                 settle_attempt_failure(runtime, lease, source_model, &failure, &HeaderMap::new());
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;
             return RequestDispatch::Continue;
         }
     };
-    let status = upstream.status();
+    let upstream_status = upstream.status();
     let response_headers = upstream.headers().clone();
     RequestDispatch::Ready(Box::new(DispatchedRequestAttempt {
         route,
         upstream,
-        status,
+        status: upstream_status,
         response_headers,
         started,
     }))

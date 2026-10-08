@@ -24,12 +24,12 @@ fn participant_catalog_only_supplies_endpoint_identity() {
     assert!(catalog_capabilities(&json!({"data":[row.clone()]}), 42).is_empty());
     row["supported_endpoint_types"] = json!(["messages"]);
     let observations = catalog_capabilities(&json!({"data":[row]}), 42);
-    assert!(observations
-        .iter()
-        .all(|entry| entry.features.is_empty() && entry.reasoning_efforts.is_empty()));
-    assert!(observations
-        .iter()
-        .any(|entry| entry.upstream_wire_api == WireApi::Messages && entry.status.available()));
+    assert!(observations.iter().all(|observation| {
+        observation.features.is_empty() && observation.reasoning_efforts.is_empty()
+    }));
+    assert!(observations.iter().any(|observation| {
+        observation.upstream_wire_api == WireApi::Messages && observation.status.available()
+    }));
 }
 
 #[test]
@@ -84,11 +84,13 @@ fn endpoint_metadata_and_gemini_methods_are_scoped_declarations() {
         42,
     );
     assert_eq!(observations.len(), 4);
-    assert!(observations.iter().all(|entry| entry.model_id == "mixed"));
+    assert!(observations
+        .iter()
+        .all(|observation| observation.model_id == "mixed"));
     assert_eq!(
         observations
             .iter()
-            .filter(|entry| entry.status.available())
+            .filter(|observation| observation.status.available())
             .count(),
         2
     );
@@ -217,7 +219,7 @@ fn failed_generation_probe_does_not_remove_catalog_models() {
     let capabilities = config.effective_capabilities("https://example.test/v1", &models);
     let responses = capabilities
         .iter()
-        .find(|entry| entry.upstream_wire_api == WireApi::Responses)
+        .find(|observation| observation.upstream_wire_api == WireApi::Responses)
         .unwrap();
     assert_eq!(responses.origin, CapabilityOrigin::Catalog);
     assert_eq!(responses.status, CapabilityStatus::Declared);

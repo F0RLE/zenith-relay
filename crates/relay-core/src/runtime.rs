@@ -157,7 +157,7 @@ struct PassiveQuotaState {
 
 #[derive(Clone, Debug)]
 struct CachedModelManifest {
-    value: Value,
+    manifest_payload: Value,
 }
 
 #[derive(Default)]
@@ -323,11 +323,15 @@ impl RuntimeHttpClients {
 
 impl GatewayRuntime {
     pub async fn discover_models(&self) -> Result<Vec<String>> {
-        let source = self.sources.values().next().ok_or_else(|| {
+        let provider_source = self.sources.values().next().ok_or_else(|| {
             Error::Validation("at least one provider source is required".to_string())
         })?;
-        discover_models_with_client(&self.discovery_client, source, source.protocol_bindings())
-            .await
+        discover_models_with_client(
+            &self.discovery_client,
+            provider_source,
+            provider_source.protocol_bindings(),
+        )
+        .await
     }
 
     pub(crate) fn record_success_with_metrics(

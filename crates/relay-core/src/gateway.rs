@@ -218,11 +218,11 @@ mod route_error_tests {
                 "Relay: method is not allowed for this route",
             ),
         ] {
-            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["error"]["code"], expected_code);
-            assert_eq!(body["error"]["message"], expected_message);
-            assert_eq!(body["error"]["zenith_relay"]["origin"], "relay");
+            let response_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response_json: Value = serde_json::from_slice(&response_bytes).unwrap();
+            assert_eq!(response_json["error"]["code"], expected_code);
+            assert_eq!(response_json["error"]["message"], expected_message);
+            assert_eq!(response_json["error"]["zenith_relay"]["origin"], "relay");
         }
     }
 }

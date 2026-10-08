@@ -17,7 +17,7 @@ pub(super) struct SelectionMissInput<'a> {
     pub(super) resolved_model: &'a str,
     pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
-    pub(super) request: &'a mut Value,
+    pub(super) request_json: &'a mut Value,
     pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) requires_affinity_owner: &'a mut bool,
     pub(super) allow_previous_response_reset: bool,
@@ -37,47 +37,51 @@ pub(super) struct SelectionMissInput<'a> {
 /// No reserved candidate is available for this attempt. Recover a pinned
 /// continuation, wait for a route, or stop with the same response the loop
 /// used to return directly.
-pub(super) async fn handle_selection_miss(input: SelectionMissInput<'_>) -> SelectionMiss {
-    let mut input = input;
-    if let Some(error) = crate::gateway::errors::admission_error(input.budget) {
+pub(super) async fn handle_selection_miss(
+    selection_context: SelectionMissInput<'_>,
+) -> SelectionMiss {
+    let mut selection_context = selection_context;
+    if let Some(error) = crate::gateway::errors::admission_error(selection_context.budget) {
         return SelectionMiss::Respond(error);
     }
-    if release_unroutable_affinity(&mut input) {
+    if release_unroutable_affinity(&mut selection_context) {
         return SelectionMiss::Continue;
     }
-    if reset_owner_without_model(&mut input) {
+    if reset_owner_without_model(&mut selection_context) {
         return SelectionMiss::Continue;
     }
-    if let Some(step) = replay_pinned_continuation(&mut input) {
+    if let Some(step) = replay_pinned_continuation(&mut selection_context) {
         return step;
     }
-    if reset_owner_outside_scope(&mut input) {
+    if reset_owner_outside_scope(&mut selection_context) {
         return SelectionMiss::Continue;
     }
-    if let Some(step) = reject_unavailable_pinned_owner(&input) {
+    if let Some(step) = reject_unavailable_pinned_owner(&selection_context) {
         return step;
     }
-    if wait_for_route_recovery(&mut input).await {
+    if wait_for_route_recovery(&mut selection_context).await {
         return SelectionMiss::Continue;
     }
-    if let Some(step) = wait_for_candidate_availability(&mut input).await {
+    if let Some(step) = wait_for_candidate_availability(&mut selection_context).await {
         return step;
     }
-    if let Some(step) = first_attempt_cooldown(&input) {
+    if let Some(step) = first_attempt_cooldown(&selection_context) {
         return step;
     }
-    stop_without_candidate(&mut input)
+    stop_without_candidate(&mut selection_context)
 }
 
-fn release_unroutable_affinity(input: &mut SelectionMissInput<'_>) -> bool {
-    !*input.requires_affinity_owner
-        && input.runtime.release_unroutable_response_affinity(
-            input.key,
-            input.response_affinity_key,
-            input.resolved_model,
-            candidate_protocols(input.client_wire_api),
-            now_ms(),
-        )
+fn release_unroutable_affinity(selection_context: &mut SelectionMissInput<'_>) -> bool {
+    !*selection_context.requires_affinity_owner
+        && selection_context
+            .runtime
+            .release_unroutable_response_affinity(
+                selection_context.key,
+                selection_context.response_affinity_key,
+                selection_context.resolved_model,
+                candidate_protocols(selection_context.client_wire_api),
+                now_ms(),
+            )
 }
 
 /// Native replay deliberately refuses to materialize a response across
@@ -85,22 +89,25 @@ fn release_unroutable_affinity(input: &mut SelectionMissInput<'_>) -> bool {
 /// route, retaining its opaque response id would therefore block all eligible
 /// new-model candidates before an upstream request is even attempted. Start a
 /// fresh safe turn instead, but never infer that from temporary availability.
-fn reset_owner_without_model(input: &mut SelectionMissInput<'_>) -> bool {
-    if !pinned_responses_reset_allowed(input) {
+fn reset_owner_without_model(selection_context: &mut SelectionMissInput<'_>) -> bool {
+    if !pinned_responses_reset_allowed(selection_context) {
         return false;
     }
-    let owner_supports_model = input
-        .response_affinity_key
-        .as_deref()
-        .and_then(|affinity_key| {
-            input.runtime.response_affinity_owner_supports_model(
-                affinity_key,
-                input.resolved_model,
-                candidate_protocols(input.client_wire_api),
-                now_ms(),
-            )
-        });
-    reset_pinned_continuation(input, owner_supports_model == Some(false))
+    let owner_supports_model =
+        selection_context
+            .response_affinity_key
+            .as_deref()
+            .and_then(|affinity_key| {
+                selection_context
+                    .runtime
+                    .response_affinity_owner_supports_model(
+                        affinity_key,
+                        selection_context.resolved_model,
+                        candidate_protocols(selection_context.client_wire_api),
+                        now_ms(),
+                    )
+            });
+    reset_pinned_continuation(selection_context, owner_supports_model == Some(false))
 }
 
 /// Pool membership can change between two Codex turns. An opaque
@@ -109,28 +116,30 @@ fn reset_owner_without_model(input: &mut SelectionMissInput<'_>) -> bool {
 /// bounded, owner-scoped native replay for that turn, materialize it before
 /// trying the replacement pool. This keeps the continuation safe while avoiding
 /// a permanent no-candidate failure after an operator rotates API sources.
-fn replay_pinned_continuation(input: &mut SelectionMissInput<'_>) -> Option<SelectionMiss> {
-    if input.client_wire_api != WireApi::Responses
-        || !input.has_previous_response_id
-        || !*input.requires_affinity_owner
-        || input.repairs.native_replay
+fn replay_pinned_continuation(
+    selection_context: &mut SelectionMissInput<'_>,
+) -> Option<SelectionMiss> {
+    if selection_context.client_wire_api != WireApi::Responses
+        || !selection_context.has_previous_response_id
+        || !*selection_context.requires_affinity_owner
+        || selection_context.repairs.native_replay
     {
         return None;
     }
     match replay_native_affinity_continuation(
-        input.runtime,
-        &input.key.id,
-        input.request,
-        input.response_affinity_key.as_deref(),
-        input.resolved_model,
-        input.stream,
-        &mut input.repairs.native_replay,
+        selection_context.runtime,
+        &selection_context.key.id,
+        selection_context.request_json,
+        selection_context.response_affinity_key.as_deref(),
+        selection_context.resolved_model,
+        selection_context.stream,
+        &mut selection_context.repairs.native_replay,
     ) {
         Ok(true) => {
             clear_materialized_continuation(
-                input.response_affinity_key,
-                input.requires_affinity_owner,
-                input.has_unpaired_tool_output,
+                selection_context.response_affinity_key,
+                selection_context.requires_affinity_owner,
+                selection_context.has_unpaired_tool_output,
             );
             Some(SelectionMiss::Continue)
         }
@@ -143,23 +152,25 @@ fn replay_pinned_continuation(input: &mut SelectionMissInput<'_>) -> Option<Sele
 /// scope, there is no safe upstream route for the opaque response id. Reset it
 /// only after giving the bounded native replay above a chance to preserve the
 /// conversation.
-fn reset_owner_outside_scope(input: &mut SelectionMissInput<'_>) -> bool {
-    if !pinned_responses_reset_allowed(input) {
+fn reset_owner_outside_scope(selection_context: &mut SelectionMissInput<'_>) -> bool {
+    if !pinned_responses_reset_allowed(selection_context) {
         return false;
     }
-    let owner_supports_route = input
+    let owner_supports_route = selection_context
         .response_affinity_key
         .as_deref()
-        .and_then(|affinity_key| owner_supports_route(input, affinity_key));
-    reset_pinned_continuation(input, owner_supports_route == Some(false))
+        .and_then(|affinity_key| owner_supports_route(selection_context, affinity_key));
+    reset_pinned_continuation(selection_context, owner_supports_route == Some(false))
 }
 
-fn reject_unavailable_pinned_owner(input: &SelectionMissInput<'_>) -> Option<SelectionMiss> {
-    let unavailable = *input.requires_affinity_owner
-        && input
+fn reject_unavailable_pinned_owner(
+    selection_context: &SelectionMissInput<'_>,
+) -> Option<SelectionMiss> {
+    let unavailable = *selection_context.requires_affinity_owner
+        && selection_context
             .response_affinity_key
             .as_deref()
-            .and_then(|affinity_key| owner_supports_route(input, affinity_key))
+            .and_then(|affinity_key| owner_supports_route(selection_context, affinity_key))
             == Some(false);
     if !unavailable {
         return None;
@@ -171,39 +182,39 @@ fn reject_unavailable_pinned_owner(input: &SelectionMissInput<'_>) -> Option<Sel
     )))
 }
 
-async fn wait_for_route_recovery(input: &mut SelectionMissInput<'_>) -> bool {
+async fn wait_for_route_recovery(selection_context: &mut SelectionMissInput<'_>) -> bool {
     wait_for_recovery(
-        input.budget,
+        selection_context.budget,
         &CandidateRetryContext {
-            runtime: input.retry_context.runtime,
-            key: input.retry_context.key,
-            resolved_model: input.retry_context.resolved_model,
-            protocols: input.retry_context.protocols,
-            operation: input.retry_context.operation,
-            exclusions: input.incompatible,
+            runtime: selection_context.retry_context.runtime,
+            key: selection_context.retry_context.key,
+            resolved_model: selection_context.retry_context.resolved_model,
+            protocols: selection_context.retry_context.protocols,
+            operation: selection_context.retry_context.operation,
+            exclusions: selection_context.incompatible,
         },
-        input.tried,
-        input.response_affinity_key.as_deref(),
+        selection_context.tried,
+        selection_context.response_affinity_key.as_deref(),
     )
     .await
 }
 
 async fn wait_for_candidate_availability(
-    input: &mut SelectionMissInput<'_>,
+    selection_context: &mut SelectionMissInput<'_>,
 ) -> Option<SelectionMiss> {
     if !should_wait_for_candidate_availability(
-        input.retry_until_available,
-        input.last_failure,
-        input.last_adapter_error.is_some(),
-        input.has_previous_response_id,
+        selection_context.retry_until_available,
+        selection_context.last_failure,
+        selection_context.last_adapter_error.is_some(),
+        selection_context.has_previous_response_id,
     ) {
         return None;
     }
     if !wait_for_candidate_retry(
-        input.budget,
-        input.retry_context,
-        input.tried,
-        input.response_affinity_key.as_deref(),
+        selection_context.budget,
+        selection_context.retry_context,
+        selection_context.tried,
+        selection_context.response_affinity_key.as_deref(),
     )
     .await
     {
@@ -214,16 +225,16 @@ async fn wait_for_candidate_availability(
     Some(SelectionMiss::Continue)
 }
 
-fn first_attempt_cooldown(input: &SelectionMissInput<'_>) -> Option<SelectionMiss> {
-    if input.attempt != 0 {
+fn first_attempt_cooldown(selection_context: &SelectionMissInput<'_>) -> Option<SelectionMiss> {
+    if selection_context.attempt != 0 {
         return None;
     }
-    let (retry_at, reason) = input.runtime.all_applicable_cooldown(
-        input.key,
-        input.resolved_model,
-        candidate_protocols(input.client_wire_api),
-        input.tried,
-        input.response_affinity_key.as_deref(),
+    let (retry_at, reason) = selection_context.runtime.all_applicable_cooldown(
+        selection_context.key,
+        selection_context.resolved_model,
+        candidate_protocols(selection_context.client_wire_api),
+        selection_context.tried,
+        selection_context.response_affinity_key.as_deref(),
         now_ms(),
         crate::scheduler::rotation::RotationOperation::Text,
     )?;
@@ -235,47 +246,55 @@ fn first_attempt_cooldown(input: &SelectionMissInput<'_>) -> Option<SelectionMis
     )))
 }
 
-fn stop_without_candidate(input: &mut SelectionMissInput<'_>) -> SelectionMiss {
-    if input.last_failure.is_none() {
-        if let Some(error) = input.last_adapter_error.take() {
+fn stop_without_candidate(selection_context: &mut SelectionMissInput<'_>) -> SelectionMiss {
+    if selection_context.last_failure.is_none() {
+        if let Some(error) = selection_context.last_adapter_error.take() {
             return SelectionMiss::Respond(adapter_error_response(error));
         }
     }
     SelectionMiss::Stop {
-        retry_window_expired: input.retry_window_expired,
+        retry_window_expired: selection_context.retry_window_expired,
     }
 }
 
-fn pinned_responses_reset_allowed(input: &SelectionMissInput<'_>) -> bool {
-    input.client_wire_api == WireApi::Responses
-        && input.allow_previous_response_reset
-        && input.has_previous_response_id
-        && *input.requires_affinity_owner
-        && !*input.has_unpaired_tool_output
-        && !input.repairs.model_switch_reset
+fn pinned_responses_reset_allowed(selection_context: &SelectionMissInput<'_>) -> bool {
+    selection_context.client_wire_api == WireApi::Responses
+        && selection_context.allow_previous_response_reset
+        && selection_context.has_previous_response_id
+        && *selection_context.requires_affinity_owner
+        && !*selection_context.has_unpaired_tool_output
+        && !selection_context.repairs.model_switch_reset
 }
 
-fn owner_supports_route(input: &SelectionMissInput<'_>, affinity_key: &str) -> Option<bool> {
-    input.runtime.response_affinity_owner_supports_route(
-        input.key,
-        affinity_key,
-        input.resolved_model,
-        candidate_protocols(input.client_wire_api),
-        now_ms(),
-    )
+fn owner_supports_route(
+    selection_context: &SelectionMissInput<'_>,
+    affinity_key: &str,
+) -> Option<bool> {
+    selection_context
+        .runtime
+        .response_affinity_owner_supports_route(
+            selection_context.key,
+            affinity_key,
+            selection_context.resolved_model,
+            candidate_protocols(selection_context.client_wire_api),
+            now_ms(),
+        )
 }
 
-fn reset_pinned_continuation(input: &mut SelectionMissInput<'_>, eligible: bool) -> bool {
+fn reset_pinned_continuation(
+    selection_context: &mut SelectionMissInput<'_>,
+    eligible: bool,
+) -> bool {
     reset_materialized_continuation(
         &mut ContinuationReset {
-            attempted: &mut input.repairs.model_switch_reset,
-            response_affinity_key: input.response_affinity_key,
-            requires_affinity_owner: input.requires_affinity_owner,
+            attempted: &mut selection_context.repairs.model_switch_reset,
+            response_affinity_key: selection_context.response_affinity_key,
+            requires_affinity_owner: selection_context.requires_affinity_owner,
         },
         eligible,
-        input.runtime,
-        &input.key.id,
-        input.request,
-        input.resolved_model,
+        selection_context.runtime,
+        &selection_context.key.id,
+        selection_context.request_json,
+        selection_context.resolved_model,
     )
 }

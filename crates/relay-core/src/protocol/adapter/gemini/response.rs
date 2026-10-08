@@ -23,7 +23,7 @@ pub fn translate_gemini_response(
         return Ok(GeminiBridgeResponse {
             response_body,
             response_id,
-            continuation: request.state,
+            continuation: request.bridge_state,
         });
     }
     let candidate = first_candidate(upstream)?;
@@ -37,22 +37,22 @@ pub fn translate_gemini_response(
         None if incomplete_reason.is_some() => &[],
         None => return Err(AdapterError::upstream_response_invalid()),
     };
-    let (output, _) = responses_output_from_gemini_parts(&request, parts)?;
-    if output.is_empty() && incomplete_reason.is_none() {
+    let (response_items, _) = responses_output_from_gemini_parts(&request, parts)?;
+    if response_items.is_empty() && incomplete_reason.is_none() {
         return Err(AdapterError::upstream_response_invalid());
     }
     let response_id = request.response_id.clone();
     let mut response_body = responses_body_from_output(
         &response_id,
         &request.model,
-        output,
+        response_items,
         upstream.get("usageMetadata"),
     );
     if let Some(reason) = incomplete_reason {
         response_body["status"] = Value::String("incomplete".to_string());
         response_body["incomplete_details"] = json!({"reason": reason});
     }
-    let mut continuation = request.state.clone();
+    let mut continuation = request.bridge_state.clone();
     super::request::append_message(&mut continuation, "model", parts.to_vec());
     Ok(GeminiBridgeResponse {
         response_body,
@@ -85,16 +85,20 @@ pub(in crate::protocol::adapter) fn candidate_incomplete_reason(
 
 /// Gemini can block a prompt before producing candidates. Only an explicit
 /// block reason is a filtered terminal; missing candidates alone are not.
-pub(in crate::protocol::adapter) fn prompt_blocked(value: &Value) -> Result<bool, ()> {
-    let Some(reason) = value.pointer("/promptFeedback/blockReason") else {
+pub(in crate::protocol::adapter) fn prompt_blocked(upstream_response: &Value) -> Result<bool, ()> {
+    let Some(reason) = upstream_response.pointer("/promptFeedback/blockReason") else {
         return Ok(false);
     };
     if !matches!(
         reason.as_str(),
         Some("SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY")
-    ) || value
+    ) || upstream_response
         .get("candidates")
-        .is_some_and(|candidates| candidates.as_array().is_none_or(|items| !items.is_empty()))
+        .is_some_and(|candidates| {
+            candidates
+                .as_array()
+                .is_none_or(|candidate_items| !candidate_items.is_empty())
+        })
     {
         return Err(());
     }
@@ -103,12 +107,12 @@ pub(in crate::protocol::adapter) fn prompt_blocked(value: &Value) -> Result<bool
 
 /// Recognize only Gemini terminal reasons the response adapter can translate.
 /// The gateway uses this before releasing a stream with no generated output.
-pub(crate) fn gemini_incomplete(value: &Value) -> bool {
-    let Ok(blocked) = prompt_blocked(value) else {
+pub(crate) fn gemini_incomplete(upstream_response: &Value) -> bool {
+    let Ok(blocked) = prompt_blocked(upstream_response) else {
         return false;
     };
     blocked
-        || value
+        || upstream_response
             .get("candidates")
             .and_then(Value::as_array)
             .and_then(|candidates| candidates.first())
@@ -122,59 +126,59 @@ pub(crate) fn gemini_incomplete(value: &Value) -> bool {
 fn responses_body_from_output(
     response_id: &str,
     model: &str,
-    output: Vec<Value>,
-    usage: Option<&Value>,
+    response_items: Vec<Value>,
+    usage_metadata: Option<&Value>,
 ) -> Value {
     json!({"id": response_id, "object": "response", "created_at": 0, "status": "completed",
-        "model": model, "output": output, "usage": responses_usage(usage)})
+        "model": model, "output": response_items, "usage": responses_usage(usage_metadata)})
 }
 
-fn responses_usage(usage: Option<&Value>) -> Value {
-    let mut result = Map::new();
-    if let Some(input) = usage
+fn responses_usage(usage_metadata: Option<&Value>) -> Value {
+    let mut usage_object = Map::new();
+    if let Some(input_tokens) = usage_metadata
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(Value::as_u64)
     {
-        result.insert("input_tokens".to_string(), Value::from(input));
+        usage_object.insert("input_tokens".to_string(), Value::from(input_tokens));
     }
-    if let Some(output) = usage
+    if let Some(output_tokens) = usage_metadata
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(Value::as_u64)
     {
-        result.insert("output_tokens".to_string(), Value::from(output));
+        usage_object.insert("output_tokens".to_string(), Value::from(output_tokens));
     }
-    if let Some(total) = usage
+    if let Some(total_tokens) = usage_metadata
         .and_then(|u| u.get("totalTokenCount"))
         .and_then(Value::as_u64)
     {
-        result.insert("total_tokens".to_string(), Value::from(total));
+        usage_object.insert("total_tokens".to_string(), Value::from(total_tokens));
     }
-    if let Some(cached) = usage
+    if let Some(cached_tokens) = usage_metadata
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)
     {
-        result.insert(
+        usage_object.insert(
             "input_tokens_details".to_string(),
-            json!({"cached_tokens": cached}),
+            json!({"cached_tokens": cached_tokens}),
         );
     }
-    if let Some(reasoning) = usage
+    if let Some(reasoning_tokens) = usage_metadata
         .and_then(|u| u.get("thoughtsTokenCount"))
         .and_then(Value::as_u64)
     {
-        result.insert(
+        usage_object.insert(
             "output_tokens_details".to_string(),
-            json!({"reasoning_tokens": reasoning}),
+            json!({"reasoning_tokens": reasoning_tokens}),
         );
     }
-    Value::Object(result)
+    Value::Object(usage_object)
 }
 
 fn first_candidate(upstream: &Value) -> AdapterResult<&Value> {
     upstream
         .get("candidates")
         .and_then(Value::as_array)
-        .and_then(|values| values.first())
+        .and_then(|candidates| candidates.first())
         .ok_or_else(AdapterError::upstream_response_invalid)
 }
 
@@ -182,31 +186,31 @@ fn responses_output_from_gemini_parts(
     request: &GeminiBridgeRequest,
     parts: &[Value],
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
-    let mut output = Vec::new();
-    let mut text = String::new();
-    let mut reasoning = String::new();
+    let mut response_items = Vec::new();
+    let mut text_buffer = String::new();
+    let mut reasoning_buffer = String::new();
     let mut call_index = 0_usize;
-    let flush_text = |output: &mut Vec<Value>, text: &mut String| {
-        if !text.is_empty() {
-            output.push(json!({"id":format!("msg_{}_{}",request.response_id(),output.len()),"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":std::mem::take(text),"annotations":[]}]}));
+    let flush_text = |response_items: &mut Vec<Value>, text_buffer: &mut String| {
+        if !text_buffer.is_empty() {
+            response_items.push(json!({"id":format!("msg_{}_{}",request.response_id(),response_items.len()),"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":std::mem::take(text_buffer),"annotations":[]}]}));
         }
     };
-    let flush_reasoning = |output: &mut Vec<Value>, reasoning: &mut String| {
-        if !reasoning.is_empty() {
-            output.push(json!({"id":format!("reasoning_{}_{}",request.response_id(),output.len()),"type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":std::mem::take(reasoning)}]}));
+    let flush_reasoning = |response_items: &mut Vec<Value>, reasoning_buffer: &mut String| {
+        if !reasoning_buffer.is_empty() {
+            response_items.push(json!({"id":format!("reasoning_{}_{}",request.response_id(),response_items.len()),"type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":std::mem::take(reasoning_buffer)}]}));
         }
     };
-    for value in parts {
-        let part = value
+    for part_value in parts {
+        let part = part_value
             .as_object()
             .ok_or_else(AdapterError::upstream_response_invalid)?;
-        if let Some(value) = part.get("text").and_then(Value::as_str) {
+        if let Some(text_value) = part.get("text").and_then(Value::as_str) {
             if part.get("thought").and_then(Value::as_bool) == Some(true) {
-                flush_text(&mut output, &mut text);
-                reasoning.push_str(value);
+                flush_text(&mut response_items, &mut text_buffer);
+                reasoning_buffer.push_str(text_value);
             } else {
-                flush_reasoning(&mut output, &mut reasoning);
-                text.push_str(value);
+                flush_reasoning(&mut response_items, &mut reasoning_buffer);
+                text_buffer.push_str(text_value);
             }
             continue;
         }
@@ -216,41 +220,41 @@ fn responses_output_from_gemini_parts(
             }
             return Err(AdapterError::upstream_response_invalid());
         };
-        flush_text(&mut output, &mut text);
-        flush_reasoning(&mut output, &mut reasoning);
+        flush_text(&mut response_items, &mut text_buffer);
+        flush_reasoning(&mut response_items, &mut reasoning_buffer);
         let upstream_name = call
             .get("name")
             .and_then(Value::as_str)
-            .filter(|name| request.state.allows_tool_name(name))
+            .filter(|tool_name| request.bridge_state.allows_tool_name(tool_name))
             .ok_or_else(AdapterError::upstream_response_invalid)?;
         let target = request
-            .state
+            .bridge_state
             .client_tool(upstream_name)
             .ok_or_else(AdapterError::upstream_response_invalid)?;
         let call_id = call
             .get("id")
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+            .filter(|call_id| !call_id.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("call_{}_{}", request.response_id(), call_index));
-        let args = super::json_path::function_call_args(call)
+        let function_arguments = super::json_path::function_call_args(call)
             .map_err(|_| AdapterError::upstream_response_invalid())?;
-        let mut item = if target.kind == ResponsesToolKind::Custom {
-            let input = args
+        let mut response_item = if target.kind == ResponsesToolKind::Custom {
+            let custom_input = function_arguments
                 .get("input")
                 .and_then(Value::as_str)
                 .ok_or_else(AdapterError::upstream_response_invalid)?;
-            json!({"id":custom_tool_item_id(&call_id),"type":"custom_tool_call","status":"completed","call_id":call_id,"name":target.name,"input":input})
+            json!({"id":custom_tool_item_id(&call_id),"type":"custom_tool_call","status":"completed","call_id":call_id,"name":target.name,"input":custom_input})
         } else {
-            json!({"id":call_id,"type":"function_call","status":"completed","call_id":call_id,"name":target.name,"arguments":serde_json::to_string(&args).map_err(|_| AdapterError::upstream_response_invalid())?})
+            json!({"id":call_id,"type":"function_call","status":"completed","call_id":call_id,"name":target.name,"arguments":serde_json::to_string(&function_arguments).map_err(|_| AdapterError::upstream_response_invalid())?})
         };
         if let Some(namespace) = target.namespace.as_ref() {
-            item["namespace"] = Value::String(namespace.clone());
+            response_item["namespace"] = Value::String(namespace.clone());
         }
-        output.push(item);
+        response_items.push(response_item);
         call_index = call_index.saturating_add(1);
     }
-    flush_text(&mut output, &mut text);
-    flush_reasoning(&mut output, &mut reasoning);
-    Ok((output, Vec::new()))
+    flush_text(&mut response_items, &mut text_buffer);
+    flush_reasoning(&mut response_items, &mut reasoning_buffer);
+    Ok((response_items, Vec::new()))
 }

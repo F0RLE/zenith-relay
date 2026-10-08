@@ -108,11 +108,11 @@ pub struct RotationCandidate {
 
 impl RotationCandidate {
     pub fn new(
-        id: impl Into<String>,
+        candidate_id: impl Into<String>,
         route_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
-        let id = id.into();
+        let candidate_id = candidate_id.into();
         let route_key = route_key.into();
         let routes = BTreeMap::from([(
             route_key.clone(),
@@ -122,8 +122,8 @@ impl RotationCandidate {
             },
         )]);
         Self {
-            capacity_key: id.clone(),
-            id,
+            capacity_key: candidate_id.clone(),
+            id: candidate_id,
             priority: 0,
             weight: 1,
             max_concurrency: 0,
@@ -166,11 +166,11 @@ impl RotationCandidate {
             || self.routes.iter().any(|(key, route)| {
                 [key.as_str(), route.model.as_str()]
                     .into_iter()
-                    .any(|value| {
-                        value.trim().is_empty()
-                            || value.trim() != value
-                            || value.len() > 256
-                            || value.chars().any(char::is_control)
+                    .any(|route_identifier| {
+                        route_identifier.trim().is_empty()
+                            || route_identifier.trim() != route_identifier
+                            || route_identifier.len() > 256
+                            || route_identifier.chars().any(char::is_control)
                     })
             })
         {

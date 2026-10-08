@@ -6,8 +6,8 @@ use crate::GatewayRuntime;
 use serde_json::Value;
 
 impl super::ClientRequest {
-    pub(in crate::gateway::websocket) fn native_replay_value(&self) -> Value {
-        self.value.clone()
+    pub(in crate::gateway::websocket) fn native_replay_request(&self) -> Value {
+        self.request_body.clone()
     }
 
     /// Replace an owner-bound opaque continuation with materialized native
@@ -30,8 +30,8 @@ impl super::ClientRequest {
         ) else {
             return Ok(false);
         };
-        let replayed = match replay.replay_request(&self.value, owner_model, true) {
-            Ok(value) => value,
+        let replayed = match replay.replay_request(&self.request_body, owner_model, true) {
+            Ok(replayed_request) => replayed_request,
             Err(error) if error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH => {
                 return Ok(false)
             }
@@ -41,7 +41,7 @@ impl super::ClientRequest {
                 ))
             }
         };
-        self.value = replayed;
+        self.request_body = replayed;
         continuation::clear_materialized_continuation(
             &mut self.response_affinity_key,
             &mut self.requires_affinity_owner,
@@ -86,7 +86,7 @@ impl super::ClientRequest {
     }
 
     pub(in crate::gateway::websocket) fn previous_response_id(&self) -> Option<&str> {
-        continuation::previous_response_id(&self.value)
+        continuation::previous_response_id(&self.request_body)
     }
 
     pub(in crate::gateway::websocket) const fn has_unpaired_tool_output(&self) -> bool {
@@ -101,7 +101,7 @@ impl super::ClientRequest {
         if continuation::drop_materialized_previous_response_id(
             runtime,
             local_key_id,
-            &mut self.value,
+            &mut self.request_body,
             &self.resolved_model,
             now_ms(),
         ) {
@@ -122,7 +122,7 @@ impl super::ClientRequest {
         local_key_id: &str,
         upstream_error: &[u8],
     ) -> bool {
-        let mut materialized = self.value.clone();
+        let mut materialized = self.request_body.clone();
         if !continuation::recover_stale_tool_history(
             runtime,
             local_key_id,
@@ -134,7 +134,7 @@ impl super::ClientRequest {
         ) {
             return false;
         }
-        self.value = materialized;
+        self.request_body = materialized;
         continuation::clear_materialized_continuation(
             &mut self.response_affinity_key,
             &mut self.requires_affinity_owner,
@@ -143,21 +143,21 @@ impl super::ClientRequest {
         true
     }
 
-    pub(in crate::gateway::websocket) fn value_mut(&mut self) -> &mut Value {
-        &mut self.value
+    pub(in crate::gateway::websocket) fn request_body_mut(&mut self) -> &mut Value {
+        &mut self.request_body
     }
 
     #[cfg(test)]
     pub(in crate::gateway::websocket) fn repair_message_item_ids(&mut self) -> bool {
-        crate::protocol::remove_item_prefixed_message_ids(&mut self.value)
+        crate::protocol::remove_item_prefixed_message_ids(&mut self.request_body)
     }
 
     pub(in crate::gateway::websocket) fn repair_legacy_call_ids(&mut self) -> bool {
-        if !repair_legacy_responses_call_ids(&mut self.value) {
+        if !repair_legacy_responses_call_ids(&mut self.request_body) {
             return false;
         }
         self.has_unpaired_tool_output =
-            !crate::gateway::request::unpaired_tool_output_ids(&self.value).is_empty();
+            !crate::gateway::request::unpaired_tool_output_ids(&self.request_body).is_empty();
         self.requires_affinity_owner =
             self.has_previous_response_id() || self.has_unpaired_tool_output;
         true

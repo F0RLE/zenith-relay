@@ -18,31 +18,31 @@ mod stop;
 
 impl MessagesStreamBridge {
     pub(super) fn handle_event(&mut self, event: &[u8]) {
-        let Some(value) = parse_sse_data(event) else {
+        let Some(event_payload) = parse_sse_data(event) else {
             if sse_event_has_data(event) {
                 self.fail(AdapterError::upstream_stream_invalid());
             }
             return;
         };
-        let Some(kind) = value.get("type").and_then(Value::as_str) else {
+        let Some(kind) = event_payload.get("type").and_then(Value::as_str) else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
         match kind {
-            "message_start" => self.handle_message_start(&value),
-            "content_block_start" => self.handle_block_start(&value),
+            "message_start" => self.handle_message_start(&event_payload),
+            "content_block_start" => self.handle_block_start(&event_payload),
             "content_block_delta"
-                if value
+                if event_payload
                     .get("delta")
                     .and_then(|delta| delta.get("type"))
                     .and_then(Value::as_str)
                     .is_some_and(|delta| {
                         matches!(delta, "citations_delta" | "document" | "compaction_delta")
                     }) => {}
-            "content_block_delta" => self.handle_block_delta(&value),
-            "content_block_stop" => self.handle_block_stop(&value),
+            "content_block_delta" => self.handle_block_delta(&event_payload),
+            "content_block_stop" => self.handle_block_stop(&event_payload),
             "message_delta" => {
-                if let Some(reason) = value
+                if let Some(reason) = event_payload
                     .pointer("/delta/stop_reason")
                     .filter(|reason| !reason.is_null())
                 {
@@ -58,7 +58,7 @@ impl MessagesStreamBridge {
                     }
                     self.stop_reason = Some(reason.to_owned());
                 }
-                if let Some(usage) = value.get("usage") {
+                if let Some(usage) = event_payload.get("usage") {
                     merge_usage(&mut self.usage, usage);
                 }
             }
@@ -68,7 +68,7 @@ impl MessagesStreamBridge {
             // an otherwise valid stream into a synthetic adapter failure.
             "ping" => {}
             "error" => {
-                self.upstream_error = Some(value.clone());
+                self.upstream_error = Some(event_payload.clone());
                 self.fail(AdapterError::upstream_stream_invalid());
             }
             kind if is_ignorable_metadata_event(kind) => {}
@@ -76,8 +76,8 @@ impl MessagesStreamBridge {
         }
     }
 
-    fn handle_message_start(&mut self, value: &Value) {
-        let Some(message) = value.get("message") else {
+    fn handle_message_start(&mut self, event_payload: &Value) {
+        let Some(message) = event_payload.get("message") else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
@@ -85,7 +85,7 @@ impl MessagesStreamBridge {
             .get("id")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|id| !id.is_empty())
+            .filter(|message_id| !message_id.is_empty())
         else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -272,9 +272,9 @@ impl MessagesStreamBridge {
                     arguments,
                     ..
                 } => {
-                    let input = tool_arguments_value(arguments)
+                    let tool_input = tool_arguments_value(arguments)
                         .ok_or_else(AdapterError::upstream_stream_invalid)?;
-                    Ok(json!({"type": "tool_use", "id": id, "name": upstream_name, "input": input}))
+                    Ok(json!({"type": "tool_use", "id": id, "name": upstream_name, "input": tool_input}))
                 }
                 StreamBlock::Thinking {
                     thinking,
@@ -331,16 +331,16 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
-        if validate_messages_tool_calls(&request.state, &content).is_err() {
+        if validate_messages_tool_calls(&request.bridge_state, &content).is_err() {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
         let (mut output, _) = match responses_output_from_messages_content(
             &content,
-            &request.state,
+            &request.bridge_state,
             status == "incomplete",
         ) {
-            Ok(value) => value,
+            Ok(output_parts) => output_parts,
             Err(error) => {
                 self.fail(error);
                 return;
@@ -365,7 +365,7 @@ impl MessagesStreamBridge {
             "output": output,
             "usage": responses_usage(self.usage.as_ref()),
         });
-        let mut continuation = request.state;
+        let mut continuation = request.bridge_state;
         continuation.append_assistant_content(content);
         self.completed = Some(MessagesBridgeResponse {
             response_body: response_body.clone(),
@@ -402,8 +402,8 @@ impl MessagesStreamBridge {
         self.terminal = true;
     }
 
-    fn frame(&mut self, event: &str, payload: Value) {
-        if !push_sse_frame(&mut self.output, event, &payload) {
+    fn frame(&mut self, event: &str, event_payload: Value) {
+        if !push_sse_frame(&mut self.output, event, &event_payload) {
             self.terminal = true;
         }
     }

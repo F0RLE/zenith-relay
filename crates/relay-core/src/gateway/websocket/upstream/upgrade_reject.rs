@@ -33,18 +33,19 @@ pub(super) async fn handle_upgrade_rejection(
     let native_replay_attempted = &mut repairs.native_replay;
     let stale_tool_history_recovered = &mut repairs.stale_tool_history;
     let model_switch_reset_attempted = &mut repairs.model_switch_reset;
-    let response = upgrade.into_inner();
-    let body = timeout(
+    let upgrade_response = upgrade.into_inner();
+    let error_body = timeout(
         UPSTREAM_CONNECT_TIMEOUT,
-        crate::transport::collect_limited(response, MAX_WEBSOCKET_ERROR_BYTES),
+        crate::transport::collect_limited(upgrade_response, MAX_WEBSOCKET_ERROR_BYTES),
     )
     .await
     .ok()
     .and_then(Result::ok);
-    let failure = GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin)
-        .apply_degraded_route_policy(runtime);
+    let failure =
+        GatewayFailure::upstream_status(status, error_body.as_deref(), source_error_origin)
+            .apply_degraded_route_policy(runtime);
     if !*legacy_call_id_repair_attempted
-        && body
+        && error_body
             .as_deref()
             .is_some_and(super::super::super::errors::responses_tool_call_links_rejected)
         && scope.request.repair_legacy_call_ids()
@@ -64,7 +65,7 @@ pub(super) async fn handle_upgrade_rejection(
         *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
         return Ok(UpgradeAction::ContinueCandidates);
     }
-    let response_missing = body
+    let response_missing = error_body
         .as_deref()
         .is_some_and(super::super::super::errors::previous_response_not_found);
     let affinity_miss = super::super::super::errors::recoverable_response_affinity_miss(
@@ -79,7 +80,7 @@ pub(super) async fn handle_upgrade_rejection(
             failure.category,
             scope.request.has_previous_response_id(),
             scope.request.has_unpaired_tool_output(),
-            body.as_deref().unwrap_or_default(),
+            error_body.as_deref().unwrap_or_default(),
         );
     if affinity_miss
         && response_affinity_hit
@@ -98,11 +99,11 @@ pub(super) async fn handle_upgrade_rejection(
     }
     let stale_tool_history = !*stale_tool_history_recovered
         && scope.request.has_previous_response_id()
-        && body.as_deref().is_some_and(|body| {
-            super::super::super::errors::responses_tool_call_is_missing_output(body)
+        && error_body.as_deref().is_some_and(|error_body| {
+            super::super::super::errors::responses_tool_call_is_missing_output(error_body)
                 && scope
                     .request
-                    .recover_stale_tool_history(runtime, &key.id, body)
+                    .recover_stale_tool_history(runtime, &key.id, error_body)
         });
     if stale_tool_history {
         *stale_tool_history_recovered = true;
@@ -115,7 +116,7 @@ pub(super) async fn handle_upgrade_rejection(
         *last_failure = Some(failure);
         return Ok(UpgradeAction::ContinueCandidates);
     }
-    if body
+    if error_body
         .as_deref()
         .is_some_and(super::super::super::errors::prompt_cache_write_rejected)
     {
@@ -124,7 +125,8 @@ pub(super) async fn handle_upgrade_rejection(
             &scope.trace(),
             &failure,
             Some(response_headers),
-            body.as_deref()
+            error_body
+                .as_deref()
                 .map(rate_limit_body_hint)
                 .unwrap_or_default(),
         );
@@ -153,7 +155,8 @@ pub(super) async fn handle_upgrade_rejection(
             &scope.trace(),
             &failure,
             Some(response_headers),
-            body.as_deref()
+            error_body
+                .as_deref()
                 .map(rate_limit_body_hint)
                 .unwrap_or_default(),
         );

@@ -79,50 +79,50 @@ impl StatsClient {
         authenticated: bool,
     ) -> StatsResult<Value> {
         use SourceStatsStatus as S;
-        let mut request = self
+        let mut stats_request = self
             .client
             .get(self.endpoint(path, site)?)
             .header("Accept", "application/json");
         if authenticated {
-            request = request.bearer_auth(&self.api_key);
+            stats_request = stats_request.bearer_auth(&self.api_key);
         }
-        let (response, permit) = self
+        let (stats_response, permit) = self
             .scope
-            .send(&self.client, request, HttpClass::Ordinary)
+            .send(&self.client, stats_request, HttpClass::Ordinary)
             .await
             .map_err(|_| S::Unavailable)?;
-        self.hints.observe(response.headers());
-        match response.status().as_u16() {
+        self.hints.observe(stats_response.headers());
+        match stats_response.status().as_u16() {
             200..=299 => {}
             401 | 403 => return Err(S::Unauthorized),
             429 => return Err(S::RateLimited),
             300..=399 | 404 | 405 => return Err(S::Unsupported),
             _ => return Err(S::Unavailable),
         }
-        if response
+        if stats_response
             .headers()
             .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+            .and_then(|header_value| header_value.to_str().ok())
+            .is_some_and(|header_value| header_value.to_ascii_lowercase().contains("text/html"))
         {
             return Err(S::Unsupported);
         }
-        if response
+        if stats_response
             .content_length()
             .is_some_and(|length| length > MAX_STATS_BYTES as u64)
         {
             return Err(S::InvalidResponse);
         }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| S::Unavailable)?;
-            if bytes.len().saturating_add(chunk.len()) > MAX_STATS_BYTES {
+        let mut response_bytes = Vec::new();
+        let mut response_stream = stats_response.bytes_stream();
+        while let Some(chunk) = response_stream.next().await {
+            let chunk_bytes = chunk.map_err(|_| S::Unavailable)?;
+            if response_bytes.len().saturating_add(chunk_bytes.len()) > MAX_STATS_BYTES {
                 return Err(S::InvalidResponse);
             }
-            bytes.extend_from_slice(&chunk);
+            response_bytes.extend_from_slice(&chunk_bytes);
         }
         drop(permit);
-        serde_json::from_slice(&bytes).map_err(|_| S::InvalidResponse)
+        serde_json::from_slice(&response_bytes).map_err(|_| S::InvalidResponse)
     }
 }

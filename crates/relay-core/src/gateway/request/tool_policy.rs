@@ -1,11 +1,11 @@
 use super::*;
 
-pub(in crate::gateway) fn tool_use_diagnostics(value: &Value) -> ToolUseDiagnostics {
-    let stats = crate::tool_policy::catalog_stats(value);
+pub(in crate::gateway) fn tool_use_diagnostics(request_payload: &Value) -> ToolUseDiagnostics {
+    let stats = crate::tool_policy::catalog_stats(request_payload);
     ToolUseDiagnostics {
         client_tool_count: stats.count,
         client_schema_bytes: Some(stats.bytes),
-        tool_choice: tool_choice_mode(value),
+        tool_choice: tool_choice_mode(request_payload),
         ..ToolUseDiagnostics::default()
     }
 }
@@ -39,8 +39,8 @@ impl RequestToolPolicy {
         &mut self,
         request: &mut Value,
     ) -> Result<(), &'static str> {
-        let result = crate::tool_policy::apply_tool_policy(request, &self.policy)?;
-        self.record(result);
+        let policy_result = crate::tool_policy::apply_tool_policy(request, &self.policy)?;
+        self.record(policy_result);
         Ok(())
     }
 
@@ -48,35 +48,37 @@ impl RequestToolPolicy {
         &mut self,
         request: &mut crate::PreparedAdapterRequest,
     ) -> Result<(), &'static str> {
-        let result = request.apply_tool_policy(&self.policy)?;
-        self.record(result);
+        let policy_result = request.apply_tool_policy(&self.policy)?;
+        self.record(policy_result);
         Ok(())
     }
 
-    fn record(&mut self, result: crate::tool_policy::ToolPolicyResult) {
+    fn record(&mut self, policy_result: crate::tool_policy::ToolPolicyResult) {
         // Keep the configured mode visible on every attempt.
         self.diagnostics.policy_mode = Some(self.configured_mode);
         // Capture the exact post-policy Value that will be serialized. Do not
         // deserialize the entire conversation again just to count its catalog.
         // Usage rows describe one attempt, not the maximum across other routes.
-        self.diagnostics.forwarded_tool_count = result.after.count;
-        self.diagnostics.forwarded_schema_bytes = Some(result.after.bytes);
-        self.diagnostics.filtered_tool_count =
-            result.before.count.saturating_sub(result.after.count);
-        self.diagnostics.policy_outcome = Some(result.outcome);
+        self.diagnostics.forwarded_tool_count = policy_result.after.count;
+        self.diagnostics.forwarded_schema_bytes = Some(policy_result.after.bytes);
+        self.diagnostics.filtered_tool_count = policy_result
+            .before
+            .count
+            .saturating_sub(policy_result.after.count);
+        self.diagnostics.policy_outcome = Some(policy_result.outcome);
     }
 }
 
-fn tool_choice_mode(value: &Value) -> ToolChoiceMode {
-    let choice = value.get("tool_choice").or_else(|| {
-        value
+fn tool_choice_mode(request_payload: &Value) -> ToolChoiceMode {
+    let choice = request_payload.get("tool_choice").or_else(|| {
+        request_payload
             .get("response")
             .and_then(|response| response.get("tool_choice"))
     });
     match choice {
         None => ToolChoiceMode::Unspecified,
-        Some(Value::String(value)) => tool_choice_mode_from_type(value),
-        Some(Value::Object(object)) => object
+        Some(Value::String(choice_type)) => tool_choice_mode_from_type(choice_type),
+        Some(Value::Object(choice_object)) => choice_object
             .get("type")
             .and_then(Value::as_str)
             .map_or(ToolChoiceMode::Specific, tool_choice_mode_from_type),
@@ -84,8 +86,8 @@ fn tool_choice_mode(value: &Value) -> ToolChoiceMode {
     }
 }
 
-fn tool_choice_mode_from_type(value: &str) -> ToolChoiceMode {
-    match value.to_ascii_lowercase().as_str() {
+fn tool_choice_mode_from_type(choice_type: &str) -> ToolChoiceMode {
+    match choice_type.to_ascii_lowercase().as_str() {
         "auto" => ToolChoiceMode::Auto,
         "required" | "any" => ToolChoiceMode::Required,
         "none" => ToolChoiceMode::None,

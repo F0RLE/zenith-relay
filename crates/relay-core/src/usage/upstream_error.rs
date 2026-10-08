@@ -19,18 +19,18 @@ pub struct UpstreamErrorDetails {
 }
 
 impl UpstreamErrorDetails {
-    pub fn from_body(http_status: Option<u16>, body: &[u8]) -> Self {
-        if body.len() > MAX_BODY_BYTES {
+    pub fn from_response_body(http_status: Option<u16>, response_body: &[u8]) -> Self {
+        if response_body.len() > MAX_BODY_BYTES {
             return Self {
                 truncated: true,
                 ..Self::empty(http_status)
             };
         }
-        match serde_json::from_slice::<Value>(body) {
-            Ok(value) => Self::from_value(http_status, &value),
+        match serde_json::from_slice::<Value>(response_body) {
+            Ok(error_payload) => Self::from_value(http_status, &error_payload),
             Err(_) => {
                 let mut details = Self::empty(http_status);
-                let text = String::from_utf8_lossy(body);
+                let text = String::from_utf8_lossy(response_body);
                 if text.trim_start().starts_with(['<', '{', '['])
                     || text
                         .lines()
@@ -45,7 +45,7 @@ impl UpstreamErrorDetails {
         }
     }
 
-    pub fn from_value(http_status: Option<u16>, value: &Value) -> Self {
+    pub fn from_value(http_status: Option<u16>, error_payload: &Value) -> Self {
         let mut details = Self::empty(http_status);
         let envelope = [
             "/error",
@@ -57,21 +57,22 @@ impl UpstreamErrorDetails {
             "",
         ]
         .into_iter()
-        .filter_map(|path| value.pointer(path))
-        .find(|value| {
-            value.is_string()
-                || value.as_object().is_some_and(|object| {
+        .filter_map(|path| error_payload.pointer(path))
+        .find(|candidate| {
+            candidate.is_string()
+                || candidate.as_object().is_some_and(|error_fields| {
                     ["message", "detail", "code", "type"]
                         .iter()
-                        .any(|key| object.contains_key(*key))
+                        .any(|key| error_fields.contains_key(*key))
                 })
         });
         if let Some(envelope) = envelope {
-            let code = envelope.get("code").and_then(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .or_else(|| value.as_u64().map(|value| value.to_string()))
+            let code = envelope.get("code").and_then(|code_value| {
+                code_value.as_str().map(str::to_owned).or_else(|| {
+                    code_value
+                        .as_u64()
+                        .map(|numeric_code| numeric_code.to_string())
+                })
             });
             details.code = code.as_deref().and_then(safe_identifier);
             let error_type = envelope
@@ -128,17 +129,17 @@ impl UpstreamErrorDetails {
 }
 
 impl From<Value> for UpstreamErrorDetails {
-    fn from(value: Value) -> Self {
-        let status = value
+    fn from(error_payload: Value) -> Self {
+        let status = error_payload
             .get("httpStatus")
             .and_then(Value::as_u64)
             .and_then(|status| u16::try_from(status).ok());
-        let mut details = Self::from_value(status, &value);
-        details.redacted |= value
+        let mut details = Self::from_value(status, &error_payload);
+        details.redacted |= error_payload
             .get("redacted")
             .and_then(Value::as_bool)
             .unwrap_or_default();
-        details.truncated |= value
+        details.truncated |= error_payload
             .get("truncated")
             .and_then(Value::as_bool)
             .unwrap_or_default();
@@ -146,13 +147,14 @@ impl From<Value> for UpstreamErrorDetails {
     }
 }
 
-fn safe_identifier(value: &str) -> Option<String> {
-    let normalized = crate::normalize_error_code(value)?;
-    let (_, redacted, truncated) = sanitize_message(value);
-    (!redacted && !truncated && !normalized.starts_with("eyj")).then(|| value.trim().to_string())
+fn safe_identifier(identifier_text: &str) -> Option<String> {
+    let normalized = crate::normalize_error_code(identifier_text)?;
+    let (_, redacted, truncated) = sanitize_message(identifier_text);
+    (!redacted && !truncated && !normalized.starts_with("eyj"))
+        .then(|| identifier_text.trim().to_string())
 }
 
-fn sanitize_message(value: &str) -> (String, bool, bool) {
+fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
     static SENSITIVE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         [
             r#"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|password|secret)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\n,;]+)"#,
@@ -167,7 +169,7 @@ fn sanitize_message(value: &str) -> (String, bool, bool) {
             r#"(?is)\b(?:received|provided|supplied|got)\s*[:=]\s*.*"#,
         ].into_iter().map(|pattern| Regex::new(pattern).expect("static diagnostic redaction regex")).collect()
     });
-    let mut message = value
+    let mut message = raw_message
         .chars()
         .take(MAX_BODY_BYTES)
         .map(|ch| {
@@ -186,7 +188,7 @@ fn sanitize_message(value: &str) -> (String, bool, bool) {
     }
     let message = message.trim();
     let truncated =
-        value.chars().count() > MAX_BODY_BYTES || message.chars().count() > MAX_MESSAGE_CHARS;
+        raw_message.chars().count() > MAX_BODY_BYTES || message.chars().count() > MAX_MESSAGE_CHARS;
     (
         message.chars().take(MAX_MESSAGE_CHARS).collect(),
         redacted,
@@ -230,7 +232,7 @@ mod tests {
             b"{\"input\":\"synthetic".as_slice(),
             b"data: {\"delta\":\"synthetic\"}\n\n",
         ] {
-            let details = UpstreamErrorDetails::from_body(Some(502), body);
+            let details = UpstreamErrorDetails::from_response_body(Some(502), body);
             assert!(details.redacted);
             assert!(details.message.is_none());
         }
@@ -293,7 +295,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_bounded_and_html_is_not_retained() {
-        let text = UpstreamErrorDetails::from_body(Some(503), b"Provider maintenance in progress");
+        let text = UpstreamErrorDetails::from_response_body(
+            Some(503),
+            b"Provider maintenance in progress",
+        );
         assert_eq!(
             text.message.as_deref(),
             Some("Provider maintenance in progress")
@@ -304,7 +309,8 @@ mod tests {
         );
         assert!(long.truncated);
         assert_eq!(long.message.unwrap().chars().count(), MAX_MESSAGE_CHARS);
-        let html = UpstreamErrorDetails::from_body(Some(502), b"<html>private diagnostic</html>");
+        let html =
+            UpstreamErrorDetails::from_response_body(Some(502), b"<html>private diagnostic</html>");
         assert!(html.redacted);
         assert!(html.message.is_none());
     }

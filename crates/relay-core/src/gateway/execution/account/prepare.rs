@@ -55,7 +55,9 @@ pub(super) struct AccountPrepareInput<'a> {
 /// Turn one reserved account into a serialized upstream attempt. A route that
 /// cannot carry this endpoint continues the loop; a client-shaped body returns
 /// immediately.
-pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> AccountPrepare {
+pub(super) fn prepare_account_attempt(
+    account_prepare_input: AccountPrepareInput<'_>,
+) -> AccountPrepare {
     let AccountPrepareInput {
         runtime,
         key,
@@ -75,7 +77,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         last_failure,
         last_adapter_error,
         ..
-    } = input;
+    } = account_prepare_input;
     let Some(mut route) = runtime.executor_route(
         candidate_id,
         resolved_model,
@@ -137,7 +139,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         route_responses_lite.is_some(),
         basis_points_route,
     ) {
-        Ok(body) => body,
+        Ok(upstream_response_body) => upstream_response_body,
         Err(step) => return step,
     };
     // Saved tool optimization is not applied. Wake, compact, and alpha/search

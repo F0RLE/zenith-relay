@@ -32,26 +32,27 @@ pub struct SourceProbeResult {
 /// accepts a user prompt, follows redirects, or returns upstream response data.
 pub async fn probe_source_generation(
     source: &ProviderSource,
-    input: &SourceProbeInput,
+    probe_input: &SourceProbeInput,
 ) -> Result<SourceProbeResult> {
-    probe_source_generation_with_scope(source, input, ManagementHttpScope::default()).await
+    probe_source_generation_with_scope(source, probe_input, ManagementHttpScope::default()).await
 }
 
 pub async fn probe_source_generation_with_scope(
     source: &ProviderSource,
-    input: &SourceProbeInput,
+    probe_input: &SourceProbeInput,
     scope: ManagementHttpScope,
 ) -> Result<SourceProbeResult> {
     source.validate()?;
-    let model = source
+    let model_id = source
         .models
         .iter()
-        .find(|model| model.eq_ignore_ascii_case(input.model_id.trim()))
+        .find(|model| model.eq_ignore_ascii_case(probe_input.model_id.trim()))
         .ok_or_else(|| Error::Validation("probe model must belong to the source catalog".into()))?;
-    let binding = SourceProtocolBinding::legacy(input.wire_api, std::slice::from_ref(model));
+    let binding =
+        SourceProtocolBinding::legacy(probe_input.wire_api, std::slice::from_ref(model_id));
     let connector = SourceConnector::new(source, std::slice::from_ref(&binding))?;
     let endpoint = connector
-        .endpoint(binding.key(), model, false)
+        .endpoint(binding.key(), model_id, false)
         .ok_or_else(|| Error::Validation("probe endpoint is invalid".into()))?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
@@ -59,58 +60,60 @@ pub async fn probe_source_generation_with_scope(
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let (header, authorization) = connector.authorization_for_binding(&binding);
-    let request = client
+    let probe_request = client
         .post(endpoint)
         .header(header, authorization)
         .headers(connector.protocol_headers_for_binding(&binding))
-        .json(&probe_body(input.wire_api, model));
-    let mut result = SourceProbeResult {
+        .json(&probe_body(probe_input.wire_api, model_id));
+    let mut probe_result = SourceProbeResult {
         capability: ModelEndpointCapability {
-            model_id: model.clone(),
-            upstream_wire_api: input.wire_api,
+            model_id: model_id.clone(),
+            upstream_wire_api: probe_input.wire_api,
             status: CapabilityStatus::Unknown,
             origin: CapabilityOrigin::GenerationProbe,
             checked_at_ms: crate::unix_time_ms(),
             features: BTreeMap::new(),
             reasoning_efforts: vec![],
         },
-        revision: input.expected_revision,
+        revision: probe_input.expected_revision,
         http_status: None,
         error_code: Some(error_codes::SOURCE_PROBE_UNAVAILABLE.into()),
     };
     let exchange = async {
-        let (response, permit) = scope
-            .send(&client, request, HttpClass::Ordinary)
+        let (probe_response, permit) = scope
+            .send(&client, probe_request, HttpClass::Ordinary)
             .await
             .map_err(|_| Error::ManagementHttpUnavailable)?;
-        let status = response.status();
-        let body = collect_limited(response, MAX_PROBE_BYTES).await?;
+        let status = probe_response.status();
+        let response_body = collect_limited(probe_response, MAX_PROBE_BYTES).await?;
         drop(permit);
-        Ok::<_, Error>((status, body))
+        Ok::<_, Error>((status, response_body))
     };
-    if let Ok(Ok((status, body))) = tokio::time::timeout(PROBE_TIMEOUT, exchange).await {
-        result.http_status = Some(status.as_u16());
+    if let Ok(Ok((status, response_body))) = tokio::time::timeout(PROBE_TIMEOUT, exchange).await {
+        probe_result.http_status = Some(status.as_u16());
         if status.is_success() {
-            let valid = serde_json::from_slice::<Value>(&body)
+            let has_valid_text = serde_json::from_slice::<Value>(&response_body)
                 .ok()
-                .is_some_and(|body| valid_text_response(input.wire_api, &body));
-            if valid {
-                result.capability.status = CapabilityStatus::Confirmed;
-                result
+                .is_some_and(|response_json| {
+                    valid_text_response(probe_input.wire_api, &response_json)
+                });
+            if has_valid_text {
+                probe_result.capability.status = CapabilityStatus::Confirmed;
+                probe_result
                     .capability
                     .features
                     .insert(ProtocolFeature::Text, CapabilityStatus::Confirmed);
-                result.error_code = None;
+                probe_result.error_code = None;
             } else {
-                result.error_code = Some(error_codes::SOURCE_PROBE_INVALID_RESPONSE.into());
+                probe_result.error_code = Some(error_codes::SOURCE_PROBE_INVALID_RESPONSE.into());
             }
         } else if matches!(status.as_u16(), 404 | 405) {
-            result.capability.status = CapabilityStatus::Unsupported;
-            result.error_code = Some(error_codes::SOURCE_PROBE_UNSUPPORTED.into());
+            probe_result.capability.status = CapabilityStatus::Unsupported;
+            probe_result.error_code = Some(error_codes::SOURCE_PROBE_UNSUPPORTED.into());
         }
     }
-    result.capability.checked_at_ms = crate::unix_time_ms();
-    Ok(result)
+    probe_result.capability.checked_at_ms = crate::unix_time_ms();
+    Ok(probe_result)
 }
 
 fn probe_body(protocol: WireApi, model: &str) -> Value {
@@ -131,66 +134,72 @@ fn probe_body(protocol: WireApi, model: &str) -> Value {
     }
 }
 
-fn valid_text_response(protocol: WireApi, body: &Value) -> bool {
-    let nonempty = |value: Option<&Value>| {
-        value
+fn valid_text_response(protocol: WireApi, response_json: &Value) -> bool {
+    let has_nonempty_text = |field: Option<&Value>| {
+        field
             .and_then(Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty())
+            .is_some_and(|text| !text.trim().is_empty())
     };
-    if body.get("error").is_some_and(|e| !e.is_null()) {
+    if response_json
+        .get("error")
+        .is_some_and(|error_value| !error_value.is_null())
+    {
         return false;
     }
     match protocol {
         WireApi::Responses => {
-            body.get("status").and_then(Value::as_str) == Some("completed")
-                && body
+            response_json.get("status").and_then(Value::as_str) == Some("completed")
+                && response_json
                     .get("output")
                     .and_then(Value::as_array)
-                    .is_some_and(|output| {
-                        output.iter().any(|item| {
-                            item.get("type").and_then(Value::as_str) == Some("message")
-                                && item.get("content").and_then(Value::as_array).is_some_and(
-                                    |content| {
-                                        content.iter().any(|part| {
-                                            part.get("type").and_then(Value::as_str)
+                    .is_some_and(|output_items| {
+                        output_items.iter().any(|output_item| {
+                            output_item.get("type").and_then(Value::as_str) == Some("message")
+                                && output_item
+                                    .get("content")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|content_items| {
+                                        content_items.iter().any(|content_item| {
+                                            content_item.get("type").and_then(Value::as_str)
                                                 == Some("output_text")
-                                                && nonempty(part.get("text"))
+                                                && has_nonempty_text(content_item.get("text"))
                                         })
-                                    },
-                                )
+                                    })
                         })
                     })
         }
         WireApi::ChatCompletions => {
-            body.pointer("/choices/0/finish_reason")
+            response_json
+                .pointer("/choices/0/finish_reason")
                 .and_then(Value::as_str)
                 == Some("stop")
-                && nonempty(body.pointer("/choices/0/message/content"))
+                && has_nonempty_text(response_json.pointer("/choices/0/message/content"))
         }
         WireApi::Messages => {
-            body.get("type").and_then(Value::as_str) == Some("message")
-                && body.get("stop_reason").and_then(Value::as_str) == Some("end_turn")
-                && body
+            response_json.get("type").and_then(Value::as_str) == Some("message")
+                && response_json.get("stop_reason").and_then(Value::as_str) == Some("end_turn")
+                && response_json
                     .get("content")
                     .and_then(Value::as_array)
-                    .is_some_and(|content| {
-                        content.iter().any(|part| {
-                            part.get("type").and_then(Value::as_str) == Some("text")
-                                && nonempty(part.get("text"))
+                    .is_some_and(|content_items| {
+                        content_items.iter().any(|content_item| {
+                            content_item.get("type").and_then(Value::as_str) == Some("text")
+                                && has_nonempty_text(content_item.get("text"))
                         })
                     })
         }
         WireApi::Gemini => {
-            body.pointer("/candidates/0/finishReason")
+            response_json
+                .pointer("/candidates/0/finishReason")
                 .and_then(Value::as_str)
                 == Some("STOP")
-                && body
+                && response_json
                     .pointer("/candidates/0/content/parts")
                     .and_then(Value::as_array)
                     .is_some_and(|parts| {
-                        parts.iter().any(|part| {
-                            part.get("thought").and_then(Value::as_bool) != Some(true)
-                                && nonempty(part.get("text"))
+                        parts.iter().any(|content_part| {
+                            content_part.get("thought").and_then(Value::as_bool) != Some(true)
+                                && has_nonempty_text(content_part.get("text"))
                         })
                     })
         }
@@ -228,20 +237,20 @@ mod tests {
                 wire_api: WireApi::ChatCompletions,
                 expected_revision: 3,
             };
-            let result = probe_source_generation(&source, &input).await.unwrap();
+            let probe_result = probe_source_generation(&source, &input).await.unwrap();
             assert_eq!(
-                result.capability.status,
+                probe_result.capability.status,
                 match status {
                     200 => CapabilityStatus::Confirmed,
                     404 | 405 => CapabilityStatus::Unsupported,
                     _ => CapabilityStatus::Unknown,
                 }
             );
-            assert!(!result
+            assert!(!probe_result
                 .capability
                 .features
                 .contains_key(&ProtocolFeature::Streaming));
-            assert_eq!(result.revision, 3);
+            assert_eq!(probe_result.revision, 3);
             server.abort();
         }
     }

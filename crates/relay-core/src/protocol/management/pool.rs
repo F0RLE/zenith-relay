@@ -46,20 +46,20 @@ pub fn pool_model_summaries_with_pricing(
     let mut summaries = models
         .into_values()
         .map(|model| {
-            let id = model.id.clone();
-            let resolved = resolve_pool_model_price(&model, &id, catalog, context);
+            let model_id = model.id.clone();
+            let resolved = resolve_pool_model_price(&model, &model_id, catalog, context);
             let quote = resolved.as_ref().and_then(|price| price.quote);
             let enabled = !hidden_models
                 .iter()
-                .any(|hidden| hidden.eq_ignore_ascii_case(&id));
+                .any(|hidden| hidden.eq_ignore_ascii_case(&model_id));
             (
                 model.upstream_order,
                 model_summary(
-                    id.clone(),
+                    model_id.clone(),
                     model.members.len(),
                     enabled,
                     quote,
-                    catalog.image_request_prices(&id),
+                    catalog.image_request_prices(&model_id),
                 ),
             )
         })
@@ -270,11 +270,11 @@ fn add_member_models(
         let model_order = *upstream_order;
         *upstream_order = upstream_order.saturating_add(1);
         let key = crate::model_id_key(model);
-        let entry = models.entry(key).or_insert_with(|| PoolModel {
+        let pool_model = models.entry(key).or_insert_with(|| PoolModel {
             id: model.clone(),
             members: BTreeSet::new(),
             upstream_order: model_order,
         });
-        entry.members.insert(member_id.to_string());
+        pool_model.members.insert(member_id.to_string());
     }
 }

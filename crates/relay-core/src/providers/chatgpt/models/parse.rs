@@ -19,16 +19,18 @@ struct ModelEntry {
     slug: String,
 }
 
-pub(super) fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
-    let response: ModelsResponse = serde_json::from_slice(body)
+pub(super) fn parse_models(
+    models_response_body: &[u8],
+) -> Result<Vec<String>, ModelDiscoveryFailure> {
+    let models_response: ModelsResponse = serde_json::from_slice(models_response_body)
         .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidResponse))?;
-    if response.models.len() > MAX_MODELS {
+    if models_response.models.len() > MAX_MODELS {
         return Err(ModelDiscoveryFailure::new(
             ModelDiscoveryFailureCode::InvalidResponse,
         ));
     }
     let mut seen = HashSet::new();
-    Ok(response
+    Ok(models_response
         .models
         .into_iter()
         // This endpoint is the account's authoritative model inventory.

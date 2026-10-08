@@ -57,8 +57,8 @@ pub enum UsagePriceClass {
 }
 
 impl UsagePriceClass {
-    pub fn from_observed(value: Option<&str>) -> Self {
-        match value
+    pub fn from_observed(observed_tier: Option<&str>) -> Self {
+        match observed_tier
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase()
@@ -70,8 +70,8 @@ impl UsagePriceClass {
         }
     }
 
-    pub fn from_label(value: &str) -> Self {
-        match value {
+    pub fn from_label(price_class_label: &str) -> Self {
+        match price_class_label {
             "flex" => Self::Flex,
             "priority" => Self::Priority,
             _ => Self::Standard,
@@ -101,8 +101,8 @@ impl UsageContextBand {
         }
     }
 
-    pub fn from_label(value: &str) -> Self {
-        match value {
+    pub fn from_label(context_band_label: &str) -> Self {
+        match context_band_label {
             "above_200k" => Self::Above200k,
             "above_272k" => Self::Above272k,
             _ => Self::Base,

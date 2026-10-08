@@ -42,24 +42,29 @@ pub(super) fn native_catalog(
         return client_api_forbidden();
     }
     let models = runtime.visible_models(&key, &[protocol], super::now_ms());
-    let entry = |id: &str| -> Value {
+    let build_catalog_entry = |model_id: &str| -> Value {
         if protocol == WireApi::Gemini {
-            let model = runtime.resolve_model(&key, id).unwrap_or_else(|| id.into());
+            let resolved_model = runtime
+                .resolve_model(&key, model_id)
+                .unwrap_or_else(|| model_id.into());
             let streaming = !runtime
-                .configured_executor_routes(&key, &model, &[protocol], true)
+                .configured_executor_routes(&key, &resolved_model, &[protocol], true)
                 .is_empty();
             let mut methods = vec!["generateContent"];
             if streaming {
                 methods.push("streamGenerateContent");
             }
-            json!({"name":format!("models/{id}"),"displayName":id,"supportedGenerationMethods":methods})
+            json!({"name":format!("models/{model_id}"),"displayName":model_id,"supportedGenerationMethods":methods})
         } else {
-            json!({"id":id,"display_name":id,"type":"model"})
+            json!({"id":model_id,"display_name":model_id,"type":"model"})
         }
     };
     if let Some(model) = model {
-        return match models.iter().find(|id| id.eq_ignore_ascii_case(model)) {
-            Some(id) => Json(entry(id)).into_response(),
+        return match models
+            .iter()
+            .find(|model_id| model_id.eq_ignore_ascii_case(model))
+        {
+            Some(model_id) => Json(build_catalog_entry(model_id)).into_response(),
             None => api_error(
                 StatusCode::NOT_FOUND,
                 "model is not available in this managed pool",
@@ -68,10 +73,10 @@ pub(super) fn native_catalog(
         };
     }
     if protocol == WireApi::Gemini {
-        Json(json!({"models":models.iter().map(|id| entry(id)).collect::<Vec<_>>()}))
+        Json(json!({"models":models.iter().map(|model_id| build_catalog_entry(model_id)).collect::<Vec<_>>()}))
             .into_response()
     } else {
-        Json(json!({"data":models.iter().map(|id| entry(id)).collect::<Vec<_>>(),"has_more":false,"first_id":models.first(),"last_id":models.last()})).into_response()
+        Json(json!({"data":models.iter().map(|model_id| build_catalog_entry(model_id)).collect::<Vec<_>>(),"has_more":false,"first_id":models.first(),"last_id":models.last()})).into_response()
     }
 }
 
@@ -117,7 +122,7 @@ pub(super) async fn native_model(
     if runtime
         .visible_models(&key, &protocols, super::now_ms())
         .iter()
-        .any(|id| id.eq_ignore_ascii_case(&model))
+        .any(|model_id| model_id.eq_ignore_ascii_case(&model))
     {
         Json(json!({"id": model, "object":"model", "owned_by":"zenith-relay"})).into_response()
     } else {

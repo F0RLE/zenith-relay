@@ -7,18 +7,21 @@ use crate::DefaultServiceTier;
 
 impl GatewayRuntime {
     pub(crate) fn resolve_model(&self, key: &AuthenticatedKey, model: &str) -> Option<String> {
-        let model = model.trim();
-        if model.is_empty() {
+        let requested_model_id = model.trim();
+        if requested_model_id.is_empty() {
             return None;
         }
-        let model = match key.model_prefix.as_deref() {
-            Some(prefix) => strip_prefix_ignore_ascii_case(model, &format!("{prefix}/"))?,
-            None => model,
+        let scoped_model_id = match key.model_prefix.as_deref() {
+            Some(prefix) => {
+                strip_prefix_ignore_ascii_case(requested_model_id, &format!("{prefix}/"))?
+            }
+            None => requested_model_id,
         };
-        if self.degraded_route_blocked(model) {
+        if self.degraded_route_blocked(scoped_model_id) {
             return None;
         }
-        (key.model_rules.allows(model) && self.model_enabled(model)).then(|| model.to_string())
+        (key.model_rules.allows(scoped_model_id) && self.model_enabled(scoped_model_id))
+            .then(|| scoped_model_id.to_string())
     }
 
     pub(super) fn model_enabled(&self, model: &str) -> bool {
@@ -68,7 +71,8 @@ impl GatewayRuntime {
                 .any(|candidate| candidate.is_configured(&resolved, allowed_protocols, &scope))
                 .then_some(resolved)
         };
-        resolve(model).or_else(|| decode_codex_model_alias(model).and_then(|id| resolve(&id)))
+        resolve(model)
+            .or_else(|| decode_codex_model_alias(model).and_then(|model_id| resolve(&model_id)))
     }
 
     pub(crate) fn resolve_visible_account_model(
@@ -91,7 +95,8 @@ impl GatewayRuntime {
                 .is_empty())
             .then_some(resolved)
         };
-        resolve(model).or_else(|| decode_codex_model_alias(model).and_then(|id| resolve(&id)))
+        resolve(model)
+            .or_else(|| decode_codex_model_alias(model).and_then(|model_id| resolve(&model_id)))
     }
 
     fn resolve_from_visible(
@@ -104,12 +109,12 @@ impl GatewayRuntime {
             let resolved = self.resolve_model(key, candidate)?;
             visible
                 .iter()
-                .filter_map(|visible| self.resolve_model(key, visible))
-                .any(|visible| visible.eq_ignore_ascii_case(&resolved))
+                .filter_map(|visible_model_id| self.resolve_model(key, visible_model_id))
+                .any(|visible_model_id| visible_model_id.eq_ignore_ascii_case(&resolved))
                 .then_some(resolved)
         };
         resolve(requested)
-            .or_else(|| decode_codex_model_alias(requested).and_then(|id| resolve(&id)))
+            .or_else(|| decode_codex_model_alias(requested).and_then(|model_id| resolve(&model_id)))
     }
 
     pub(crate) fn visible_models(

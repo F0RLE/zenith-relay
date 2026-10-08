@@ -106,15 +106,15 @@ fn legacy_preset_rotation_upgrades_without_consent_or_losing_member_limits() {
     let mut current = valid_configuration_preset().settings;
     current.routing.pool_routing = Some(current.resolved_pool_routing());
     let mut requested = current.clone();
-    let old = requested.routing.pool_routing.as_mut().unwrap();
-    old.version = 1;
-    old.mode = crate::PoolRoutingMode::Smart;
-    old.members.reverse();
-    for member in &mut old.members {
+    let legacy_routing = requested.routing.pool_routing.as_mut().unwrap();
+    legacy_routing.version = 1;
+    legacy_routing.mode = crate::PoolRoutingMode::Smart;
+    legacy_routing.members.reverse();
+    for member in &mut legacy_routing.members {
         member.weight = 7;
         member.max_concurrency = 4;
     }
-    let expected_members = old.members.clone();
+    let expected_members = legacy_routing.members.clone();
     let merged = merge_configuration_preset_settings(&current, &requested).unwrap();
     let policy = merged.routing.pool_routing.unwrap();
     assert!(policy.is_current_rotation());
@@ -179,13 +179,16 @@ fn legacy_preset_routing_fields_are_read_but_not_exported() {
         .unwrap();
     assert_eq!(policy.max_retry_candidates, 3);
     let saved = serde_json::to_value(policy).unwrap();
-    for old in [
+    for legacy_field in [
         "cooldownAfterFailures",
         "keepLastCandidateAvailable",
         "routingStrategy",
         "subscriptionPlanOrder",
     ] {
-        assert!(saved.get(old).is_none(), "{old} must not be exported");
+        assert!(
+            saved.get(legacy_field).is_none(),
+            "{legacy_field} must not be exported"
+        );
     }
     let mut unsupported = saved;
     unsupported["unknownRoutingControl"] = serde_json::json!(true);

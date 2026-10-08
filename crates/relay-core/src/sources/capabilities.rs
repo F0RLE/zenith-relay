@@ -116,8 +116,8 @@ pub fn service_protocol(base_url: &str) -> Option<WireApi> {
     }
 }
 
-pub(super) fn endpoint_type(value: &str) -> Option<WireApi> {
-    match value {
+pub(super) fn endpoint_type(endpoint_type_text: &str) -> Option<WireApi> {
+    match endpoint_type_text {
         "openai-response" | "responses" | "/v1/responses" => Some(WireApi::Responses),
         "openai" | "chat_completions" | "chat.completions" | "/v1/chat/completions" => {
             Some(WireApi::ChatCompletions)

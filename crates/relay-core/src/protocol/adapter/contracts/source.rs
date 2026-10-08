@@ -210,9 +210,10 @@ impl SourceAdapter {
         self.validate(context.client_wire_api, context.reasoning_mode)?;
         let rewritten = if !self.is_passthrough() && context.client_wire_api == WireApi::Responses {
             match super::super::compaction::prepare_bridged_compaction(context.request)? {
-                super::super::compaction::BridgedCompaction::Rewritten { request, .. } => {
-                    Some(request)
-                }
+                super::super::compaction::BridgedCompaction::Rewritten {
+                    rewritten_request,
+                    ..
+                } => Some(rewritten_request),
                 super::super::compaction::BridgedCompaction::Unchanged => None,
             }
         } else {
@@ -249,16 +250,16 @@ impl SourceAdapter {
         match self {
             Self::Native => {
                 let mut upstream_body = request.clone();
-                let object = upstream_body
+                let upstream_object = upstream_body
                     .as_object_mut()
                     .ok_or_else(AdapterError::invalid_request)?;
                 if client_wire_api == WireApi::Gemini {
                     // Gemini places the model in the endpoint path. A model
                     // field is not part of the generateContent contract and
                     // some providers reject it as an unknown field.
-                    object.remove("model");
+                    upstream_object.remove("model");
                 } else {
-                    object.insert("model".to_string(), Value::String(model.to_string()));
+                    upstream_object.insert("model".to_string(), Value::String(model.to_string()));
                 }
                 if client_wire_api == WireApi::Messages {
                     messages::apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;

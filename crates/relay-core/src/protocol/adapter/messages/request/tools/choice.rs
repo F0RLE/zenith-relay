@@ -2,73 +2,76 @@ use super::*;
 
 pub(in crate::protocol::adapter::messages::request) fn translate_tool_choice(
     tool_choice: &Value,
-    state: &MessagesBridgeState,
+    bridge_state: &MessagesBridgeState,
 ) -> AdapterResult<TranslatedToolChoice> {
-    let has_tools = state.upstream_tools().is_some();
+    let has_tools = bridge_state.upstream_tools().is_some();
     match tool_choice {
-        Value::String(value) => match value.as_str() {
+        Value::String(choice_name) => match choice_name.as_str() {
             "auto" => Ok(TranslatedToolChoice {
-                value: has_tools.then(|| json!({"type": "auto"})),
+                translated_choice: has_tools.then(|| json!({"type": "auto"})),
                 allowed_names: None,
             }),
             "none" => Ok(TranslatedToolChoice {
-                value: has_tools.then(|| json!({"type": "none"})),
+                translated_choice: has_tools.then(|| json!({"type": "none"})),
                 allowed_names: None,
             }),
             "required" if has_tools => Ok(TranslatedToolChoice {
-                value: Some(json!({"type": "any"})),
+                translated_choice: Some(json!({"type": "any"})),
                 allowed_names: None,
             }),
             _ => Err(AdapterError::unsupported_tool()),
         },
-        Value::Object(value)
+        Value::Object(choice_object)
             if matches!(
-                value.get("type").and_then(Value::as_str),
+                choice_object.get("type").and_then(Value::as_str),
                 Some("function" | "custom")
             ) =>
         {
-            let Some(name) = state.selected_upstream_tool_name(value) else {
+            let Some(name) = bridge_state.selected_upstream_tool_name(choice_object) else {
                 return Err(AdapterError::unsupported_tool());
             };
             Ok(TranslatedToolChoice {
-                value: Some(json!({"type": "tool", "name": name})),
+                translated_choice: Some(json!({"type": "tool", "name": name})),
                 allowed_names: None,
             })
         }
-        Value::Object(value) if value.get("type").and_then(Value::as_str) == Some("namespace") => {
-            let namespace = value
+        Value::Object(choice_object)
+            if choice_object.get("type").and_then(Value::as_str) == Some("namespace") =>
+        {
+            let namespace = choice_object
                 .get("name")
-                .or_else(|| value.get("namespace"))
+                .or_else(|| choice_object.get("namespace"))
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|namespace| !namespace.is_empty())
                 .ok_or_else(AdapterError::unsupported_tool)?;
-            let allowed_names = state
+            let allowed_names = bridge_state
                 .tool_targets
                 .iter()
                 .filter_map(|(upstream_name, target)| {
                     (target.namespace.as_deref() == Some(namespace)
-                        && state.allows_tool_name(upstream_name))
+                        && bridge_state.allows_tool_name(upstream_name))
                     .then_some(upstream_name.clone())
                 })
                 .collect::<BTreeSet<_>>();
             if allowed_names.is_empty() {
                 return Ok(TranslatedToolChoice {
-                    value: None,
+                    translated_choice: None,
                     allowed_names: None,
                 });
             }
             Ok(TranslatedToolChoice {
-                value: Some(json!({"type": "any"})),
+                translated_choice: Some(json!({"type": "any"})),
                 allowed_names: Some(allowed_names),
             })
         }
-        Value::Object(value)
-            if value.get("type").and_then(Value::as_str) == Some("allowed_tools") =>
+        Value::Object(choice_object)
+            if choice_object.get("type").and_then(Value::as_str) == Some("allowed_tools") =>
         {
-            let Some(configured_tools) = value.get("tools").and_then(Value::as_array) else {
+            let Some(configured_tools) = choice_object.get("tools").and_then(Value::as_array)
+            else {
                 return Ok(TranslatedToolChoice {
-                    value: None,
+                    translated_choice: None,
                     allowed_names: None,
                 });
             };
@@ -79,7 +82,7 @@ pub(in crate::protocol::adapter::messages::request) fn translate_tool_choice(
                 };
                 match tool.get("type").and_then(Value::as_str) {
                     Some("function" | "custom") => {
-                        if let Some(name) = state.selected_upstream_tool_name(tool) {
+                        if let Some(name) = bridge_state.selected_upstream_tool_name(tool) {
                             allowed_names.insert(name);
                         }
                     }
@@ -94,10 +97,10 @@ pub(in crate::protocol::adapter::messages::request) fn translate_tool_choice(
                         if namespace.is_empty() {
                             continue;
                         }
-                        allowed_names.extend(state.tool_targets.iter().filter_map(
+                        allowed_names.extend(bridge_state.tool_targets.iter().filter_map(
                             |(upstream_name, target)| {
                                 (target.namespace.as_deref() == Some(namespace)
-                                    && state.allows_tool_name(upstream_name))
+                                    && bridge_state.allows_tool_name(upstream_name))
                                 .then_some(upstream_name.clone())
                             },
                         ));
@@ -110,27 +113,31 @@ pub(in crate::protocol::adapter::messages::request) fn translate_tool_choice(
             }
             if allowed_names.is_empty() {
                 return Ok(TranslatedToolChoice {
-                    value: None,
+                    translated_choice: None,
                     allowed_names: None,
                 });
             }
-            let value = match value.get("mode").and_then(Value::as_str).unwrap_or("auto") {
+            let translated_choice = match choice_object
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("auto")
+            {
                 "auto" => json!({"type": "auto"}),
                 "required" => json!({"type": "any"}),
                 _ => {
                     return Ok(TranslatedToolChoice {
-                        value: None,
+                        translated_choice: None,
                         allowed_names: None,
                     })
                 }
             };
             Ok(TranslatedToolChoice {
-                value: Some(value),
+                translated_choice: Some(translated_choice),
                 allowed_names: Some(allowed_names),
             })
         }
         Value::Null => Ok(TranslatedToolChoice {
-            value: None,
+            translated_choice: None,
             allowed_names: None,
         }),
         _ => Err(AdapterError::unsupported_tool()),

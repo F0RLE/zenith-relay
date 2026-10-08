@@ -248,7 +248,9 @@ impl UsageQuery {
         let (page, page_size) = self.normalized_page();
         self.page = page;
         self.page_size = page_size;
-        self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
+        self.bucket_ms = self
+            .bucket_ms
+            .filter(|bucket_duration_ms| *bucket_duration_ms >= 60_000);
     }
 
     pub fn includes_models(&self) -> bool {

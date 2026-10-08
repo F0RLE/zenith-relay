@@ -27,7 +27,7 @@ pub(in crate::gateway::execution) enum AttachmentFailure {
 struct InlineImage {
     media_type: &'static str,
     filename: &'static str,
-    data: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 enum ImageJob {
@@ -36,8 +36,8 @@ enum ImageJob {
 }
 
 struct LocatedJob {
-    item: usize,
-    part: usize,
+    input_index: usize,
+    content_index: usize,
     job: ImageJob,
 }
 
@@ -51,30 +51,38 @@ pub(in crate::gateway::execution) async fn attach_input_images(
     candidate_id: &str,
     responses_url: &url::Url,
     headers: &HeaderMap,
-    body: Vec<u8>,
+    request_body: Vec<u8>,
 ) -> Result<Vec<u8>, AttachmentFailure> {
-    if !body.windows(13).any(|window| window == b"\"input_image\"") {
-        return Ok(body);
+    if !request_body
+        .windows(13)
+        .any(|window| window == b"\"input_image\"")
+    {
+        return Ok(request_body);
     }
-    let mut request: Value = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return Ok(body),
+    let mut request_fields: Value = match serde_json::from_slice(&request_body) {
+        Ok(request_body) => request_body,
+        Err(_) => return Ok(request_body),
     };
-    let jobs = stage_input_images(&request)?;
+    let jobs = stage_input_images(&request_fields)?;
     if jobs.is_empty() {
-        return Ok(body);
+        return Ok(request_body);
     }
     let endpoint = attachment_url(responses_url).map_err(|_| upload_failed())?;
     for job in &jobs {
         if let ImageJob::File(file_id) = &job.job {
-            set_image_part(&mut request, job.item, job.part, file_id);
+            set_image_part(
+                &mut request_fields,
+                job.input_index,
+                job.content_index,
+                file_id,
+            );
         }
     }
     for job in jobs {
         let ImageJob::Upload(image) = job.job else {
             continue;
         };
-        let key = attachment_key(&endpoint, candidate_id, image.media_type, &image.data);
+        let key = attachment_key(&endpoint, candidate_id, image.media_type, &image.bytes);
         let file_id = if let Some(file_id) = cached_file_id(&key) {
             file_id
         } else {
@@ -82,39 +90,50 @@ pub(in crate::gateway::execution) async fn attach_input_images(
             remember_file_id(key, file_id.clone());
             file_id
         };
-        set_image_part(&mut request, job.item, job.part, &file_id);
+        set_image_part(
+            &mut request_fields,
+            job.input_index,
+            job.content_index,
+            &file_id,
+        );
     }
-    serde_json::to_vec(&request).map_err(|_| upload_failed())
+    serde_json::to_vec(&request_fields).map_err(|_| upload_failed())
 }
 
-fn stage_input_images(body: &Value) -> Result<Vec<LocatedJob>, AttachmentFailure> {
-    let Some(items) = body.get("input").and_then(Value::as_array) else {
+fn stage_input_images(request_fields: &Value) -> Result<Vec<LocatedJob>, AttachmentFailure> {
+    let Some(input_items) = request_fields.get("input").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
     let mut jobs = Vec::new();
-    for (item_index, item) in items.iter().enumerate() {
-        let Some(object) = item.as_object() else {
+    for (input_index, input_item) in input_items.iter().enumerate() {
+        let Some(input_item_fields) = input_item.as_object() else {
             continue;
         };
-        let role = object.get("role").and_then(Value::as_str).unwrap_or("");
-        let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+        let role = input_item_fields
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let kind = input_item_fields
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if role != "user" || !(kind.is_empty() || kind == "message") {
             continue;
         }
-        let Some(parts) = object.get("content").and_then(Value::as_array) else {
+        let Some(content_parts) = input_item_fields.get("content").and_then(Value::as_array) else {
             continue;
         };
-        for (part_index, part) in parts.iter().enumerate() {
-            let Some(part) = part.as_object() else {
+        for (content_index, content_part) in content_parts.iter().enumerate() {
+            let Some(content_part_fields) = content_part.as_object() else {
                 continue;
             };
-            if part.get("type").and_then(Value::as_str) != Some("input_image") {
+            if content_part_fields.get("type").and_then(Value::as_str) != Some("input_image") {
                 continue;
             }
             jobs.push(LocatedJob {
-                item: item_index,
-                part: part_index,
-                job: image_job(part)?,
+                input_index,
+                content_index,
+                job: image_job(content_part_fields)?,
             });
         }
     }
@@ -174,22 +193,22 @@ fn decode_inline_image(data_url: &str) -> Result<InlineImage, AttachmentFailure>
     let base64 = declared_image_base64(metadata)?;
     let decoded =
         path_unescape(encoded).map_err(|_| invalid_image("input_image data URL is invalid"))?;
-    let data = if base64 {
+    let image_bytes = if base64 {
         let text = std::str::from_utf8(&decoded)
             .map_err(|_| invalid_image("input_image data URL is invalid"))?;
         decode_base64(text)?
     } else {
         decoded
     };
-    if data.is_empty() {
+    if image_bytes.is_empty() {
         return Err(invalid_image("input_image data URL is invalid"));
     }
-    let (media_type, filename) = sniff_image(&data)
+    let (media_type, filename) = sniff_image(&image_bytes)
         .ok_or_else(|| invalid_image("input_image must be PNG, JPEG, GIF, or WebP"))?;
     Ok(InlineImage {
         media_type,
         filename,
-        data,
+        bytes: image_bytes,
     })
 }
 
@@ -210,14 +229,17 @@ fn declared_image_base64(metadata: &str) -> Result<bool, AttachmentFailure> {
     Ok(base64)
 }
 
-fn sniff_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
-    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+fn sniff_image(image_bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if image_bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some(("image/png", "image.png"))
-    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    } else if image_bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(("image/jpeg", "image.jpeg"))
-    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+    } else if image_bytes.starts_with(b"GIF87a") || image_bytes.starts_with(b"GIF89a") {
         Some(("image/gif", "image.gif"))
-    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+    } else if image_bytes.len() >= 12
+        && image_bytes.starts_with(b"RIFF")
+        && &image_bytes[8..12] == b"WEBP"
+    {
         Some(("image/webp", "image.webp"))
     } else {
         None
@@ -249,14 +271,19 @@ fn attachment_url(responses_url: &url::Url) -> Result<String, &'static str> {
     Ok(joined.to_string())
 }
 
-fn set_image_part(body: &mut Value, item: usize, part: usize, file_id: &str) {
-    if let Some(slot) = body
+fn set_image_part(
+    request_fields: &mut Value,
+    input_index: usize,
+    content_index: usize,
+    file_id: &str,
+) {
+    if let Some(slot) = request_fields
         .get_mut("input")
         .and_then(Value::as_array_mut)
-        .and_then(|items| items.get_mut(item))
-        .and_then(|item| item.get_mut("content"))
+        .and_then(|input_items| input_items.get_mut(input_index))
+        .and_then(|input_item| input_item.get_mut("content"))
         .and_then(Value::as_array_mut)
-        .and_then(|parts| parts.get_mut(part))
+        .and_then(|content_parts| content_parts.get_mut(content_index))
     {
         *slot = serde_json::json!({
             "type": "input_image",
@@ -272,19 +299,19 @@ async fn upload_image(
     headers: &HeaderMap,
     image: &InlineImage,
 ) -> Result<String, AttachmentFailure> {
-    let (content_type, payload) = multipart_body(image);
+    let (content_type, multipart_bytes) = multipart_body(image);
     let mut headers = headers.clone();
     headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_str(&content_type).map_err(|_| upload_failed())?,
     );
-    let request = runtime
+    let upload_request = runtime
         .request_client(candidate_id)
         .post(endpoint)
         .headers(headers)
-        .body(payload);
+        .body(multipart_bytes);
     let upstream = runtime
-        .send_authorized_request(candidate_id, request, None, None, None, None)
+        .send_authorized_request(candidate_id, upload_request, None, None, None, None)
         .await
         .map_err(|error| match error {
             crate::runtime::AuthorizedRequestError::Transport(error) => {
@@ -298,9 +325,10 @@ async fn upload_image(
             status, None,
         )));
     }
-    let body = read_capped(upstream.response, MAX_UPLOAD_RESPONSE_BYTES).await?;
-    let value: Value = serde_json::from_slice(&body).map_err(|_| upload_failed())?;
-    value
+    let upload_response_body = read_capped(upstream.response, MAX_UPLOAD_RESPONSE_BYTES).await?;
+    let upload_response: Value =
+        serde_json::from_slice(&upload_response_body).map_err(|_| upload_failed())?;
+    upload_response
         .get("openai_file_id")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -310,52 +338,61 @@ async fn upload_image(
 }
 
 async fn read_capped(
-    mut response: reqwest::Response,
+    mut upstream_response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, AttachmentFailure> {
-    let mut body = Vec::new();
+    let mut response_body = Vec::new();
     loop {
-        match response.chunk().await {
+        match upstream_response.chunk().await {
             Ok(Some(chunk)) => {
-                if body.len().saturating_add(chunk.len()) > limit {
+                if response_body.len().saturating_add(chunk.len()) > limit {
                     return Err(upload_failed());
                 }
-                body.extend_from_slice(&chunk);
+                response_body.extend_from_slice(&chunk);
             }
-            Ok(None) => return Ok(body),
+            Ok(None) => return Ok(response_body),
             Err(_) => return Err(upload_failed()),
         }
     }
 }
 
 fn multipart_body(image: &InlineImage) -> (String, Vec<u8>) {
-    let boundary = multipart_boundary(&image.data);
+    let boundary = multipart_boundary(&image.bytes);
     let header = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
         image.filename, image.media_type
     );
-    let mut body = Vec::with_capacity(header.len() + image.data.len() + boundary.len() + 8);
-    body.extend_from_slice(header.as_bytes());
-    body.extend_from_slice(&image.data);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    (format!("multipart/form-data; boundary={boundary}"), body)
+    let mut multipart_body =
+        Vec::with_capacity(header.len() + image.bytes.len() + boundary.len() + 8);
+    multipart_body.extend_from_slice(header.as_bytes());
+    multipart_body.extend_from_slice(&image.bytes);
+    multipart_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        multipart_body,
+    )
 }
 
-fn multipart_boundary(data: &[u8]) -> String {
+fn multipart_boundary(image_bytes: &[u8]) -> String {
     let mut salt = 0_u32;
     loop {
         let mut digest = Sha256::new();
-        digest.update(data);
+        digest.update(image_bytes);
         digest.update(salt.to_le_bytes());
         let boundary = format!("zenithbp{}", &hex::encode(digest.finalize())[..16]);
-        if !contains_slice(data, boundary.as_bytes()) {
+        if !contains_slice(image_bytes, boundary.as_bytes()) {
             return boundary;
         }
         salt = salt.wrapping_add(1);
     }
 }
 
-fn attachment_key(endpoint: &str, candidate_id: &str, media_type: &str, data: &[u8]) -> [u8; 32] {
+fn attachment_key(
+    endpoint: &str,
+    candidate_id: &str,
+    media_type: &str,
+    image_bytes: &[u8],
+) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(endpoint.as_bytes());
     digest.update([0]);
@@ -363,7 +400,7 @@ fn attachment_key(endpoint: &str, candidate_id: &str, media_type: &str, data: &[
     digest.update([0]);
     digest.update(media_type.as_bytes());
     digest.update([0]);
-    digest.update(data);
+    digest.update(image_bytes);
     let digest = digest.finalize();
     let mut key = [0_u8; 32];
     key.copy_from_slice(&digest);
@@ -383,9 +420,9 @@ fn attachment_cache() -> &'static Mutex<AttachmentCache> {
 fn cached_file_id(key: &[u8; 32]) -> Option<String> {
     let mut cache = crate::poison::mutex(attachment_cache());
     let file_id = cache.entries.get(key)?.clone();
-    if let Some(position) = cache.order.iter().position(|item| item == key) {
-        if let Some(item) = cache.order.remove(position) {
-            cache.order.push_front(item);
+    if let Some(position) = cache.order.iter().position(|cache_key| cache_key == key) {
+        if let Some(cache_key) = cache.order.remove(position) {
+            cache.order.push_front(cache_key);
         }
     }
     Some(file_id)
@@ -395,9 +432,9 @@ fn remember_file_id(key: [u8; 32], file_id: String) {
     let mut cache = crate::poison::mutex(attachment_cache());
     if let std::collections::hash_map::Entry::Occupied(mut entry) = cache.entries.entry(key) {
         entry.insert(file_id);
-        if let Some(position) = cache.order.iter().position(|item| *item == key) {
-            if let Some(item) = cache.order.remove(position) {
-                cache.order.push_front(item);
+        if let Some(position) = cache.order.iter().position(|cache_key| *cache_key == key) {
+            if let Some(cache_key) = cache.order.remove(position) {
+                cache.order.push_front(cache_key);
             }
         }
         return;
@@ -422,13 +459,13 @@ fn upload_failed() -> AttachmentFailure {
     ))
 }
 
-fn path_unescape(input: &str) -> Result<Vec<u8>, ()> {
-    let bytes = input.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
+fn path_unescape(escaped_path: &str) -> Result<Vec<u8>, ()> {
+    let bytes = escaped_path.as_bytes();
+    let mut decoded_bytes = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] != b'%' {
-            output.push(bytes[index]);
+            decoded_bytes.push(bytes[index]);
             index += 1;
             continue;
         }
@@ -437,10 +474,10 @@ fn path_unescape(input: &str) -> Result<Vec<u8>, ()> {
         }
         let high = hex_value(bytes[index + 1]).ok_or(())?;
         let low = hex_value(bytes[index + 2]).ok_or(())?;
-        output.push((high << 4) | low);
+        decoded_bytes.push((high << 4) | low);
         index += 3;
     }
-    Ok(output)
+    Ok(decoded_bytes)
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -452,16 +489,16 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn decode_base64(input: &str) -> Result<Vec<u8>, AttachmentFailure> {
+fn decode_base64(base64_text: &str) -> Result<Vec<u8>, AttachmentFailure> {
     let compact;
-    let encoded = if input.as_bytes().iter().any(u8::is_ascii_whitespace) {
-        compact = input
+    let encoded = if base64_text.as_bytes().iter().any(u8::is_ascii_whitespace) {
+        compact = base64_text
             .chars()
             .filter(|character| !character.is_ascii_whitespace())
             .collect::<String>();
         compact.as_str()
     } else {
-        input
+        base64_text
     };
     STANDARD
         .decode(encoded)

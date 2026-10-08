@@ -17,9 +17,9 @@ struct FinishedToolBlock {
 impl MessagesStreamBridge {
     pub(in crate::protocol::adapter::stream::messages::events) fn handle_block_stop(
         &mut self,
-        value: &Value,
+        block_stop_event: &Value,
     ) {
-        let Some(index) = value
+        let Some(index) = block_stop_event
             .get("index")
             .and_then(Value::as_u64)
             .map(|index| index as usize)
@@ -78,7 +78,7 @@ impl MessagesStreamBridge {
         let Some(text_output) = self
             .text_output
             .as_ref()
-            .filter(|output| output.output_index == output_index)
+            .filter(|text_state| text_state.output_index == output_index)
         else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -172,7 +172,7 @@ impl MessagesStreamBridge {
                 .insert("namespace".to_string(), Value::String(namespace.clone()));
         }
         self.frame("response.function_call_arguments.done", arguments_done);
-        let mut item = json!({
+        let mut output_item = json!({
             "id": id,
             "type": kind.response_item_type(),
             "status": "completed",
@@ -181,7 +181,8 @@ impl MessagesStreamBridge {
             "arguments": arguments,
         });
         if let Some(namespace) = namespace {
-            item.as_object_mut()
+            output_item
+                .as_object_mut()
                 .expect("Responses function call item is an object")
                 .insert("namespace".to_string(), Value::String(namespace));
         }
@@ -191,12 +192,12 @@ impl MessagesStreamBridge {
                 "type": "response.output_item.done",
                 "response_id": response_id,
                 "output_index": output_index,
-                "item": item,
+                "item": output_item,
             }),
         );
     }
 
-    fn finish_custom_tool_call(&mut self, block: FinishedToolBlock, input: Value) {
+    fn finish_custom_tool_call(&mut self, block: FinishedToolBlock, tool_input: Value) {
         let FinishedToolBlock {
             id,
             item_id,
@@ -206,7 +207,7 @@ impl MessagesStreamBridge {
             output_index,
             ..
         } = block;
-        let Ok(raw_input) = custom_tool_input(&input) else {
+        let Ok(raw_input) = custom_tool_input(&tool_input) else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
@@ -221,7 +222,7 @@ impl MessagesStreamBridge {
                 "input": raw_input,
             }),
         );
-        let mut item = json!({
+        let mut output_item = json!({
             "id": item_id,
             "type": kind.response_item_type(),
             "status": "completed",
@@ -230,7 +231,8 @@ impl MessagesStreamBridge {
             "input": raw_input,
         });
         if let Some(namespace) = namespace {
-            item.as_object_mut()
+            output_item
+                .as_object_mut()
                 .expect("Responses custom tool item is an object")
                 .insert("namespace".to_string(), Value::String(namespace));
         }
@@ -240,7 +242,7 @@ impl MessagesStreamBridge {
                 "type": "response.output_item.done",
                 "response_id": response_id,
                 "output_index": output_index,
-                "item": item,
+                "item": output_item,
             }),
         );
     }

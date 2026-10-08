@@ -77,8 +77,8 @@ impl GatewayRuntime {
             .and_then(|response_id| {
                 self.load_native_responses_replay(local_key_id, response_id, candidate_id, now_ms)
             })
-            .and_then(|previous| {
-                previous
+            .and_then(|previous_response| {
+                previous_response
                     .replay_request(
                         request,
                         model,

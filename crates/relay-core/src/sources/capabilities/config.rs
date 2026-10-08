@@ -11,30 +11,30 @@ impl SourceProtocolConfig {
             .or_else(|| endpoint_url_protocol(base_url));
         let profile = service_protocol(base_url);
         let mut indexed = BTreeMap::<_, Vec<_>>::new();
-        for entry in &self.capabilities {
+        for capability in &self.capabilities {
             // Legacy generation probes are diagnostic records, not routing or
             // model-capability evidence. Never let them override discovery.
-            if entry.origin == CapabilityOrigin::GenerationProbe {
+            if capability.origin == CapabilityOrigin::GenerationProbe {
                 continue;
             }
-            if entry.status == CapabilityStatus::Unknown
-                && (entry.origin != CapabilityOrigin::Catalog
-                    || (entry.features.is_empty() && entry.reasoning_efforts.is_empty()))
+            if capability.status == CapabilityStatus::Unknown
+                && (capability.origin != CapabilityOrigin::Catalog
+                    || (capability.features.is_empty() && capability.reasoning_efforts.is_empty()))
             {
                 continue;
             }
             indexed
                 .entry((
-                    crate::model_id_key(&entry.model_id),
-                    entry.upstream_wire_api,
+                    crate::model_id_key(&capability.model_id),
+                    capability.upstream_wire_api,
                 ))
                 .or_default()
-                .push(entry);
+                .push(capability);
         }
         for observations in indexed.values_mut() {
-            observations.sort_by_key(|entry| entry.checked_at_ms);
+            observations.sort_by_key(|capability| capability.checked_at_ms);
         }
-        let mut result = Vec::new();
+        let mut effective_capabilities = Vec::new();
         for model in models {
             let model_key = crate::model_id_key(model);
             for upstream in WireApi::ALL {
@@ -62,26 +62,29 @@ impl SourceProtocolConfig {
                         )]),
                         reasoning_efforts: vec![],
                     })
-                    .or_else(|| observations.first().map(|entry| (*entry).clone()));
-                if let Some(entry) = merged.as_mut() {
+                    .or_else(|| observations.first().map(|capability| (*capability).clone()));
+                if let Some(effective_capability) = merged.as_mut() {
                     for observation in observations {
                         // Feature-only catalog rows do not establish or erase
                         // the protocol selected by an endpoint declaration.
                         if observation.status != CapabilityStatus::Unknown {
-                            entry.status = observation.status;
-                            entry.origin = observation.origin;
-                            entry.checked_at_ms = observation.checked_at_ms;
+                            effective_capability.status = observation.status;
+                            effective_capability.origin = observation.origin;
+                            effective_capability.checked_at_ms = observation.checked_at_ms;
                         }
-                        entry.features.extend(observation.features.clone());
+                        effective_capability
+                            .features
+                            .extend(observation.features.clone());
                         if !observation.reasoning_efforts.is_empty() {
-                            entry.reasoning_efforts = observation.reasoning_efforts.clone();
+                            effective_capability.reasoning_efforts =
+                                observation.reasoning_efforts.clone();
                         }
                     }
                 }
-                result.extend(merged);
+                effective_capabilities.extend(merged);
             }
         }
-        result
+        effective_capabilities
     }
 
     pub fn with_effective_capabilities(&self, base_url: &str, models: &[String]) -> Self {

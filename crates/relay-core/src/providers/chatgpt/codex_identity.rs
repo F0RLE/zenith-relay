@@ -25,12 +25,12 @@ pub fn configured_codex_client_version() -> String {
 /// Replaces the process-wide Codex release after the host verifies it from the
 /// official release feed. Pre-release tags, delayed results, and equal versions
 /// are ignored, so the process can never downgrade or move onto an alpha/beta.
-pub fn configure_codex_client_version(value: &str) -> bool {
+pub fn configure_codex_client_version(candidate_version: &str) -> bool {
     let mut configured = crate::poison::write(&CONFIGURED_CODEX_CLIENT_VERSION);
-    if !is_newer_official_release(value, &configured) {
+    if !is_newer_official_release(candidate_version, &configured) {
         return false;
     }
-    *configured = value.to_string();
+    *configured = candidate_version.to_string();
     true
 }
 
@@ -140,10 +140,10 @@ impl CodexIdentityEnvelope {
     }
 }
 
-pub fn valid_codex_client_version(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
+pub fn valid_codex_client_version(client_version: &str) -> bool {
+    !client_version.is_empty()
+        && client_version.len() <= 64
+        && client_version
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
 }
@@ -180,21 +180,21 @@ fn codex_terminal_token() -> String {
             None => program,
         };
     }
-    if env::var_os("WT_SESSION").is_some_and(|value| !value.is_empty()) {
+    if env::var_os("WT_SESSION").is_some_and(|session_value| !session_value.is_empty()) {
         return "WindowsTerminal".to_string();
     }
     environment_user_agent_token("TERM").unwrap_or_else(|| "unknown".to_string())
 }
 
-fn environment_user_agent_token(name: &str) -> Option<String> {
-    env::var(name)
+fn environment_user_agent_token(environment_variable_name: &str) -> Option<String> {
+    env::var(environment_variable_name)
         .ok()
-        .map(|value| sanitize_user_agent_token(&value))
-        .filter(|value| !value.is_empty())
+        .map(|environment_value| sanitize_user_agent_token(&environment_value))
+        .filter(|sanitized_value| !sanitized_value.is_empty())
 }
 
-fn sanitize_user_agent_token(value: &str) -> String {
-    value
+fn sanitize_user_agent_token(user_agent_token: &str) -> String {
+    user_agent_token
         .trim()
         .chars()
         .take(128)

@@ -1,12 +1,12 @@
 use super::order::normalize;
-use super::{validate_payload, MAX_RECORDS};
+use super::{validate_metadata_payload, MAX_RECORDS};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 const IDENTITY_PRIORITY: &str = "_relay_identity_priority";
 
-pub(super) fn identity_priority(record: &Value) -> u64 {
-    record
+pub(super) fn identity_priority(model_record: &Value) -> u64 {
+    model_record
         .get(IDENTITY_PRIORITY)
         .and_then(Value::as_u64)
         .unwrap_or(0)
@@ -21,7 +21,7 @@ pub(super) fn merge_reference_records(
     litellm: Option<&Value>,
 ) -> BTreeMap<String, Value> {
     let mut merged_records = BTreeMap::new();
-    for (source_id, source_record) in validate_payload(primary).unwrap_or_default() {
+    for (source_id, source_record) in validate_metadata_payload(primary).unwrap_or_default() {
         insert(&mut merged_records, &source_id, source_record.clone(), 0);
     }
     for (provider_name, provider_record) in details.and_then(Value::as_object).into_iter().flatten()
@@ -35,7 +35,7 @@ pub(super) fn merge_reference_records(
             let model_id = model_record
                 .get("id")
                 .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
+                .filter(|model_id| !model_id.trim().is_empty())
                 .unwrap_or(source_id);
             let qualified_id = if model_id.contains('/') {
                 model_id.to_owned()
@@ -46,7 +46,7 @@ pub(super) fn merge_reference_records(
         }
     }
     for route_record in openrouter
-        .and_then(|v| v.get("data"))
+        .and_then(|openrouter_catalog| openrouter_catalog.get("data"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -60,14 +60,14 @@ pub(super) fn merge_reference_records(
             if let Some(context) = projected_record
                 .get("context_length")
                 .and_then(Value::as_u64)
-                .filter(|v| *v > 0)
+                .filter(|context_window| *context_window > 0)
             {
                 route_limits.insert("context".into(), json!(context));
             }
             if let Some(output) = projected_record
                 .pointer("/top_provider/max_completion_tokens")
                 .and_then(Value::as_u64)
-                .filter(|v| *v > 0)
+                .filter(|output_limit| *output_limit > 0)
             {
                 route_limits.insert("output".into(), json!(output));
             }
@@ -80,7 +80,7 @@ pub(super) fn merge_reference_records(
             ] {
                 if let Some(modalities) = projected_record
                     .get("architecture")
-                    .and_then(|a| a.get(from))
+                    .and_then(|architecture| architecture.get(from))
                     .cloned()
                 {
                     if !projected_record
@@ -133,7 +133,7 @@ pub(super) fn merge_reference_records(
             if let Some(limit) = pricing_record
                 .get(from)
                 .and_then(Value::as_u64)
-                .filter(|value| *value > 0)
+                .filter(|token_limit| *token_limit > 0)
             {
                 token_limits.insert(to.into(), json!(limit));
             }
@@ -189,11 +189,11 @@ fn fill_missing(target: &mut Value, fallback: Value) {
         return;
     }
     if let (Some(target), Value::Object(fallback)) = (target.as_object_mut(), fallback) {
-        for (key, value) in fallback {
-            if let Some(existing) = target.get_mut(&key) {
-                fill_missing(existing, value);
+        for (field_name, fallback_value) in fallback {
+            if let Some(existing_value) = target.get_mut(&field_name) {
+                fill_missing(existing_value, fallback_value);
             } else {
-                target.insert(key, value);
+                target.insert(field_name, fallback_value);
             }
         }
     }

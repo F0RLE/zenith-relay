@@ -38,10 +38,10 @@ pub(super) fn compare_metadata(
     }
 }
 
-fn presentation_provider(id: &str, metadata: Option<&ModelMetadata>) -> Option<String> {
+fn presentation_provider(model_id: &str, metadata: Option<&ModelMetadata>) -> Option<String> {
     metadata
         .and_then(provider_key)
-        .or_else(|| inferred_provider(id))
+        .or_else(|| inferred_provider(model_id))
 }
 
 /// Keep common provider aliases in one presentation block. The metadata
@@ -69,20 +69,20 @@ fn provider_order(provider: &str) -> (u8, &str) {
 /// Display-only provider for a native model ID when the reference catalog has
 /// no exact or unique leaf match. This keeps discovered ChatGPT models in the
 /// OpenAI block without changing their route IDs.
-fn inferred_provider(id: &str) -> Option<String> {
-    let normalized = normalize(id);
-    let model = model_leaf(strip_reasoning_effort(&normalized));
-    let provider = if is_openai_model(model) {
+fn inferred_provider(model_id: &str) -> Option<String> {
+    let normalized = normalize(model_id);
+    let model_leaf_id = model_leaf(strip_reasoning_effort(&normalized));
+    let provider = if is_openai_model(model_leaf_id) {
         "openai"
-    } else if model.starts_with("claude-") {
+    } else if model_leaf_id.starts_with("claude-") {
         "anthropic"
-    } else if model.starts_with("gemini-")
-        || model.starts_with("gemma-")
-        || model.starts_with("imagen-")
-        || model.starts_with("veo-")
+    } else if model_leaf_id.starts_with("gemini-")
+        || model_leaf_id.starts_with("gemma-")
+        || model_leaf_id.starts_with("imagen-")
+        || model_leaf_id.starts_with("veo-")
     {
         "google"
-    } else if model.starts_with("grok-") {
+    } else if model_leaf_id.starts_with("grok-") {
         "xai"
     } else {
         return None;
@@ -131,19 +131,19 @@ fn strip_reasoning_effort(model: &str) -> &str {
     model
 }
 
-pub(super) fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
+pub(super) fn normalize(provider_or_model: &str) -> String {
+    provider_or_model.trim().to_ascii_lowercase()
 }
 
-pub(super) fn model_leaf(value: &str) -> &str {
-    value.rsplit('/').next().unwrap_or(value)
+pub(super) fn model_leaf(model_id: &str) -> &str {
+    model_id.rsplit('/').next().unwrap_or(model_id)
 }
 
-pub(super) fn date_key(value: &str) -> Option<u32> {
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+pub(super) fn date_key(date_text: &str) -> Option<u32> {
+    let date = NaiveDate::parse_from_str(date_text, "%Y-%m-%d")
         .ok()
         .or_else(|| {
-            let (year, month) = value.split_once('-')?;
+            let (year, month) = date_text.split_once('-')?;
             if month.len() != 2 {
                 return None;
             }

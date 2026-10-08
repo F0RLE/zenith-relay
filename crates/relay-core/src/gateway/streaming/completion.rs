@@ -11,7 +11,7 @@ pub(super) struct StreamCompletionSettlement {
     pub(super) upstream_usage: Option<Arc<Mutex<UpstreamUsage>>>,
     pub(super) lease: CandidateLease,
     pub(super) runtime: std::sync::Arc<crate::GatewayRuntime>,
-    pub(super) source: String,
+    pub(super) candidate_id: String,
     pub(super) model: String,
     pub(super) headers: HeaderMap,
     pub(super) prompt_affinity: Option<String>,
@@ -55,7 +55,7 @@ impl StreamCompletionSettlement {
             let cooldown = event.error_category.as_deref().and_then(|category| {
                 failure_cooldown(CooldownInput {
                     runtime: &self.runtime,
-                    candidate_id: &self.source,
+                    candidate_id: &self.candidate_id,
                     model: &self.model,
                     status: StatusCode::from_u16(event.http_status)
                         .unwrap_or(StatusCode::BAD_GATEWAY),
@@ -81,7 +81,7 @@ impl StreamCompletionSettlement {
         // reset the selected slot's failure state.
         if event.success {
             let recovered = self.runtime.record_success_with_metrics(
-                &self.source,
+                &self.candidate_id,
                 &self.model,
                 now_ms(),
                 event.output_tokens,
@@ -90,39 +90,39 @@ impl StreamCompletionSettlement {
             event.consecutive_failures = recovered.then_some(0);
             self.runtime.bind_prompt_affinity(
                 self.prompt_affinity.as_deref(),
-                &self.source,
+                &self.candidate_id,
                 now_ms(),
             );
             if self.uses_response_affinity {
                 self.runtime
-                    .bind_response_affinity(response_id, &self.source, now_ms());
+                    .bind_response_affinity(response_id, &self.candidate_id, now_ms());
             }
             if let Some(shared) = self.bridge_state.as_ref() {
-                if let Some(response) = crate::poison::mutex(shared).take() {
+                if let Some(messages_bridge_response) = crate::poison::mutex(shared).take() {
                     self.runtime.save_messages_bridge_response(
                         &self.local_key,
-                        &self.source,
-                        &response,
+                        &self.candidate_id,
+                        &messages_bridge_response,
                         now_ms(),
                     );
                 }
             }
             if let Some(shared) = self.native_response.as_ref() {
-                if let Some(response) = crate::poison::mutex(shared).take() {
-                    for call_id in response_tool_call_ids(&response) {
+                if let Some(native_response_payload) = crate::poison::mutex(shared).take() {
+                    for call_id in response_tool_call_ids(&native_response_payload) {
                         self.runtime.bind_tool_call_affinity(
                             &self.local_key,
                             &call_id,
-                            &self.source,
+                            &self.candidate_id,
                             now_ms(),
                         );
                     }
                     self.runtime.capture_native_responses_replay(
                         &self.local_key,
-                        &self.source,
+                        &self.candidate_id,
                         &self.native_template,
                         &self.model,
-                        &response,
+                        &native_response_payload,
                         now_ms(),
                     );
                 }
@@ -132,8 +132,9 @@ impl StreamCompletionSettlement {
             .as_deref()
             .is_some_and(failure_category_requires_cooldown)
         {
-            let state = current_failure_state(&self.runtime, &self.source, &self.model);
-            apply_failure_state(event, state);
+            let failure_state =
+                current_failure_state(&self.runtime, &self.candidate_id, &self.model);
+            apply_failure_state(event, failure_state);
         }
     }
 }

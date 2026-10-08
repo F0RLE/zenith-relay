@@ -10,7 +10,7 @@ pub(super) fn detected_model_price(
 ) -> Option<ApiModelPriceOverride> {
     let pricing_record = model_record
         .get("pricing")
-        .filter(|value| value.is_object());
+        .filter(|pricing_value| pricing_value.is_object());
     let input_price = price_component(
         model_record,
         pricing_record,
@@ -147,40 +147,44 @@ fn price_component(
     usd_per_token_fields: &[&str],
 ) -> Option<u64> {
     micro_usd_field(model_record, micro_usd_fields)
-        .or_else(|| pricing_record.and_then(|value| micro_usd_field(value, micro_usd_fields)))
+        .or_else(|| {
+            pricing_record
+                .and_then(|pricing_value| micro_usd_field(pricing_value, micro_usd_fields))
+        })
         .or_else(|| usd_per_token_field(model_record, usd_per_token_fields))
         .or_else(|| {
-            pricing_record.and_then(|value| usd_per_token_field(value, usd_per_token_fields))
+            pricing_record
+                .and_then(|pricing_value| usd_per_token_field(pricing_value, usd_per_token_fields))
         })
 }
 
-fn micro_usd_field(value: &Value, fields: &[&str]) -> Option<u64> {
+fn micro_usd_field(price_record: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
-        .find_map(|field| unsigned_integer(value.get(*field)?))
+        .find_map(|field| unsigned_integer(price_record.get(*field)?))
 }
 
-fn usd_per_token_field(value: &Value, fields: &[&str]) -> Option<u64> {
+fn usd_per_token_field(price_record: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
-        .find_map(|field| usd_per_token_to_micro_usd_per_million(value.get(*field)?))
+        .find_map(|field| usd_per_token_to_micro_usd_per_million(price_record.get(*field)?))
 }
 
-fn usd_per_request_field(value: &Value, fields: &[&str]) -> Option<u64> {
+fn usd_per_request_field(price_record: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
-        .find_map(|field| usd_per_request_to_micro_usd(value.get(*field)?))
+        .find_map(|field| usd_per_request_to_micro_usd(price_record.get(*field)?))
 }
 
 fn ttl_price(model: &Value, pricing: Option<&Value>, field: &str, ttl: &str) -> Option<u64> {
     model
         .get(field)
-        .and_then(|values| values.get(ttl))
+        .and_then(|ttl_prices| ttl_prices.get(ttl))
         .and_then(unsigned_integer)
         .or_else(|| {
             pricing
-                .and_then(|value| value.get(field))
-                .and_then(|values| values.get(ttl))
+                .and_then(|pricing_value| pricing_value.get(field))
+                .and_then(|ttl_prices| ttl_prices.get(ttl))
                 .and_then(unsigned_integer)
         })
 }
@@ -198,25 +202,31 @@ fn request_price(model: &Value, pricing: Option<&Value>) -> Option<u64> {
         "request",
     ];
     micro_usd_field(model, &micro_usd_fields)
-        .or_else(|| pricing.and_then(|value| micro_usd_field(value, &micro_usd_fields)))
+        .or_else(|| {
+            pricing.and_then(|pricing_value| micro_usd_field(pricing_value, &micro_usd_fields))
+        })
         .or_else(|| usd_per_request_field(model, &usd_per_request_fields))
-        .or_else(|| pricing.and_then(|value| usd_per_request_field(value, &usd_per_request_fields)))
+        .or_else(|| {
+            pricing.and_then(|pricing_value| {
+                usd_per_request_field(pricing_value, &usd_per_request_fields)
+            })
+        })
 }
 
-fn unsigned_integer(value: &Value) -> Option<u64> {
-    value.as_u64().or_else(|| {
-        value
+fn unsigned_integer(numeric_value: &Value) -> Option<u64> {
+    numeric_value.as_u64().or_else(|| {
+        numeric_value
             .as_str()
-            .and_then(|value| value.trim().parse::<u64>().ok())
+            .and_then(|number_text| number_text.trim().parse::<u64>().ok())
     })
 }
 
-fn usd_per_token_to_micro_usd_per_million(value: &Value) -> Option<u64> {
-    crate::usd_per_token_to_micro_usd_per_million(value).ok()
+fn usd_per_token_to_micro_usd_per_million(price_value: &Value) -> Option<u64> {
+    crate::usd_per_token_to_micro_usd_per_million(price_value).ok()
 }
 
-fn usd_per_request_to_micro_usd(value: &Value) -> Option<u64> {
-    crate::usd_per_request_to_micro_usd(value).ok()
+fn usd_per_request_to_micro_usd(price_value: &Value) -> Option<u64> {
+    crate::usd_per_request_to_micro_usd(price_value).ok()
 }
 
 #[cfg(test)]

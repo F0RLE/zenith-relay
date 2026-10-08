@@ -3,7 +3,7 @@ use serde_json::json;
 
 pub(super) fn invalid_event(
     frame: &[u8],
-    data: &[u8],
+    sse_data: &[u8],
     error: &serde_json::Error,
 ) -> UpstreamErrorDetails {
     let mut data_lines = 0;
@@ -18,7 +18,7 @@ pub(super) fn invalid_event(
         .enumerate()
         .filter(|(index, byte)| **byte == b'\r' && frame.get(index + 1) != Some(&b'\n'))
         .count();
-    let kind = match data.trim_ascii().first() {
+    let data_kind = match sse_data.trim_ascii().first() {
         Some(b'{') => "object",
         Some(b'[') => "array_or_marker",
         Some(b'<') => "markup",
@@ -27,9 +27,9 @@ pub(super) fn invalid_event(
     // serde's Display and the upstream event name can contain arbitrary data.
     // Persist only fixed labels, counts and positions, never payload fragments.
     let message = format!(
-        "Relay SSE parser: invalid JSON; category={:?}; line={}; column={}; frame_bytes={}; data_bytes={}; data_lines={data_lines}; event_field={event_field}; utf8={}; kind={kind}; event_fields={event_fields}; cr_only={cr_only}",
-        error.classify(), error.line(), error.column(), frame.len(), data.len(),
-        std::str::from_utf8(data).is_ok(),
+        "Relay SSE parser: invalid JSON; category={:?}; line={}; column={}; frame_bytes={}; data_bytes={}; data_lines={data_lines}; event_field={event_field}; utf8={}; kind={data_kind}; event_fields={event_fields}; cr_only={cr_only}",
+        error.classify(), error.line(), error.column(), frame.len(), sse_data.len(),
+        std::str::from_utf8(sse_data).is_ok(),
     );
     UpstreamErrorDetails::from_value(
         None,

@@ -17,27 +17,29 @@ pub(crate) fn recoverable_response_affinity_miss(
         )
 }
 
-pub(crate) fn previous_response_not_found(payload: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(payload)
+pub(crate) fn previous_response_not_found(error_response_body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(error_response_body)
         .ok()
-        .is_some_and(|value| previous_response_not_found_value(&value))
+        .is_some_and(|error_payload| previous_response_not_found_value(&error_payload))
 }
 
-pub(crate) fn previous_response_requires_websocket(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+pub(crate) fn previous_response_requires_websocket(error_response_body: &[u8]) -> bool {
+    let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {
         return false;
     };
-    let text = serde_json::to_string(&value)
+    let text = serde_json::to_string(&error_payload)
         .unwrap_or_default()
         .to_ascii_lowercase();
     text.contains("previous_response_id") && text.contains("websocket")
 }
 
-pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+pub(crate) fn responses_function_call_output_has_invalid_call_id(
+    error_response_body: &[u8],
+) -> bool {
+    let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {
         return false;
     };
-    responses_function_call_output_has_invalid_call_id_text(&upstream_error_text(&value))
+    responses_function_call_output_has_invalid_call_id_text(&upstream_error_text(&error_payload))
 }
 
 fn responses_function_call_output_has_invalid_call_id_text(text: &str) -> bool {
@@ -52,15 +54,15 @@ fn responses_function_call_output_has_invalid_call_id_text(text: &str) -> bool {
     )
 }
 
-pub(crate) fn responses_tool_call_links_rejected(payload: &[u8]) -> bool {
-    responses_call_id_is_missing(payload)
-        || responses_tool_call_is_missing_output(payload)
-        || responses_function_call_output_has_invalid_call_id(payload)
+pub(crate) fn responses_tool_call_links_rejected(error_response_body: &[u8]) -> bool {
+    responses_call_id_is_missing(error_response_body)
+        || responses_tool_call_is_missing_output(error_response_body)
+        || responses_function_call_output_has_invalid_call_id(error_response_body)
 }
 
-pub(crate) fn responses_tool_call_links_rejected_value(value: &Value) -> bool {
-    let text = upstream_error_text(value);
-    responses_call_id_is_missing_value(value)
+pub(crate) fn responses_tool_call_links_rejected_value(error_payload: &Value) -> bool {
+    let text = upstream_error_text(error_payload);
+    responses_call_id_is_missing_value(error_payload)
         || responses_tool_call_is_missing_output_message(&text)
         || responses_function_call_output_has_invalid_call_id_text(&text)
 }
@@ -69,14 +71,14 @@ pub(crate) fn responses_tool_call_links_rejected_value(value: &Value) -> bool {
 /// tool item that omitted `call_id`. This deliberately does not match generic
 /// invalid-call-id or arbitrary required-field errors: the request repair is
 /// allowed only when the upstream identifies the missing field itself.
-pub(crate) fn responses_call_id_is_missing(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
-        return responses_call_id_is_missing_text(&normalized_error_text(payload));
+pub(crate) fn responses_call_id_is_missing(error_response_body: &[u8]) -> bool {
+    let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {
+        return responses_call_id_is_missing_text(&normalized_error_text(error_response_body));
     };
-    responses_call_id_is_missing_value(&value)
+    responses_call_id_is_missing_value(&error_payload)
 }
 
-pub(crate) fn responses_call_id_is_missing_value(value: &Value) -> bool {
+pub(crate) fn responses_call_id_is_missing_value(error_payload: &Value) -> bool {
     let code = [
         "/code",
         "/error/code",
@@ -84,7 +86,7 @@ pub(crate) fn responses_call_id_is_missing_value(value: &Value) -> bool {
         "/response/error/code",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
     .map(str::trim)
     .any(|code| {
         matches!(
@@ -92,7 +94,7 @@ pub(crate) fn responses_call_id_is_missing_value(value: &Value) -> bool {
             "missing_call_id" | "call_id_required" | "missing_required_call_id"
         )
     });
-    code || responses_call_id_is_missing_text(&upstream_error_text(value))
+    code || responses_call_id_is_missing_text(&upstream_error_text(error_payload))
 }
 
 pub(in crate::gateway::errors) fn responses_call_id_is_missing_text(text: &str) -> bool {
@@ -157,8 +159,8 @@ pub(in crate::gateway::errors) fn responses_call_id_is_missing_text(text: &str) 
 /// Detects the specific Responses rejection produced when imported history
 /// contains a tool call without its matching output. The caller must still
 /// prove that the request contains such an incomplete call before recovery.
-pub(crate) fn responses_tool_call_is_missing_output(payload: &[u8]) -> bool {
-    responses_tool_call_is_missing_output_message(&normalized_error_text(payload))
+pub(crate) fn responses_tool_call_is_missing_output(error_response_body: &[u8]) -> bool {
+    responses_tool_call_is_missing_output_message(&normalized_error_text(error_response_body))
 }
 
 pub(crate) fn responses_tool_call_is_missing_output_message(message: &str) -> bool {
@@ -177,14 +179,14 @@ pub(crate) fn responses_tool_call_is_missing_output_message(message: &str) -> bo
 /// Responses continuation with tool output can use the local replay state to
 /// recover the preceding tool call when this exact public envelope is returned.
 /// Do not match arbitrary 400 responses: those may be genuine client errors.
-pub(crate) fn zenith_gateway_invalid_request(payload: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+pub(crate) fn zenith_gateway_invalid_request(error_response_body: &[u8]) -> bool {
+    let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {
         return false;
     };
-    zenith_gateway_invalid_request_value(&value)
+    zenith_gateway_invalid_request_value(&error_payload)
 }
 
-pub(crate) fn zenith_gateway_invalid_request_value(value: &Value) -> bool {
+pub(crate) fn zenith_gateway_invalid_request_value(error_payload: &Value) -> bool {
     const MESSAGE: &str =
         "Zenith AI request is invalid. Check the model, messages, tools, and parameters.";
 
@@ -197,7 +199,7 @@ pub(crate) fn zenith_gateway_invalid_request_value(value: &Value) -> bool {
         "/body/message",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
     .any(|message| message.trim().eq_ignore_ascii_case(MESSAGE))
 }
 
@@ -205,14 +207,16 @@ pub(crate) fn zenith_gateway_invalid_request_value(value: &Value) -> bool {
 /// `function_call.id`; the matching `call_id` is unchanged. This is only a
 /// recovery signal. The request repair itself still verifies that it has a
 /// call-prefixed function item before retrying.
-pub(crate) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
+pub(crate) fn responses_function_item_id_requires_fc_prefix(error_response_body: &[u8]) -> bool {
+    let text = normalized_error_text(error_response_body);
     text.contains("input") && text.contains("expected an id that begins with 'fc'")
 }
 
 /// Strict Responses endpoints use `ctc_` for `custom_tool_call.id`.
-pub(crate) fn responses_custom_tool_item_id_requires_ctc_prefix(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
+pub(crate) fn responses_custom_tool_item_id_requires_ctc_prefix(
+    error_response_body: &[u8],
+) -> bool {
+    let text = normalized_error_text(error_response_body);
     text.contains("input")
         && text.contains(".id")
         && (text.contains("expected an id that begins with 'ctc'")
@@ -223,8 +227,8 @@ pub(crate) fn responses_custom_tool_item_id_requires_ctc_prefix(payload: &[u8]) 
 /// Strict Responses endpoints require server-owned `msg_` item identifiers on
 /// message inputs. This only identifies the precise upstream validation error;
 /// the repair still verifies the foreign `item_` identifier before retrying.
-pub(crate) fn responses_message_item_id_requires_msg_prefix(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
+pub(crate) fn responses_message_item_id_requires_msg_prefix(error_response_body: &[u8]) -> bool {
+    let text = normalized_error_text(error_response_body);
     text.contains("input[")
         && text.contains(".id")
         && text.contains("expected an id that begins with 'msg'")
@@ -243,14 +247,14 @@ pub(crate) fn recoverable_response_model_switch(
     category: &str,
     has_previous_response_id: bool,
     has_unpaired_tool_output: bool,
-    payload: &[u8],
+    error_response_body: &[u8],
 ) -> bool {
     if status != StatusCode::BAD_REQUEST || !has_previous_response_id || has_unpaired_tool_output {
         return false;
     }
 
     category == error_codes::UPSTREAM_TOOL_CALL_MISMATCH || {
-        let text = normalized_error_text(payload);
+        let text = normalized_error_text(error_response_body);
         (text.contains("previous_response_id")
             && text_has_any(&text, &["model", "mismatch", "switch"]))
             || (text.contains("previous response") && text_has_any(&text, &["model", "mismatch"]))
@@ -261,8 +265,8 @@ pub(crate) fn recoverable_response_model_switch(
 /// A cache write is a route-local optimization. Providers use several
 /// different error envelopes for rejecting cache-control/ephemeral writes;
 /// treat only explicit cache-write wording as a retryable route failure.
-pub(crate) fn prompt_cache_write_rejected(payload: &[u8]) -> bool {
-    let text = normalized_error_text(payload);
+pub(crate) fn prompt_cache_write_rejected(error_response_body: &[u8]) -> bool {
+    let text = normalized_error_text(error_response_body);
     text.contains("cache")
         && text_has_any(
             &text,
@@ -279,24 +283,29 @@ pub(crate) fn prompt_cache_write_rejected(payload: &[u8]) -> bool {
         )
 }
 
-pub(crate) fn previous_response_not_found_value(value: &Value) -> bool {
-    [value.pointer("/error/code"), value.pointer("/error/type")]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|value| {
-            value
+pub(crate) fn previous_response_not_found_value(error_payload: &Value) -> bool {
+    [
+        error_payload.pointer("/error/code"),
+        error_payload.pointer("/error/type"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .any(|error_code| {
+        error_code
+            .trim()
+            .eq_ignore_ascii_case("previous_response_not_found")
+            || error_code
                 .trim()
-                .eq_ignore_ascii_case("previous_response_not_found")
-                || value
-                    .trim()
-                    .eq_ignore_ascii_case(error_codes::RESPONSE_CONTINUATION_UNAVAILABLE)
-        })
-        || [value.pointer("/error/message"), value.get("message")]
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .any(previous_response_not_found_message)
+                .eq_ignore_ascii_case(error_codes::RESPONSE_CONTINUATION_UNAVAILABLE)
+    }) || [
+        error_payload.pointer("/error/message"),
+        error_payload.get("message"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .any(previous_response_not_found_message)
 }
 
 fn previous_response_not_found_message(message: &str) -> bool {

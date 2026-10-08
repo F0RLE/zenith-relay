@@ -27,7 +27,7 @@ pub(in crate::gateway::execution) struct BasisPointsRelayRetryContext<'a> {
 /// eligible.
 pub(in crate::gateway::execution) fn handle_basis_points_relay_retry(
     error: AdapterError,
-    body: &[u8],
+    upstream_response_body: &[u8],
     event: UsageEvent,
     context: BasisPointsRelayRetryContext<'_>,
 ) -> Result<(), Box<(AdapterError, UsageEvent)>> {
@@ -40,7 +40,12 @@ pub(in crate::gateway::execution) fn handle_basis_points_relay_retry(
         lease,
         last_adapter_error,
     } = context;
-    if !super::super::basis_points::take_tool_relay_retry(error, body, attempted, parameter) {
+    if !super::super::basis_points::take_tool_relay_retry(
+        error,
+        upstream_response_body,
+        attempted,
+        parameter,
+    ) {
         return Err(Box::new((error, event)));
     }
 

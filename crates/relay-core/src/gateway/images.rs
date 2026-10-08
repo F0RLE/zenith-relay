@@ -138,11 +138,12 @@ mod tests {
             response_format: "b64_json".to_string(),
             client_context_id: None,
         };
-        let body = build_account_request(&request, ImageEndpoint::Generations, "gpt-5.4-mini");
-        assert_eq!(body["model"], "gpt-5.4-mini");
-        assert_eq!(body["tools"][0]["model"], IMAGE_API_MODEL);
-        assert_eq!(body["tools"][0]["quality"], "low");
-        assert!(body["tools"][0].get("size").is_none());
+        let request_json =
+            build_account_request(&request, ImageEndpoint::Generations, "gpt-5.4-mini");
+        assert_eq!(request_json["model"], "gpt-5.4-mini");
+        assert_eq!(request_json["tools"][0]["model"], IMAGE_API_MODEL);
+        assert_eq!(request_json["tools"][0]["quality"], "low");
+        assert!(request_json["tools"][0].get("size").is_none());
     }
 
     #[test]
@@ -164,10 +165,10 @@ mod tests {
             response_format: "b64_json".to_string(),
             client_context_id: None,
         };
-        let body = direct_request_body(&request, "gpt-image-2.5-flare");
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["model"], "gpt-image-2.5-flare");
-        assert!(body.get("response_format").is_none());
+        let request_bytes = direct_request_body(&request, "gpt-image-2.5-flare");
+        let request_json: Value = serde_json::from_slice(&request_bytes).unwrap();
+        assert_eq!(request_json["model"], "gpt-image-2.5-flare");
+        assert!(request_json.get("response_format").is_none());
     }
 
     #[test]
@@ -177,9 +178,9 @@ mod tests {
             let translated =
                 translate_account_response(frame.as_bytes(), "b64_json", "image_generation")
                     .unwrap();
-            let body: Value = serde_json::from_slice(&translated.json).unwrap();
-            assert_eq!(body["created"], 7);
-            assert_eq!(body["data"][0]["b64_json"], "aW1hZ2U=");
+            let response_json: Value = serde_json::from_slice(&translated.json).unwrap();
+            assert_eq!(response_json["created"], 7);
+            assert_eq!(response_json["data"][0]["b64_json"], "aW1hZ2U=");
             assert!(String::from_utf8(translated.stream)
                 .unwrap()
                 .contains("image_generation.completed"));
@@ -247,13 +248,15 @@ mod tests {
     #[tokio::test]
     async fn multipart_edit_parses_multiple_images_and_mask() {
         let boundary = "zenith-test-boundary";
-        let body = Bytes::from(format!(
+        let multipart_body = Bytes::from(format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nedit\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\nPNG-A\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image[]\"; filename=\"b.png\"\r\nContent-Type: image/png\r\n\r\nPNG-B\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"mask\"; filename=\"mask.png\"\r\nContent-Type: image/png\r\n\r\nMASK\r\n--{boundary}--\r\n"
         ));
-        let (fields, images, mask) =
-            parse_multipart(&format!("multipart/form-data; boundary={boundary}"), body)
-                .await
-                .unwrap();
+        let (fields, images, mask) = parse_multipart(
+            &format!("multipart/form-data; boundary={boundary}"),
+            multipart_body,
+        )
+        .await
+        .unwrap();
         assert_eq!(fields["prompt"], "edit");
         assert_eq!(images.len(), 2);
         assert!(images

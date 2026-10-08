@@ -4,7 +4,7 @@ use super::{AccountExportCredential, AccountExportFormat};
 use crate::error_codes;
 use crate::Result;
 use serde_json::{json, Map, Value};
-struct AccountExportValues<'a> {
+struct AccountExportContext<'a> {
     account: &'a AccountExportCredential,
     exported_at: &'a str,
     expires_at: Option<String>,
@@ -14,7 +14,7 @@ struct AccountExportValues<'a> {
     expires_in: Option<u64>,
 }
 
-impl<'a> AccountExportValues<'a> {
+impl<'a> AccountExportContext<'a> {
     fn new(
         account: &'a AccountExportCredential,
         exported_at_ms: u64,
@@ -39,48 +39,52 @@ impl<'a> AccountExportValues<'a> {
     }
 }
 
-pub(super) fn account_value(
+pub(super) fn build_account_export(
     format: AccountExportFormat,
     account: &AccountExportCredential,
     exported_at_ms: u64,
     exported_at: &str,
 ) -> Result<Value> {
-    let values = AccountExportValues::new(account, exported_at_ms, exported_at)?;
-    let mut value = match format {
-        AccountExportFormat::Zenith => zenith_account_value(&values),
-        AccountExportFormat::Cpa => cpa_account_value(&values),
-        AccountExportFormat::Sub2api => sub2api_account_value(&values),
-        AccountExportFormat::Cockpit => cockpit_account_value(&values),
-        AccountExportFormat::NineRouter => nine_router_account_value(&values),
-        AccountExportFormat::Codex => codex_account_value(&values),
-        AccountExportFormat::AxonHub => axon_hub_account_value(&values),
-        AccountExportFormat::CodexManager => codex_manager_account_value(&values),
+    let context = AccountExportContext::new(account, exported_at_ms, exported_at)?;
+    let mut export_payload = match format {
+        AccountExportFormat::Zenith => build_zenith_export(&context),
+        AccountExportFormat::Cpa => build_cpa_export(&context),
+        AccountExportFormat::Sub2api => build_sub2api_export(&context),
+        AccountExportFormat::Cockpit => build_cockpit_export(&context),
+        AccountExportFormat::NineRouter => build_nine_router_export(&context),
+        AccountExportFormat::Codex => build_codex_export(&context),
+        AccountExportFormat::AxonHub => build_axon_hub_export(&context),
+        AccountExportFormat::CodexManager => build_codex_manager_export(&context),
     };
-    attach_login_notes(&mut value, account);
+    attach_login_notes(&mut export_payload, account);
     Ok(if format == AccountExportFormat::Codex {
-        value
+        export_payload
     } else {
-        strip_nulls(value)
+        strip_nulls(export_payload)
     })
 }
 
-fn attach_login_notes(value: &mut Value, account: &AccountExportCredential) {
-    let Some(object) = value.as_object_mut() else {
+fn attach_login_notes(export_payload: &mut Value, account: &AccountExportCredential) {
+    let Some(export_object) = export_payload.as_object_mut() else {
         return;
     };
-    insert_login_note(object, "phone", account.phone.as_deref());
-    insert_login_note(object, "password", account.password.as_deref());
-    insert_login_note(object, "2fa", account.totp_secret.as_deref());
+    insert_login_note(export_object, "phone", account.phone.as_deref());
+    insert_login_note(export_object, "password", account.password.as_deref());
+    insert_login_note(export_object, "2fa", account.totp_secret.as_deref());
 }
 
-fn insert_login_note(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
-    if let Some(value) = value.filter(|value| !value.is_empty()) {
-        object.insert(key.to_string(), Value::String(value.to_string()));
+fn insert_login_note(
+    export_object: &mut Map<String, Value>,
+    note_key: &str,
+    note_text: Option<&str>,
+) {
+    if let Some(note_text) = note_text.filter(|note| !note.is_empty()) {
+        export_object.insert(note_key.to_string(), Value::String(note_text.to_string()));
     }
 }
 
-fn zenith_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_zenith_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     json!({
         "name": account.label,
         "provider": "openai",
@@ -89,8 +93,8 @@ fn zenith_account_value(values: &AccountExportValues<'_>) -> Value {
             "accessToken": account.access_token,
             "refreshToken": account.refresh_token,
             "idToken": account.id_token,
-            "issuedAt": values.issued_at,
-            "expiresAt": values.expires_at,
+            "issuedAt": context.issued_at,
+            "expiresAt": context.expires_at,
         },
         "identity": {
             "email": account.email,
@@ -100,13 +104,13 @@ fn zenith_account_value(values: &AccountExportValues<'_>) -> Value {
         },
         "subscription": {
             "plan": account.plan_type,
-            "expiresAt": values.subscription_expires_at,
+            "expiresAt": context.subscription_expires_at,
         },
     })
 }
 
-fn cpa_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_cpa_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     json!({
         "type": "codex",
         "account_id": account.account_id,
@@ -118,21 +122,21 @@ fn cpa_account_value(values: &AccountExportValues<'_>) -> Value {
         "id_token": account.id_token,
         "access_token": account.access_token,
         "refresh_token": account.refresh_token.as_deref().unwrap_or(""),
-        "last_refresh": values.exported_at,
-        error_codes::EXPIRED: values.expires_at,
+        "last_refresh": context.exported_at,
+        error_codes::EXPIRED: context.expires_at,
         "disabled": (!account.enabled).then_some(true),
     })
 }
 
-fn sub2api_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_sub2api_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     json!({
         "name": account.label,
         "platform": "openai",
         "type": "oauth",
         "credentials": {
             "access_token": account.access_token,
-            "expires_at": values.expires_at,
+            "expires_at": context.expires_at,
             "refresh_token": account.refresh_token,
             "id_token": account.id_token,
             "email": account.email,
@@ -140,36 +144,36 @@ fn sub2api_account_value(values: &AccountExportValues<'_>) -> Value {
             "chatgpt_user_id": account.user_id,
             "organization_id": account.organization_id,
             "plan_type": account.plan_type,
-            "subscription_expires_at": values.subscription_expires_at,
+            "subscription_expires_at": context.subscription_expires_at,
         },
         "concurrency": 0,
         "priority": account.priority,
     })
 }
 
-fn cockpit_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
-    let mut value = json!({
+fn build_cockpit_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
+    let mut cockpit_payload = json!({
         "type": "codex",
         "id_token": account.id_token,
         "access_token": account.access_token,
         "refresh_token": account.refresh_token.as_deref().unwrap_or(""),
         "account_id": account.account_id,
-        "last_refresh": values.exported_at,
+        "last_refresh": context.exported_at,
         "email": account.email,
-        error_codes::EXPIRED: values.expires_at,
+        error_codes::EXPIRED: context.expires_at,
     });
-    if let Value::Object(object) = &mut value {
-        object.insert(
+    if let Value::Object(cockpit_object) = &mut cockpit_payload {
+        cockpit_object.insert(
             "account_name".to_string(),
             Value::String(account.label.clone()),
         );
         let tags = safe_cockpit_tags(account);
         if !tags.is_empty() {
-            object.insert("tags".to_string(), json!(tags));
+            cockpit_object.insert("tags".to_string(), json!(tags));
         }
     }
-    value
+    cockpit_payload
 }
 
 fn safe_cockpit_tags(account: &AccountExportCredential) -> Vec<String> {
@@ -205,14 +209,14 @@ fn safe_cockpit_tags(account: &AccountExportCredential) -> Vec<String> {
     tags
 }
 
-fn nine_router_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_nine_router_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     json!({
         "accessToken": account.access_token,
         "refreshToken": account.refresh_token,
-        "expiresAt": values.expires_at,
+        "expiresAt": context.expires_at,
         "testStatus": "active",
-        "expiresIn": values.expires_in,
+        "expiresIn": context.expires_in,
         "providerSpecificData": {
             "chatgptAccountId": account.account_id,
             "chatgptUserId": account.user_id,
@@ -225,13 +229,13 @@ fn nine_router_account_value(values: &AccountExportValues<'_>) -> Value {
         "email": account.email,
         "priority": account.priority,
         "isActive": account.enabled,
-        "createdAt": values.created_at,
-        "updatedAt": values.exported_at,
+        "createdAt": context.created_at,
+        "updatedAt": context.exported_at,
     })
 }
 
-fn codex_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_codex_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     let mut root = object(json!({
         "auth_mode": "chatgpt",
         "tokens": {
@@ -240,17 +244,17 @@ fn codex_account_value(values: &AccountExportValues<'_>) -> Value {
             "refresh_token": account.refresh_token.as_deref().unwrap_or(""),
             "account_id": account.account_id.as_deref().unwrap_or(""),
         },
-        "last_refresh": values.exported_at,
+        "last_refresh": context.exported_at,
     }));
     root.insert("OPENAI_API_KEY".to_string(), Value::Null);
     Value::Object(root)
 }
 
-fn axon_hub_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_axon_hub_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     json!({
         "auth_mode": "chatgpt",
-        "last_refresh": values.issued_at,
+        "last_refresh": context.issued_at,
         "tokens": {
             "access_token": account.access_token,
             "refresh_token": account.refresh_token,
@@ -259,8 +263,8 @@ fn axon_hub_account_value(values: &AccountExportValues<'_>) -> Value {
     })
 }
 
-fn codex_manager_account_value(values: &AccountExportValues<'_>) -> Value {
-    let account = values.account;
+fn build_codex_manager_export(context: &AccountExportContext<'_>) -> Value {
+    let account = context.account;
     json!({
         "tokens": {
             "access_token": account.access_token,

@@ -7,33 +7,33 @@ mod responses;
 use super::*;
 use std::collections::BTreeMap;
 
-pub(super) fn request(protocol: WireApi, value: &Value) -> AdapterResult<Request> {
-    let request = match protocol {
-        WireApi::Responses => responses::decode(value)?,
-        WireApi::ChatCompletions => chat::decode(value)?,
-        WireApi::Messages => messages::decode(value)?,
-        WireApi::Gemini => gemini::decode(value)?,
+pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<Request> {
+    let decoded_request = match protocol {
+        WireApi::Responses => responses::decode(request_body)?,
+        WireApi::ChatCompletions => chat::decode(request_body)?,
+        WireApi::Messages => messages::decode(request_body)?,
+        WireApi::Gemini => gemini::decode(request_body)?,
     };
-    if request
+    if decoded_request
         .messages
         .iter()
         .all(|message| message.role == Role::System)
     {
         return Err(AdapterError::invalid_request());
     }
-    if let Some(ToolChoice::Function(name)) = &request.tool_choice {
-        if !request.tools.iter().any(|tool| tool.name == *name) {
+    if let Some(ToolChoice::Function(name)) = &decoded_request.tool_choice {
+        if !decoded_request.tools.iter().any(|tool| tool.name == *name) {
             return Err(AdapterError::unsupported_tool());
         }
     }
-    Ok(request)
+    Ok(decoded_request)
 }
 
 pub(super) fn resolve_tool_history(messages: &mut [Message]) -> AdapterResult<()> {
     // Gemini function results are linked by name; assign their original call
     // identifiers when the history supplies them, without dropping any result.
     let mut pending = Vec::<(String, String)>::new();
-    let mut ids = messages
+    let mut known_call_ids = messages
         .iter()
         .flat_map(|message| &message.blocks)
         .filter_map(|block| {
@@ -53,7 +53,7 @@ pub(super) fn resolve_tool_history(messages: &mut [Message]) -> AdapterResult<()
                         loop {
                             *id = format!("call_relay_{generated}");
                             generated += 1;
-                            if ids.insert(id.clone()) {
+                            if known_call_ids.insert(id.clone()) {
                                 break;
                             }
                         }

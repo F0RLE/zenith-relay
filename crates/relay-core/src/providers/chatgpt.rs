@@ -49,10 +49,10 @@ pub const BASIS_POINTS_RESPONSES_URL: &str = "https://bps.openai.com/basispoints
 
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 
-pub(super) fn valid_access_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_ACCESS_TOKEN_BYTES
-        && !value.bytes().any(|byte| byte.is_ascii_control())
+pub(super) fn valid_access_token(access_token: &str) -> bool {
+    !access_token.is_empty()
+        && access_token.len() <= MAX_ACCESS_TOKEN_BYTES
+        && !access_token.bytes().any(|byte| byte.is_ascii_control())
 }
 
 /// Creates a sensitive bearer header without exposing the token in logs.
@@ -63,14 +63,14 @@ pub fn bearer_authorization(access_token: &str) -> Result<HeaderValue, InvalidHe
 }
 
 /// Keeps one trimmed account id. Later hints that differ only by case are the same id.
-pub fn push_account_id_hint(hints: &mut Vec<String>, value: String) {
-    let value = value.trim();
-    if !value.is_empty()
+pub fn push_account_id_hint(hints: &mut Vec<String>, account_id_hint: String) {
+    let account_id_hint = account_id_hint.trim();
+    if !account_id_hint.is_empty()
         && !hints
             .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(value))
+            .any(|existing| existing.eq_ignore_ascii_case(account_id_hint))
     {
-        hints.push(value.to_string());
+        hints.push(account_id_hint.to_string());
     }
 }
 
@@ -84,16 +84,16 @@ pub(super) async fn collect_response_body(
     response: reqwest::Response,
     limit: usize,
 ) -> std::result::Result<Vec<u8>, ResponseBodyError> {
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| ResponseBodyError::Transport)?;
-        if body.len().saturating_add(chunk.len()) > limit {
+        if response_bytes.len().saturating_add(chunk.len()) > limit {
             return Err(ResponseBodyError::TooLarge);
         }
-        body.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(response_bytes)
 }
 
 #[cfg(test)]

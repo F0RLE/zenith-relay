@@ -296,9 +296,10 @@ fn buffered_client_response(
     selected_error_origin: ErrorOrigin,
 ) -> CompletionStep {
     if let Some(stream_body) = basis_points_stream {
-        let mut response = proxy_sse_response(status, response_headers, Body::from(stream_body));
-        relay_account_response_header(forwarded_headers, response_headers, &mut response);
-        return CompletionStep::Respond(response);
+        let mut stream_response =
+            proxy_sse_response(status, response_headers, Body::from(stream_body));
+        relay_account_response_header(forwarded_headers, response_headers, &mut stream_response);
+        return CompletionStep::Respond(stream_response);
     }
     if account_route || !adapter_is_passthrough {
         if summarize && client_stream {
@@ -311,18 +312,22 @@ fn buffered_client_response(
                     ));
                 }
             };
-            let mut response =
+            let mut stream_response =
                 proxy_sse_response(status, response_headers, Body::from(stream_body));
             if account_route && adapter_is_passthrough {
-                relay_account_response_header(forwarded_headers, response_headers, &mut response);
+                relay_account_response_header(
+                    forwarded_headers,
+                    response_headers,
+                    &mut stream_response,
+                );
             }
-            return CompletionStep::Respond(response);
+            return CompletionStep::Respond(stream_response);
         }
-        let mut response = proxy_json_response(status, response_headers, Body::from(bytes));
+        let mut json_response = proxy_json_response(status, response_headers, Body::from(bytes));
         if account_route && adapter_is_passthrough {
-            relay_account_response_header(forwarded_headers, response_headers, &mut response);
+            relay_account_response_header(forwarded_headers, response_headers, &mut json_response);
         }
-        return CompletionStep::Respond(response);
+        return CompletionStep::Respond(json_response);
     }
     CompletionStep::Respond(proxy_response(status, response_headers, Body::from(bytes)))
 }
@@ -371,7 +376,7 @@ async fn read_completed_body(
             let mut failure = upstream_failure.failure;
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
-            let state = if matches!(failure.category, error_codes::UPSTREAM_BODY) {
+            let failure_state = if matches!(failure.category, error_codes::UPSTREAM_BODY) {
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
             } else {
@@ -427,7 +432,7 @@ async fn read_completed_body(
                     }
                 }
             }
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
                 || failure.execution.certainty != ExecutionCertainty::NotSent

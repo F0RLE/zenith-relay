@@ -1,40 +1,40 @@
 use super::super::*;
 use super::{InputEntry, ParsedEntries};
 
-pub(super) fn parse_json_lines(input: &str) -> Result<ParsedEntries, ImportError> {
-    let lines = input
+pub(super) fn parse_json_lines(import_document: &str) -> Result<ParsedEntries, ImportError> {
+    let non_empty_lines = import_document
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
-    if lines.is_empty() {
+    if non_empty_lines.is_empty() {
         return Err(ImportError::new(
             ImportErrorCode::EmptyInput,
             "import content is empty",
         ));
     }
-    check_item_count(lines.len())?;
+    check_item_count(non_empty_lines.len())?;
 
-    let multiple = lines.len() > 1;
-    let mut entries = Vec::with_capacity(lines.len());
-    for (ordinal, line) in lines.into_iter().enumerate() {
+    let has_multiple_lines = non_empty_lines.len() > 1;
+    let mut parsed_entries = Vec::with_capacity(non_empty_lines.len());
+    for (ordinal, line) in non_empty_lines.into_iter().enumerate() {
         match serde_json::from_str::<Value>(line) {
-            Ok(value) => {
-                ensure_depth(&value)?;
-                entries.push(InputEntry {
+            Ok(json_value) => {
+                ensure_depth(&json_value)?;
+                parsed_entries.push(InputEntry {
                     ordinal,
-                    value: Some(normalize_token_value(value)),
+                    import_value: Some(normalize_token_value(json_value)),
                     issue: None,
                 });
             }
             Err(_) => match raw_access_token(line) {
-                Some(token) => entries.push(InputEntry {
+                Some(token) => parsed_entries.push(InputEntry {
                     ordinal,
-                    value: Some(access_token_value(token)),
+                    import_value: Some(access_token_value(token)),
                     issue: None,
                 }),
-                None if multiple => entries.push(InputEntry {
+                None if has_multiple_lines => parsed_entries.push(InputEntry {
                     ordinal,
-                    value: None,
+                    import_value: None,
                     issue: Some(ImportIssue::new(
                         ImportIssueCode::MalformedJson,
                         "malformed JSON or access token line",
@@ -49,26 +49,26 @@ pub(super) fn parse_json_lines(input: &str) -> Result<ParsedEntries, ImportError
             },
         }
     }
-    Ok((ImportFormat::JsonLines, entries, Vec::new(), None))
+    Ok((ImportFormat::JsonLines, parsed_entries, Vec::new(), None))
 }
 
-pub(super) fn normalize_token_value(value: Value) -> Value {
-    match value {
-        Value::String(value) => raw_access_token(&value)
+pub(super) fn normalize_token_value(token_value: Value) -> Value {
+    match token_value {
+        Value::String(token_text) => raw_access_token(token_text.as_str())
             .map(access_token_value)
-            .unwrap_or(Value::String(value)),
-        value => value,
+            .unwrap_or(Value::String(token_text)),
+        other_value => other_value,
     }
 }
 
-fn raw_access_token(value: &str) -> Option<&str> {
-    let value = value.trim();
-    let token = value
+fn raw_access_token(token_text: &str) -> Option<&str> {
+    let trimmed_token = token_text.trim();
+    let token = trimmed_token
         .get(..7)
         .filter(|prefix| prefix.eq_ignore_ascii_case("bearer "))
-        .and_then(|_| value.get(7..))
+        .and_then(|_| trimmed_token.get(7..))
         .map(str::trim)
-        .unwrap_or(value);
+        .unwrap_or(trimmed_token);
     if token.is_empty()
         || token.len() > MAX_RAW_TOKEN_BYTES
         || !token.is_ascii()
@@ -86,7 +86,7 @@ fn raw_access_token(value: &str) -> Option<&str> {
     );
     (jwt || token
         .strip_prefix("at-")
-        .is_some_and(|value| !value.is_empty()))
+        .is_some_and(|suffix| !suffix.is_empty()))
     .then_some(token)
 }
 

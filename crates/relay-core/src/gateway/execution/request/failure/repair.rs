@@ -98,7 +98,7 @@ pub(super) fn repair_collected_rejection(
     super::super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
     *last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
     let upstream_error =
-        crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), &bytes);
+        crate::usage::UpstreamErrorDetails::from_response_body(Some(status.as_u16()), &bytes);
     event.upstream_error = Some(upstream_error.clone());
     event.error_category = Some(failure.category.to_string());
     if client_wire_api == WireApi::Responses

@@ -87,12 +87,12 @@ async fn a_new_driver_keeps_physical_attempt_history_but_explicit_repair_can_ret
         .settle_rotation(rejected(), crate::unix_time_ms())
         .unwrap();
     let handoff = budget.clone();
-    let next = reserve(&runtime, &handoff, WireApi::ChatCompletions).await;
+    let handoff_attempt = reserve(&runtime, &handoff, WireApi::ChatCompletions).await;
     assert_eq!(
-        next.member_key, "source:source-b",
+        handoff_attempt.member_key, "source:source-b",
         "an alias of A is not an untried source"
     );
-    drop(next);
+    drop(handoff_attempt);
     first.allow_rotation_repair();
     assert_eq!(handoff.dispatches(), 1, "repair never refunds a dispatch");
     let repair = reserve(&runtime, &handoff, WireApi::Responses).await;

@@ -52,13 +52,13 @@ impl ApiModelPriceOverride {
         self.input_micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
             && self
                 .cached_input_micro_usd_per_million
-                .is_none_or(|value| value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+                .is_none_or(|price_value| price_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
             && self
                 .cache_write_5m_micro_usd_per_million
-                .is_none_or(|value| value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+                .is_none_or(|price_value| price_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
             && self
                 .cache_write_1h_micro_usd_per_million
-                .is_none_or(|value| value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+                .is_none_or(|price_value| price_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
             && self.output_micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
     }
 }
@@ -157,16 +157,18 @@ pub fn estimate_api_equivalent_with_token_price(
     let output_tokens = usage.output_tokens;
     let cache_read_tokens = usage
         .cached_input_tokens
-        .map(|value| value.min(input_tokens.unwrap_or(value)));
-    let short_cache_write_tokens = usage
-        .cache_write_5m_tokens
-        .map(|value| value.min(input_tokens.unwrap_or(value)));
-    let long_cache_write_tokens = usage
-        .cache_write_1h_tokens
-        .map(|value| value.min(input_tokens.unwrap_or(value)));
+        .map(|cached_tokens| cached_tokens.min(input_tokens.unwrap_or(cached_tokens)));
+    let short_cache_write_tokens = usage.cache_write_5m_tokens.map(|cache_write_tokens| {
+        cache_write_tokens.min(input_tokens.unwrap_or(cache_write_tokens))
+    });
+    let long_cache_write_tokens = usage.cache_write_1h_tokens.map(|cache_write_tokens| {
+        cache_write_tokens.min(input_tokens.unwrap_or(cache_write_tokens))
+    });
     let unknown_cache_write_tokens = usage
         .unknown_cache_write_tokens
-        .map(|value| value.min(input_tokens.unwrap_or(value)));
+        .map(|unknown_cache_tokens| {
+            unknown_cache_tokens.min(input_tokens.unwrap_or(unknown_cache_tokens))
+        });
 
     let (
         uncached_input_tokens,
@@ -177,19 +179,19 @@ pub fn estimate_api_equivalent_with_token_price(
     ) = if let Some(input_tokens) = input_tokens {
         let mut remaining_input_tokens = input_tokens;
         let cache_read_tokens = cache_read_tokens
-            .map(|value| value.min(remaining_input_tokens))
+            .map(|cached_tokens| cached_tokens.min(remaining_input_tokens))
             .unwrap_or_default();
         remaining_input_tokens = remaining_input_tokens.saturating_sub(cache_read_tokens);
         let short_cache_write_tokens = short_cache_write_tokens
-            .map(|value| value.min(remaining_input_tokens))
+            .map(|cache_write_tokens| cache_write_tokens.min(remaining_input_tokens))
             .unwrap_or_default();
         remaining_input_tokens = remaining_input_tokens.saturating_sub(short_cache_write_tokens);
         let long_cache_write_tokens = long_cache_write_tokens
-            .map(|value| value.min(remaining_input_tokens))
+            .map(|cache_write_tokens| cache_write_tokens.min(remaining_input_tokens))
             .unwrap_or_default();
         remaining_input_tokens = remaining_input_tokens.saturating_sub(long_cache_write_tokens);
         let unknown_cache_write_tokens = unknown_cache_write_tokens
-            .map(|value| value.min(remaining_input_tokens))
+            .map(|unknown_cache_tokens| unknown_cache_tokens.min(remaining_input_tokens))
             .unwrap_or_default();
         remaining_input_tokens = remaining_input_tokens.saturating_sub(unknown_cache_write_tokens);
         (
@@ -385,13 +387,13 @@ impl<'a> CatalogPriceResolver<'a> {
 
     pub fn pricing_metadata(
         &self,
-        value: ApiEquivalentSummary,
+        equivalent_summary: ApiEquivalentSummary,
         sources: &[PriceSource],
     ) -> PricingMetadata {
         PricingMetadata::for_catalog(
             self.catalog,
             PricingSourceSummary::from_sources(sources.iter().copied()),
-            value.unpriced_tokens,
+            equivalent_summary.unpriced_tokens,
         )
     }
 }

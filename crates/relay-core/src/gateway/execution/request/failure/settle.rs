@@ -88,8 +88,8 @@ pub(super) fn settle_collected_rejection(
                     lease.allow_rotation_repair();
                     event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
                 } else {
-                    let state = rejection_state.clone();
-                    apply_failure_state(event, state);
+                    let failure_state = rejection_state.clone();
+                    apply_failure_state(event, failure_state);
                 }
                 // A retryable transport/availability failure leaves
                 // the owner in `tried`: replay has materialized the
@@ -116,8 +116,8 @@ pub(super) fn settle_collected_rejection(
             runtime.invalidate_response_affinity(response_affinity_key.as_deref());
             event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
         } else {
-            let state = rejection_state.clone();
-            apply_failure_state(event, state);
+            let failure_state = rejection_state.clone();
+            apply_failure_state(event, failure_state);
         }
         emit_usage(runtime, event.clone());
         *last_failure = Some(failure);
@@ -139,7 +139,7 @@ pub(super) fn settle_collected_rejection(
     populate_tokens(event, &bytes);
     emit_usage(runtime, event.clone());
     let origin = selected_error_origin.for_category(failure.category);
-    let mut response = proxy_error_response(
+    let mut error_response = proxy_error_response(
         status,
         response_headers,
         &bytes,
@@ -148,7 +148,7 @@ pub(super) fn settle_collected_rejection(
         Some(request_id),
     );
     if account_route && adapter_is_passthrough {
-        relay_account_response_header(forwarded_headers, response_headers, &mut response);
+        relay_account_response_header(forwarded_headers, response_headers, &mut error_response);
     }
-    FailureStep::Respond(response)
+    FailureStep::Respond(error_response)
 }

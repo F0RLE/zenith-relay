@@ -35,7 +35,7 @@ pub(super) struct DriveCandidateInput<'a> {
 /// Drive one reserved WebSocket candidate through upgrade. Continue and break
 /// hand the same request back; a ready socket consumes it.
 pub(super) async fn drive_selected_candidate(
-    input: DriveCandidateInput<'_>,
+    connect_input: DriveCandidateInput<'_>,
 ) -> Result<DrivenConnect, GatewayFailure> {
     let DriveCandidateInput {
         selected,
@@ -50,7 +50,7 @@ pub(super) async fn drive_selected_candidate(
         confirmed_response_missing,
         last_failure,
         http_fallback_origin: websocket_http_fallback_origin,
-    } = input;
+    } = connect_input;
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
     let Some(mut route) = runtime.executor_route(
@@ -104,7 +104,7 @@ pub(super) async fn drive_selected_candidate(
         return Ok(DrivenConnect::Break(request));
     };
     let started = Instant::now();
-    // Reads the current attempt. The dispatch number changes after the payload is sent.
+    // Reads the current attempt. The dispatch number changes after the request is sent.
     macro_rules! connect_trace {
         () => {
             &ConnectTrace {
@@ -130,7 +130,7 @@ pub(super) async fn drive_selected_candidate(
             return Ok(DrivenConnect::Continue(request));
         }
     };
-    let payload = request.payload_for(&route)?;
+    let request_payload = request.payload_for(&route)?;
     let mut prepared = prepared;
     let upgrade = match upgrade_with_authorization_refresh(
         runtime,
@@ -207,7 +207,7 @@ pub(super) async fn drive_selected_candidate(
         route,
         lease,
         upgrade,
-        payload,
+        request_payload,
         prepared,
         attempt,
         started,

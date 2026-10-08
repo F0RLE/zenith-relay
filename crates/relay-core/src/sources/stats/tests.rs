@@ -66,7 +66,10 @@ async fn rate_limited_stats_return_retry_after_even_without_a_valid_payload() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let read = read_source_provider_stats(&format!("http://{address}/v1"), "synthetic-key").await;
-    assert_eq!(read.value.unwrap().status, SourceStatsStatus::RateLimited);
+    assert_eq!(
+        read.read_value.unwrap().status,
+        SourceStatsStatus::RateLimited
+    );
     assert!(read.retry_after_ms.is_some_and(|delay| delay >= 1_000));
     server.abort();
 }

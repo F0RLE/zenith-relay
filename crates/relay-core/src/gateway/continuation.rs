@@ -22,7 +22,7 @@ pub(super) fn previous_response_id(request: &Value) -> Option<&str> {
         .get("previous_response_id")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|response_id| !response_id.is_empty())
 }
 
 /// Drops the opaque continuation binding after its history has been materialized.

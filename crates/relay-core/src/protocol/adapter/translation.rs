@@ -144,31 +144,32 @@ impl TranslationRequest {
         context: AdapterRequestContext<'_>,
         upstream: WireApi,
     ) -> AdapterResult<Self> {
-        let mut request = decode::request(context.client_wire_api, context.request)?;
+        let mut decoded_request = decode::request(context.client_wire_api, context.request)?;
         if context.client_wire_api == WireApi::Responses
             && context
                 .request
                 .get("previous_response_id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| !id.is_empty())
+                .is_some_and(|response_id_value| !response_id_value.is_empty())
         {
-            let previous = context
+            let previous_context = context
                 .previous
                 .ok_or_else(AdapterError::continuation_missing)?;
-            if previous.model != context.model {
+            if previous_context.model != context.model {
                 return Err(AdapterError::continuation_mismatch());
             }
-            if previous.reasoning_mode != context.reasoning_mode {
+            if previous_context.reasoning_mode != context.reasoning_mode {
                 return Err(AdapterError::continuation_mismatch());
             }
-            let mut history = previous
+            let mut history = previous_context
                 .portable_history
                 .ok_or_else(AdapterError::continuation_mismatch)?;
-            history.append(&mut request.messages);
-            request.messages = history;
+            history.append(&mut decoded_request.messages);
+            decoded_request.messages = history;
         }
-        decode::resolve_tool_history(&mut request.messages)?;
-        let mut upstream_body = encode::request(&request, upstream, context.model, context.stream)?;
+        decode::resolve_tool_history(&mut decoded_request.messages)?;
+        let mut upstream_body =
+            encode::request(&decoded_request, upstream, context.model, context.stream)?;
         if upstream == WireApi::Messages {
             super::messages::apply_cache_write_ttl(&mut upstream_body, context.cache_write_ttl)?;
         }
@@ -176,7 +177,7 @@ impl TranslationRequest {
             context.response_scope,
             context.response_id_seed,
         );
-        let custom_tools = request
+        let custom_tools = decoded_request
             .tools
             .iter()
             .filter(|tool| tool.custom)
@@ -189,7 +190,7 @@ impl TranslationRequest {
             model: context.model.to_owned(),
             response_id,
             reasoning_mode: context.reasoning_mode,
-            history: request.messages,
+            history: decoded_request.messages,
             custom_tools,
         })
     }
@@ -198,9 +199,13 @@ impl TranslationRequest {
         &self.upstream_body
     }
 
-    pub(super) fn translate(self, value: &Value) -> AdapterResult<MessagesBridgeResponse> {
-        let response = response::decode(self.upstream, value, &self.response_id)?;
-        self.complete(response)
+    pub(super) fn translate(
+        self,
+        upstream_response: &Value,
+    ) -> AdapterResult<MessagesBridgeResponse> {
+        let decoded_response =
+            response::decode(self.upstream, upstream_response, &self.response_id)?;
+        self.complete(decoded_response)
     }
 
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
@@ -222,34 +227,46 @@ impl TranslationRequest {
     }
 }
 
-fn required_text<'a>(value: &'a Value, key: &str) -> AdapterResult<&'a str> {
-    value
+fn required_text<'a>(json_object: &'a Value, key: &str) -> AdapterResult<&'a str> {
+    json_object
         .get(key)
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .ok_or_else(AdapterError::invalid_request)
 }
 
-fn optional_u64(value: &Value, key: &str) -> AdapterResult<Option<u64>> {
-    value
+fn optional_u64(json_object: &Value, key: &str) -> AdapterResult<Option<u64>> {
+    json_object
         .get(key)
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_u64().ok_or_else(AdapterError::invalid_request))
+        .filter(|field_value| !field_value.is_null())
+        .map(|field_value| {
+            field_value
+                .as_u64()
+                .ok_or_else(AdapterError::invalid_request)
+        })
         .transpose()
 }
 
-fn optional_f64(value: &Value, key: &str) -> AdapterResult<Option<f64>> {
-    value
+fn optional_f64(json_object: &Value, key: &str) -> AdapterResult<Option<f64>> {
+    json_object
         .get(key)
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_f64().ok_or_else(AdapterError::invalid_request))
+        .filter(|field_value| !field_value.is_null())
+        .map(|field_value| {
+            field_value
+                .as_f64()
+                .ok_or_else(AdapterError::invalid_request)
+        })
         .transpose()
 }
 
-fn optional_bool(value: &Value, key: &str) -> AdapterResult<Option<bool>> {
-    value
+fn optional_bool(json_object: &Value, key: &str) -> AdapterResult<Option<bool>> {
+    json_object
         .get(key)
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_bool().ok_or_else(AdapterError::invalid_request))
+        .filter(|field_value| !field_value.is_null())
+        .map(|field_value| {
+            field_value
+                .as_bool()
+                .ok_or_else(AdapterError::invalid_request)
+        })
         .transpose()
 }

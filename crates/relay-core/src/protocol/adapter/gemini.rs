@@ -14,7 +14,7 @@ pub struct GeminiBridgeRequest {
     pub(super) upstream_body: Value,
     pub(super) model: String,
     pub(super) response_id: String,
-    pub(super) state: MessagesBridgeState,
+    pub(super) bridge_state: MessagesBridgeState,
 }
 
 impl GeminiBridgeRequest {
@@ -27,8 +27,8 @@ impl GeminiBridgeRequest {
     pub fn response_id(&self) -> &str {
         &self.response_id
     }
-    pub(super) fn state(&self) -> &MessagesBridgeState {
-        &self.state
+    pub(super) fn bridge_state(&self) -> &MessagesBridgeState {
+        &self.bridge_state
     }
 }
 

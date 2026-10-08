@@ -139,7 +139,7 @@ async fn usage_stream_still_reports_a_failure_before_any_visible_bytes() {
     let failure = parse_sse_event(&bytes);
     assert_eq!(failure.outcome, Some(TerminalOutcome::Failure));
     assert_eq!(
-        failure.payload.unwrap()["response"]["error"]["code"],
+        failure.event_payload.unwrap()["response"]["error"]["code"],
         "stream_incomplete"
     );
     assert!(stream.next().await.is_none());
@@ -185,7 +185,7 @@ async fn upstream_stream_errors_prefix_the_selected_account() {
     let error = stream.next().await.unwrap().unwrap();
     let error = parse_sse_event(&error);
     assert_eq!(
-        error.payload.unwrap()["response"]["error"]["message"],
+        error.event_payload.unwrap()["response"]["error"]["message"],
         "Account: connection closed"
     );
 }
@@ -209,7 +209,7 @@ async fn upstream_stream_error_with_reordered_json_fields_gets_prefixed_as_one_e
 
     let forwarded = stream.next().await.unwrap().unwrap();
     let error = parse_sse_event(&forwarded);
-    let payload = error.payload.unwrap();
+    let payload = error.event_payload.unwrap();
     assert_eq!(payload["id"], "resp_test");
     assert_eq!(
         payload["response"]["error"]["message"],
@@ -235,7 +235,7 @@ async fn upstream_sse_error_event_without_json_type_gets_prefixed() {
     let error = parse_sse_event(&forwarded);
     assert_eq!(error.outcome, Some(TerminalOutcome::Failure));
     assert_eq!(
-        error.payload.unwrap()["message"],
+        error.event_payload.unwrap()["message"],
         "Account: connection closed"
     );
 }

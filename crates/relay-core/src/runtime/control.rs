@@ -71,9 +71,9 @@ impl RuntimeControl {
         self.route_recovery_window_ms.load(Ordering::Acquire)
     }
 
-    pub(crate) fn set_route_recovery_window_ms(&self, value: u64) {
+    pub(crate) fn set_route_recovery_window_ms(&self, window_ms: u64) {
         self.route_recovery_window_ms
-            .store(value.max(1_000), Ordering::Release);
+            .store(window_ms.max(1_000), Ordering::Release);
     }
 
     pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
@@ -81,8 +81,8 @@ impl RuntimeControl {
         origins.insert(request_id.to_string(), origin);
         if origins.len() > MAX_TRACKED_REQUEST_ORIGINS {
             let excess = origins.len() - MAX_TRACKED_REQUEST_ORIGINS;
-            let old = origins.keys().take(excess).cloned().collect::<Vec<_>>();
-            for request_id in old {
+            let expired_request_ids = origins.keys().take(excess).cloned().collect::<Vec<_>>();
+            for request_id in expired_request_ids {
                 origins.remove(&request_id);
             }
         }

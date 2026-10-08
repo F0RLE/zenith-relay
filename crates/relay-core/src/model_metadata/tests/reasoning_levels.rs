@@ -136,7 +136,7 @@ fn parses_reasoning_method_and_filters_unrecognized_efforts() {
         "reasoning": {"type": "effort", "effort": {"values": ["low", "HIGH", "vendor-private", "x".repeat(2_000)]}, "default_effort": "high"},
         "supported_parameters": ["reasoning"]
     }]});
-    let catalog = ModelMetadataCatalog::from_payload(
+    let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, Some(&openrouter), None),
         None,
         None,
@@ -268,7 +268,7 @@ fn recognizes_litellm_camel_case_effort_flags_without_openrouter() {
         "supportsLowReasoningEffort": true,
         "supportsHighReasoningEffort": true
     }});
-    let catalog = ModelMetadataCatalog::from_payload(
+    let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, None, Some(&litellm)),
         None,
         None,
@@ -308,7 +308,7 @@ fn matches_decimal_and_dashed_model_versions_before_litellm_fallback() {
         "claude-opus-4-8": {"supports_max_reasoning_effort": true}
     });
 
-    let catalog = ModelMetadataCatalog::from_payload(
+    let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, Some(&openrouter), Some(&litellm)),
         None,
         None,

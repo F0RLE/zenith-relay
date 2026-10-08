@@ -392,18 +392,36 @@ fn events_after_failed_completion_cannot_advance_provider_retry_after() {
 #[test]
 fn old_revision_completion_cannot_publish_into_a_new_identity() {
     let mut coordinator = coordinator();
-    let old = identity(1);
-    let new = identity(2);
-    coordinator.register(old.clone(), RefreshKind::Models, 0, true, true);
+    let previous_identity = identity(1);
+    let replacement_identity = identity(2);
+    coordinator.register(
+        previous_identity.clone(),
+        RefreshKind::Models,
+        0,
+        true,
+        true,
+    );
     let job = coordinator.claim_due(0).unwrap();
-    assert_eq!(coordinator.invalidate(&old), 1);
-    coordinator.register(new.clone(), RefreshKind::Models, 1, true, true);
+    assert_eq!(coordinator.invalidate(&previous_identity), 1);
+    coordinator.register(
+        replacement_identity.clone(),
+        RefreshKind::Models,
+        1,
+        true,
+        true,
+    );
     assert_eq!(
         coordinator.complete(&job, RefreshOutcome::Success, 2),
         RefreshCompletion::Stale
     );
-    assert_eq!(coordinator.next_due(&new, RefreshKind::Models), Some(1));
-    assert_eq!(coordinator.claim_due(1).unwrap().identity, new);
+    assert_eq!(
+        coordinator.next_due(&replacement_identity, RefreshKind::Models),
+        Some(1)
+    );
+    assert_eq!(
+        coordinator.claim_due(1).unwrap().identity,
+        replacement_identity
+    );
 }
 
 #[test]

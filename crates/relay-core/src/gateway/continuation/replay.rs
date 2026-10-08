@@ -38,7 +38,7 @@ pub(in crate::gateway) fn drop_materialized_previous_response_id(
     if !has_materialized_plaintext_history(&materialized)
         || request
             .get("conversation")
-            .is_some_and(|value| !value.is_null())
+            .is_some_and(|conversation_value| !conversation_value.is_null())
         || request.get("context_management").is_some()
     {
         return false;
@@ -90,7 +90,7 @@ pub(in crate::gateway) fn recover_stale_tool_history(
     let Some(historical_item_count) = materialized
         .get("input")
         .and_then(Value::as_array)
-        .and_then(|input| input.len().checked_sub(current_input_item_count))
+        .and_then(|input_items| input_items.len().checked_sub(current_input_item_count))
     else {
         return false;
     };
@@ -110,7 +110,7 @@ pub(in crate::gateway) fn recover_stale_tool_history(
 
 fn replay_input_item_count(request: &Value) -> Option<usize> {
     match request.get("input")? {
-        Value::Array(items) => Some(items.len()),
+        Value::Array(input_items) => Some(input_items.len()),
         Value::String(_) | Value::Object(_) => Some(1),
         _ => None,
     }
@@ -122,27 +122,25 @@ fn has_materialized_tool_history(request: &Value) -> bool {
         || contains_encrypted_content(request)
         || request
             .get("conversation")
-            .is_some_and(|value| !value.is_null())
+            .is_some_and(|conversation_value| !conversation_value.is_null())
     {
         return false;
     }
-    let Some(input) = request.get("input").and_then(Value::as_array) else {
+    let Some(input_items) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
-    !input.is_empty()
-        && input.iter().all(|item| {
-            let Some(object) = item.as_object() else {
+    !input_items.is_empty()
+        && input_items.iter().all(|input_item| {
+            let Some(item_object) = input_item.as_object() else {
                 return false;
             };
-            match object.get("type").and_then(Value::as_str) {
-                Some("message") | None => {
-                    object
-                        .get("role")
-                        .and_then(Value::as_str)
-                        .is_some_and(|role| {
-                            matches!(role, "user" | "assistant" | "developer" | "system")
-                        })
-                }
+            match item_object.get("type").and_then(Value::as_str) {
+                Some("message") | None => item_object
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| {
+                        matches!(role, "user" | "assistant" | "developer" | "system")
+                    }),
                 Some(
                     "function_call"
                     | "function_call_output"
@@ -162,32 +160,32 @@ fn has_materialized_plaintext_history(request: &Value) -> bool {
         || contains_tool_state(request)
         || request
             .get("conversation")
-            .is_some_and(|value| !value.is_null())
+            .is_some_and(|conversation_value| !conversation_value.is_null())
     {
         return false;
     }
-    let Some(input) = request.get("input").and_then(Value::as_array) else {
+    let Some(input_items) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
-    if input.is_empty() {
+    if input_items.is_empty() {
         return false;
     }
 
-    for item in input {
-        let Some(message) = item.as_object() else {
+    for input_item in input_items {
+        let Some(message_object) = input_item.as_object() else {
             return false;
         };
-        if message
+        if message_object
             .get("type")
             .is_some_and(|kind| kind.as_str() != Some("message"))
         {
             return false;
         }
-        let Some(role) = message.get("role").and_then(Value::as_str) else {
+        let Some(role) = message_object.get("role").and_then(Value::as_str) else {
             return false;
         };
         if !matches!(role, "user" | "assistant" | "developer" | "system")
-            || !message_has_plaintext_content(message)
+            || !message_has_plaintext_content(message_object)
         {
             return false;
         }
@@ -195,33 +193,33 @@ fn has_materialized_plaintext_history(request: &Value) -> bool {
     true
 }
 
-pub(super) fn message_has_plaintext_content(message: &Map<String, Value>) -> bool {
-    match message.get("content") {
+pub(super) fn message_has_plaintext_content(message_object: &Map<String, Value>) -> bool {
+    match message_object.get("content") {
         Some(Value::String(_)) => true,
         Some(Value::Array(parts)) => !parts.is_empty() && parts.iter().all(plaintext_content_part),
         _ => false,
     }
 }
 
-fn plaintext_content_part(part: &Value) -> bool {
-    let Some(part) = part.as_object() else {
+fn plaintext_content_part(content_part: &Value) -> bool {
+    let Some(part_object) = content_part.as_object() else {
         return false;
     };
-    match part.get("type").and_then(Value::as_str) {
+    match part_object.get("type").and_then(Value::as_str) {
         Some("input_text" | "output_text" | "text") => {
-            part.get("text").is_some_and(Value::is_string)
+            part_object.get("text").is_some_and(Value::is_string)
         }
-        Some("refusal") => part.get("refusal").is_some_and(Value::is_string),
+        Some("refusal") => part_object.get("refusal").is_some_and(Value::is_string),
         _ => false,
     }
 }
 
-pub(super) fn contains_encrypted_content(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(contains_encrypted_content),
-        Value::Object(values) => {
-            values.contains_key("encrypted_content")
-                || values.values().any(contains_encrypted_content)
+pub(super) fn contains_encrypted_content(json_value: &Value) -> bool {
+    match json_value {
+        Value::Array(json_values) => json_values.iter().any(contains_encrypted_content),
+        Value::Object(json_object) => {
+            json_object.contains_key("encrypted_content")
+                || json_object.values().any(contains_encrypted_content)
         }
         _ => false,
     }
@@ -231,20 +229,20 @@ fn contains_tool_state(request: &Value) -> bool {
     request
         .get("input")
         .and_then(Value::as_array)
-        .is_some_and(|items| items.iter().any(is_tool_state_item))
+        .is_some_and(|input_items| input_items.iter().any(is_tool_state_item))
 }
 
-pub(super) fn is_tool_state_item(item: &Value) -> bool {
-    let Some(item) = item.as_object() else {
+pub(super) fn is_tool_state_item(input_item: &Value) -> bool {
+    let Some(item_object) = input_item.as_object() else {
         return false;
     };
-    let kind = item.get("type").and_then(Value::as_str);
+    let kind = item_object.get("type").and_then(Value::as_str);
     kind.is_some_and(|kind| {
         kind.ends_with("_call") || kind.ends_with("_call_output") || kind.ends_with("_output")
     }) || matches!(
-        item.get("role").and_then(Value::as_str),
+        item_object.get("role").and_then(Value::as_str),
         Some("tool" | "function")
     ) || ["tool_calls", "tool_call_id", "function_call"]
         .iter()
-        .any(|field| item.contains_key(*field))
+        .any(|field| item_object.contains_key(*field))
 }

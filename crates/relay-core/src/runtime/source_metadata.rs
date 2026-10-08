@@ -115,7 +115,7 @@ impl GatewayRuntime {
         model: &str,
         account_only: bool,
     ) -> bool {
-        let Some(model) = self.resolve_model(key, model) else {
+        let Some(resolved_model_id) = self.resolve_model(key, model) else {
             return false;
         };
         let scope = key.scope_snapshot();
@@ -127,7 +127,7 @@ impl GatewayRuntime {
             scheduler
                 .candidates()
                 .filter(|candidate| {
-                    candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                    candidate.is_configured(&resolved_model_id, &[WireApi::Responses], &scope)
                         && (!account_only || candidate.kind == CandidateKind::OAuthAccount)
                 })
                 .map(|candidate| (candidate.id.clone(), candidate.kind))
@@ -136,11 +136,11 @@ impl GatewayRuntime {
         if configured.is_empty() {
             return false;
         }
-        let model = crate::model_id_key(&model);
+        let model_id = crate::model_id_key(&resolved_model_id);
         let lite_models = crate::poison::mutex(&self.codex_responses_lite_models);
         configured.into_iter().all(|(candidate_id, kind)| {
             kind == CandidateKind::OAuthAccount
-                && lite_models.contains(&(candidate_id, model.clone()))
+                && lite_models.contains(&(candidate_id, model_id.clone()))
         })
     }
 

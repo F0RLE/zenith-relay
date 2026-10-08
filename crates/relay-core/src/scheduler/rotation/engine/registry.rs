@@ -273,12 +273,12 @@ impl RotationEngine {
         quota: QuotaState,
         revision: u64,
     ) -> bool {
-        let current = self
+        let stored_revision = self
             .quota_revisions
             .get(candidate_id)
             .copied()
             .unwrap_or_default();
-        if revision <= current {
+        if revision <= stored_revision {
             return false;
         }
         let Some(runtime) = self.candidates.get_mut(candidate_id) else {

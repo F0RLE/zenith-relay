@@ -34,8 +34,8 @@ impl TokenRateSet {
             && self.output.is_none()
     }
 
-    fn skip_serializing(value: &Self) -> bool {
-        value.is_empty()
+    fn skip_serializing(rate_set: &Self) -> bool {
+        rate_set.is_empty()
     }
 
     pub const fn is_valid(self) -> bool {
@@ -87,8 +87,8 @@ impl LongContextRates {
         self.standard.is_empty() && self.flex.is_empty() && self.priority.is_empty()
     }
 
-    fn skip_serializing(value: &Self) -> bool {
-        value.is_empty()
+    fn skip_serializing(context_rates: &Self) -> bool {
+        context_rates.is_empty()
     }
 
     pub const fn is_valid(self) -> bool {
@@ -154,17 +154,17 @@ impl TokenPrice {
     }
 }
 
-const fn option_is_valid(value: Option<u64>) -> bool {
-    match value {
-        Some(value) => value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+const fn option_is_valid(rate_value: Option<u64>) -> bool {
+    match rate_value {
+        Some(rate_value) => rate_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
         None => true,
     }
 }
 
-const fn or_rate(preferred: Option<u64>, fallback: Option<u64>) -> Option<u64> {
-    match preferred {
-        Some(value) => Some(value),
-        None => fallback,
+const fn or_rate(preferred_rate: Option<u64>, fallback_rate: Option<u64>) -> Option<u64> {
+    match preferred_rate {
+        Some(rate_value) => Some(rate_value),
+        None => fallback_rate,
     }
 }
 

@@ -78,8 +78,8 @@ fn weighted_preview_is_side_effect_free_and_reservation_advances_state() {
     assert_eq!(preview.candidate_id, second_preview.candidate_id);
     let lease = engine.reserve(&first_request, 0).unwrap();
     assert_eq!(lease.candidate_id, preview.candidate_id);
-    let next = engine.select(&request(3), 0).unwrap();
-    assert_ne!(next.candidate_id, lease.candidate_id);
+    let different_candidate = engine.select(&request(3), 0).unwrap();
+    assert_ne!(different_candidate.candidate_id, lease.candidate_id);
 }
 
 #[test]
@@ -322,32 +322,32 @@ fn late_success_does_not_clear_a_newer_failure() {
     let mut engine = engine_with([candidate("a", 0, 1)]);
     let first = request(1).with_owner("a");
     let second = request(2).with_owner("a");
-    let old = engine.reserve(&first, 0).unwrap();
-    let new = engine.reserve(&second, 0).unwrap();
-    let old_budget = dispatch(&mut engine, &old);
-    let new_budget = dispatch(&mut engine, &new);
+    let previous_lease = engine.reserve(&first, 0).unwrap();
+    let newer_lease = engine.reserve(&second, 0).unwrap();
+    let previous_budget = dispatch(&mut engine, &previous_lease);
+    let newer_budget = dispatch(&mut engine, &newer_lease);
     engine
         .settle(
-            new.lease_id,
+            newer_lease.lease_id,
             AttemptObservation {
                 execution: ExecutionObservation::not_sent(),
                 health: HealthObservation::CountableTransient {
                     provider_not_before_ms: None,
                 },
             },
-            &new_budget,
+            &newer_budget,
             1,
         )
         .unwrap();
     let before = engine.circuit("a", "responses:gpt");
     engine
         .settle(
-            old.lease_id,
+            previous_lease.lease_id,
             AttemptObservation {
                 execution: ExecutionObservation::accepted(),
                 health: HealthObservation::Success,
             },
-            &old_budget,
+            &previous_budget,
             2,
         )
         .unwrap();
@@ -483,7 +483,7 @@ fn remove_and_readd_fences_old_capacity_release() {
     let mut original = candidate("source", 0, 1).with_capacity("physical", 1);
     original.max_concurrency = 1;
     let mut engine = engine_with([original]);
-    let old = engine.reserve(&request(1), 0).unwrap();
+    let previous_lease = engine.reserve(&request(1), 0).unwrap();
     let removed = engine.remove("source").unwrap();
     assert_eq!(removed.id, "source");
     let replacement = candidate("source", 0, 1).with_capacity("physical", 1);
@@ -494,7 +494,11 @@ fn remove_and_readd_fences_old_capacity_release() {
         CandidateAvailability::Busy(CandidateBlockReason::CapacityBusy)
     ));
     engine
-        .cancel(old.lease_id, &RequestBudget::default_for(RequestId(1)), 0)
+        .cancel(
+            previous_lease.lease_id,
+            &RequestBudget::default_for(RequestId(1)),
+            0,
+        )
         .unwrap();
     assert_eq!(engine.capacity_in_flight("physical"), 0);
     assert!(engine.reserve(&request(2), 0).is_ok());

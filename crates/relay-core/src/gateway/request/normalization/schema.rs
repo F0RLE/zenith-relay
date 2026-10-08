@@ -6,53 +6,63 @@ const MAX_EXPANSION_DEPTH: usize = 64;
 /// Inline ordinary local definitions for account tool compatibility. Expansion
 /// is optional: if it would change reference scope or exceed the memory budget,
 /// keep the original schema, including all definitions and constraints.
-pub(super) fn inline_local_refs(value: &mut Value) {
+pub(super) fn inline_local_refs(schema_value: &mut Value) {
     let mut budget = MAX_EXPANSION_BYTES;
-    if !charge(value, &mut budget) {
+    if !charge(schema_value, &mut budget) {
         return;
     }
-    if !value.get("$defs").is_some_and(Value::is_object)
-        && !value.get("definitions").is_some_and(Value::is_object)
+    if !schema_value.get("$defs").is_some_and(Value::is_object)
+        && !schema_value
+            .get("definitions")
+            .is_some_and(Value::is_object)
     {
         return;
     }
-    let mut expanded = value.clone();
-    if expand(&mut expanded, value, &mut Vec::new(), &mut budget, 0).is_none() {
+    let mut expanded_schema = schema_value.clone();
+    if expand(
+        &mut expanded_schema,
+        schema_value,
+        &mut Vec::new(),
+        &mut budget,
+        0,
+    )
+    .is_none()
+    {
         return;
     }
-    if !contains_ref(&expanded) {
-        if let Some(object) = expanded.as_object_mut() {
-            object.remove("$defs");
-            object.remove("definitions");
+    if !contains_ref(&expanded_schema) {
+        if let Some(schema_object) = expanded_schema.as_object_mut() {
+            schema_object.remove("$defs");
+            schema_object.remove("definitions");
         }
     }
-    *value = expanded;
+    *schema_value = expanded_schema;
 }
 
 // Account for strings, keys and tree nodes before cloning a referenced subtree.
 // A small DAG can otherwise expand exponentially.
-fn charge(value: &Value, remaining: &mut usize) -> bool {
-    let cost = std::mem::size_of::<Value>() + value.as_str().map_or(0, str::len);
+fn charge(schema_value: &Value, remaining: &mut usize) -> bool {
+    let cost = std::mem::size_of::<Value>() + schema_value.as_str().map_or(0, str::len);
     let Some(left) = remaining.checked_sub(cost) else {
         return false;
     };
     *remaining = left;
-    match value {
-        Value::Object(object) => object.iter().all(|(key, child)| {
+    match schema_value {
+        Value::Object(schema_object) => schema_object.iter().all(|(key, child)| {
             let Some(left) = remaining.checked_sub(key.len()) else {
                 return false;
             };
             *remaining = left;
             charge(child, remaining)
         }),
-        Value::Array(values) => values.iter().all(|child| charge(child, remaining)),
+        Value::Array(schema_items) => schema_items.iter().all(|child| charge(child, remaining)),
         _ => true,
     }
 }
 
 fn expand(
-    value: &mut Value,
-    root: &Value,
+    schema_value: &mut Value,
+    root_schema: &Value,
     stack: &mut Vec<String>,
     budget: &mut usize,
     depth: usize,
@@ -60,7 +70,7 @@ fn expand(
     if depth > MAX_EXPANSION_DEPTH {
         return None;
     }
-    let Some(object) = value.as_object_mut() else {
+    let Some(schema_object) = schema_value.as_object_mut() else {
         return Some(());
     };
     // Resource identifiers and dynamic references need a full dialect-aware
@@ -75,54 +85,56 @@ fn expand(
         "$recursiveRef",
     ]
     .iter()
-    .any(|key| object.contains_key(*key))
+    .any(|key| schema_object.contains_key(*key))
     {
         return None;
     }
-    let reference = object
+    let reference = schema_object
         .get("$ref")
         .and_then(Value::as_str)
         .filter(|reference| {
             reference.starts_with("#/$defs/") || reference.starts_with("#/definitions/")
         })
         .filter(|_| {
-            object
+            schema_object
                 .keys()
                 .all(|key| matches!(key.as_str(), "$ref" | "title" | "description"))
         })
         .map(str::to_owned);
     if let Some(reference) = reference {
         if !stack.contains(&reference) {
-            if let Some(target) = root.pointer(&reference[1..]) {
-                if !charge(target, budget) {
+            if let Some(referenced_schema) = root_schema.pointer(&reference[1..]) {
+                if !charge(referenced_schema, budget) {
                     return None;
                 }
                 // Boolean schemas with annotations retain their reference.
-                if target.is_object() || (target.is_boolean() && object.len() == 1) {
+                if referenced_schema.is_object()
+                    || (referenced_schema.is_boolean() && schema_object.len() == 1)
+                {
                     stack.push(reference);
-                    let mut resolved = target.clone();
-                    expand(&mut resolved, root, stack, budget, depth + 1)?;
+                    let mut resolved_schema = referenced_schema.clone();
+                    expand(&mut resolved_schema, root_schema, stack, budget, depth + 1)?;
                     stack.pop();
-                    if let Some(resolved) = resolved.as_object_mut() {
-                        for (key, sibling) in std::mem::take(object) {
+                    if let Some(resolved_object) = resolved_schema.as_object_mut() {
+                        for (key, sibling) in std::mem::take(schema_object) {
                             if key != "$ref" {
-                                resolved.insert(key, sibling);
+                                resolved_object.insert(key, sibling);
                             }
                         }
                     }
-                    *value = resolved;
+                    *schema_value = resolved_schema;
                     return Some(());
                 }
             }
         }
     }
-    visit_subschemas(object, |child| {
-        expand(child, root, stack, budget, depth + 1)
+    visit_subschemas(schema_object, |child_schema| {
+        expand(child_schema, root_schema, stack, budget, depth + 1)
     })
 }
 
 fn visit_subschemas(
-    object: &mut Map<String, Value>,
+    schema_object: &mut Map<String, Value>,
     mut visit: impl FnMut(&mut Value) -> Option<()>,
 ) -> Option<()> {
     // These are schema positions. Defaults, examples, enum/const values and
@@ -134,16 +146,16 @@ fn visit_subschemas(
         "patternProperties",
         "dependentSchemas",
     ] {
-        if let Some(map) = object.get_mut(key).and_then(Value::as_object_mut) {
-            for child in map.values_mut() {
-                visit(child)?;
+        if let Some(schema_map) = schema_object.get_mut(key).and_then(Value::as_object_mut) {
+            for child_schema in schema_map.values_mut() {
+                visit(child_schema)?;
             }
         }
     }
     for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(array) = object.get_mut(key).and_then(Value::as_array_mut) {
-            for child in array {
-                visit(child)?;
+        if let Some(schema_array) = schema_object.get_mut(key).and_then(Value::as_array_mut) {
+            for child_schema in schema_array {
+                visit(child_schema)?;
             }
         }
     }
@@ -160,23 +172,25 @@ fn visit_subschemas(
         "then",
         "else",
     ] {
-        if let Some(child) = object.get_mut(key) {
-            if let Some(items) = child.as_array_mut() {
-                for item in items {
-                    visit(item)?;
+        if let Some(schema_child) = schema_object.get_mut(key) {
+            if let Some(schema_items) = schema_child.as_array_mut() {
+                for child_schema in schema_items {
+                    visit(child_schema)?;
                 }
             } else {
-                visit(child)?;
+                visit(schema_child)?;
             }
         }
     }
     Some(())
 }
 
-fn contains_ref(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => object.contains_key("$ref") || object.values().any(contains_ref),
-        Value::Array(items) => items.iter().any(contains_ref),
+fn contains_ref(schema_value: &Value) -> bool {
+    match schema_value {
+        Value::Object(schema_object) => {
+            schema_object.contains_key("$ref") || schema_object.values().any(contains_ref)
+        }
+        Value::Array(schema_items) => schema_items.iter().any(contains_ref),
         _ => false,
     }
 }
@@ -210,16 +224,16 @@ mod tests {
     fn branching_and_deep_references_fall_back_atomically() {
         for (width, depth) in [(1, 80), (2, 20)] {
             let mut definitions = Map::from_iter([("leaf".into(), json!({"type":"string"}))]);
-            let mut previous = "leaf".to_owned();
+            let mut current_definition_id = "leaf".to_owned();
             for index in 0..depth {
-                let id = format!("node-{index}");
+                let node_id = format!("node-{index}");
                 let children = (0..width)
-                    .map(|_| json!({"$ref":format!("#/$defs/{previous}")}))
+                    .map(|_| json!({"$ref":format!("#/$defs/{current_definition_id}")}))
                     .collect::<Vec<_>>();
-                definitions.insert(id.clone(), json!({"allOf":children}));
-                previous = id;
+                definitions.insert(node_id.clone(), json!({"allOf":children}));
+                current_definition_id = node_id;
             }
-            let mut schema = json!({"$defs":definitions,"properties":{"value":{"$ref":format!("#/$defs/{previous}")}}});
+            let mut schema = json!({"$defs":definitions,"properties":{"value":{"$ref":format!("#/$defs/{current_definition_id}")}}});
             let original = schema.clone();
             inline_local_refs(&mut schema);
             assert_eq!(schema, original);

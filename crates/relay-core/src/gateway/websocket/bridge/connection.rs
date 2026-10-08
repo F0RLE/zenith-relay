@@ -28,7 +28,7 @@ pub(super) async fn retry_upstream_connection(
                 bridge.upstream,
                 bridge.runtime,
                 bridge.key,
-                bridge.state,
+                bridge.bridge_state,
                 connected,
             )
             .await
@@ -48,11 +48,13 @@ pub(super) async fn retry_upstream_connection(
 
 pub(in crate::gateway::websocket) async fn send_request(
     upstream: &mut UpstreamWebSocket,
-    payload: String,
+    request_payload: String,
     origin: ErrorOrigin,
 ) -> Result<(), GatewayFailure> {
     let send = async {
-        upstream.send(UpstreamMessage::Text(payload)).await?;
+        upstream
+            .send(UpstreamMessage::Text(request_payload))
+            .await?;
         upstream.flush().await
     };
     match timeout(UPSTREAM_CONNECT_TIMEOUT, send).await {

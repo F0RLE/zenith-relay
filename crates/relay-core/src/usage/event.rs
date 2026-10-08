@@ -24,8 +24,8 @@ impl UsageTransport {
 impl std::str::FromStr for UsageTransport {
     type Err = ();
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+    fn from_str(transport_name: &str) -> Result<Self, Self::Err> {
+        match transport_name {
             "http" => Ok(Self::Http),
             "websocket" => Ok(Self::Websocket),
             _ => Err(()),
@@ -93,8 +93,8 @@ impl ErrorOrigin {
 impl std::str::FromStr for ErrorOrigin {
     type Err = ();
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+    fn from_str(origin_name: &str) -> Result<Self, Self::Err> {
+        match origin_name {
             "provider" => Ok(Self::Provider),
             "account" => Ok(Self::Account),
             "relay" => Ok(Self::Relay),

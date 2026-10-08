@@ -95,20 +95,28 @@ fn runtime_capacity_is_finite_and_shrink_preserves_every_live_lease() {
 #[test]
 fn old_identity_release_does_not_decrement_new_identity_load() {
     let mut engine = engine(&["a"]);
-    let old = engine.reserve(&request(1), 0).unwrap();
+    let previous_lease = engine.reserve(&request(1), 0).unwrap();
     engine.remove("a").unwrap();
     engine
         .upsert(member("a").with_capacity("new-resource", 1))
         .unwrap();
-    let new = engine.reserve(&request(2), 0).unwrap();
+    let replacement_lease = engine.reserve(&request(2), 0).unwrap();
     engine
-        .cancel(old.lease_id, &RequestBudget::default_for(old.request_id), 0)
+        .cancel(
+            previous_lease.lease_id,
+            &RequestBudget::default_for(previous_lease.request_id),
+            0,
+        )
         .unwrap();
     assert_eq!(engine.in_flight("a"), 1);
     assert_eq!(engine.capacity_in_flight("new-resource"), 1);
     assert!(engine.reserve(&request(3), 0).is_err());
     engine
-        .cancel(new.lease_id, &RequestBudget::default_for(new.request_id), 0)
+        .cancel(
+            replacement_lease.lease_id,
+            &RequestBudget::default_for(replacement_lease.request_id),
+            0,
+        )
         .unwrap();
     assert_eq!(engine.active_leases(), 0);
 }
@@ -395,10 +403,10 @@ fn long_separated_failures_do_not_accumulate_forever() {
 #[test]
 fn outcomes_from_a_closed_incident_cannot_join_a_later_incident() {
     let mut engine = engine(&["a"]);
-    let old = engine.reserve(&request(1), 0).unwrap();
-    let mut old_budget = RequestBudget::default_for(old.request_id);
+    let previous_lease = engine.reserve(&request(1), 0).unwrap();
+    let mut previous_budget = RequestBudget::default_for(previous_lease.request_id);
     engine
-        .begin_dispatch(old.lease_id, &mut old_budget)
+        .begin_dispatch(previous_lease.lease_id, &mut previous_budget)
         .unwrap();
     let success = engine.reserve(&request(2), 0).unwrap();
     outcome(&mut engine, success, HealthObservation::Success, 0);
@@ -406,14 +414,14 @@ fn outcomes_from_a_closed_incident_cannot_join_a_later_incident() {
     let before = engine.circuit("a", "responses:text");
     engine
         .settle(
-            old.lease_id,
+            previous_lease.lease_id,
             AttemptObservation {
                 execution: ExecutionObservation::not_sent(),
                 health: HealthObservation::CountableTransient {
                     provider_not_before_ms: None,
                 },
             },
-            &old_budget,
+            &previous_budget,
             2,
         )
         .unwrap();

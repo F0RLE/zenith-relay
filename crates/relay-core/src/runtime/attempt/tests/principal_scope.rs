@@ -78,11 +78,11 @@ async fn principal_scope_revision_revokes_an_aba_edit_but_not_an_unchanged_save(
     assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
     drop(pending);
 
-    let current = reserve(budget.clone()).await;
-    assert_eq!(current.candidate_id(), "source-a");
+    let next_lease = reserve(budget.clone()).await;
+    assert_eq!(next_lease.candidate_id(), "source-a");
     assert!(runtime.update_key_scope("key", key.scope_snapshot()));
-    current.begin_rotation_http_dispatch().unwrap();
-    current.settle_rotation_success(crate::unix_time_ms());
+    next_lease.begin_rotation_http_dispatch().unwrap();
+    next_lease.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(budget.dispatches(), 1);
 }
 
@@ -135,14 +135,14 @@ async fn host_membership_and_key_scope_update_revoke_pending_dispatch_together()
     assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
     drop(pending);
 
-    let current = reserve(&runtime, &budget, WireApi::Responses).await;
-    assert_eq!(current.candidate_id(), "source-b");
+    let next_lease = reserve(&runtime, &budget, WireApi::Responses).await;
+    assert_eq!(next_lease.candidate_id(), "source-b");
     policy.members[0].weight = 2;
     assert!(runtime
         .set_pool_routing_policy_with_key_scopes(policy, 2, &[("key".into(), next_scope)])
         .unwrap());
-    current.begin_rotation_http_dispatch().unwrap();
-    current.settle_rotation_success(crate::unix_time_ms());
+    next_lease.begin_rotation_http_dispatch().unwrap();
+    next_lease.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(budget.dispatches(), 1);
 }
 
@@ -169,10 +169,10 @@ async fn candidate_permission_revision_revokes_an_aba_policy_edit_but_not_weight
     assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
     drop(pending);
 
-    let current = reserve(&runtime, &budget, WireApi::Responses).await;
-    assert_eq!(current.candidate_id(), "source-b");
+    let next_lease = reserve(&runtime, &budget, WireApi::Responses).await;
+    assert_eq!(next_lease.candidate_id(), "source-b");
     assert!(runtime.update_source_policy("source-b", policy(true, 2), 0));
-    current.begin_rotation_http_dispatch().unwrap();
-    current.settle_rotation_success(crate::unix_time_ms());
+    next_lease.begin_rotation_http_dispatch().unwrap();
+    next_lease.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(budget.dispatches(), 1);
 }

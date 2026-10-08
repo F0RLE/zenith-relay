@@ -25,7 +25,7 @@ pub(super) async fn open_upgraded_socket(
     route: ExecutorRoute,
     lease: CandidateLease,
     upgrade: reqwest_websocket::UpgradeResponse,
-    payload: String,
+    request_payload: String,
     prepared: PreparedAuthorization,
     attempt: &mut u16,
     started: Instant,
@@ -64,7 +64,7 @@ pub(super) async fn open_upgraded_socket(
         .begin_rotation_dispatch_for(&prepared, runtime)
         .map_err(|_| GatewayFailure::unavailable())?;
     *attempt = u16::try_from(dispatch.0).unwrap_or(u16::MAX);
-    if send_request(&mut upstream, payload, source_error_origin)
+    if send_request(&mut upstream, request_payload, source_error_origin)
         .await
         .is_err()
     {

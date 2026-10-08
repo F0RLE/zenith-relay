@@ -65,10 +65,10 @@ pub fn member_model_catalog(
     });
     source_models
         .chain(account_models)
-        .filter_map(|id| {
-            let metadata = catalog.resolve(id)?;
+        .filter_map(|model_id| {
+            let metadata = catalog.resolve(model_id)?;
             Some((
-                crate::model_id_key(id),
+                crate::model_id_key(model_id),
                 ModelCatalogIdentity {
                     catalog_provider: metadata.provider.clone(),
                     catalog_family: metadata.family.clone(),

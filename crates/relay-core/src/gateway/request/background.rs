@@ -19,7 +19,7 @@ pub(in crate::gateway) fn codex_background_request_kind(
     }
     if let Some(kind) = headers
         .get("x-openai-subagent")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|header_value| header_value.to_str().ok())
         .and_then(metadata_kind_text)
     {
         return Some(kind);
@@ -40,7 +40,7 @@ pub(in crate::gateway) fn codex_background_request_kind(
 fn codex_background_client(headers: &HeaderMap) -> bool {
     let originator = headers
         .get("originator")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|header_value| header_value.to_str().ok())
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
@@ -51,13 +51,13 @@ fn codex_background_client(headers: &HeaderMap) -> bool {
     }
     headers
         .get("user-agent")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| {
-            value.starts_with("chatgptdesktop/")
-                || value.starts_with("codex desktop/")
-                || value.starts_with("codex-tui/")
-                || value.starts_with("codex_cli_rs/")
+        .and_then(|header_value| header_value.to_str().ok())
+        .map(|user_agent| user_agent.trim().to_ascii_lowercase())
+        .is_some_and(|user_agent| {
+            user_agent.starts_with("chatgptdesktop/")
+                || user_agent.starts_with("codex desktop/")
+                || user_agent.starts_with("codex-tui/")
+                || user_agent.starts_with("codex_cli_rs/")
         })
 }
 
@@ -65,14 +65,14 @@ fn background_metadata(headers: &HeaderMap, request: &Value) -> Vec<Value> {
     let mut documents = Vec::new();
     if let Some(metadata) = headers
         .get("x-codex-turn-metadata")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|header_value| header_value.to_str().ok())
         .and_then(parse_metadata_text)
     {
         documents.push(metadata);
     }
     if let Some(client_metadata) = request
         .get("client_metadata")
-        .filter(|value| value.is_object())
+        .filter(|metadata_value| metadata_value.is_object())
     {
         if let Some(metadata) = client_metadata
             .get("x-codex-turn-metadata")
@@ -80,10 +80,11 @@ fn background_metadata(headers: &HeaderMap, request: &Value) -> Vec<Value> {
         {
             documents.push(metadata);
         }
-        if client_metadata
-            .as_object()
-            .is_some_and(|object| object.keys().any(|key| metadata_operation_key(key)))
-        {
+        if client_metadata.as_object().is_some_and(|metadata_object| {
+            metadata_object
+                .keys()
+                .any(|key| metadata_operation_key(key))
+        }) {
             documents.push(client_metadata.clone());
         }
     }
@@ -108,39 +109,39 @@ fn metadata_operation_key(key: &str) -> bool {
     )
 }
 
-fn parse_metadata_text(value: &str) -> Option<Value> {
-    serde_json::from_str::<Value>(value)
+fn parse_metadata_text(metadata_text: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(metadata_text)
         .ok()
-        .or_else(|| metadata_kind_text(value).map(|kind| Value::String(kind.to_string())))
+        .or_else(|| metadata_kind_text(metadata_text).map(|kind| Value::String(kind.to_string())))
 }
 
-fn parse_metadata_value(value: &Value) -> Option<Value> {
-    match value {
+fn parse_metadata_value(metadata_value: &Value) -> Option<Value> {
+    match metadata_value {
         Value::String(text) => parse_metadata_text(text),
-        Value::Object(_) | Value::Array(_) => Some(value.clone()),
+        Value::Object(_) | Value::Array(_) => Some(metadata_value.clone()),
         _ => None,
     }
 }
 
-fn metadata_kind_value(value: &Value) -> Option<&'static str> {
-    match value {
-        Value::String(_) => metadata_kind(value),
-        Value::Object(object) => object.iter().find_map(|(key, value)| {
+fn metadata_kind_value(metadata_value: &Value) -> Option<&'static str> {
+    match metadata_value {
+        Value::String(_) => metadata_kind(metadata_value),
+        Value::Object(object) => object.iter().find_map(|(key, nested_value)| {
             let relevant = metadata_operation_key(key);
             if relevant {
-                if let Some(kind) = metadata_kind(value) {
+                if let Some(kind) = metadata_kind(nested_value) {
                     return Some(kind);
                 }
             }
-            if value.is_object() || value.is_array() {
-                metadata_kind_value(value)
+            if nested_value.is_object() || nested_value.is_array() {
+                metadata_kind_value(nested_value)
             } else {
                 None
             }
         }),
-        Value::Array(values) => values.iter().find_map(|value| {
-            if value.is_object() || value.is_array() {
-                metadata_kind_value(value)
+        Value::Array(metadata_values) => metadata_values.iter().find_map(|nested_value| {
+            if nested_value.is_object() || nested_value.is_array() {
+                metadata_kind_value(nested_value)
             } else {
                 None
             }
@@ -149,8 +150,8 @@ fn metadata_kind_value(value: &Value) -> Option<&'static str> {
     }
 }
 
-fn metadata_kind(value: &Value) -> Option<&'static str> {
-    let Value::String(text) = value else {
+fn metadata_kind(metadata_value: &Value) -> Option<&'static str> {
+    let Value::String(text) = metadata_value else {
         return None;
     };
     metadata_kind_text(text)
@@ -202,15 +203,15 @@ fn prompt_background_kind(text: &str) -> Option<&'static str> {
     None
 }
 
-fn collect_request_strings(value: Option<&Value>, output: &mut Vec<String>) {
-    match value {
-        Some(Value::String(value)) => output.push(value.clone()),
-        Some(Value::Array(values)) => values
+fn collect_request_strings(request_value: Option<&Value>, strings: &mut Vec<String>) {
+    match request_value {
+        Some(Value::String(text)) => strings.push(text.clone()),
+        Some(Value::Array(array_values)) => array_values
             .iter()
-            .for_each(|value| collect_request_strings(Some(value), output)),
+            .for_each(|nested_value| collect_request_strings(Some(nested_value), strings)),
         Some(Value::Object(object)) => object
             .values()
-            .for_each(|value| collect_request_strings(Some(value), output)),
+            .for_each(|nested_value| collect_request_strings(Some(nested_value), strings)),
         _ => {}
     }
 }

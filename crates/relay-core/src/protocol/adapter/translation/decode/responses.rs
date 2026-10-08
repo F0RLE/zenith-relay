@@ -5,39 +5,46 @@ use super::super::{
 use crate::WireApi;
 use serde_json::{json, Value};
 
-pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
+pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     super::super::super::contracts::validate_responses_bridge_request(
-        value,
+        request_body,
         WireApi::ChatCompletions,
     )?;
-    let mut request = Request::default();
-    if let Some(instructions) = value.get("instructions").filter(|v| !v.is_null()) {
-        request.instructions = Some(Message {
+    let mut decoded_request = Request::default();
+    if let Some(instructions) = request_body
+        .get("instructions")
+        .filter(|instructions_value| !instructions_value.is_null())
+    {
+        decoded_request.instructions = Some(Message {
             role: Role::System,
             blocks: super::content::text_blocks(instructions, WireApi::Responses)?,
         });
     }
-    let input = value
+    let input_items = request_body
         .get("input")
         .ok_or_else(AdapterError::invalid_request)?;
-    if let Some(text) = input.as_str() {
-        request.messages.push(Message {
+    if let Some(text) = input_items.as_str() {
+        decoded_request.messages.push(Message {
             role: Role::User,
             blocks: vec![Block::Text(text.into())],
         });
     } else {
-        for item in input.as_array().ok_or_else(AdapterError::invalid_request)? {
-            match item
+        for response_item in input_items
+            .as_array()
+            .ok_or_else(AdapterError::invalid_request)?
+        {
+            match response_item
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or("message")
             {
                 "message" => {
-                    checked(item, &["type", "role", "content", "id", "status"])?;
-                    request.messages.push(Message {
-                        role: super::content::role(item)?,
+                    checked(response_item, &["type", "role", "content", "id", "status"])?;
+                    decoded_request.messages.push(Message {
+                        role: super::content::role(response_item)?,
                         blocks: super::content::text_blocks(
-                            item.get("content")
+                            response_item
+                                .get("content")
                                 .ok_or_else(AdapterError::invalid_request)?,
                             WireApi::Responses,
                         )?,
@@ -45,40 +52,47 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 }
                 "function_call" => {
                     checked(
-                        item,
+                        response_item,
                         &["type", "id", "status", "call_id", "name", "arguments"],
                     )?;
                     append_assistant_blocks(
-                        &mut request.messages,
+                        &mut decoded_request.messages,
                         vec![Block::ToolCall {
-                            id: required_text(item, "call_id")?.into(),
-                            name: required_text(item, "name")?.into(),
-                            arguments: required_text(item, "arguments")?.into(),
+                            id: required_text(response_item, "call_id")?.into(),
+                            name: required_text(response_item, "name")?.into(),
+                            arguments: required_text(response_item, "arguments")?.into(),
                         }],
                     );
                 }
                 "custom_tool_call" => {
-                    checked(item, &["type", "id", "status", "call_id", "name", "input"])?;
-                    let input = required_text(item, "input")?;
+                    checked(
+                        response_item,
+                        &["type", "id", "status", "call_id", "name", "input"],
+                    )?;
+                    let tool_input = required_text(response_item, "input")?;
                     append_assistant_blocks(
-                        &mut request.messages,
+                        &mut decoded_request.messages,
                         vec![Block::ToolCall {
-                            id: required_text(item, "call_id")?.into(),
-                            name: required_text(item, "name")?.into(),
-                            arguments: serde_json::to_string(&json!({"input": input}))
+                            id: required_text(response_item, "call_id")?.into(),
+                            name: required_text(response_item, "name")?.into(),
+                            arguments: serde_json::to_string(&json!({"input": tool_input}))
                                 .map_err(|_| AdapterError::invalid_request())?,
                         }],
                     );
                 }
                 "function_call_output" | "custom_tool_call_output" => {
-                    checked(item, &["type", "id", "status", "call_id", "output"])?;
-                    request.messages.push(Message {
+                    checked(
+                        response_item,
+                        &["type", "id", "status", "call_id", "output"],
+                    )?;
+                    decoded_request.messages.push(Message {
                         role: Role::User,
                         blocks: vec![Block::ToolResult {
-                            id: required_text(item, "call_id")?.into(),
+                            id: required_text(response_item, "call_id")?.into(),
                             name: String::new(),
                             content: super::content::plain_text(
-                                item.get("output")
+                                response_item
+                                    .get("output")
                                     .ok_or_else(AdapterError::invalid_request)?,
                                 WireApi::Responses,
                             )?,
@@ -89,19 +103,19 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 "reasoning" => {
                     // Public summaries are portable. Encrypted state is not:
                     // `checked` rejects it instead of dropping its ownership.
-                    checked(item, &["type", "id", "status", "summary"])?;
-                    let blocks = item
+                    checked(response_item, &["type", "id", "status", "summary"])?;
+                    let blocks = response_item
                         .get("summary")
                         .and_then(Value::as_array)
                         .ok_or_else(AdapterError::invalid_request)?
                         .iter()
-                        .map(|summary| {
-                            checked(summary, &["type", "text"])?;
-                            if required_text(summary, "type")? != "summary_text" {
+                        .map(|summary_item| {
+                            checked(summary_item, &["type", "text"])?;
+                            if required_text(summary_item, "type")? != "summary_text" {
                                 return Err(AdapterError::parameter_unsupported());
                             }
                             Ok(Block::Reasoning(
-                                summary
+                                summary_item
                                     .get("text")
                                     .and_then(Value::as_str)
                                     .ok_or_else(AdapterError::invalid_request)?
@@ -109,24 +123,40 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                             ))
                         })
                         .collect::<AdapterResult<Vec<_>>>()?;
-                    append_assistant_blocks(&mut request.messages, blocks);
+                    append_assistant_blocks(&mut decoded_request.messages, blocks);
                 }
                 _ => return Err(AdapterError::parameter_unsupported()),
             }
         }
     }
-    request.tools = super::content::tools(value.get("tools"), WireApi::Responses)?;
-    request.tool_choice = super::content::choice(value.get("tool_choice"), WireApi::Responses)?;
-    request.parallel_tools = optional_bool(value, "parallel_tool_calls")?;
-    super::content::common(&mut request, value, "max_output_tokens", "top_p", "stop")?;
-    if let Some(text) = value.get("text").filter(|v| !v.is_null()) {
-        checked(text, &["format"])?;
-        request.output_format =
-            super::content::output_format(text.get("format").unwrap_or(&Value::Null))?;
+    decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Responses)?;
+    decoded_request.tool_choice =
+        super::content::choice(request_body.get("tool_choice"), WireApi::Responses)?;
+    decoded_request.parallel_tools = optional_bool(request_body, "parallel_tool_calls")?;
+    super::content::common(
+        &mut decoded_request,
+        request_body,
+        "max_output_tokens",
+        "top_p",
+        "stop",
+    )?;
+    if let Some(text_config) = request_body
+        .get("text")
+        .filter(|text_config_value| !text_config_value.is_null())
+    {
+        checked(text_config, &["format"])?;
+        decoded_request.output_format =
+            super::content::output_format(text_config.get("format").unwrap_or(&Value::Null))?;
     }
-    if let Some(reasoning) = value.get("reasoning").filter(|v| !v.is_null()) {
-        if let Some(effort) = reasoning.get("effort").filter(|value| !value.is_null()) {
-            request.reasoning = Some(Reasoning::Effort(
+    if let Some(reasoning) = request_body
+        .get("reasoning")
+        .filter(|reasoning_value| !reasoning_value.is_null())
+    {
+        if let Some(effort) = reasoning
+            .get("effort")
+            .filter(|field_value| !field_value.is_null())
+        {
+            decoded_request.reasoning = Some(Reasoning::Effort(
                 effort
                     .as_str()
                     .ok_or_else(AdapterError::invalid_request)?
@@ -134,7 +164,7 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             ));
         }
     }
-    Ok(request)
+    Ok(decoded_request)
 }
 
 /// Responses emits each tool call as an output item; Chat Completions needs

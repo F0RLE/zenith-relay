@@ -79,7 +79,7 @@ fn carry(
 
 /// Drive one reserved candidate from preparation through a client response.
 /// Continue and break return the same request identity the loop still owns.
-pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> DrivenAttempt {
+pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -> DrivenAttempt {
     let DriveAttemptInput {
         selected,
         lease,
@@ -115,7 +115,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         allow_previous_response_reset,
         confirmed_response_missing,
         basis_points_relay_retry_attempted,
-    } = input;
+    } = drive_input;
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
     let prepared = match prepare_request_attempt(RequestPrepareInput {

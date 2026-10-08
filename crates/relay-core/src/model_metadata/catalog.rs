@@ -12,7 +12,9 @@ impl ModelMetadataCatalog {
         self.resolve(model)
             .and_then(|metadata| metadata.name.as_deref())
             .map(str::trim)
-            .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+            .filter(|display_name| {
+                !display_name.is_empty() && !display_name.chars().any(char::is_control)
+            })
             .map(str::to_owned)
             .unwrap_or_else(|| crate::codex_model_display_name(model))
     }
@@ -30,9 +32,9 @@ impl ModelMetadataCatalog {
             .unwrap_or_else(ModelCapabilities::unknown_model)
     }
 
-    pub fn apply_codex_capabilities(&self, model: &str, entry: &mut Value) {
-        self.capabilities_for(model).apply_to_codex(entry);
-        crate::catalog::set_codex_service_tiers(entry, self.service_tiers_for(model));
+    pub fn apply_codex_capabilities(&self, model: &str, catalog_entry: &mut Value) {
+        self.capabilities_for(model).apply_to_codex(catalog_entry);
+        crate::catalog::set_codex_service_tiers(catalog_entry, self.service_tiers_for(model));
     }
 
     pub fn service_tiers_for(&self, model: &str) -> &'static [crate::DefaultServiceTier] {
@@ -55,25 +57,25 @@ impl ModelMetadataCatalog {
         }
     }
 
-    pub fn from_models_dev_json(raw: &str) -> Result<Self, ModelMetadataError> {
-        let catalog_payload =
-            serde_json::from_str(raw).map_err(|_| ModelMetadataError::InvalidCatalog)?;
-        Self::from_payload(&catalog_payload, None, None, false)
+    pub fn from_models_dev_json(models_dev_json: &str) -> Result<Self, ModelMetadataError> {
+        let catalog_payload = serde_json::from_str(models_dev_json)
+            .map_err(|_| ModelMetadataError::InvalidCatalog)?;
+        Self::from_metadata_payload(&catalog_payload, None, None, false)
     }
 
-    pub(super) fn from_payload(
-        payload: &Value,
+    pub(super) fn from_metadata_payload(
+        metadata_payload: &Value,
         revision: Option<String>,
         fetched_at_ms: Option<u64>,
         stale: bool,
     ) -> Result<Self, ModelMetadataError> {
-        let records = parsing::validate_payload(payload)?;
+        let metadata_records = parsing::validate_metadata_payload(metadata_payload)?;
         let mut metadata_entries = BTreeMap::new();
         let mut leaf_matches = BTreeMap::new();
         let mut ambiguous_leaves = BTreeSet::new();
         let mut leaf_priorities = BTreeMap::new();
 
-        for (source_id, metadata_record) in records {
+        for (source_id, metadata_record) in metadata_records {
             let provider_namespace = source_id
                 .split_once('/')
                 .map_or("", |(provider, _)| provider);
@@ -92,8 +94,8 @@ impl ModelMetadataCatalog {
             // qualified IDs always resolve independently.
             let priority = reference::identity_priority(metadata_record);
             match leaf_priorities.get(&leaf) {
-                Some(previous) if *previous < priority => continue,
-                Some(previous) if *previous == priority => {}
+                Some(previous_priority) if *previous_priority < priority => continue,
+                Some(previous_priority) if *previous_priority == priority => {}
                 _ => {
                     leaf_priorities.insert(leaf.clone(), priority);
                     ambiguous_leaves.remove(&leaf);
@@ -159,7 +161,7 @@ impl ModelMetadataCatalog {
         }
         self.leaf_matches
             .get(leaf)
-            .and_then(|id| self.entries.get(id))
+            .and_then(|model_id| self.entries.get(model_id))
     }
 
     pub fn reasoning_effort_levels(&self, model: &str) -> Option<Vec<String>> {
@@ -178,16 +180,18 @@ impl ModelMetadataCatalog {
     {
         let source_model_ids = crate::normalize_model_ids(models);
         let mut indexed = source_model_ids.into_iter().enumerate().collect::<Vec<_>>();
-        indexed.sort_by(|(left_position, left_id), (right_position, right_id)| {
-            order::compare_metadata(
-                left_id,
-                self.resolve(left_id),
-                right_id,
-                self.resolve(right_id),
-            )
-            .then_with(|| left_position.cmp(right_position))
-        });
-        indexed.into_iter().map(|(_, id)| id).collect()
+        indexed.sort_by(
+            |(left_position, left_model_id), (right_position, right_model_id)| {
+                order::compare_metadata(
+                    left_model_id,
+                    self.resolve(left_model_id),
+                    right_model_id,
+                    self.resolve(right_model_id),
+                )
+                .then_with(|| left_position.cmp(right_position))
+            },
+        );
+        indexed.into_iter().map(|(_, model_id)| model_id).collect()
     }
 
     /// Preserve the relative order explicitly saved by the user. Newly
@@ -201,12 +205,12 @@ impl ModelMetadataCatalog {
         let source_model_ids = crate::normalize_model_ids(models);
         let available_model_ids = source_model_ids
             .iter()
-            .map(|id| order::normalize(id))
+            .map(|model_id| order::normalize(model_id))
             .collect::<BTreeSet<_>>();
         let catalog_order = self.order_model_ids(source_model_ids);
         if !saved_order
             .iter()
-            .any(|id| available_model_ids.contains(&order::normalize(id)))
+            .any(|model_id| available_model_ids.contains(&order::normalize(model_id)))
         {
             return catalog_order;
         }
@@ -214,30 +218,30 @@ impl ModelMetadataCatalog {
         let catalog_positions = catalog_order
             .iter()
             .enumerate()
-            .map(|(position, id)| (order::normalize(id), position))
+            .map(|(position, model_id)| (order::normalize(model_id), position))
             .collect::<BTreeMap<_, _>>();
         let mut saved_model_ids = BTreeSet::new();
         let mut ordered_model_ids = Vec::with_capacity(catalog_order.len());
 
-        for id in saved_order {
-            let normalized_id = order::normalize(id);
-            if saved_model_ids.insert(normalized_id.clone()) {
-                if let Some(position) = catalog_positions.get(&normalized_id) {
+        for saved_model_id in saved_order {
+            let normalized_model_id = order::normalize(saved_model_id);
+            if saved_model_ids.insert(normalized_model_id.clone()) {
+                if let Some(position) = catalog_positions.get(&normalized_model_id) {
                     ordered_model_ids.push(catalog_order[*position].clone());
                 }
             }
         }
-        for id in catalog_order {
-            let normalized_id = order::normalize(&id);
-            if saved_model_ids.contains(&normalized_id) {
+        for model_id in catalog_order {
+            let normalized_model_id = order::normalize(&model_id);
+            if saved_model_ids.contains(&normalized_model_id) {
                 continue;
             }
-            let position = catalog_positions[&normalized_id];
+            let position = catalog_positions[&normalized_model_id];
             let insertion_index = ordered_model_ids
                 .iter()
                 .position(|existing| catalog_positions[&order::normalize(existing)] > position)
                 .unwrap_or(ordered_model_ids.len());
-            ordered_model_ids.insert(insertion_index, id);
+            ordered_model_ids.insert(insertion_index, model_id);
         }
         ordered_model_ids
     }

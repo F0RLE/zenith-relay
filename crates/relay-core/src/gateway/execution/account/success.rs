@@ -49,7 +49,9 @@ pub(super) struct AccountSuccessInput<'a> {
 
 /// Record a successful account response and build the client body. A Basis
 /// Points translation retry stays inside the attempt loop.
-pub(super) fn complete_account_response(input: AccountSuccessInput<'_>) -> AccountSuccess {
+pub(super) fn complete_account_response(
+    account_success_input: AccountSuccessInput<'_>,
+) -> AccountSuccess {
     let AccountSuccessInput {
         status,
         bytes,
@@ -73,7 +75,7 @@ pub(super) fn complete_account_response(input: AccountSuccessInput<'_>) -> Accou
         basis_points_relay_retry_attempted,
         basis_points_relay_retry_parameter,
         last_adapter_error,
-    } = input;
+    } = account_success_input;
     let client_stream = request.get("stream").and_then(Value::as_bool) == Some(true);
     let mut event = usage_event(
         UsageAttempt {
@@ -104,14 +106,14 @@ pub(super) fn complete_account_response(input: AccountSuccessInput<'_>) -> Accou
             event.success = false;
             event.http_status = failure.status.as_u16();
             event.error_category = Some(failure.category.to_string());
-            let state = super::super::super::errors::settle_attempt_failure(
+            let failure_state = super::super::super::errors::settle_attempt_failure(
                 runtime,
                 lease,
                 &route.source_model,
                 &failure,
                 response_headers,
             );
-            super::super::super::errors::apply_failure_state(&mut event, state);
+            super::super::super::errors::apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return AccountSuccess::Respond(super::super::attempt_error_response(
                 failure,

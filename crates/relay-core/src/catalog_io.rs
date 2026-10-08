@@ -38,49 +38,51 @@ pub(crate) fn read_bytes(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>
 
 pub(crate) fn write_json_if_changed<T: Serialize>(
     path: &Path,
-    value: &T,
+    json_value: &T,
     max_bytes: usize,
 ) -> Result<bool, CatalogIoError> {
-    let bytes = serde_json::to_vec(value).map_err(|_| CatalogIoError::InvalidJson)?;
-    if bytes.len() > max_bytes {
+    let serialized_json =
+        serde_json::to_vec(json_value).map_err(|_| CatalogIoError::InvalidJson)?;
+    if serialized_json.len() > max_bytes {
         return Err(CatalogIoError::TooLarge);
     }
-    if existing_bytes_equal(path, &bytes, max_bytes) {
+    if existing_bytes_equal(path, &serialized_json, max_bytes) {
         return Ok(false);
     }
     let parent = path.parent().ok_or(CatalogIoError::Io)?;
     fs::create_dir_all(parent).map_err(|_| CatalogIoError::Io)?;
     let temporary = temporary_path(path);
-    let result = (|| {
+    let write_result = (|| {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|_| CatalogIoError::Io)?;
-        file.write_all(&bytes).map_err(|_| CatalogIoError::Io)?;
+        file.write_all(&serialized_json)
+            .map_err(|_| CatalogIoError::Io)?;
         file.sync_all().map_err(|_| CatalogIoError::Io)?;
         replace_file(&temporary, path)
     })();
-    if result.is_err() {
+    if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result.map(|()| true)
+    write_result.map(|()| true)
 }
 
 fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, CatalogIoError> {
-    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut file_bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
     let limit = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     File::open(path)
         .map_err(|_| CatalogIoError::Io)?
         .take(limit)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut file_bytes)
         .map_err(|_| CatalogIoError::Io)?;
-    if bytes.len() > max_bytes {
+    if file_bytes.len() > max_bytes {
         return Err(CatalogIoError::TooLarge);
     }
-    Ok(bytes)
+    Ok(file_bytes)
 }
 
 fn existing_bytes_equal(path: &Path, expected: &[u8], max_bytes: usize) -> bool {
@@ -125,18 +127,18 @@ pub(crate) async fn response_json(
     {
         return Err(CatalogIoError::TooLarge);
     }
-    let mut bytes = Vec::new();
+    let mut response_bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| CatalogIoError::Network)?
     {
-        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+        if response_bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(CatalogIoError::TooLarge);
         }
-        bytes.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| CatalogIoError::InvalidJson)
+    serde_json::from_slice(&response_bytes).map_err(|_| CatalogIoError::InvalidJson)
 }
 
 fn temporary_path(path: &Path) -> PathBuf {

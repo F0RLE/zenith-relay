@@ -75,7 +75,7 @@ impl AttemptFailure {
         match error {
             AuthorizedRequestError::Prepare(error) => Self::prepare(error),
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
-            AuthorizedRequestError::NotReplayable => Self::body(),
+            AuthorizedRequestError::NotReplayable => Self::upstream_response_body_failure(),
             AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
         }
     }
@@ -117,7 +117,7 @@ impl AttemptFailure {
         }
     }
 
-    pub(crate) fn body() -> Self {
+    pub(crate) fn upstream_response_body_failure() -> Self {
         Self {
             execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
@@ -141,14 +141,14 @@ impl AttemptFailure {
         }
     }
 
-    pub(crate) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
-        let classification = classify_upstream_error(status, body);
+    pub(crate) fn status_with_body(status: StatusCode, response_body: Option<&[u8]>) -> Self {
+        let classification = classify_upstream_error(status, response_body);
         Self {
             execution: rejection_execution(status, classification.category),
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
-            cooldown_hint: body.map(rate_limit_body_hint).unwrap_or_default(),
+            cooldown_hint: response_body.map(rate_limit_body_hint).unwrap_or_default(),
         }
     }
 

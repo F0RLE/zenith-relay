@@ -9,22 +9,28 @@ const MAX_ERROR_MESSAGE_CHARS: usize = 1_024;
 /// Normalizes only Relay's local error envelope for a native Claude Messages
 /// client. Successful Messages bodies and SSE frames always pass through
 /// unchanged.
-pub(super) async fn native_messages_error_response(response: Response<Body>) -> Response<Body> {
-    if response.status().is_success() || response.extensions().get::<LocalGatewayError>().is_none()
+pub(super) async fn native_messages_error_response(
+    gateway_response: Response<Body>,
+) -> Response<Body> {
+    if gateway_response.status().is_success()
+        || gateway_response
+            .extensions()
+            .get::<LocalGatewayError>()
+            .is_none()
     {
-        return response;
+        return gateway_response;
     }
-    let (mut parts, body) = response.into_parts();
+    let (mut parts, response_body) = gateway_response.into_parts();
     let origin = parts
         .headers
         .get("x-zenith-relay-error-origin")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
+        .and_then(|origin_header| origin_header.to_str().ok())
+        .and_then(|origin_text| origin_text.parse().ok())
         .unwrap_or(crate::ErrorOrigin::Relay);
-    let message = axum::body::to_bytes(body, MAX_ERROR_MESSAGE_CHARS.saturating_mul(4))
+    let message = axum::body::to_bytes(response_body, MAX_ERROR_MESSAGE_CHARS.saturating_mul(4))
         .await
         .ok()
-        .and_then(|body| native_messages_error_message(&body))
+        .and_then(|body_bytes| native_messages_error_message(&body_bytes))
         .map(|message| origin.prefix_message(&message))
         .unwrap_or_else(|| origin.prefix_message("request failed"));
     parts.headers.remove(CONTENT_LENGTH);
@@ -34,25 +40,28 @@ pub(super) async fn native_messages_error_response(response: Response<Body>) -> 
     parts
         .headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    let body = json!({
+    let error_response_body = json!({
         "type": "error",
         "error": {
             "type": native_messages_error_type(parts.status),
             "message": message,
         }
     });
-    Response::from_parts(parts, Body::from(body.to_string()))
+    Response::from_parts(parts, Body::from(error_response_body.to_string()))
 }
 
-fn native_messages_error_message(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(body).ok().and_then(|body| {
-        body.pointer("/error/message")
-            .or_else(|| body.get("message"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
-            .map(|message| message.chars().take(MAX_ERROR_MESSAGE_CHARS).collect())
-    })
+fn native_messages_error_message(response_body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(response_body)
+        .ok()
+        .and_then(|error_payload| {
+            error_payload
+                .pointer("/error/message")
+                .or_else(|| error_payload.get("message"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(|message| message.chars().take(MAX_ERROR_MESSAGE_CHARS).collect())
+        })
 }
 
 fn native_messages_error_type(status: StatusCode) -> &'static str {
@@ -84,31 +93,31 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["type"], "error");
-        assert_eq!(body["error"]["type"], "rate_limit_error");
+        let response_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response_json: Value = serde_json::from_slice(&response_bytes).unwrap();
+        assert_eq!(response_json["type"], "error");
+        assert_eq!(response_json["error"]["type"], "rate_limit_error");
         assert_eq!(
-            body["error"]["message"],
+            response_json["error"]["message"],
             "Relay: all eligible sources are cooling down"
         );
-        assert!(body["error"].get("code").is_none());
+        assert!(response_json["error"].get("code").is_none());
     }
 
     #[tokio::test]
     async fn native_upstream_errors_are_preserved_verbatim() {
-        let body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens is required"}}"#;
+        let native_error_body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens is required"}}"#;
         let response = Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header(CONTENT_TYPE, "application/json")
             .header("request-id", "req_native")
-            .body(Body::from(body.as_slice()))
+            .body(Body::from(native_error_body.as_slice()))
             .unwrap();
 
         let response = native_messages_error_response(response).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response.headers()["request-id"], "req_native");
         let actual = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(actual.as_ref(), body);
+        assert_eq!(actual.as_ref(), native_error_body);
     }
 }

@@ -89,26 +89,30 @@ pub(in crate::gateway) fn usage_event(
     event
 }
 
-pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, body: &[u8]) {
-    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body: &[u8]) {
+    let Ok(response_payload) = serde_json::from_slice::<Value>(response_body) else {
         return;
     };
-    event.tool_use.set_terminal_response(&body);
-    event.applied_service_tier = response_service_tier(&body);
-    let Some(usage) = find_usage(&body) else {
+    event.tool_use.set_terminal_response(&response_payload);
+    event.applied_service_tier = response_service_tier(&response_payload);
+    let Some(usage) = find_usage(&response_payload) else {
         return;
     };
     apply_usage(event, usage);
 }
 
-pub(in crate::gateway) fn response_service_tier(value: &Value) -> Option<ObservedServiceTier> {
-    std::iter::successors(Some(value), |value| value.get("response"))
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .find_map(|value| value.get("service_tier").and_then(Value::as_str))
-        .and_then(normalize_observed_service_tier)
+pub(in crate::gateway) fn response_service_tier(
+    response_payload: &Value,
+) -> Option<ObservedServiceTier> {
+    std::iter::successors(Some(response_payload), |nested_response| {
+        nested_response.get("response")
+    })
+    .take(3)
+    .collect::<Vec<_>>()
+    .into_iter()
+    .rev()
+    .find_map(|response_object| response_object.get("service_tier").and_then(Value::as_str))
+    .and_then(normalize_observed_service_tier)
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
@@ -139,11 +143,11 @@ pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: 
 }
 
 pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
-    let gemini = usage.get("usageMetadata").unwrap_or(usage);
+    let gemini_usage_metadata = usage.get("usageMetadata").unwrap_or(usage);
     let reported_input_tokens = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
-        .or_else(|| gemini.get("promptTokenCount"))
+        .or_else(|| gemini_usage_metadata.get("promptTokenCount"))
         .and_then(Value::as_u64);
     let anthropic_cache_read_tokens = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
     let anthropic_cache_write_tokens = usage
@@ -151,8 +155,8 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .and_then(Value::as_u64);
     let input_tokens =
         if anthropic_cache_read_tokens.is_some() || anthropic_cache_write_tokens.is_some() {
-            reported_input_tokens.map(|input| {
-                input
+            reported_input_tokens.map(|input_token_count| {
+                input_token_count
                     .saturating_add(anthropic_cache_read_tokens.unwrap_or_default())
                     .saturating_add(anthropic_cache_write_tokens.unwrap_or_default())
             })
@@ -162,12 +166,12 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     let mut output_tokens = usage
         .get("output_tokens")
         .or_else(|| usage.get("completion_tokens"))
-        .or_else(|| gemini.get("candidatesTokenCount"))
+        .or_else(|| gemini_usage_metadata.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
-    if gemini.get("candidatesTokenCount").is_some() {
-        output_tokens = output_tokens.map(|output| {
-            output.saturating_add(
-                gemini
+    if gemini_usage_metadata.get("candidatesTokenCount").is_some() {
+        output_tokens = output_tokens.map(|output_token_count| {
+            output_token_count.saturating_add(
+                gemini_usage_metadata
                     .get("thoughtsTokenCount")
                     .and_then(Value::as_u64)
                     .unwrap_or_default(),
@@ -187,7 +191,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| usage.get("cached_tokens"))
         .or_else(|| usage.get("cache_read_input_tokens"))
-        .or_else(|| gemini.get("cachedContentTokenCount"))
+        .or_else(|| gemini_usage_metadata.get("cachedContentTokenCount"))
         .and_then(Value::as_u64)
         .map(|cached| cached.min(input_tokens.unwrap_or(event.input_tokens.unwrap_or(cached))));
     if let Some(cached_input_tokens) = cached_input_tokens {
@@ -228,7 +232,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                 .get("completion_tokens_details")
                 .and_then(|details| details.get("reasoning_tokens"))
         })
-        .or_else(|| gemini.get("thoughtsTokenCount"))
+        .or_else(|| gemini_usage_metadata.get("thoughtsTokenCount"))
         .and_then(Value::as_u64)
         .map(|reasoning| {
             reasoning.min(output_tokens.unwrap_or(event.output_tokens.unwrap_or(reasoning)))
@@ -241,7 +245,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     }
     let reported_total = usage
         .get("total_tokens")
-        .or_else(|| gemini.get("totalTokenCount"))
+        .or_else(|| gemini_usage_metadata.get("totalTokenCount"))
         .and_then(Value::as_u64);
     if let Some(total_tokens) = reported_total.or_else(|| {
         input_tokens
@@ -259,35 +263,35 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     }
 }
 
-pub(in crate::gateway) fn find_usage(value: &Value) -> Option<&Value> {
-    value
+pub(in crate::gateway) fn find_usage(response_payload: &Value) -> Option<&Value> {
+    response_payload
         .get("usage")
-        .or_else(|| value.get("usageMetadata"))
-        .or_else(|| value.pointer("/message/usage"))
+        .or_else(|| response_payload.get("usageMetadata"))
+        .or_else(|| response_payload.pointer("/message/usage"))
         .or_else(|| {
-            let response = value.get("response")?;
-            response.get("usage").or_else(|| {
-                response
+            let nested_response = response_payload.get("response")?;
+            nested_response.get("usage").or_else(|| {
+                nested_response
                     .get("response")
                     .and_then(|nested| nested.get("usage"))
             })
         })
 }
 
-pub(in crate::gateway) fn response_id(value: &Value) -> Option<&str> {
-    value
+pub(in crate::gateway) fn response_id(response_payload: &Value) -> Option<&str> {
+    response_payload
         .pointer("/response/response/id")
-        .or_else(|| value.pointer("/response/id"))
-        .or_else(|| value.get("id"))
+        .or_else(|| response_payload.pointer("/response/id"))
+        .or_else(|| response_payload.get("id"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|response_id| !response_id.is_empty())
 }
 
-pub(in crate::gateway) fn response_id_from_bytes(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(body)
+pub(in crate::gateway) fn response_id_from_bytes(response_body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(response_body)
         .ok()
-        .and_then(|value| response_id(&value).map(str::to_string))
+        .and_then(|response_json| response_id(&response_json).map(str::to_string))
 }
 
 pub(in crate::gateway::response) fn cache_write_ttl_from_usage(usage: &Value) -> Option<String> {
@@ -304,38 +308,44 @@ pub(in crate::gateway::response) fn cache_write_ttl_from_usage(usage: &Value) ->
         }
     }
 
-    for object in usage_objects {
+    for usage_object in usage_objects {
         for field in [
             "cache_write_ttl",
             "cacheWriteTtl",
             "cache_creation_ttl",
             "cacheCreationTtl",
         ] {
-            if let Some(value) = object.get(field).and_then(Value::as_str) {
-                windows.push(value.to_string());
+            if let Some(ttl_value) = usage_object.get(field).and_then(Value::as_str) {
+                windows.push(ttl_value.to_string());
             }
         }
 
-        if let Some(object) = object.as_object() {
-            for (key, tokens) in object {
-                if tokens.as_u64().is_some_and(|tokens| tokens > 0) {
-                    if let Some(window) = cache_window_from_token_field(key) {
+        if let Some(usage_fields) = usage_object.as_object() {
+            for (usage_field_name, usage_token_value) in usage_fields {
+                if usage_token_value
+                    .as_u64()
+                    .is_some_and(|token_count| token_count > 0)
+                {
+                    if let Some(window) = cache_window_from_token_field(usage_field_name) {
                         windows.push(window);
                     }
                 }
             }
         }
 
-        if let Some(creation) = object
+        if let Some(cache_creation_fields) = usage_object
             .get("cache_creation")
-            .or_else(|| object.get("cacheCreation"))
+            .or_else(|| usage_object.get("cacheCreation"))
             .and_then(Value::as_object)
         {
-            for (key, tokens) in creation {
-                let window = key
+            for (cache_field_name, cache_token_value) in cache_creation_fields {
+                let window = cache_field_name
                     .strip_prefix("ephemeral_")
                     .and_then(|key| key.strip_suffix("_input_tokens"));
-                if tokens.as_u64().is_some_and(|tokens| tokens > 0) {
+                if cache_token_value
+                    .as_u64()
+                    .is_some_and(|token_count| token_count > 0)
+                {
                     if let Some(window) = window {
                         windows.push(window.to_string());
                     }

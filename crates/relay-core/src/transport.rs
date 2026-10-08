@@ -10,12 +10,12 @@ pub(crate) fn retry_after_ms(
     headers: &reqwest::header::HeaderMap,
     now: std::time::SystemTime,
 ) -> Option<u64> {
-    let value = headers.get("retry-after")?.to_str().ok()?.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
+    let retry_after_header = headers.get("retry-after")?.to_str().ok()?.trim();
+    if let Ok(seconds) = retry_after_header.parse::<u64>() {
         return Some(seconds.saturating_mul(1_000));
     }
     Some(
-        httpdate::parse_http_date(value)
+        httpdate::parse_http_date(retry_after_header)
             .ok()?
             .duration_since(now)
             .ok()?
@@ -25,12 +25,12 @@ pub(crate) fn retry_after_ms(
 }
 
 pub(crate) async fn collect(response: reqwest::Response) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        body.extend_from_slice(&chunk?);
+        response_bytes.extend_from_slice(&chunk?);
     }
-    Ok(body)
+    Ok(response_bytes)
 }
 
 pub async fn collect_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -40,14 +40,14 @@ pub async fn collect_limited(response: reqwest::Response, limit: usize) -> Resul
     {
         return Err(Error::UpstreamBodyTooLarge);
     }
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        if body.len().saturating_add(chunk.len()) > limit {
+        if response_bytes.len().saturating_add(chunk.len()) > limit {
             return Err(Error::UpstreamBodyTooLarge);
         }
-        body.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(response_bytes)
 }

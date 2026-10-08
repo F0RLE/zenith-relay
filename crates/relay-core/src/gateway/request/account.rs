@@ -21,18 +21,21 @@ pub(in crate::gateway) async fn responses_compact(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let (headers, key, mut request) = match read_account_request(&runtime, request).await {
-        Ok(request) => request,
-        Err(response) => return *response,
+    let (headers, key, mut request_fields) = match read_account_request(&runtime, request).await {
+        Ok(request_fields) => request_fields,
+        Err(error_response) => return *error_response,
     };
-    if request.get("stream").is_some_and(|stream| stream != false) {
+    if request_fields
+        .get("stream")
+        .is_some_and(|stream| stream != false)
+    {
         return api_error(
             StatusCode::BAD_REQUEST,
             "streaming is not supported for compact responses",
             error_codes::INVALID_REQUEST,
         );
     }
-    let Some(requested_model) = request
+    let Some(requested_model) = request_fields
         .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.trim().is_empty())
@@ -46,10 +49,10 @@ pub(in crate::gateway) async fn responses_compact(
     };
     let resolved_model = resolved_account_model(&runtime, &key, &requested_model);
     let Some(resolved_model) = resolved_model else {
-        return execute_routed_compaction(runtime, headers, Value::Object(request)).await;
+        return execute_routed_compaction(runtime, headers, Value::Object(request_fields)).await;
     };
     let responses_lite = headers.get(CODEX_RESPONSES_LITE_HEADER).cloned();
-    if responses_lite.is_some() && !responses_lite_parallel_tool_calls_valid(&request) {
+    if responses_lite.is_some() && !responses_lite_parallel_tool_calls_valid(&request_fields) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "responses Lite requires parallel_tool_calls to be a boolean",
@@ -59,11 +62,11 @@ pub(in crate::gateway) async fn responses_compact(
     // The endpoint is ChatGPT-specific. Keep eligibility with the request and
     // read the mutable retry setting in the execution loop.
     let wait_for_candidate_availability = true;
-    normalize_compact_account_request(&mut request, responses_lite.is_some());
+    normalize_compact_account_request(&mut request_fields, responses_lite.is_some());
     execute_account_endpoint(AccountExecution {
         runtime,
         key,
-        request: Value::Object(request),
+        request: Value::Object(request_fields),
         requested_model,
         resolved_model,
         client_headers: headers,
@@ -85,21 +88,21 @@ async fn execute_routed_compaction(
     mut headers: HeaderMap,
     mut request: Value,
 ) -> Response<Body> {
-    let Some(object) = request.as_object_mut() else {
+    let Some(request_object) = request.as_object_mut() else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
             error_codes::INVALID_REQUEST,
         );
     };
-    if !super::super::compaction::prepare_routed_compaction_request(object) {
+    if !super::super::compaction::prepare_routed_compaction_request(request_object) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "input must be a string, item, or array",
             error_codes::INVALID_REQUEST,
         );
     }
-    let Ok(bytes) = serde_json::to_vec(&request) else {
+    let Ok(request_bytes) = serde_json::to_vec(&request) else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
@@ -114,29 +117,30 @@ async fn execute_routed_compaction(
     let mut http_request = Request::builder()
         .method(Method::POST)
         .uri("/v1/responses")
-        .body(Body::from(bytes))
+        .body(Body::from(request_bytes))
         .expect("routed compaction request");
     *http_request.headers_mut() = headers;
-    let response = execute_client_request(runtime, http_request, crate::WireApi::Responses).await;
-    routed_compaction_response(response).await
+    let upstream_response =
+        execute_client_request(runtime, http_request, crate::WireApi::Responses).await;
+    routed_compaction_response(upstream_response).await
 }
 
-async fn routed_compaction_response(response: Response<Body>) -> Response<Body> {
-    if !response.status().is_success() {
-        return response;
+async fn routed_compaction_response(upstream_response: Response<Body>) -> Response<Body> {
+    if !upstream_response.status().is_success() {
+        return upstream_response;
     }
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await;
-    let Ok(bytes) = bytes else {
+    let response_bytes = axum::body::to_bytes(upstream_response.into_body(), usize::MAX).await;
+    let Ok(response_bytes) = response_bytes else {
         return compaction_invalid();
     };
-    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+    let Ok(response_json) = serde_json::from_slice::<Value>(&response_bytes) else {
         return compaction_invalid();
     };
-    match super::super::compaction::compaction_document(&body) {
-        Ok(body) => Response::builder()
+    match super::super::compaction::compaction_document(&response_json) {
+        Ok(compaction_document) => Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(body))
+            .body(Body::from(compaction_document))
             .expect("compaction response"),
         Err(_) => compaction_invalid(),
     }
@@ -154,15 +158,16 @@ pub(in crate::gateway) async fn alpha_search(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let (mut headers, key, mut request) = match read_account_request(&runtime, request).await {
-        Ok(request) => request,
-        Err(response) => return *response,
+    let (mut headers, key, mut request_fields) = match read_account_request(&runtime, request).await
+    {
+        Ok(request_fields) => request_fields,
+        Err(error_response) => return *error_response,
     };
-    let model_was_provided = request
+    let model_was_provided = request_fields
         .get("model")
         .and_then(Value::as_str)
         .is_some_and(|model| !model.trim().is_empty());
-    let requested_model = request
+    let requested_model = request_fields
         .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.trim().is_empty())
@@ -184,19 +189,19 @@ pub(in crate::gateway) async fn alpha_search(
         );
     };
     if !model_was_provided {
-        request.remove("model");
+        request_fields.remove("model");
     }
     // The endpoint is ChatGPT-specific. Keep eligibility with the request and
     // read the mutable retry setting in the execution loop.
     let wait_for_candidate_availability = true;
-    request.remove("prompt_cache_key");
-    request.remove("prompt_cache_retention");
-    if let Some(session_id) = request
+    request_fields.remove("prompt_cache_key");
+    request_fields.remove("prompt_cache_retention");
+    if let Some(session_id) = request_fields
         .get("id")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .and_then(|value| HeaderValue::from_str(value).ok())
+        .filter(|account_id| !account_id.is_empty() && account_id.len() <= 256)
+        .and_then(|account_id| HeaderValue::from_str(account_id).ok())
     {
         if !headers.contains_key("x-session-id") {
             headers.insert("x-session-id", session_id.clone());
@@ -208,7 +213,7 @@ pub(in crate::gateway) async fn alpha_search(
     execute_account_endpoint(AccountExecution {
         runtime,
         key,
-        request: Value::Object(request),
+        request: Value::Object(request_fields),
         requested_model,
         resolved_model,
         client_headers: headers,
@@ -237,8 +242,8 @@ async fn read_account_request(
     if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
         return Err(Box::new(client_api_forbidden()));
     }
-    let request = read_json_object(&headers, body).await?;
-    Ok((headers, key, request))
+    let request_fields = read_json_object(&headers, body).await?;
+    Ok((headers, key, request_fields))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

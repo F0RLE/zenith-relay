@@ -25,10 +25,10 @@ pub use tools::{TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics};
 pub use upstream_error::UpstreamErrorDetails;
 
 /// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.
-pub fn sql_like_contains_pattern(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
+pub fn sql_like_contains_pattern(search_text: &str) -> String {
+    let mut escaped = String::with_capacity(search_text.len() + 2);
     escaped.push('%');
-    for character in value.chars() {
+    for character in search_text.chars() {
         if matches!(character, '%' | '_' | '\\') {
             escaped.push('\\');
         }
@@ -39,18 +39,18 @@ pub fn sql_like_contains_pattern(value: &str) -> String {
 }
 
 /// Stores a counter in SQLite. A value that does not fit in `i64` stays at the top.
-pub fn sql_u64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+pub fn sql_u64(counter_value: u64) -> i64 {
+    i64::try_from(counter_value).unwrap_or(i64::MAX)
 }
 
 /// Reads a stored counter. A negative or overflowing value becomes zero.
-pub fn sql_count_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or_default()
+pub fn sql_count_u64(stored_count: i64) -> u64 {
+    u64::try_from(stored_count).unwrap_or_default()
 }
 
 /// `NULL` and a negative stored integer are both absent. Zero stays zero.
-pub fn sql_optional_u64(value: Option<i64>) -> Option<u64> {
-    value.and_then(|value| u64::try_from(value).ok())
+pub fn sql_optional_u64(stored_count: Option<i64>) -> Option<u64> {
+    stored_count.and_then(|signed_count| u64::try_from(signed_count).ok())
 }
 
 pub const DELETE_ACCOUNT_CANDIDATE_ROLLUPS_SQL: &str =
@@ -105,29 +105,31 @@ pub type ApiEquivalentSummary = UsageValue;
 /// stores safe normalized text instead of silently discarding a new value.
 pub type ObservedServiceTier = String;
 
-pub fn normalize_observed_service_tier(value: &str) -> Option<ObservedServiceTier> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 48
-        || !value
+pub fn normalize_observed_service_tier(tier_text: &str) -> Option<ObservedServiceTier> {
+    let trimmed_tier = tier_text.trim();
+    if trimmed_tier.is_empty()
+        || trimmed_tier.len() > 48
+        || !trimmed_tier
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         return None;
     }
-    Some(value.to_ascii_lowercase())
+    Some(trimmed_tier.to_ascii_lowercase())
 }
 
 /// Validates and normalizes provider-reported cache-window durations.
 /// Multiple values are kept in ascending duration order, for example
 /// `"5m, 1h"`. Unknown or malformed values stay unreported in the UI.
-pub fn normalize_reported_cache_ttls(value: &str) -> Option<String> {
+pub fn normalize_reported_cache_ttls(cache_ttl_text: &str) -> Option<String> {
     let mut windows = Vec::new();
-    for raw in value.split([',', '+']) {
-        let raw = raw.trim().to_ascii_lowercase();
-        let (amount, unit) = ["ms", "s", "m", "h", "d"]
-            .into_iter()
-            .find_map(|unit| raw.strip_suffix(unit).map(|amount| (amount, unit)))?;
+    for ttl_text in cache_ttl_text.split([',', '+']) {
+        let normalized_ttl = ttl_text.trim().to_ascii_lowercase();
+        let (amount, unit) = ["ms", "s", "m", "h", "d"].into_iter().find_map(|unit| {
+            normalized_ttl
+                .strip_suffix(unit)
+                .map(|amount| (amount, unit))
+        })?;
         let amount = amount.parse::<u32>().ok()?;
         if amount == 0 {
             return None;

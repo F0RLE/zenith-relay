@@ -140,21 +140,25 @@ fn native_codex_ultra_survives_reference_projection_when_max_is_routable() {
 #[test]
 fn native_catalog_follows_inventory_replacement_without_a_model_name_allowlist() {
     // Synthetic future identities deliberately include a non-GPT model.
-    let old = "gpt-123-retired";
-    let replacements = ["gpt-124-future", "next-family-synthetic"];
-    let cards = [old, replacements[0], replacements[1]]
-        .into_iter()
-        .map(|id| {
-            json!({
-                "slug": id,
-                "display_name": format!("Upstream title for {id}"),
-                "supported_reasoning_levels": [{"effort": "high", "description": "High"}],
-                "supports_parallel_tool_calls": true
-            })
+    let retired_model_id = "gpt-123-retired";
+    let replacement_model_ids = ["gpt-124-future", "next-family-synthetic"];
+    let cards = [
+        retired_model_id,
+        replacement_model_ids[0],
+        replacement_model_ids[1],
+    ]
+    .into_iter()
+    .map(|id| {
+        json!({
+            "slug": id,
+            "display_name": format!("Upstream title for {id}"),
+            "supported_reasoning_levels": [{"effort": "high", "description": "High"}],
+            "supports_parallel_tool_calls": true
         })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
     // A retained manifest must not resurrect a model removed from the pool.
-    for inventory in [&[old][..], &replacements[..]] {
+    for inventory in [&[retired_model_id][..], &replacement_model_ids[..]] {
         let runtime =
             native_catalog_test_runtime_with_accounts(None, None, &["native-account"], inventory);
         let key = runtime

@@ -38,9 +38,9 @@ impl QuotaRefreshFailure {
     }
 }
 
-pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
+pub fn classify_quota_http_failure(status: u16, response_body: &[u8]) -> QuotaRefreshFailure {
     let retryable = status == 429 || status >= 500;
-    let code = provider_error_code(body).unwrap_or_else(|| {
+    let code = provider_error_code(response_body).unwrap_or_else(|| {
         match status {
             401 => error_codes::QUOTA_UNAUTHORIZED,
             403 => error_codes::QUOTA_FORBIDDEN,
@@ -53,8 +53,8 @@ pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFail
     QuotaRefreshFailure::new(&code, retryable).with_http_status(status)
 }
 
-fn provider_error_code(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+fn provider_error_code(response_body: &[u8]) -> Option<String> {
+    let error_payload: serde_json::Value = serde_json::from_slice(response_body).ok()?;
     [
         "/detail/code",
         "/detail/error/code",
@@ -64,6 +64,10 @@ fn provider_error_code(body: &[u8]) -> Option<String> {
         "/type",
     ]
     .into_iter()
-    .filter_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
+    .filter_map(|pointer| {
+        error_payload
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+    })
     .find_map(normalize_error_code)
 }

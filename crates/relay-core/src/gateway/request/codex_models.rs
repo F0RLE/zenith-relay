@@ -56,7 +56,7 @@ pub(in crate::gateway) async fn models(
     let client_version = uri.query().and_then(|query| {
         url::form_urlencoded::parse(query.as_bytes())
             .find(|(key, _)| key == "client_version")
-            .map(|(_, value)| value.into_owned())
+            .map(|(_, query_value)| query_value.into_owned())
     });
     let protocols = match client_version.as_deref() {
         // Codex always executes selected models through /v1/responses.  Do
@@ -86,8 +86,8 @@ pub(in crate::gateway) async fn models(
     }
     Json(json!({
         "object": "list",
-        "data": models.into_iter().map(|id| json!({
-            "id": id,
+        "data": models.into_iter().map(|model_id| json!({
+            "id": model_id,
             "object": "model",
             "owned_by": "zenith-relay",
         })).collect::<Vec<_>>()
@@ -143,8 +143,8 @@ async fn codex_account_model_manifests(
     loop {
         tokio::select! {
             _ = &mut deadline => break,
-            result = fetches.next() => match result {
-                Some(result) => completed.push(result),
+            manifest_result = fetches.next() => match manifest_result {
+                Some(manifest_result) => completed.push(manifest_result),
                 None => break,
             },
         }
@@ -203,16 +203,16 @@ async fn fetch_codex_account_manifest(
         if !response.response.status().is_success() {
             continue;
         }
-        let Ok(body) =
+        let Ok(manifest_body) =
             crate::transport::collect_limited(response.response, MAX_CODEX_MODELS_BODY_BYTES).await
         else {
             continue;
         };
-        let Ok(upstream) = serde_json::from_slice::<Value>(&body) else {
+        let Ok(manifest_document) = serde_json::from_slice::<Value>(&manifest_body) else {
             continue;
         };
-        if upstream_codex_models(&upstream).is_some() {
-            return Some(upstream);
+        if upstream_codex_models(&manifest_document).is_some() {
+            return Some(manifest_document);
         }
     }
     None

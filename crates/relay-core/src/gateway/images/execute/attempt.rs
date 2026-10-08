@@ -28,7 +28,9 @@ pub(super) struct SelectedImageRoute<'a> {
     pub(super) route: ExecutorRoute,
 }
 
-pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> ImageAttemptStep {
+pub(super) async fn run_selected_attempt(
+    selected_image_route: SelectedImageRoute<'_>,
+) -> ImageAttemptStep {
     let SelectedImageRoute {
         runtime,
         key,
@@ -38,7 +40,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
         budget,
         lease,
         mut route,
-    } = input;
+    } = selected_image_route;
     let account_route = route.account_id.is_some();
     let upstream_url = if account_route {
         Some(route.upstream_url.clone())
@@ -134,7 +136,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
                     failure.category,
                 ));
             }
-            let state = settle_attempt_failure(
+            let failure_state = settle_attempt_failure(
                 runtime,
                 lease,
                 &prepared.resolved_model,
@@ -143,7 +145,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
             );
             let mut event =
                 observed.event(false, failure.status, Some(failure.category.to_string()));
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(failure);
         }
@@ -161,10 +163,11 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
     let response_headers = upstream.headers().clone();
     let Ok(bytes) = crate::transport::collect(upstream).await else {
         lease.settle_rotation_unknown(now_ms());
-        let failure = AttemptFailure::body();
-        let state = current_failure_state(runtime, &route.candidate_id, &prepared.resolved_model);
+        let failure = AttemptFailure::upstream_response_body_failure();
+        let failure_state =
+            current_failure_state(runtime, &route.candidate_id, &prepared.resolved_model);
         let mut event = observed.event(false, failure.status, Some(failure.category.to_string()));
-        apply_failure_state(&mut event, state);
+        apply_failure_state(&mut event, failure_state);
         emit_usage(runtime, event);
         return ImageAttemptStep::Retry(failure);
     };

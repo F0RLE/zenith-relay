@@ -41,7 +41,7 @@ pub(in crate::gateway::websocket) async fn await_while_client_connected<F: std::
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            result = &mut future => return Ok(result),
+            connection_result = &mut future => return Ok(connection_result),
             _ = heartbeat.tick() => {
                 downstream
                     .send(Message::Ping(Default::default()))
@@ -50,9 +50,9 @@ pub(in crate::gateway::websocket) async fn await_while_client_connected<F: std::
             }
             message = downstream.recv() => {
                 match message {
-                    Some(Ok(Message::Ping(payload))) => {
+                    Some(Ok(Message::Ping(ping_payload))) => {
                         downstream
-                            .send(Message::Pong(payload))
+                            .send(Message::Pong(ping_payload))
                             .await
                             .map_err(|_| GatewayFailure::client_closed())?;
                     }

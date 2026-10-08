@@ -160,7 +160,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 resolved_model: &resolved_model,
                 client_wire_api,
                 stream,
-                request: &mut request,
+                request_json: &mut request,
                 response_affinity_key: &mut response_affinity_key,
                 requires_affinity_owner: &mut requires_affinity_owner,
                 allow_previous_response_reset,

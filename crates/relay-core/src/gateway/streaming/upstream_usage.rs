@@ -75,9 +75,9 @@ impl UpstreamUsage {
             }
             if self.expected_model.as_deref().is_some_and(|expected| {
                 parsed
-                    .payload
+                    .event_payload
                     .as_ref()
-                    .is_some_and(|value| served_model_is_rejected(value, expected))
+                    .is_some_and(|served_model| served_model_is_rejected(served_model, expected))
             }) {
                 self.pending.clear();
                 self.rejection = Some(error_codes::UPSTREAM_ROUTE_DEGRADED);

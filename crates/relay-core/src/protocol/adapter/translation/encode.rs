@@ -7,13 +7,13 @@ pub(super) fn request(
     model: &str,
     stream: bool,
 ) -> AdapterResult<Value> {
-    let mut body = Map::new();
+    let mut request_fields = Map::new();
     if protocol != WireApi::Gemini {
-        body.insert("model".into(), model.into());
-        body.insert("stream".into(), stream.into());
+        request_fields.insert("model".into(), model.into());
+        request_fields.insert("stream".into(), stream.into());
     }
     let (history, system) = conversation(request, protocol)?;
-    body.insert(
+    request_fields.insert(
         match protocol {
             WireApi::Responses => "input",
             WireApi::Gemini => "contents",
@@ -25,10 +25,10 @@ pub(super) fn request(
     if !system.is_empty() {
         match protocol {
             WireApi::Messages => {
-                body.insert("system".into(), system.into());
+                request_fields.insert("system".into(), system.into());
             }
             WireApi::Gemini => {
-                body.insert("systemInstruction".into(), json!({"parts": system}));
+                request_fields.insert("systemInstruction".into(), json!({"parts": system}));
             }
             _ => {}
         }
@@ -38,25 +38,25 @@ pub(super) fn request(
         let controls = if protocol == WireApi::Gemini {
             &mut generation
         } else {
-            &mut body
+            &mut request_fields
         };
         write_sampling(controls, request, protocol)?;
     }
-    write_tools(&mut body, request, protocol)?;
+    write_tools(&mut request_fields, request, protocol)?;
     if let Some(format) = &request.output_format {
-        parts::output_format(&mut body, &mut generation, format, protocol)?;
+        parts::output_format(&mut request_fields, &mut generation, format, protocol)?;
     }
-    write_reasoning(&mut body, &mut generation, request, protocol)?;
+    write_reasoning(&mut request_fields, &mut generation, request, protocol)?;
     if protocol == WireApi::Gemini && !generation.is_empty() {
-        body.insert("generationConfig".into(), generation.into());
+        request_fields.insert("generationConfig".into(), generation.into());
     }
     if protocol == WireApi::ChatCompletions && stream {
-        body.insert("stream_options".into(), json!({"include_usage": true}));
+        request_fields.insert("stream_options".into(), json!({"include_usage": true}));
     }
     if protocol == WireApi::Responses {
-        body.insert("store".into(), false.into());
+        request_fields.insert("store".into(), false.into());
     }
-    Ok(body.into())
+    Ok(request_fields.into())
 }
 
 fn conversation(request: &Request, protocol: WireApi) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
@@ -101,10 +101,10 @@ fn write_sampling(
             tokens.into(),
         );
     }
-    if let Some(value) = request.temperature {
-        controls.insert("temperature".into(), value.into());
+    if let Some(temperature_value) = request.temperature {
+        controls.insert("temperature".into(), temperature_value.into());
     }
-    if let Some(value) = request.top_p {
+    if let Some(top_p_value) = request.top_p {
         controls.insert(
             if protocol == WireApi::Gemini {
                 "topP"
@@ -112,7 +112,7 @@ fn write_sampling(
                 "top_p"
             }
             .into(),
-            value.into(),
+            top_p_value.into(),
         );
     }
     if !request.stop.is_empty() {
@@ -133,7 +133,7 @@ fn write_sampling(
 }
 
 fn write_tools(
-    body: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     request: &Request,
     protocol: WireApi,
 ) -> AdapterResult<()> {
@@ -143,7 +143,7 @@ fn write_tools(
             .iter()
             .map(|tool| parts::function(tool, protocol))
             .collect::<AdapterResult<Vec<_>>>()?;
-        body.insert(
+        request_fields.insert(
             "tools".into(),
             if protocol == WireApi::Gemini {
                 json!([{"functionDeclarations": declarations}])
@@ -153,7 +153,7 @@ fn write_tools(
         );
     }
     if let Some(choice) = &request.tool_choice {
-        body.insert(
+        request_fields.insert(
             if protocol == WireApi::Gemini {
                 "toolConfig"
             } else {
@@ -166,10 +166,10 @@ fn write_tools(
     if let Some(parallel) = request.parallel_tools {
         match protocol {
             WireApi::Responses | WireApi::ChatCompletions => {
-                body.insert("parallel_tool_calls".into(), parallel.into());
+                request_fields.insert("parallel_tool_calls".into(), parallel.into());
             }
             WireApi::Messages => {
-                let choice = body
+                let choice = request_fields
                     .entry("tool_choice")
                     .or_insert_with(|| json!({"type": "auto"}));
                 choice["disable_parallel_tool_use"] = (!parallel).into();
@@ -182,7 +182,7 @@ fn write_tools(
 }
 
 fn write_reasoning(
-    body: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     generation: &mut Map<String, Value>,
     request: &Request,
     protocol: WireApi,
@@ -201,11 +201,11 @@ fn write_reasoning(
                 return Err(AdapterError::parameter_unsupported());
             }
             if request.max_tokens.is_none() {
-                body.insert("max_tokens".into(), budget.saturating_add(1024).into());
+                request_fields.insert("max_tokens".into(), budget.saturating_add(1024).into());
             }
         }
     }
-    parts::thinking(body, generation, reasoning, protocol)
+    parts::thinking(request_fields, generation, reasoning, protocol)
 }
 
 mod parts;

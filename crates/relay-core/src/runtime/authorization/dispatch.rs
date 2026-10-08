@@ -33,7 +33,7 @@ impl GatewayRuntime {
             .prepare_authorization(candidate_id, runtime_now_ms())
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
-        let response = self
+        let upstream_response = self
             .send_prepared_authorization(
                 candidate_id,
                 first_request,
@@ -44,14 +44,14 @@ impl GatewayRuntime {
                 lease,
             )
             .await?;
-        if response.status() == StatusCode::UNAUTHORIZED {
+        if upstream_response.status() == StatusCode::UNAUTHORIZED {
             if let Some(task_id) = prepared.agent_task_id.as_deref() {
-                let (response, invalid_task) =
-                    inspect_agent_identity_unauthorized(response).await?;
+                let (unauthorized_response, invalid_task) =
+                    inspect_agent_identity_unauthorized(upstream_response).await?;
                 if !invalid_task {
                     return Ok(self.accept_authorized_response(
                         candidate_id,
-                        response,
+                        unauthorized_response,
                         prepared.token_generation,
                     ));
                 }
@@ -60,11 +60,11 @@ impl GatewayRuntime {
                 // outer request's dispatch budget.
                 if budget.is_some_and(|budget| !budget.can_dispatch()) {
                     return Ok(AuthorizedResponse {
-                        response,
+                        response: unauthorized_response,
                         account_token_generation: prepared.token_generation,
                     });
                 }
-                drop(response);
+                drop(unauthorized_response);
                 if let Some(budget) = budget {
                     budget.observe_rejection();
                 }
@@ -76,7 +76,7 @@ impl GatewayRuntime {
                     )
                     .await
                     .map_err(AuthorizedRequestError::Prepare)?;
-                let response = self
+                let refreshed_response = self
                     .send_prepared_authorization(
                         candidate_id,
                         request,
@@ -89,26 +89,28 @@ impl GatewayRuntime {
                     .await?;
                 return Ok(self.accept_authorized_response(
                     candidate_id,
-                    response,
+                    refreshed_response,
                     refreshed.token_generation,
                 ));
             }
         }
-        if response.status() != StatusCode::UNAUTHORIZED || prepared.token_generation.is_none() {
+        if upstream_response.status() != StatusCode::UNAUTHORIZED
+            || prepared.token_generation.is_none()
+        {
             return Ok(self.accept_authorized_response(
                 candidate_id,
-                response,
+                upstream_response,
                 prepared.token_generation,
             ));
         }
 
         if budget.is_some_and(|budget| !budget.can_dispatch()) {
             return Ok(AuthorizedResponse {
-                response,
+                response: upstream_response,
                 account_token_generation: prepared.token_generation,
             });
         }
-        drop(response);
+        drop(upstream_response);
         if let Some(budget) = budget {
             budget.observe_rejection();
         }
@@ -125,7 +127,7 @@ impl GatewayRuntime {
         // token authority has produced the replacement, release the Auth
         // admission fence before that same lease passes final dispatch.
         drop(fence);
-        let response = self
+        let refreshed_response = self
             .send_prepared_authorization(
                 candidate_id,
                 request,
@@ -136,7 +138,11 @@ impl GatewayRuntime {
                 lease,
             )
             .await?;
-        Ok(self.accept_authorized_response(candidate_id, response, refreshed.token_generation))
+        Ok(self.accept_authorized_response(
+            candidate_id,
+            refreshed_response,
+            refreshed.token_generation,
+        ))
     }
 
     fn accept_authorized_response(
@@ -175,11 +181,11 @@ impl GatewayRuntime {
         scope: Option<&CodexTurnStateScope<'_>>,
         prepared: &PreparedAuthorization,
     ) {
-        if let Some(state) = headers.get("x-codex-turn-state") {
+        if let Some(turn_state_header) = headers.get("x-codex-turn-state") {
             if !scope.is_some_and(|scope| {
                 self.codex_turn_state_matches(
                     scope,
-                    state.as_bytes(),
+                    turn_state_header.as_bytes(),
                     prepared.turn_state_credential(),
                     runtime_now_ms(),
                 )
@@ -195,10 +201,10 @@ impl GatewayRuntime {
         scope: Option<&CodexTurnStateScope<'_>>,
         prepared: &PreparedAuthorization,
     ) {
-        if let (Some(scope), Some(state)) = (scope, headers.get("x-codex-turn-state")) {
+        if let (Some(scope), Some(turn_state_header)) = (scope, headers.get("x-codex-turn-state")) {
             self.note_codex_turn_state(
                 scope,
-                state.as_bytes(),
+                turn_state_header.as_bytes(),
                 prepared.turn_state_credential(),
                 runtime_now_ms(),
             );
@@ -216,13 +222,13 @@ impl GatewayRuntime {
         budget: Option<&SharedRequestBudget>,
         lease: Option<&CandidateLease>,
     ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
-        let (client, mut request) =
+        let (client, mut authorized_request) =
             apply_prepared_authorization(request, prepared, client_version)?;
-        self.guard_turn_state(request.headers_mut(), scope, prepared);
-        let url = request.url().clone();
+        self.guard_turn_state(authorized_request.headers_mut(), scope, prepared);
+        let url = authorized_request.url().clone();
         let cookies = self.routing_cookies(candidate_id, prepared);
         if let Some(cookies) = &cookies {
-            cookies.apply(&url, request.headers_mut());
+            cookies.apply(&url, authorized_request.headers_mut());
         }
         let stale_authorization =
             || AuthorizedRequestError::Prepare(ExecutorPrepareError::Transient);
@@ -260,17 +266,17 @@ impl GatewayRuntime {
                 .dispatch_guard(self, candidate_id)
                 .ok_or_else(stale_authorization)?;
         }
-        let response = client
-            .execute(request)
+        let upstream_response = client
+            .execute(authorized_request)
             .await
             .map_err(AuthorizedRequestError::Transport)?;
         if let Some(cookies) = cookies {
-            cookies.observe(&url, response.headers());
+            cookies.observe(&url, upstream_response.headers());
         }
-        if response.status().is_success() {
-            self.observe_turn_state(response.headers(), scope, prepared);
+        if upstream_response.status().is_success() {
+            self.observe_turn_state(upstream_response.headers(), scope, prepared);
         }
-        Ok(response)
+        Ok(upstream_response)
     }
 }
 

@@ -568,11 +568,14 @@ fn source_runtime_keeps_policy_edits_and_rebuilds_catalog_evidence() {
     };
     let same = previous;
     assert!(source_runtime_policy_compatible(&[previous], &[same],));
-    let next = SourceTransportIdentity {
+    let changed_source_identity = SourceTransportIdentity {
         protocol_config: &changed,
         ..previous
     };
-    assert!(!source_runtime_policy_compatible(&[previous], &[next],));
+    assert!(!source_runtime_policy_compatible(
+        &[previous],
+        &[changed_source_identity],
+    ));
 }
 
 #[test]

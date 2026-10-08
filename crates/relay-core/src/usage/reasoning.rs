@@ -77,11 +77,11 @@ fn effective_reasoning_effort(upstream_body: &Value) -> Option<String> {
 }
 
 /// Returns a canonical diagnostic effort value, rejecting arbitrary text.
-pub fn normalize_reasoning_effort(value: &str) -> Option<String> {
-    let value = value.trim().to_ascii_lowercase();
+pub fn normalize_reasoning_effort(effort_text: &str) -> Option<String> {
+    let canonical_effort = effort_text.trim().to_ascii_lowercase();
     matches!(
-        value.as_str(),
+        canonical_effort.as_str(),
         "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
     )
-    .then_some(value)
+    .then_some(canonical_effort)
 }

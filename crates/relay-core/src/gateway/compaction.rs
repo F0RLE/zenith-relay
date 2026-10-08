@@ -12,45 +12,46 @@ use axum::http::{
 };
 use serde_json::{json, Value};
 
-pub(super) fn missing_legacy_endpoint(status: StatusCode, body: &[u8]) -> bool {
+pub(super) fn missing_legacy_endpoint(status: StatusCode, response_body: &[u8]) -> bool {
     if status == StatusCode::METHOD_NOT_ALLOWED {
         return true;
     }
     if status != StatusCode::NOT_FOUND {
         return false;
     }
-    match serde_json::from_slice::<Value>(body) {
-        Ok(value) => matches!(
-            value
+    match serde_json::from_slice::<Value>(response_body) {
+        Ok(response_json) => matches!(
+            response_json
                 .pointer("/error/code")
-                .or_else(|| value.get("code"))
+                .or_else(|| response_json.get("code"))
                 .and_then(Value::as_str),
             Some("route_not_found" | "endpoint_not_found")
         ),
         Err(_) => {
-            body.is_empty()
-                || std::str::from_utf8(body).is_ok_and(|text| text.trim() == "404 page not found")
+            response_body.is_empty()
+                || std::str::from_utf8(response_body)
+                    .is_ok_and(|text| text.trim() == "404 page not found")
         }
     }
 }
 
-fn request_body(request: &Value) -> Result<Vec<u8>, AttemptFailure> {
-    let mut request = request.clone();
-    let input = request
+fn request_body(request_json: &Value) -> Result<Vec<u8>, AttemptFailure> {
+    let mut request_json = request_json.clone();
+    let input_items = request_json
         .get_mut("input")
         .and_then(Value::as_array_mut)
         .ok_or_else(AttemptFailure::invalid_request)?;
-    ensure_compaction_trigger(input);
-    let object = request
+    ensure_compaction_trigger(input_items);
+    let request_object = request_json
         .as_object_mut()
         .ok_or_else(AttemptFailure::invalid_request)?;
-    object.insert("stream".into(), Value::Bool(true));
-    object.insert("store".into(), Value::Bool(false));
-    object.entry("tool_choice").or_insert(json!("auto"));
-    object
+    request_object.insert("stream".into(), Value::Bool(true));
+    request_object.insert("store".into(), Value::Bool(false));
+    request_object.entry("tool_choice").or_insert(json!("auto"));
+    request_object
         .entry("include")
         .or_insert(json!(["reasoning.encrypted_content"]));
-    let bytes = serde_json::to_vec(&request).map_err(|_| AttemptFailure::invalid_request())?;
+    let bytes = serde_json::to_vec(&request_json).map_err(|_| AttemptFailure::invalid_request())?;
     Ok(bytes)
 }
 
@@ -63,7 +64,7 @@ fn invalid_stream() -> AttemptFailure {
 }
 
 fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
-    let mut completed = None;
+    let mut completed_response = None;
     let mut capture = NativeReplayCapture::default();
     while let Some(end) = sse_event_end(bytes) {
         let event = parse_sse_event(&bytes[..end]);
@@ -71,12 +72,12 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
         if event.has_data && !event.valid {
             return Err(invalid_stream());
         }
-        if let Some(payload) = &event.payload {
-            if completed.is_some() {
+        if let Some(event_payload) = &event.event_payload {
+            if completed_response.is_some() {
                 return Err(invalid_stream());
             }
             if event.outcome.is_none() {
-                capture.observe(payload);
+                capture.observe(event_payload);
             }
         }
         if matches!(
@@ -91,86 +92,89 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
                 event.cooldown_hint,
             ));
         }
-        if let Some(response) = event
+        if let Some(event_response) = event
             .response
             .filter(|_| event.outcome == Some(TerminalOutcome::Success))
         {
-            if completed.is_some() {
+            if completed_response.is_some() {
                 return Err(invalid_stream());
             }
-            completed = Some(response);
+            completed_response = Some(event_response);
         }
     }
     if !bytes.trim_ascii().is_empty() {
         return Err(invalid_stream());
     }
-    let mut response = completed.ok_or_else(invalid_stream)?;
-    if response
+    let mut compact_response = completed_response.ok_or_else(invalid_stream)?;
+    if compact_response
         .get("status")
-        .is_some_and(|value| value != "completed")
+        .is_some_and(|status_value| status_value != "completed")
     {
         return Err(invalid_stream());
     }
-    if response
+    if compact_response
         .get("output")
-        .is_none_or(|output| output.as_array().is_some_and(Vec::is_empty))
+        .is_none_or(|output_value| output_value.as_array().is_some_and(Vec::is_empty))
     {
-        response = capture
-            .finish(Some(response), None)
+        compact_response = capture
+            .finish(Some(compact_response), None)
             .ok_or_else(invalid_stream)?;
     }
-    compaction_document(&response)
+    compaction_document(&compact_response)
 }
 
 /// Codex compact response. Retained tail items stay in `output`; exactly one
 /// encrypted compaction checkpoint is required.
-pub(super) fn compaction_document(response: &Value) -> Result<Vec<u8>, AttemptFailure> {
-    if response
+pub(super) fn compaction_document(compaction_response: &Value) -> Result<Vec<u8>, AttemptFailure> {
+    if compaction_response
         .get("status")
-        .is_some_and(|value| value != "completed")
+        .is_some_and(|status_value| status_value != "completed")
     {
         return Err(invalid_stream());
     }
-    let output = response
+    let response_items = compaction_response
         .get("output")
         .and_then(Value::as_array)
-        .filter(|output| !output.is_empty())
+        .filter(|output_items| !output_items.is_empty())
         .ok_or_else(invalid_stream)?;
-    let compactions = output
+    let compaction_items = response_items
         .iter()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
+        .filter(|output_item| output_item.get("type").and_then(Value::as_str) == Some("compaction"))
         .collect::<Vec<_>>();
-    if compactions.len() != 1
-        || compactions[0]
+    if compaction_items.len() != 1
+        || compaction_items[0]
             .get("encrypted_content")
             .and_then(Value::as_str)
             .is_none_or(str::is_empty)
     {
         return Err(invalid_stream());
     }
-    let mut result = json!({"object": "response.compaction", "output": output});
+    let mut compaction_json = json!({"object": "response.compaction", "output": response_items});
     for key in ["id", "created_at", "usage"] {
-        if let Some(value) = response.get(key) {
-            result[key] = value.clone();
+        if let Some(metadata_value) = compaction_response.get(key) {
+            compaction_json[key] = metadata_value.clone();
         }
     }
-    serde_json::to_vec(&result).map_err(|_| invalid_stream())
+    serde_json::to_vec(&compaction_json).map_err(|_| invalid_stream())
 }
 
 /// Makes a non-account `/v1/responses/compact` body an ordinary Responses
 /// request. String and object input use the same array shape as account
 /// compact, then Relay adds the trigger when the client omitted it.
 pub(super) fn prepare_routed_compaction_request(
-    object: &mut serde_json::Map<String, Value>,
+    request_object: &mut serde_json::Map<String, Value>,
 ) -> bool {
-    if !super::request::coerce_responses_input_array(object) {
+    if !super::request::coerce_responses_input_array(request_object) {
         return false;
     }
-    let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
+    let Some(input_items) = request_object
+        .get_mut("input")
+        .and_then(Value::as_array_mut)
+    else {
         return false;
     };
-    ensure_compaction_trigger(input);
-    object.insert("stream".to_string(), Value::Bool(false));
+    ensure_compaction_trigger(input_items);
+    request_object.insert("stream".to_string(), Value::Bool(false));
     true
 }
 
@@ -179,13 +183,14 @@ pub(super) fn prepare_routed_compaction_request(
 pub(super) async fn execute(
     runtime: &GatewayRuntime,
     route: &mut ExecutorRoute,
-    request: &Value,
+    client_request: &Value,
     headers: &HeaderMap,
     scope: Option<&CodexTurnStateScope<'_>>,
     budget: &SharedRequestBudget,
     lease: &crate::runtime::CandidateLease,
 ) -> Result<(HeaderMap, Vec<u8>), Box<(AttemptFailure, HeaderMap)>> {
-    let body = request_body(request).map_err(|failure| Box::new((failure, HeaderMap::new())))?;
+    let request_body =
+        request_body(client_request).map_err(|failure| Box::new((failure, HeaderMap::new())))?;
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
@@ -195,7 +200,7 @@ pub(super) async fn execute(
                 .headers(headers.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "text/event-stream")
-                .body(body),
+                .body(request_body),
             codex_client_version(headers),
             scope,
             Some(budget),
@@ -204,28 +209,29 @@ pub(super) async fn execute(
         .await
         .map_err(|error| Box::new((AttemptFailure::authorized_request(error), HeaderMap::new())))?;
     route.account_token_generation = upstream.account_token_generation;
-    let response = upstream.response;
-    let status = response.status();
-    let mut headers = response.headers().clone();
-    let bytes = crate::transport::collect(response)
+    let upstream_response = upstream.response;
+    let status = upstream_response.status();
+    let mut headers = upstream_response.headers().clone();
+    let response_bytes = crate::transport::collect(upstream_response)
         .await
         .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
     if !status.is_success() {
-        let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        let mut failure = AttemptFailure::status_with_body(status, Some(&response_bytes));
         super::errors::apply_degraded_route_policy(runtime, &mut failure);
         return Err(Box::new((failure, headers)));
     }
-    let body = compact_output(&bytes).map_err(|failure| Box::new((failure, headers.clone())))?;
-    for name in [
+    let compacted_body =
+        compact_output(&response_bytes).map_err(|failure| Box::new((failure, headers.clone())))?;
+    for header_name in [
         "content-length",
         "content-encoding",
         "transfer-encoding",
         "trailer",
     ] {
-        headers.remove(name);
+        headers.remove(header_name);
     }
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
-    Ok((headers, body))
+    Ok((headers, compacted_body))
 }
 
 #[cfg(test)]
@@ -257,25 +263,27 @@ mod tests {
             "output": [{"type": "compaction", "encrypted_content": "zenith-relay-compact-v1:test"}]
         });
         let encoded = compaction_document(&completed).ok().unwrap();
-        let body: Value = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(body["object"], "response.compaction");
-        assert_eq!(body["id"], "resp_compact");
-        assert_eq!(body["usage"]["input_tokens"], 12);
-        assert_eq!(body["output"][0]["type"], "compaction");
+        let response_json: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(response_json["object"], "response.compaction");
+        assert_eq!(response_json["id"], "resp_compact");
+        assert_eq!(response_json["usage"]["input_tokens"], 12);
+        assert_eq!(response_json["output"][0]["type"], "compaction");
         assert!(compaction_document(&json!({"status": "incomplete", "output": []})).is_err());
     }
 
     #[test]
     fn bridge_preserves_history_and_request_fields() {
         let request = json!({"model":"future-model", "input":[{"type":"function_call_output","call_id":"call-1","output":"result"}], "tools":[{"type":"function","name":"test"}], "reasoning":{"effort":"high"}, "extension":true});
-        let body: Value = serde_json::from_slice(&request_body(&request).ok().unwrap()).unwrap();
-        assert_eq!(body["input"][0], request["input"][0]);
-        assert_eq!(body["tools"], request["tools"]);
-        assert_eq!(body["reasoning"], request["reasoning"]);
-        assert_eq!(body["extension"], true);
-        assert_eq!(body["input"][1]["type"], "compaction_trigger");
-        let again: Value = serde_json::from_slice(&request_body(&body).ok().unwrap()).unwrap();
-        assert_eq!(again, body);
+        let request_json: Value =
+            serde_json::from_slice(&request_body(&request).ok().unwrap()).unwrap();
+        assert_eq!(request_json["input"][0], request["input"][0]);
+        assert_eq!(request_json["tools"], request["tools"]);
+        assert_eq!(request_json["reasoning"], request["reasoning"]);
+        assert_eq!(request_json["extension"], true);
+        assert_eq!(request_json["input"][1]["type"], "compaction_trigger");
+        let repeated_request: Value =
+            serde_json::from_slice(&request_body(&request_json).ok().unwrap()).unwrap();
+        assert_eq!(repeated_request, request_json);
     }
 
     #[test]
@@ -288,11 +296,11 @@ mod tests {
             "id":"synthetic-compaction", "status":"completed", "output":output,
             "usage":{"input_tokens":100,"output_tokens":8}
         }});
-        let body = format!(
+        let sse_body = format!(
             "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"synthetic-compaction\"}}}}\r\n\r\n: keep-alive\n\ndata: {terminal}\n\n"
         );
         let response: Value =
-            serde_json::from_slice(&compact_output(body.as_bytes()).ok().unwrap()).unwrap();
+            serde_json::from_slice(&compact_output(sse_body.as_bytes()).ok().unwrap()).unwrap();
         assert_eq!(response["output"], output);
         assert_eq!(response["usage"]["input_tokens"], 100);
         assert_eq!(response["usage"]["output_tokens"], 8);
@@ -301,9 +309,10 @@ mod tests {
     #[test]
     fn compaction_requires_terminal_success_and_real_encrypted_output() {
         let complete = b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"encrypted_content\":\"synthetic\"}],\"usage\":{\"input_tokens\":42}}}\n\n";
-        let body: Value = serde_json::from_slice(&compact_output(complete).ok().unwrap()).unwrap();
-        assert_eq!(body["usage"]["input_tokens"], 42);
-        assert!(body["usage"].get("output_tokens").is_none());
+        let response_json: Value =
+            serde_json::from_slice(&compact_output(complete).ok().unwrap()).unwrap();
+        assert_eq!(response_json["usage"]["input_tokens"], 42);
+        assert!(response_json["usage"].get("output_tokens").is_none());
         assert!(compact_output(&complete[..complete.len() - 1]).is_err());
         assert!(compact_output(b"data: [DONE]\n\n").is_err());
         let failed = [
@@ -334,10 +343,10 @@ mod tests {
                 .collect::<String>()
         };
         let complete = sse(&frames);
-        let result: Value =
+        let response_json: Value =
             serde_json::from_slice(&compact_output(complete.as_bytes()).ok().unwrap()).unwrap();
-        assert_eq!(result["output"], json!([message, compaction]));
-        assert_eq!(result["usage"], json!({"input_tokens":12}));
+        assert_eq!(response_json["output"], json!([message, compaction]));
+        assert_eq!(response_json["usage"], json!({"input_tokens":12}));
         assert!(compact_output(sse(&frames[..2]).as_bytes()).is_err());
         let unfinished = format!(
             "data: {}\n\n{complete}",

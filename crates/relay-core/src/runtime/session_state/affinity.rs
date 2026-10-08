@@ -18,13 +18,13 @@ impl GatewayRuntime {
         // survive normal key rotation; explicit cache keys remain stronger.
         let (material_kind, material) = prompt_cache_key
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| ("cache", value))
+            .filter(|cache_key| !cache_key.is_empty())
+            .map(|cache_key| ("cache", cache_key))
             .or_else(|| {
                 client_context_id
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(|value| ("session", value))
+                    .filter(|context_id| !context_id.is_empty())
+                    .map(|context_id| ("session", context_id))
             })?;
         let digest = hex::encode(Sha256::digest(
             format!(

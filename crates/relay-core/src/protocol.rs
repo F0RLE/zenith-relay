@@ -54,7 +54,7 @@ pub use management::{
     PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
 pub(crate) use sse::{
-    data as sse_data, event_end as sse_event_end, lines as sse_lines,
+    event_data as sse_data, event_end as sse_event_end, lines as sse_lines,
     push_pending_frames as push_pending_sse_frames, take_event as take_sse_event,
 };
 pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

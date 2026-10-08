@@ -63,7 +63,7 @@ impl ModelCapabilities {
         &self,
     ) -> std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus> {
         use crate::{CapabilityStatus, ProtocolFeature};
-        let capability_status = |value| match value {
+        let capability_status = |capability_flag| match capability_flag {
             Some(true) => CapabilityStatus::Declared,
             Some(false) => CapabilityStatus::Unsupported,
             None => CapabilityStatus::Unknown,
@@ -183,13 +183,13 @@ impl ModelCapabilities {
 
     /// Replace model capability fields, including stale fields from provider
     /// templates. Routing IDs and native transport settings are left intact.
-    pub fn apply_to_codex(&self, entry: &mut Value) {
-        let Some(object) = entry.as_object_mut() else {
+    pub fn apply_to_codex(&self, catalog_entry: &mut Value) {
+        let Some(catalog_object) = catalog_entry.as_object_mut() else {
             return;
         };
         // The projected row is served by Relay's API. The account's flag for
         // its vendor API does not describe this pool endpoint or its key scope.
-        object.insert("supported_in_api".into(), json!(true));
+        catalog_object.insert("supported_in_api".into(), json!(true));
         for field in [
             "default_reasoning_level",
             "context_window",
@@ -201,7 +201,7 @@ impl ModelCapabilities {
             "default_service_tier",
             "default_verbosity",
         ] {
-            object.remove(field);
+            catalog_object.remove(field);
         }
         // The Codex catalog schema accepts text/image/audio, not models.dev's
         // video/pdf inputs. Keep the full set in management/OpenCode, but do
@@ -211,20 +211,20 @@ impl ModelCapabilities {
             .iter()
             .filter(|modality| matches!(modality.as_str(), "text" | "image" | "audio"))
             .collect::<Vec<_>>();
-        object.insert("input_modalities".into(), json!(input_modalities));
-        object.insert("output_modalities".into(), json!(self.output_modalities));
-        object.insert(
+        catalog_object.insert("input_modalities".into(), json!(input_modalities));
+        catalog_object.insert("output_modalities".into(), json!(self.output_modalities));
+        catalog_object.insert(
             "supports_parallel_tool_calls".into(),
             json!(self.tool_call == Some(true)),
         );
-        object.insert("supports_search_tool".into(), json!(false));
-        object.insert("supports_image_detail_original".into(), json!(false));
-        object.insert("supports_reasoning_summaries".into(), json!(false));
-        object.insert("supports_reasoning_summary_parameter".into(), json!(false));
-        object.insert("default_reasoning_summary".into(), json!("none"));
-        object.insert("support_verbosity".into(), json!(false));
-        object.insert("default_verbosity".into(), Value::Null);
-        object.insert("experimental_supported_tools".into(), json!([]));
+        catalog_object.insert("supports_search_tool".into(), json!(false));
+        catalog_object.insert("supports_image_detail_original".into(), json!(false));
+        catalog_object.insert("supports_reasoning_summaries".into(), json!(false));
+        catalog_object.insert("supports_reasoning_summary_parameter".into(), json!(false));
+        catalog_object.insert("default_reasoning_summary".into(), json!("none"));
+        catalog_object.insert("support_verbosity".into(), json!(false));
+        catalog_object.insert("default_verbosity".into(), Value::Null);
+        catalog_object.insert("experimental_supported_tools".into(), json!([]));
         // A boolean reasoning capability is not an enum. Do not invent
         // effort levels when registries only say that reasoning exists.
         let levels = if self.reasoning == Some(false) {
@@ -232,7 +232,7 @@ impl ModelCapabilities {
         } else {
             crate::canonicalize_reasoning_levels(&self.reasoning_effort_levels)
         };
-        object.insert(
+        catalog_object.insert(
             "supported_reasoning_levels".into(),
             json!(levels
                 .iter()
@@ -244,7 +244,7 @@ impl ModelCapabilities {
             .as_ref()
             .filter(|default| levels.iter().any(|level| level == *default))
         {
-            object.insert("default_reasoning_level".into(), json!(default));
+            catalog_object.insert("default_reasoning_level".into(), json!(default));
         }
         // Native Codex cards keep Codex's own window. Advertising a theoretical
         // catalog maximum here makes Codex expand a conversation instead.
@@ -301,10 +301,10 @@ mod tests {
             output_modalities: vec!["text".into()],
             ..ModelCapabilities::default()
         };
-        let mut entry = crate::routed_codex_catalog_entry(None, "multimodal", 1000, None);
-        capabilities.apply_to_codex(&mut entry);
-        assert_eq!(entry["input_modalities"], json!(["text", "image"]));
-        assert!(crate::codex_catalog_entry_is_compatible(&entry));
+        let mut catalog_entry = crate::routed_codex_catalog_entry(None, "multimodal", 1000, None);
+        capabilities.apply_to_codex(&mut catalog_entry);
+        assert_eq!(catalog_entry["input_modalities"], json!(["text", "image"]));
+        assert!(crate::codex_catalog_entry_is_compatible(&catalog_entry));
         assert_eq!(capabilities.input_modalities.len(), 4);
     }
 
@@ -318,26 +318,26 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let mut entry = crate::routed_codex_catalog_entry(None, "astra", 1000, None);
-        entry["input_modalities"] = json!(["text", "image"]);
-        entry["context_window"] = json!(999999);
-        catalog.apply_codex_capabilities("astra", &mut entry);
-        assert_eq!(entry["input_modalities"], json!(["text"]));
-        assert!(entry.get("context_window").is_none());
+        let mut catalog_entry = crate::routed_codex_catalog_entry(None, "astra", 1000, None);
+        catalog_entry["input_modalities"] = json!(["text", "image"]);
+        catalog_entry["context_window"] = json!(999999);
+        catalog.apply_codex_capabilities("astra", &mut catalog_entry);
+        assert_eq!(catalog_entry["input_modalities"], json!(["text"]));
+        assert!(catalog_entry.get("context_window").is_none());
         assert_eq!(
-            entry["supported_reasoning_levels"]
+            catalog_entry["supported_reasoning_levels"]
                 .as_array()
                 .unwrap()
                 .len(),
             2
         );
-        assert!(crate::codex_catalog_entry_is_compatible(&entry));
-        catalog.apply_codex_capabilities("astra-other", &mut entry);
-        assert_eq!(entry["input_modalities"], json!(["text", "image"]));
-        assert_eq!(entry["supported_reasoning_levels"], json!([]));
-        assert_eq!(entry["supports_parallel_tool_calls"], true);
-        assert!(entry.get("context_window").is_none());
-        assert!(crate::codex_catalog_entry_is_compatible(&entry));
+        assert!(crate::codex_catalog_entry_is_compatible(&catalog_entry));
+        catalog.apply_codex_capabilities("astra-other", &mut catalog_entry);
+        assert_eq!(catalog_entry["input_modalities"], json!(["text", "image"]));
+        assert_eq!(catalog_entry["supported_reasoning_levels"], json!([]));
+        assert_eq!(catalog_entry["supports_parallel_tool_calls"], true);
+        assert!(catalog_entry.get("context_window").is_none());
+        assert!(crate::codex_catalog_entry_is_compatible(&catalog_entry));
     }
 
     #[test]

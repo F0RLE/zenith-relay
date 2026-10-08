@@ -27,8 +27,8 @@ pub(in crate::gateway::execution) use response::{synthetic_stream, translate_res
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";
 pub(super) const TRANSPORT_TOOL_ALIAS: &str = "functions.run_officejs";
 
-pub(super) fn is_transport_tool(name: &str) -> bool {
-    name == TRANSPORT_TOOL || name == TRANSPORT_TOOL_ALIAS
+pub(super) fn is_transport_tool(tool_name: &str) -> bool {
+    tool_name == TRANSPORT_TOOL || tool_name == TRANSPORT_TOOL_ALIAS
 }
 /// Function arguments and the outer `run_officejs` arguments are two JSON
 /// layers. The adapter's v0.2.8 instructions say this explicitly so a function

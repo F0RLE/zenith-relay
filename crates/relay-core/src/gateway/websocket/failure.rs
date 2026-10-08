@@ -226,13 +226,17 @@ impl GatewayFailure {
 
     pub(super) fn upstream_status(
         status: StatusCode,
-        body: Option<&[u8]>,
+        upstream_error_body: Option<&[u8]>,
         origin: ErrorOrigin,
     ) -> Self {
-        let classification = super::super::errors::classify_upstream_error(status, body);
+        let classification =
+            super::super::errors::classify_upstream_error(status, upstream_error_body);
         Self::classified(status, classification.category, origin).with_upstream_error(
-            body.map(|body| {
-                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), body)
+            upstream_error_body.map(|error_body| {
+                crate::usage::UpstreamErrorDetails::from_response_body(
+                    Some(status.as_u16()),
+                    error_body,
+                )
             }),
         )
     }

@@ -51,16 +51,19 @@ pub(in crate::runtime) fn runtime_now_ms() -> u64 {
 
 pub(in crate::runtime) fn basis_points_headers(account_id: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Ok(value) = HeaderValue::from_str(account_id) {
-        let mut value = value;
-        value.set_sensitive(true);
+    if let Ok(account_header_value) = HeaderValue::from_str(account_id) {
+        let mut account_header_value = account_header_value;
+        account_header_value.set_sensitive(true);
         headers.insert(
             HeaderName::from_static("x-openai-account-id"),
-            value.clone(),
+            account_header_value.clone(),
         );
-        headers.insert(HeaderName::from_static("chatgpt-account-id"), value);
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            account_header_value,
+        );
     }
-    for (name, value) in [
+    for (header_name, header_value) in [
         ("x-basispoints-auth-mode", "chatgpt"),
         ("origin", "https://bps.openai.com"),
         (
@@ -104,8 +107,8 @@ pub(in crate::runtime) fn basis_points_headers(account_id: &str) -> HeaderMap {
         ),
     ] {
         headers.insert(
-            HeaderName::from_static(name),
-            HeaderValue::from_static(value),
+            HeaderName::from_static(header_name),
+            HeaderValue::from_static(header_value),
         );
     }
     headers.insert(
@@ -115,22 +118,24 @@ pub(in crate::runtime) fn basis_points_headers(account_id: &str) -> HeaderMap {
     headers
 }
 
-pub(in crate::runtime) fn parse_bearer(value: &str) -> Option<&str> {
-    let (scheme, secret) = value.trim().split_once(char::is_whitespace)?;
+pub(in crate::runtime) fn parse_bearer(authorization_header: &str) -> Option<&str> {
+    let (scheme, secret) = authorization_header
+        .trim()
+        .split_once(char::is_whitespace)?;
     let secret = secret.trim();
     (scheme.eq_ignore_ascii_case("bearer") && !secret.is_empty()).then_some(secret)
 }
 
 pub(in crate::runtime) fn normalized_set<'a>(
-    values: impl IntoIterator<Item = &'a String>,
+    model_ids: impl IntoIterator<Item = &'a String>,
 ) -> BTreeSet<String> {
     let mut normalized = BTreeMap::new();
-    for value in values {
-        let value = value.trim();
-        if !value.is_empty() {
+    for model_id in model_ids {
+        let model_id = model_id.trim();
+        if !model_id.is_empty() {
             normalized
-                .entry(crate::model_id_key(value))
-                .or_insert_with(|| value.to_string());
+                .entry(crate::model_id_key(model_id))
+                .or_insert_with(|| model_id.to_string());
         }
     }
     normalized.into_values().collect()
@@ -157,12 +162,12 @@ pub(in crate::runtime) fn apply_candidate_policy(
 
 pub(in crate::runtime) fn normalize_prefix(prefix: Option<String>) -> Option<String> {
     prefix
-        .map(|value| value.trim().trim_matches('/').to_string())
-        .filter(|value| !value.is_empty())
+        .map(|prefix_value| prefix_value.trim().trim_matches('/').to_string())
+        .filter(|prefix_value| !prefix_value.is_empty())
 }
 
-pub(in crate::runtime) fn normalized_responses_url(value: &str) -> Result<Url> {
-    let url = Url::parse(value.trim())
+pub(in crate::runtime) fn normalized_responses_url(responses_url: &str) -> Result<Url> {
+    let url = Url::parse(responses_url.trim())
         .map_err(|_| Error::Validation("account Responses URL is invalid".to_string()))?;
     if !is_http_endpoint(&url) {
         return Err(Error::Validation(
@@ -216,20 +221,25 @@ pub(in crate::runtime) fn runtime_websocket_client(
         .map_err(Error::from)
 }
 
-pub(in crate::runtime) fn require_runtime_value(name: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        Err(Error::Validation(format!("{name} must not be empty")))
+pub(in crate::runtime) fn require_runtime_value(
+    setting_name: &str,
+    runtime_value: &str,
+) -> Result<()> {
+    if runtime_value.trim().is_empty() {
+        Err(Error::Validation(format!(
+            "{setting_name} must not be empty"
+        )))
     } else {
         Ok(())
     }
 }
 
 pub(in crate::runtime) fn strip_prefix_ignore_ascii_case<'a>(
-    value: &'a str,
+    input_text: &'a str,
     prefix: &str,
 ) -> Option<&'a str> {
-    value
+    input_text
         .get(..prefix.len())
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
-        .then(|| &value[prefix.len()..])
+        .then(|| &input_text[prefix.len()..])
 }

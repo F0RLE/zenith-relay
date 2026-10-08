@@ -29,14 +29,15 @@ pub fn reduce_account_quota(
     previous_subscription: &Subscription,
     previous_health: AccountHealthState,
     previous_last_error_code: Option<&str>,
-    result: Result<QuotaRefreshResult, QuotaRefreshFailure>,
+    refresh_result: Result<QuotaRefreshResult, QuotaRefreshFailure>,
     failure_observed_at_ms: u64,
 ) -> Result<AccountQuotaUpdate, QuotaNormalizationError> {
-    match result {
-        Ok(mut data) => {
-            data.quota
+    match refresh_result {
+        Ok(mut parsed_quota) => {
+            parsed_quota
+                .quota
                 .preserve_subscription_metadata(previous_subscription);
-            let (quota, subscription) = data.quota.normalize(previous_quota)?;
+            let (quota, subscription) = parsed_quota.quota.normalize(previous_quota)?;
             let transitions = [QuotaWindowKind::Primary, QuotaWindowKind::Secondary]
                 .into_iter()
                 .filter_map(|kind| {
@@ -53,7 +54,8 @@ pub fn reduce_account_quota(
                     })
                 })
                 .collect();
-            let health = if data.allowed == Some(false) && data.reported_limit_reached != Some(true)
+            let health = if parsed_quota.allowed == Some(false)
+                && parsed_quota.reported_limit_reached != Some(true)
             {
                 AccountHealthState::Blocked
             } else {
@@ -152,7 +154,7 @@ mod tests {
 
     #[test]
     fn parser_reducer_and_routing_quota_form_one_pipeline() {
-        let data = parse_codex_usage(
+        let parsed_quota = parse_codex_usage(
             br#"{
                 "plan_type":"plus",
                 "rate_limit":{"allowed":true,"primary_window":{"used_percent":20}}
@@ -165,7 +167,7 @@ mod tests {
             &subscription(),
             AccountHealthState::Unknown,
             None,
-            Ok(data),
+            Ok(parsed_quota),
             2_000,
         )
         .unwrap();
@@ -180,7 +182,7 @@ mod tests {
 
     #[test]
     fn failures_preserve_last_good_quota_and_only_terminal_auth_changes_health() {
-        let previous = reduce_account_quota(
+        let prior_quota_state = reduce_account_quota(
             &QuotaSnapshot::default(),
             &subscription(),
             AccountHealthState::Unknown,
@@ -194,15 +196,15 @@ mod tests {
         )
         .unwrap();
         let transient = reduce_account_quota(
-            &previous.quota,
-            &previous.subscription,
-            previous.health,
-            previous.last_error_code.as_deref(),
+            &prior_quota_state.quota,
+            &prior_quota_state.subscription,
+            prior_quota_state.health,
+            prior_quota_state.last_error_code.as_deref(),
             Err(QuotaRefreshFailure::new("quota_transport", true)),
             20,
         )
         .unwrap();
-        assert_eq!(transient.quota.primary, previous.quota.primary);
+        assert_eq!(transient.quota.primary, prior_quota_state.quota.primary);
         assert_eq!(transient.health, AccountHealthState::Healthy);
         assert_eq!(transient.last_error_code, None);
 
@@ -227,7 +229,7 @@ mod tests {
 
     #[test]
     fn successful_quota_refresh_only_clears_quota_owned_errors() {
-        let data = || {
+        let parse_quota = || {
             parse_codex_usage(
                 br#"{"rate_limit":{"primary_window":{"used_percent":20}}}"#,
                 20,
@@ -239,7 +241,7 @@ mod tests {
             &subscription(),
             AccountHealthState::Degraded,
             Some("upstream_rate_limited"),
-            Ok(data()),
+            Ok(parse_quota()),
             20,
         )
         .unwrap();
@@ -258,7 +260,7 @@ mod tests {
             &subscription(),
             AccountHealthState::Unhealthy,
             Some("token_invalidated"),
-            Ok(data()),
+            Ok(parse_quota()),
             20,
         )
         .unwrap();
@@ -288,7 +290,7 @@ mod tests {
 
     #[test]
     fn weekly_exhaustion_transition_is_emitted_only_on_positive_to_zero() {
-        let previous = reduce_account_quota(
+        let prior_quota_state = reduce_account_quota(
             &QuotaSnapshot::default(),
             &subscription(),
             AccountHealthState::Unknown,
@@ -302,10 +304,10 @@ mod tests {
         )
         .unwrap();
         let exhausted = reduce_account_quota(
-            &previous.quota,
-            &previous.subscription,
-            previous.health,
-            previous.last_error_code.as_deref(),
+            &prior_quota_state.quota,
+            &prior_quota_state.subscription,
+            prior_quota_state.health,
+            prior_quota_state.last_error_code.as_deref(),
             Ok(parse_codex_usage(
                 br#"{"rate_limit":{"secondary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":1700000600}}}"#,
                 2_000,
@@ -337,7 +339,7 @@ mod tests {
 
     #[test]
     fn successful_quota_refresh_clears_only_a_false_upstream_forbidden_block() {
-        let data = || {
+        let parse_quota = || {
             parse_codex_usage(
                 br#"{"rate_limit":{"primary_window":{"used_percent":20}}}"#,
                 20,
@@ -349,7 +351,7 @@ mod tests {
             &subscription(),
             AccountHealthState::Blocked,
             Some("upstream_forbidden"),
-            Ok(data()),
+            Ok(parse_quota()),
             20,
         )
         .unwrap();
@@ -361,7 +363,7 @@ mod tests {
             &subscription(),
             AccountHealthState::Blocked,
             Some("deactivated_workspace"),
-            Ok(data()),
+            Ok(parse_quota()),
             20,
         )
         .unwrap();
@@ -371,7 +373,7 @@ mod tests {
             Some("deactivated_workspace")
         );
 
-        let mut denied = data();
+        let mut denied = parse_quota();
         denied.allowed = Some(false);
         denied.reported_limit_reached = Some(false);
         let replaced = reduce_account_quota(

@@ -168,8 +168,8 @@ pub use usage::{
 
 /// Drops optional text that is empty or only whitespace.
 /// Any other value keeps its original spelling.
-pub fn omit_blank<T: AsRef<str>>(value: Option<T>) -> Option<T> {
-    value.filter(|value| !value.as_ref().trim().is_empty())
+pub fn omit_blank<T: AsRef<str>>(optional_text: Option<T>) -> Option<T> {
+    optional_text.filter(|text| !text.as_ref().trim().is_empty())
 }
 
 #[cfg(test)]

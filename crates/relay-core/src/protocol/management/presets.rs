@@ -14,8 +14,8 @@ pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 
-pub fn max_retry_candidates_in_range(value: u8) -> bool {
-    (MIN_MAX_RETRY_CANDIDATES..=MAX_MAX_RETRY_CANDIDATES).contains(&value)
+pub fn max_retry_candidates_in_range(candidate_count: u8) -> bool {
+    (MIN_MAX_RETRY_CANDIDATES..=MAX_MAX_RETRY_CANDIDATES).contains(&candidate_count)
 }
 
 pub fn quota_request_timeout_in_range(seconds: u64) -> bool {
@@ -95,10 +95,10 @@ pub fn normalize_configuration_preset(
 /// Returns a redacted message when a requested source or account does not
 /// exist in the current configuration.
 pub fn merge_configuration_preset_settings(
-    current: &ConfigurationPresetSettings,
+    existing_settings: &ConfigurationPresetSettings,
     requested: &ConfigurationPresetSettings,
 ) -> Result<ConfigurationPresetSettings, String> {
-    let mut merged = current.clone();
+    let mut merged = existing_settings.clone();
     rules::replace_preset_members(
         &mut merged.sources,
         &requested.sources,
@@ -115,13 +115,13 @@ pub fn merge_configuration_preset_settings(
         .routing
         .tool_policy
         .clone()
-        .or_else(|| current.routing.tool_policy.clone());
+        .or_else(|| existing_settings.routing.tool_policy.clone());
     merged.routing.clone_from(&requested.routing);
     merged.routing.tool_policy = tool_policy;
     // Older presets use the same forward-only compatibility conversion as
     // persisted profiles. Omission preserves the destination's current order.
     if requested.routing.pool_routing.is_none() {
-        merged.routing.pool_routing = current.routing.pool_routing.clone();
+        merged.routing.pool_routing = existing_settings.routing.pool_routing.clone();
     }
     merged.routing.pool_routing = Some(merged.resolved_pool_routing());
     merged.quota.clone_from(&requested.quota);

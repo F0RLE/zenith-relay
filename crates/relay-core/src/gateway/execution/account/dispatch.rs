@@ -68,7 +68,9 @@ pub(super) struct AccountDispatchInput<'a> {
 
 /// Send one prepared account attempt and collect its body. Transport failures
 /// stay retryable until the provider may already have accepted the request.
-pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) -> AccountDispatch {
+pub(super) async fn dispatch_account_attempt(
+    account_attempt_input: AccountDispatchInput<'_>,
+) -> AccountDispatch {
     let AccountDispatchInput {
         runtime,
         key,
@@ -93,7 +95,7 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         response_affinity_key,
         last_failure,
         last_failure_origin,
-    } = input;
+    } = account_attempt_input;
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -104,7 +106,7 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         )
         .await
         {
-            Ok(body) => body,
+            Ok(upstream_response_body) => upstream_response_body,
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return AccountDispatch::Respond(attempt_error_response(
                     failure,
@@ -172,8 +174,9 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         .header(ACCEPT, "application/json")
         .headers(request_headers);
     if endpoint == AccountEndpoint::Compact && !basis_points_route {
-        if let Some(value) = route_responses_lite.as_ref() {
-            upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
+        if let Some(responses_lite_header) = route_responses_lite.as_ref() {
+            upstream_request =
+                upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header.clone());
         }
     }
     let upstream = runtime
@@ -249,10 +252,10 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         )
         .await
         {
-            Ok((headers, body)) => {
+            Ok((fallback_headers, fallback_body)) => {
                 status = StatusCode::OK;
-                response_headers = headers;
-                bytes = body;
+                response_headers = fallback_headers;
+                bytes = fallback_body;
             }
             Err(step) => return step,
         }
@@ -300,14 +303,14 @@ fn reject_authorized_dispatch(
             request_id,
         ));
     }
-    let state = settle_attempt_failure(
+    let failure_state = settle_attempt_failure(
         runtime,
         lease,
         &route.source_model,
         &failure,
         &HeaderMap::new(),
     );
-    apply_failure_state(&mut event, state);
+    apply_failure_state(&mut event, failure_state);
     emit_usage(runtime, event);
     *last_failure = Some(failure);
     *last_failure_origin = selected_error_origin;
@@ -326,10 +329,10 @@ fn continue_after_unreadable_body(
     last_failure_origin: &mut ErrorOrigin,
 ) -> AccountDispatch {
     lease.settle_rotation_unknown(now_ms());
-    let failure = AttemptFailure::body();
-    let state = current_failure_state(runtime, &route.candidate_id, &route.source_model);
+    let failure = AttemptFailure::upstream_response_body_failure();
+    let failure_state = current_failure_state(runtime, &route.candidate_id, &route.source_model);
     let mut event = failed_usage(route, attempt, failure);
-    apply_failure_state(&mut event, state);
+    apply_failure_state(&mut event, failure_state);
     emit_usage(runtime, event);
     *last_failure = Some(failure);
     *last_failure_origin = selected_error_origin;
@@ -365,13 +368,13 @@ async fn fallback_missing_compact(
     )
     .await
     {
-        Ok((headers, body)) => Ok((headers, body)),
+        Ok((fallback_headers, fallback_body)) => Ok((fallback_headers, fallback_body)),
         Err(error) => {
             let (failure, headers) = *error;
             let mut event = failed_usage(route, u16::from(budget.dispatches()), failure);
-            let state =
+            let failure_state =
                 settle_attempt_failure(runtime, lease, &route.source_model, &failure, &headers);
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             Err(AccountDispatch::Respond(finish_request_failure(
                 RequestFailureInput {

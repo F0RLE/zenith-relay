@@ -19,9 +19,16 @@ pub fn prepare_responses_to_messages(
     model: &str,
     stream: bool,
     reasoning_mode: MessagesReasoningMode,
-    previous: Option<MessagesBridgeState>,
+    previous_bridge_state: Option<MessagesBridgeState>,
 ) -> AdapterResult<MessagesBridgeRequest> {
-    prepare_responses_to_messages_scoped(request, model, stream, reasoning_mode, previous, "")
+    prepare_responses_to_messages_scoped(
+        request,
+        model,
+        stream,
+        reasoning_mode,
+        previous_bridge_state,
+        "",
+    )
 }
 
 /// Variant of [`prepare_responses_to_messages`] that scopes generated local
@@ -33,7 +40,7 @@ pub fn prepare_responses_to_messages_scoped(
     model: &str,
     stream: bool,
     reasoning_mode: MessagesReasoningMode,
-    previous: Option<MessagesBridgeState>,
+    previous_bridge_state: Option<MessagesBridgeState>,
     response_scope: &str,
 ) -> AdapterResult<MessagesBridgeRequest> {
     prepare_responses_to_messages_scoped_with_cache_ttl(
@@ -42,7 +49,7 @@ pub fn prepare_responses_to_messages_scoped(
         stream,
         reasoning_mode,
         CacheWriteTtl::Provider,
-        previous,
+        previous_bridge_state,
         response_scope,
     )
 }
@@ -53,87 +60,94 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     stream: bool,
     reasoning_mode: MessagesReasoningMode,
     cache_write_ttl: CacheWriteTtl,
-    previous: Option<MessagesBridgeState>,
+    previous_bridge_state: Option<MessagesBridgeState>,
     response_scope: &str,
 ) -> AdapterResult<MessagesBridgeRequest> {
-    let (object, mut state) = prepare_bridge_state(
+    let (request_object, mut bridge_state) = prepare_bridge_state(
         request,
         model,
         reasoning_mode,
-        previous,
+        previous_bridge_state,
         crate::WireApi::Messages,
     )?;
 
-    if let Some(tools) = request_tool_catalog(object)? {
+    if let Some(tools) = request_tool_catalog(request_object)? {
         let TranslatedTools {
             upstream,
             client_tools,
         } = tools::translate_tools(&tools)?;
-        state.tools = (!upstream.is_empty()).then_some(upstream);
-        state.tool_targets = client_tools;
+        bridge_state.tools = (!upstream.is_empty()).then_some(upstream);
+        bridge_state.tool_targets = client_tools;
         // A Responses request that supplies a new tool catalog without an
         // explicit choice returns to the protocol default of automatic
         // selection. Retaining a previous restricted list would silently hide
         // newly supplied tools.
-        state.tool_choice = None;
-        state.tool_allow_list = None;
+        bridge_state.tool_choice = None;
+        bridge_state.tool_allow_list = None;
     }
-    if let Some(tool_choice) = object.get("tool_choice") {
-        let translated = tools::translate_tool_choice(tool_choice, &state)?;
-        state.tool_choice = translated.value;
-        state.tool_allow_list = translated.allowed_names;
+    if let Some(tool_choice) = request_object.get("tool_choice") {
+        let translated = tools::translate_tool_choice(tool_choice, &bridge_state)?;
+        bridge_state.tool_choice = translated.translated_choice;
+        bridge_state.tool_allow_list = translated.allowed_names;
     }
 
     content::append_responses_input(
-        &mut state,
-        object
+        &mut bridge_state,
+        request_object
             .get("input")
             .ok_or_else(AdapterError::invalid_request)?,
     )?;
-    if state.messages.is_empty() {
+    if bridge_state.messages.is_empty() {
         return Err(AdapterError::invalid_request());
     }
-    state.historical_system = state.system.clone();
-    if let Some(instructions) = object.get("instructions").filter(|value| !value.is_null()) {
-        content::append_system_value(&mut state, instructions)?;
+    bridge_state.historical_system = bridge_state.system.clone();
+    if let Some(instructions) = request_object
+        .get("instructions")
+        .filter(|instructions_value| !instructions_value.is_null())
+    {
+        content::append_system_value(&mut bridge_state, instructions)?;
     }
 
-    let mut body = Map::from_iter([
+    let mut upstream_fields = Map::from_iter([
         ("model".to_string(), Value::String(model.to_string())),
-        ("messages".to_string(), Value::Array(state.messages.clone())),
+        (
+            "messages".to_string(),
+            Value::Array(bridge_state.messages.clone()),
+        ),
         ("stream".to_string(), Value::Bool(stream)),
         (
             "max_tokens".to_string(),
-            object
+            request_object
                 .get("max_output_tokens")
                 .cloned()
                 .unwrap_or_else(|| Value::from(8_192_u64)),
         ),
     ]);
-    if let Some(system) = state.system.clone() {
-        body.insert("system".to_string(), system);
+    if let Some(system) = bridge_state.system.clone() {
+        upstream_fields.insert("system".to_string(), system);
     }
-    if let Some(tools) = state.upstream_tools() {
-        body.insert("tools".to_string(), Value::Array(tools));
+    if let Some(tools) = bridge_state.upstream_tools() {
+        upstream_fields.insert("tools".to_string(), Value::Array(tools));
     }
-    if let Some(tool_choice) = state.tool_choice.clone() {
-        body.insert("tool_choice".to_string(), tool_choice);
+    if let Some(tool_choice) = bridge_state.tool_choice.clone() {
+        upstream_fields.insert("tool_choice".to_string(), tool_choice);
     }
-    if let Some(parallel) = object
+    if let Some(parallel) = request_object
         .get("parallel_tool_calls")
-        .filter(|value| !value.is_null())
+        .filter(|parallel_tool_calls_value| !parallel_tool_calls_value.is_null())
     {
         let parallel = parallel
             .as_bool()
             .ok_or_else(AdapterError::invalid_request)?;
-        body.entry("tool_choice")
+        upstream_fields
+            .entry("tool_choice")
             .or_insert_with(|| json!({"type":"auto"}))["disable_parallel_tool_use"] =
             (!parallel).into();
     }
-    if let Some(format) = object
+    if let Some(format) = request_object
         .get("text")
         .and_then(|text| text.get("format"))
-        .filter(|value| !value.is_null())
+        .filter(|format_value| !format_value.is_null())
     {
         match format.get("type").and_then(Value::as_str) {
             Some("text") => {}
@@ -142,7 +156,7 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
                     .get("schema")
                     .filter(|schema| schema.is_object())
                     .ok_or_else(AdapterError::invalid_request)?;
-                body.insert(
+                upstream_fields.insert(
                     "output_config".into(),
                     json!({"format":{"type":"json_schema","schema":schema}}),
                 );
@@ -150,43 +164,46 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
             _ => return Err(AdapterError::parameter_unsupported()),
         }
     }
-    if let Some(temperature) = object.get("temperature") {
-        body.insert("temperature".to_string(), temperature.clone());
+    if let Some(temperature) = request_object.get("temperature") {
+        upstream_fields.insert("temperature".to_string(), temperature.clone());
     }
-    if let Some(top_p) = object.get("top_p") {
-        body.insert("top_p".to_string(), top_p.clone());
+    if let Some(top_p) = request_object.get("top_p") {
+        upstream_fields.insert("top_p".to_string(), top_p.clone());
     }
-    if let Some(stop_sequences) = object.get("stop") {
-        body.insert("stop_sequences".to_string(), stop_sequences.clone());
+    if let Some(stop_sequences) = request_object.get("stop") {
+        upstream_fields.insert("stop_sequences".to_string(), stop_sequences.clone());
     }
     apply_reasoning(
-        &mut body,
-        object.get("reasoning"),
+        &mut upstream_fields,
+        request_object.get("reasoning"),
         reasoning_mode,
-        object.contains_key("max_output_tokens"),
+        request_object.contains_key("max_output_tokens"),
     )?;
-    let mut upstream_body = Value::Object(body);
+    let mut upstream_body = Value::Object(upstream_fields);
     apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
     Ok(MessagesBridgeRequest {
         upstream_body,
-        state,
+        bridge_state,
         response_scope: response_scope.trim().to_string(),
     })
 }
 
 pub(crate) fn apply_cache_write_ttl(
-    body: &mut Value,
+    message_request: &mut Value,
     cache_write_ttl: CacheWriteTtl,
 ) -> AdapterResult<()> {
     let Some(ttl) = cache_write_ttl.anthropic_ttl() else {
         return Ok(());
     };
-    let object = body
+    let message_request_object = message_request
         .as_object_mut()
         .ok_or_else(AdapterError::invalid_request)?;
     let mut updated = false;
     for key in ["system", "tools"] {
-        if let Some(blocks) = object.get_mut(key).and_then(Value::as_array_mut) {
+        if let Some(blocks) = message_request_object
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+        {
             for block in blocks {
                 if block
                     .as_object()
@@ -197,7 +214,10 @@ pub(crate) fn apply_cache_write_ttl(
             }
         }
     }
-    if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+    if let Some(messages) = message_request_object
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    {
         for message in messages {
             if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
                 for block in blocks {
@@ -214,15 +234,18 @@ pub(crate) fn apply_cache_write_ttl(
     if updated {
         return Ok(());
     }
-    let prefix_marked = object
+    let prefix_marked = message_request_object
         .get_mut("system")
         .is_some_and(|system| set_last_cache_control(system, ttl));
     if !prefix_marked {
-        if let Some(tools) = object.get_mut("tools") {
+        if let Some(tools) = message_request_object.get_mut("tools") {
             set_last_cache_control(tools, ttl);
         }
     }
-    if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+    if let Some(messages) = message_request_object
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    {
         if let Some(content) = messages
             .iter_mut()
             .rev()
@@ -234,14 +257,17 @@ pub(crate) fn apply_cache_write_ttl(
     Ok(())
 }
 
-fn set_last_cache_control(value: &mut Value, ttl: &str) -> bool {
-    if let Some(block) = value.as_array_mut().and_then(|blocks| blocks.last_mut()) {
+fn set_last_cache_control(content_value: &mut Value, ttl: &str) -> bool {
+    if let Some(block) = content_value
+        .as_array_mut()
+        .and_then(|content_blocks| content_blocks.last_mut())
+    {
         return set_cache_control(block, ttl);
     }
-    let Some(text) = value.as_str().map(str::to_string) else {
+    let Some(text) = content_value.as_str().map(str::to_string) else {
         return false;
     };
-    *value = Value::Array(vec![json!({
+    *content_value = Value::Array(vec![json!({
         "type": "text",
         "text": text,
         "cache_control": {"type": "ephemeral", "ttl": ttl},
@@ -261,7 +287,7 @@ fn set_cache_control(block: &mut Value, ttl: &str) -> bool {
 }
 
 fn apply_reasoning(
-    body: &mut Map<String, Value>,
+    message_fields: &mut Map<String, Value>,
     reasoning: Option<&Value>,
     mode: MessagesReasoningMode,
     explicit_max_tokens: bool,
@@ -276,13 +302,14 @@ fn apply_reasoning(
         return Ok(());
     };
     if effort == "none" {
-        body.insert("thinking".to_string(), json!({"type":"disabled"}));
+        message_fields.insert("thinking".to_string(), json!({"type":"disabled"}));
         return Ok(());
     }
-    if ["temperature", "top_p"]
-        .iter()
-        .any(|name| body.get(*name).is_some_and(|value| !value.is_null()))
-    {
+    if ["temperature", "top_p"].iter().any(|parameter_name| {
+        message_fields
+            .get(*parameter_name)
+            .is_some_and(|parameter_value| !parameter_value.is_null())
+    }) {
         return Err(AdapterError::parameter_unsupported());
     }
     match mode {
@@ -299,20 +326,20 @@ fn apply_reasoning(
             };
             let minimum_max_tokens = budget_tokens + 1_024;
             if explicit_max_tokens
-                && body
+                && message_fields
                     .get("max_tokens")
                     .and_then(Value::as_u64)
                     .is_none_or(|limit| limit < minimum_max_tokens)
             {
                 return Err(AdapterError::parameter_unsupported());
             }
-            let max_tokens = body
+            let max_tokens = message_fields
                 .get("max_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or_default()
                 .max(minimum_max_tokens);
-            body.insert("max_tokens".to_string(), Value::from(max_tokens));
-            body.insert(
+            message_fields.insert("max_tokens".to_string(), Value::from(max_tokens));
+            message_fields.insert(
                 "thinking".to_string(),
                 json!({"type": "enabled", "budget_tokens": budget_tokens}),
             );
@@ -323,8 +350,10 @@ fn apply_reasoning(
                 "low" | "medium" | "high" | "max" => effort.as_str(),
                 _ => return Err(AdapterError::reasoning_unsupported()),
             };
-            body.insert("thinking".to_string(), json!({"type": "adaptive"}));
-            body.entry("output_config").or_insert_with(|| json!({}))["effort"] = effort.into();
+            message_fields.insert("thinking".to_string(), json!({"type": "adaptive"}));
+            message_fields
+                .entry("output_config")
+                .or_insert_with(|| json!({}))["effort"] = effort.into();
             Ok(())
         }
     }

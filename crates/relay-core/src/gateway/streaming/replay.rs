@@ -9,7 +9,7 @@ const MAX_CAPTURE_ITEMS: usize = 1_024;
 /// phase, tool state, or reasoning; retain the upstream's completed items.
 #[derive(Default)]
 pub(in crate::gateway) struct NativeReplayCapture {
-    items: Vec<(Option<u64>, Value)>,
+    captured_items: Vec<(Option<u64>, Value)>,
     pending: BTreeSet<u64>,
     retained_bytes: usize,
     unindexed_output: bool,
@@ -17,37 +17,50 @@ pub(in crate::gateway) struct NativeReplayCapture {
 }
 
 impl NativeReplayCapture {
-    pub(in crate::gateway) fn observe(&mut self, payload: &Value) {
+    pub(in crate::gateway) fn observe(&mut self, event_payload: &Value) {
         if self.disabled {
             return;
         }
-        let kind = payload.get("type").and_then(Value::as_str);
-        let index = payload.get("output_index").and_then(Value::as_u64);
-        if kind == Some("response.output_item.done") {
-            let Some(item) = payload.get("item").filter(|item| item.is_object()) else {
+        let event_type = event_payload.get("type").and_then(Value::as_str);
+        let output_index = event_payload.get("output_index").and_then(Value::as_u64);
+        if event_type == Some("response.output_item.done") {
+            let Some(output_item) = event_payload
+                .get("item")
+                .filter(|output_item| output_item.is_object())
+            else {
                 self.unindexed_output = true;
                 return;
             };
-            let size = serde_json::to_vec(item).map_or(MAX_CAPTURE_BYTES + 1, |bytes| bytes.len());
-            self.retained_bytes = self.retained_bytes.saturating_add(size);
-            if self.retained_bytes > MAX_CAPTURE_BYTES || self.items.len() >= MAX_CAPTURE_ITEMS {
+            let item_size =
+                serde_json::to_vec(output_item).map_or(MAX_CAPTURE_BYTES + 1, |bytes| bytes.len());
+            self.retained_bytes = self.retained_bytes.saturating_add(item_size);
+            if self.retained_bytes > MAX_CAPTURE_BYTES
+                || self.captured_items.len() >= MAX_CAPTURE_ITEMS
+            {
                 self.disable();
                 return;
             }
-            if let Some(index) = index {
-                self.pending.remove(&index);
-                if let Some(existing) = self.items.iter_mut().find(|entry| entry.0 == Some(index)) {
-                    existing.1 = item.clone();
+            if let Some(output_index) = output_index {
+                self.pending.remove(&output_index);
+                if let Some(existing) = self
+                    .captured_items
+                    .iter_mut()
+                    .find(|captured_item| captured_item.0 == Some(output_index))
+                {
+                    existing.1 = output_item.clone();
                     return;
                 }
             }
-            self.items.push((index, item.clone()));
-        } else if has_semantic_output(payload, kind)
-            || is_compaction_payload(payload, kind)
-            || kind == Some("response.output_item.added")
-            || kind.is_some_and(|kind| kind.starts_with("response.") && kind.ends_with(".delta"))
+            self.captured_items
+                .push((output_index, output_item.clone()));
+        } else if has_semantic_output(event_payload, event_type)
+            || is_compaction_payload(event_payload, event_type)
+            || event_type == Some("response.output_item.added")
+            || event_type.is_some_and(|event_type| {
+                event_type.starts_with("response.") && event_type.ends_with(".delta")
+            })
         {
-            self.observe_response_delta(index);
+            self.observe_response_delta(output_index);
         }
     }
 
@@ -71,46 +84,60 @@ impl NativeReplayCapture {
 
     fn disable(&mut self) {
         self.disabled = true;
-        self.items.clear();
+        self.captured_items.clear();
         self.pending.clear();
     }
 
     pub(in crate::gateway) fn finish(
         mut self,
-        response: Option<Value>,
+        completed_response: Option<Value>,
         response_id: Option<&str>,
     ) -> Option<Value> {
         if self.disabled {
             return None;
         }
-        let mut response = response.unwrap_or_else(|| json!({}));
-        let object = response.as_object_mut()?;
-        if !object
+        let mut replay_response = completed_response.unwrap_or_else(|| json!({}));
+        let response_object = replay_response.as_object_mut()?;
+        if !response_object
             .get("id")
             .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty())
+            .is_some_and(|response_id_value| !response_id_value.trim().is_empty())
         {
-            let id = response_id.filter(|id| !id.trim().is_empty())?;
-            object.insert("id".to_string(), Value::String(id.to_string()));
+            let response_id_value =
+                response_id.filter(|response_id_value| !response_id_value.trim().is_empty())?;
+            response_object.insert(
+                "id".to_string(),
+                Value::String(response_id_value.to_string()),
+            );
         }
-        let output = object.get("output").and_then(Value::as_array);
-        if output.is_none_or(Vec::is_empty) {
+        let output_items = response_object.get("output").and_then(Value::as_array);
+        if output_items.is_none_or(Vec::is_empty) {
             if self.unindexed_output || !self.pending.is_empty() {
                 return None;
             }
-            if self.items.is_empty() && output.is_none() {
+            if self.captured_items.is_empty() && output_items.is_none() {
                 return None;
             }
-            if self.items.iter().all(|entry| entry.0.is_some()) {
-                self.items.sort_by_key(|entry| entry.0);
+            if self
+                .captured_items
+                .iter()
+                .all(|captured_item| captured_item.0.is_some())
+            {
+                self.captured_items
+                    .sort_by_key(|captured_item| captured_item.0);
             }
-            object.insert(
+            response_object.insert(
                 "output".to_string(),
-                Value::Array(self.items.into_iter().map(|entry| entry.1).collect()),
+                Value::Array(
+                    self.captured_items
+                        .into_iter()
+                        .map(|captured_item| captured_item.1)
+                        .collect(),
+                ),
             );
         }
-        let size = serde_json::to_vec(&response).ok()?.len();
-        (size <= MAX_CAPTURE_BYTES).then_some(response)
+        let response_size = serde_json::to_vec(&replay_response).ok()?.len();
+        (response_size <= MAX_CAPTURE_BYTES).then_some(replay_response)
     }
 }
 
@@ -174,7 +201,7 @@ mod tests {
         let mut capture = NativeReplayCapture::default();
         capture.observe(&json!({"type":"response.output_item.done","item":{
             "type":"message","content":"x".repeat(MAX_CAPTURE_BYTES)}}));
-        assert!(capture.items.is_empty());
+        assert!(capture.captured_items.is_empty());
         assert!(capture
             .finish(Some(json!({"id":"resp_large","output":[]})), None)
             .is_none());
@@ -182,22 +209,25 @@ mod tests {
 
     #[test]
     fn response_delta_index_tracking_does_not_need_the_payload_tree() {
-        let mut from_payload = NativeReplayCapture::default();
+        let mut indexed_capture = NativeReplayCapture::default();
         let mut from_index = NativeReplayCapture::default();
-        from_payload
+        indexed_capture
             .observe(&json!({"type":"response.output_text.delta","output_index":2,"delta":"x"}));
         from_index.observe_response_delta(Some(2));
-        assert_eq!(from_payload.pending, from_index.pending);
-        assert_eq!(from_payload.unindexed_output, from_index.unindexed_output);
+        assert_eq!(indexed_capture.pending, from_index.pending);
+        assert_eq!(
+            indexed_capture.unindexed_output,
+            from_index.unindexed_output
+        );
 
-        let mut unindexed_payload = NativeReplayCapture::default();
+        let mut unindexed_capture = NativeReplayCapture::default();
         let mut unindexed_fast = NativeReplayCapture::default();
-        unindexed_payload
+        unindexed_capture
             .observe(&json!({"type":"response.function_call_arguments.delta","delta":"{"}));
         unindexed_fast.observe_response_delta(None);
-        assert!(unindexed_payload.unindexed_output);
+        assert!(unindexed_capture.unindexed_output);
         assert!(unindexed_fast.unindexed_output);
-        assert!(unindexed_payload.pending.is_empty());
+        assert!(unindexed_capture.pending.is_empty());
         assert!(unindexed_fast.pending.is_empty());
     }
 }

@@ -85,9 +85,9 @@ impl GatewayRuntime {
         model: &str,
         upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
-        let source = self.sources.get(&binding.source_id)?;
-        let source_binding = source.binding_for(binding.binding_key)?;
-        let source_model = source.canonical_model_for(binding.binding_key, model)?;
+        let provider_source = self.sources.get(&binding.source_id)?;
+        let source_binding = provider_source.binding_for(binding.binding_key)?;
+        let source_model = provider_source.canonical_model_for(binding.binding_key, model)?;
         let route_capability = binding
             .capabilities
             .get(&crate::model_id_key(&source_model))
@@ -104,8 +104,12 @@ impl GatewayRuntime {
             reasoning_mode: binding.reasoning_mode,
             cache_write_ttl: binding.cache_write_ttl,
             service_tier: DefaultServiceTier::Standard,
-            upstream_url: source.endpoint(binding.binding_key, &source_model, upstream_stream)?,
-            upstream_headers: source.protocol_headers_for_binding(source_binding),
+            upstream_url: provider_source.endpoint(
+                binding.binding_key,
+                &source_model,
+                upstream_stream,
+            )?,
+            upstream_headers: provider_source.protocol_headers_for_binding(source_binding),
             account_transport: AccountTransport::NativeResponses,
             client_transport: crate::UsageTransport::Http,
             source_model,

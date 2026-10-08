@@ -30,8 +30,8 @@ pub(super) enum EventTerminalOutcome {
     Failure,
 }
 
-pub(super) fn event_terminal(value: &Value) -> EventTerminal {
-    let event_type = value.get("type").and_then(Value::as_str);
+pub(super) fn event_terminal(event_payload: &Value) -> EventTerminal {
+    let event_type = event_payload.get("type").and_then(Value::as_str);
     let mut outcome = match event_type {
         Some("response.completed" | "response.done") => Some(EventTerminalOutcome::Success),
         Some("response.incomplete") => Some(EventTerminalOutcome::Incomplete),
@@ -40,11 +40,14 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
         }
         _ => None,
     };
-    let error_category = upstream_event_failure_category(event_type, value);
+    let error_category = upstream_event_failure_category(event_type, event_payload);
     if let Some(category) = error_category {
         let explicitly_incomplete = outcome == Some(EventTerminalOutcome::Incomplete)
             || matches!(event_type, Some("response.completed" | "response.done"))
-                && value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete");
+                && event_payload
+                    .pointer("/response/status")
+                    .and_then(Value::as_str)
+                    == Some("incomplete");
         outcome = Some(
             if category == error_codes::RESPONSE_INCOMPLETE && explicitly_incomplete {
                 EventTerminalOutcome::Incomplete
@@ -53,18 +56,18 @@ pub(super) fn event_terminal(value: &Value) -> EventTerminal {
             },
         );
     }
-    let status = upstream_status_from_value(value);
+    let status = upstream_status_from_value(event_payload);
     EventTerminal {
         upstream_error: (outcome == Some(EventTerminalOutcome::Failure))
-            .then(|| crate::usage::UpstreamErrorDetails::from_value(None, value)),
+            .then(|| crate::usage::UpstreamErrorDetails::from_value(None, event_payload)),
         outcome,
-        response: value.get("response").cloned(),
+        response: event_payload.get("response").cloned(),
         status,
         error_category,
-        headers: websocket_retry_headers(value),
-        body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
-        previous_response_not_found: previous_response_not_found_value(value),
-        deactivated_workspace: is_deactivated_workspace_value(value),
+        headers: websocket_retry_headers(event_payload),
+        body_hint: rate_limit_body_hint_value(event_payload, std::time::SystemTime::now()),
+        previous_response_not_found: previous_response_not_found_value(event_payload),
+        deactivated_workspace: is_deactivated_workspace_value(event_payload),
     }
 }
 
@@ -111,30 +114,30 @@ pub(super) fn resolved_terminal_failure(terminal: &EventTerminal) -> (StatusCode
     (status, category)
 }
 
-pub(super) fn websocket_retry_headers(value: &Value) -> HeaderMap {
+pub(super) fn websocket_retry_headers(event_payload: &Value) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let retry_after = websocket_reset_delay_seconds(value, now_ms() / 1_000)
+    let retry_after = websocket_reset_delay_seconds(event_payload, now_ms() / 1_000)
         .map(|seconds| seconds.to_string())
         .or_else(|| {
-            value
+            event_payload
                 .pointer("/headers/retry-after")
-                .or_else(|| value.pointer("/headers/retry_after"))
-                .or_else(|| value.pointer("/body/headers/retry-after"))
-                .or_else(|| value.pointer("/body/error/resets_in_seconds"))
-                .or_else(|| value.pointer("/error/resets_in_seconds"))
-                .and_then(|value| match value {
-                    Value::String(value) => Some(value.clone()),
-                    Value::Number(value) => Some(value.to_string()),
+                .or_else(|| event_payload.pointer("/headers/retry_after"))
+                .or_else(|| event_payload.pointer("/body/headers/retry-after"))
+                .or_else(|| event_payload.pointer("/body/error/resets_in_seconds"))
+                .or_else(|| event_payload.pointer("/error/resets_in_seconds"))
+                .and_then(|header_value| match header_value {
+                    Value::String(header_text) => Some(header_text.clone()),
+                    Value::Number(header_number) => Some(header_number.to_string()),
                     _ => None,
                 })
         });
-    if let Some(value) = retry_after
-        .filter(|value| value.len() <= 128)
-        .and_then(|value| HeaderValue::from_str(&value).ok())
+    if let Some(retry_header_value) = retry_after
+        .filter(|retry_text| retry_text.len() <= 128)
+        .and_then(|retry_text| HeaderValue::from_str(&retry_text).ok())
     {
-        headers.insert(RETRY_AFTER, value);
+        headers.insert(RETRY_AFTER, retry_header_value);
     }
-    for name in [
+    for header_name in [
         "x-codex-primary-used-percent",
         "x-codex-primary-reset-after-seconds",
         "x-codex-primary-window-minutes",
@@ -142,41 +145,50 @@ pub(super) fn websocket_retry_headers(value: &Value) -> HeaderMap {
         "x-codex-secondary-reset-after-seconds",
         "x-codex-secondary-window-minutes",
     ] {
-        if let Some(value) = websocket_header_value(value, name)
-            .filter(|value| value.len() <= 128)
-            .and_then(|value| HeaderValue::from_str(&value).ok())
+        if let Some(header_value) = websocket_header_value(event_payload, header_name)
+            .filter(|header_text| header_text.len() <= 128)
+            .and_then(|header_text| HeaderValue::from_str(&header_text).ok())
         {
-            headers.insert(HeaderName::from_static(name), value);
+            headers.insert(HeaderName::from_static(header_name), header_value);
         }
     }
     headers
 }
 
-fn websocket_header_value(value: &Value, name: &str) -> Option<String> {
-    let alternate = name.replace('-', "_");
+fn websocket_header_value(event_payload: &Value, header_name: &str) -> Option<String> {
+    let alternate_name = header_name.replace('-', "_");
     [
-        value.get("headers"),
-        value.pointer("/body/headers"),
-        value.pointer("/response/headers"),
+        event_payload.get("headers"),
+        event_payload.pointer("/body/headers"),
+        event_payload.pointer("/response/headers"),
     ]
     .into_iter()
     .flatten()
-    .find_map(|headers| headers.get(name).or_else(|| headers.get(&alternate)))
-    .and_then(|value| match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
+    .find_map(|headers| {
+        headers
+            .get(header_name)
+            .or_else(|| headers.get(&alternate_name))
+    })
+    .and_then(|header_value| match header_value {
+        Value::String(header_text) => Some(header_text.clone()),
+        Value::Number(header_number) => Some(header_number.to_string()),
         _ => None,
     })
 }
 
-pub(super) fn websocket_reset_delay_seconds(value: &Value, now_seconds: u64) -> Option<u64> {
-    let reset_at = value
+pub(super) fn websocket_reset_delay_seconds(
+    event_payload: &Value,
+    now_seconds: u64,
+) -> Option<u64> {
+    let reset_at = event_payload
         .pointer("/body/error/resets_at")
-        .or_else(|| value.pointer("/response/error/resets_at"))
-        .or_else(|| value.pointer("/error/resets_at"))?;
-    let mut reset_at = reset_at
-        .as_u64()
-        .or_else(|| reset_at.as_str().and_then(|value| value.parse().ok()))?;
+        .or_else(|| event_payload.pointer("/response/error/resets_at"))
+        .or_else(|| event_payload.pointer("/error/resets_at"))?;
+    let mut reset_at = reset_at.as_u64().or_else(|| {
+        reset_at
+            .as_str()
+            .and_then(|reset_text| reset_text.parse().ok())
+    })?;
     if reset_at > 10_000_000_000 {
         reset_at /= 1_000;
     }

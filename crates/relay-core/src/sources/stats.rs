@@ -89,22 +89,22 @@ pub struct SourceProviderStats {
     pub refresh_error: Option<SourceStatsStatus>,
 }
 
-fn is_false(value: &bool) -> bool {
-    !value
+fn is_false(flag: &bool) -> bool {
+    !flag
 }
 
 impl SourceProviderStats {
     /// Preserve a successful value only inside the same fenced source scope.
-    pub fn observed(mut self, previous: Option<&Self>, now_ms: u64) -> Self {
+    pub fn observed(mut self, previous_stats: Option<&Self>, now_ms: u64) -> Self {
         if self.status == SourceStatsStatus::Available {
             self.as_of_ms = Some(now_ms);
             self.stale = false;
             self.refresh_error = None;
         } else if self.status != SourceStatsStatus::Unsupported {
-            if let Some(previous) =
-                previous.filter(|value| value.status == SourceStatsStatus::Available)
+            if let Some(previous_stats) = previous_stats
+                .filter(|previous_stats| previous_stats.status == SourceStatsStatus::Available)
             {
-                let mut retained = previous.clone();
+                let mut retained = previous_stats.clone();
                 retained.stale = true;
                 retained.refresh_error = Some(self.status);
                 return retained;
@@ -149,7 +149,9 @@ pub async fn fetch_source_provider_stats(
     base_url: &str,
     api_key: &str,
 ) -> Result<SourceProviderStats, String> {
-    read_source_provider_stats(base_url, api_key).await.value
+    read_source_provider_stats(base_url, api_key)
+        .await
+        .read_value
 }
 
 pub async fn read_source_provider_stats(
@@ -168,21 +170,21 @@ pub async fn read_source_provider_stats_with_scope(
         Ok(client) => client,
         Err(error) => {
             return super::SourceRead {
-                value: Err(error),
+                read_value: Err(error),
                 retry_after_ms: None,
             }
         }
     };
     let provider = source_stats_provider(base_url);
-    let result =
+    let stats_timeout =
         tokio::time::timeout(Duration::from_secs(20), fetch_stats(&client, provider)).await;
-    let value = Ok(match result {
+    let stats_read = Ok(match stats_timeout {
         Ok(Ok(stats)) => stats,
         Ok(Err(status)) => SourceProviderStats::empty(provider, status),
         Err(_) => SourceProviderStats::empty(provider, SourceStatsStatus::Unavailable),
     });
     super::SourceRead {
-        value,
+        read_value: stats_read,
         retry_after_ms: client.hints.delay(),
     }
 }
@@ -195,9 +197,9 @@ async fn fetch_stats(
     match provider {
         P::Zenith => formats::zenith_stats(&client.get("zenith/key/stats", false, true).await?),
         P::OpenRouter => {
-            let payload = client.get("key", false, true).await?;
-            let key = formats::openrouter_key_stats(&payload)?;
-            if payload
+            let key_stats_payload = client.get("key", false, true).await?;
+            let key_stats = formats::openrouter_key_stats(&key_stats_payload)?;
+            if key_stats_payload
                 .pointer("/data/is_management_key")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
@@ -209,7 +211,7 @@ async fn fetch_stats(
                     }
                 }
             }
-            Ok(key)
+            Ok(key_stats)
         }
         P::Deepseek => formats::deepseek_stats(&client.get("user/balance", true, true).await?),
         // SiliconFlow retired /user/info on 2026-08-14 and has not announced
@@ -229,7 +231,7 @@ async fn autodetect(client: &StatsClient) -> StatsResult<SourceProviderStats> {
     }
     let mut failure = S::Unsupported;
     match client.get("usage", false, true).await {
-        Ok(payload) => match formats::sub2api_stats(&payload) {
+        Ok(stats_payload) => match formats::sub2api_stats(&stats_payload) {
             Ok(stats) => return Ok(stats),
             Err(S::Unsupported) => {}
             Err(status) => {
@@ -243,12 +245,12 @@ async fn autodetect(client: &StatsClient) -> StatsResult<SourceProviderStats> {
         Err(status) => remember_failure(&mut failure, status),
     }
     match client.get("api/usage/token/", true, true).await {
-        Ok(payload) if formats::is_new_api(&payload) => {
+        Ok(stats_payload) if formats::is_new_api(&stats_payload) => {
             let metadata = client.get("api/status", true, false).await.ok();
             return Ok(
-                formats::new_api_stats(&payload, metadata.as_ref()).unwrap_or_else(|status| {
-                    SourceProviderStats::empty(SourceStatsProvider::NewApi, status)
-                }),
+                formats::new_api_stats(&stats_payload, metadata.as_ref()).unwrap_or_else(
+                    |status| SourceProviderStats::empty(SourceStatsProvider::NewApi, status),
+                ),
             );
         }
         Ok(_) => {}
@@ -260,15 +262,19 @@ async fn autodetect(client: &StatsClient) -> StatsResult<SourceProviderStats> {
             .get("dashboard/billing/subscription", site_path, true)
             .await
         {
-            Ok(payload) if formats::is_billing(&payload) => {
-                let usage = client
+            Ok(subscription_payload) if formats::is_billing(&subscription_payload) => {
+                let usage_payload = client
                     .get("dashboard/billing/usage", site_path, true)
                     .await?;
                 let metadata = client.get("api/status", true, false).await.ok();
-                return Ok(formats::billing_stats(&payload, &usage, metadata.as_ref())
-                    .unwrap_or_else(|status| {
-                        SourceProviderStats::empty(SourceStatsProvider::Billing, status)
-                    }));
+                return Ok(formats::billing_stats(
+                    &subscription_payload,
+                    &usage_payload,
+                    metadata.as_ref(),
+                )
+                .unwrap_or_else(|status| {
+                    SourceProviderStats::empty(SourceStatsProvider::Billing, status)
+                }));
             }
             Ok(_) => {}
             Err(S::RateLimited) => return Err(S::RateLimited),
@@ -278,7 +284,7 @@ async fn autodetect(client: &StatsClient) -> StatsResult<SourceProviderStats> {
     Err(failure)
 }
 
-fn remember_failure(current: &mut SourceStatsStatus, next: SourceStatsStatus) {
+fn remember_failure(retained_status: &mut SourceStatsStatus, incoming_status: SourceStatsStatus) {
     use SourceStatsStatus as S;
     let rank = |status| match status {
         S::Unauthorized => 3,
@@ -286,8 +292,8 @@ fn remember_failure(current: &mut SourceStatsStatus, next: SourceStatsStatus) {
         S::InvalidResponse => 1,
         _ => 0,
     };
-    if rank(next) > rank(*current) {
-        *current = next;
+    if rank(incoming_status) > rank(*retained_status) {
+        *retained_status = incoming_status;
     }
 }
 

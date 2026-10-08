@@ -141,7 +141,7 @@ impl StreamExecution {
                 (_, chunk) => chunk,
             }));
         let completion_runtime = runtime.clone();
-        let completion_source = route.candidate_id.clone();
+        let completion_candidate_id = route.candidate_id.clone();
         let completion_model = source_model.clone();
         let completion_prompt_affinity = prompt_affinity_key.clone();
         let completion_headers = headers.clone();
@@ -160,7 +160,7 @@ impl StreamExecution {
             upstream_usage,
             lease,
             runtime: completion_runtime,
-            source: completion_source,
+            candidate_id: completion_candidate_id,
             model: completion_model,
             headers: completion_headers,
             prompt_affinity: completion_prompt_affinity,
@@ -204,9 +204,10 @@ impl StreamExecution {
         );
         usage_stream.expected_model = adapter_is_passthrough.then_some(expected_model).flatten();
         let origin = route_error_origin(&route);
-        let mut response = proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
-        attach_stream_diagnostics(&mut response, origin, &request_id);
-        response
+        let mut streamed_response =
+            proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
+        attach_stream_diagnostics(&mut streamed_response, origin, &request_id);
+        streamed_response
     }
 }
 

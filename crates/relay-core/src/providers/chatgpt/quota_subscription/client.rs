@@ -116,9 +116,10 @@ impl CodexSubscriptionClient {
             )
             .await
             .map_err(|_| super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true))?;
-        let payload = response_json(response).await?;
+        let subscription_check_payload = response_json(response).await?;
         drop(permit);
-        let mut metadata = super::parse::parse_accounts_check(&payload, preferred_account_id)?;
+        let mut metadata =
+            super::parse::parse_accounts_check(&subscription_check_payload, preferred_account_id)?;
         if metadata
             .active_until_ms
             .is_some_and(|active_until_ms| active_until_ms > now_ms)
@@ -145,9 +146,9 @@ impl CodexSubscriptionClient {
             )
             .await
             .map_err(|_| super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true))?;
-        let payload = response_json(response).await?;
+        let subscription_list_payload = response_json(response).await?;
         drop(permit);
-        let fallback = super::parse::parse_subscriptions(&payload, account_id);
+        let fallback = super::parse::parse_subscriptions(&subscription_list_payload, account_id);
         metadata.account_id = fallback.account_id.or(metadata.account_id);
         metadata.plan_type = fallback.plan_type.or(metadata.plan_type);
         metadata.active_until_ms = fallback.active_until_ms.or(metadata.active_until_ms);
@@ -170,18 +171,18 @@ fn authorization_header(access_token: &str) -> Result<HeaderValue, QuotaRefreshF
         .map_err(|_| super::failure(error_codes::SUBSCRIPTION_ACCESS_TOKEN_INVALID, false))
 }
 
-fn validate_account_id(value: &str) -> Result<&str, QuotaRefreshFailure> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > super::MAX_ACCOUNT_ID_BYTES
-        || value.bytes().any(|byte| byte.is_ascii_control())
+fn validate_account_id(account_id: &str) -> Result<&str, QuotaRefreshFailure> {
+    let account_id = account_id.trim();
+    if account_id.is_empty()
+        || account_id.len() > super::MAX_ACCOUNT_ID_BYTES
+        || account_id.bytes().any(|byte| byte.is_ascii_control())
     {
         Err(super::failure(
             error_codes::SUBSCRIPTION_ACCOUNT_ID_INVALID,
             false,
         ))
     } else {
-        Ok(value)
+        Ok(account_id)
     }
 }
 
@@ -205,7 +206,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefres
     let status = response.status();
     let retry_after_ms =
         crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
-    let body = collect_response_body(response, MAX_RESPONSE_BYTES)
+    let subscription_response_body = collect_response_body(response, MAX_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
             ResponseBodyError::Transport => {
@@ -219,7 +220,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefres
     if !status.is_success() {
         return Err(http_failure(status).with_retry_after(retry_after_ms));
     }
-    serde_json::from_slice(&body)
+    serde_json::from_slice(&subscription_response_body)
         .map_err(|_| super::failure(error_codes::SUBSCRIPTION_INVALID_RESPONSE, false))
 }
 

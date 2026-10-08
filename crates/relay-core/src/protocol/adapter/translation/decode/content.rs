@@ -11,8 +11,8 @@ mod tools;
 pub(super) use request::{choice, common, output_format};
 pub(super) use tools::tools;
 
-pub(super) fn role(value: &Value) -> AdapterResult<Role> {
-    match value.get("role").and_then(Value::as_str) {
+pub(super) fn role(message_part: &Value) -> AdapterResult<Role> {
+    match message_part.get("role").and_then(Value::as_str) {
         Some("system" | "developer") => Ok(Role::System),
         Some("user") | None => Ok(Role::User),
         Some("assistant" | "model") => Ok(Role::Assistant),
@@ -20,81 +20,93 @@ pub(super) fn role(value: &Value) -> AdapterResult<Role> {
     }
 }
 
-pub(super) fn text_blocks(value: &Value, protocol: WireApi) -> AdapterResult<Vec<Block>> {
-    if let Some(text) = value.as_str() {
+pub(super) fn text_blocks(content_value: &Value, protocol: WireApi) -> AdapterResult<Vec<Block>> {
+    if let Some(text) = content_value.as_str() {
         return Ok(vec![Block::Text(text.to_owned())]);
     }
-    if value.is_null() {
+    if content_value.is_null() {
         return Ok(Vec::new());
     }
-    value
+    content_value
         .as_array()
         .ok_or_else(AdapterError::invalid_request)?
         .iter()
         .enumerate()
-        .map(|(index, part)| block(part, protocol, index))
+        .map(|(index, content_part)| block(content_part, protocol, index))
         .collect()
 }
 
-pub(super) fn block(part: &Value, protocol: WireApi, _index: usize) -> AdapterResult<Block> {
+pub(super) fn block(
+    content_part: &Value,
+    protocol: WireApi,
+    _index: usize,
+) -> AdapterResult<Block> {
     if protocol == WireApi::Gemini {
-        return gemini_block(part);
+        return gemini_block(content_part);
     }
-    match required_text(part, "type")? {
+    match required_text(content_part, "type")? {
         "thinking" if protocol == WireApi::Messages => {
-            checked(part, &["type", "thinking"])?;
+            checked(content_part, &["type", "thinking"])?;
             Ok(Block::Reasoning(
-                part.get("thinking")
+                content_part
+                    .get("thinking")
                     .and_then(Value::as_str)
                     .ok_or_else(AdapterError::invalid_request)?
                     .into(),
             ))
         }
         "text" | "input_text" | "output_text" => {
-            checked(part, &["type", "text", "annotations"])?;
-            if part
+            checked(content_part, &["type", "text", "annotations"])?;
+            if content_part
                 .get("annotations")
                 .and_then(Value::as_array)
-                .is_some_and(|items| !items.is_empty())
+                .is_some_and(|annotation_items| !annotation_items.is_empty())
             {
                 return Err(AdapterError::parameter_unsupported());
             }
             Ok(Block::Text(
-                part.get("text")
+                content_part
+                    .get("text")
                     .and_then(Value::as_str)
                     .ok_or_else(AdapterError::invalid_request)?
                     .into(),
             ))
         }
-        "image_url" | "input_image" | "image" => image_block(part),
+        "image_url" | "input_image" | "image" => image_block(content_part),
         "tool_use" => {
-            checked(part, &["type", "id", "name", "input"])?;
+            checked(content_part, &["type", "id", "name", "input"])?;
             Ok(Block::ToolCall {
-                id: required_text(part, "id")?.into(),
-                name: required_text(part, "name")?.into(),
-                arguments: part
+                id: required_text(content_part, "id")?.into(),
+                name: required_text(content_part, "name")?.into(),
+                arguments: content_part
                     .get("input")
-                    .filter(|input| input.is_object())
+                    .filter(|tool_input| tool_input.is_object())
                     .ok_or_else(AdapterError::invalid_request)?
                     .to_string(),
             })
         }
         "tool_result" => {
-            checked(part, &["type", "tool_use_id", "content", "is_error"])?;
+            checked(
+                content_part,
+                &["type", "tool_use_id", "content", "is_error"],
+            )?;
             Ok(Block::ToolResult {
-                id: required_text(part, "tool_use_id")?.into(),
+                id: required_text(content_part, "tool_use_id")?.into(),
                 name: String::new(),
-                content: plain_text(part.get("content").unwrap_or(&Value::Null), protocol)?,
-                is_error: optional_bool(part, "is_error")?.unwrap_or(false),
+                content: plain_text(
+                    content_part.get("content").unwrap_or(&Value::Null),
+                    protocol,
+                )?,
+                is_error: optional_bool(content_part, "is_error")?.unwrap_or(false),
             })
         }
         _ => Err(AdapterError::parameter_unsupported()),
     }
 }
 
-fn gemini_block(part: &Value) -> AdapterResult<Block> {
+fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
     checked(
-        part,
+        gemini_part,
         &[
             "text",
             "inlineData",
@@ -104,77 +116,77 @@ fn gemini_block(part: &Value) -> AdapterResult<Block> {
             "thought",
         ],
     )?;
-    if let Some(text) = part.get("text").and_then(Value::as_str) {
+    if let Some(text) = gemini_part.get("text").and_then(Value::as_str) {
         return Ok(
-            if part.get("thought").and_then(Value::as_bool) == Some(true) {
+            if gemini_part.get("thought").and_then(Value::as_bool) == Some(true) {
                 Block::Reasoning(text.into())
             } else {
                 Block::Text(text.into())
             },
         );
     }
-    if let Some(data) = part.get("inlineData") {
-        checked(data, &["mimeType", "data"])?;
+    if let Some(inline_data) = gemini_part.get("inlineData") {
+        checked(inline_data, &["mimeType", "data"])?;
         return image(
             format!(
                 "data:{};base64,{}",
-                required_text(data, "mimeType")?,
-                required_text(data, "data")?
+                required_text(inline_data, "mimeType")?,
+                required_text(inline_data, "data")?
             ),
             None,
         );
     }
-    if let Some(data) = part.get("fileData") {
-        checked(data, &["mimeType", "fileUri"])?;
-        if data
+    if let Some(file_data) = gemini_part.get("fileData") {
+        checked(file_data, &["mimeType", "fileUri"])?;
+        if file_data
             .get("mimeType")
             .and_then(Value::as_str)
             .is_none_or(|mime| !mime.starts_with("image/"))
         {
             return Err(AdapterError::parameter_unsupported());
         }
-        return image(required_text(data, "fileUri")?.into(), None);
+        return image(required_text(file_data, "fileUri")?.into(), None);
     }
-    if let Some(call) = part.get("functionCall") {
-        checked(call, &["id", "name", "args"])?;
+    if let Some(function_call) = gemini_part.get("functionCall") {
+        checked(function_call, &["id", "name", "args"])?;
         return Ok(Block::ToolCall {
-            id: call
+            id: function_call
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_default(),
-            name: required_text(call, "name")?.into(),
-            arguments: call.get("args").unwrap_or(&json!({})).to_string(),
+            name: required_text(function_call, "name")?.into(),
+            arguments: function_call.get("args").unwrap_or(&json!({})).to_string(),
         });
     }
-    if let Some(result) = part.get("functionResponse") {
-        checked(result, &["id", "name", "response"])?;
-        let response = result
+    if let Some(function_response) = gemini_part.get("functionResponse") {
+        checked(function_response, &["id", "name", "response"])?;
+        let response_payload = function_response
             .get("response")
             .ok_or_else(AdapterError::invalid_request)?;
         return Ok(Block::ToolResult {
-            id: result
+            id: function_response
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
-            name: required_text(result, "name")?.into(),
-            content: response.to_string(),
-            is_error: response.get("error").is_some(),
+            name: required_text(function_response, "name")?.into(),
+            content: response_payload.to_string(),
+            is_error: response_payload.get("error").is_some(),
         });
     }
     Err(AdapterError::parameter_unsupported())
 }
 
-fn image_block(part: &Value) -> AdapterResult<Block> {
-    match required_text(part, "type")? {
+fn image_block(image_part: &Value) -> AdapterResult<Block> {
+    match required_text(image_part, "type")? {
         "image_url" | "input_image" => {
-            checked(part, &["type", "image_url", "detail"])?;
-            let image_value = part
+            checked(image_part, &["type", "image_url", "detail"])?;
+            let image_value = image_part
                 .get("image_url")
                 .ok_or_else(AdapterError::invalid_request)?;
             let (url, detail) = if let Some(url) = image_value.as_str() {
-                (url, part.get("detail").and_then(Value::as_str))
+                (url, image_part.get("detail").and_then(Value::as_str))
             } else {
                 checked(image_value, &["url", "detail"])?;
                 (
@@ -185,25 +197,25 @@ fn image_block(part: &Value) -> AdapterResult<Block> {
             image(url.into(), detail.map(str::to_owned))
         }
         "image" => {
-            checked(part, &["type", "source"])?;
-            let source = part
+            checked(image_part, &["type", "source"])?;
+            let image_source = image_part
                 .get("source")
                 .ok_or_else(AdapterError::invalid_request)?;
-            match required_text(source, "type")? {
+            match required_text(image_source, "type")? {
                 "base64" => {
-                    checked(source, &["type", "media_type", "data"])?;
+                    checked(image_source, &["type", "media_type", "data"])?;
                     image(
                         format!(
                             "data:{};base64,{}",
-                            required_text(source, "media_type")?,
-                            required_text(source, "data")?
+                            required_text(image_source, "media_type")?,
+                            required_text(image_source, "data")?
                         ),
                         None,
                     )
                 }
                 "url" => {
-                    checked(source, &["type", "url"])?;
-                    image(required_text(source, "url")?.into(), None)
+                    checked(image_source, &["type", "url"])?;
+                    image(required_text(image_source, "url")?.into(), None)
                 }
                 _ => Err(AdapterError::parameter_unsupported()),
             }
@@ -214,15 +226,15 @@ fn image_block(part: &Value) -> AdapterResult<Block> {
 
 pub(super) fn image(url: String, detail: Option<String>) -> AdapterResult<Block> {
     use base64::Engine;
-    if let Some(data) = url.strip_prefix("data:") {
-        let (mime, data) = data
+    if let Some(base64_payload) = url.strip_prefix("data:") {
+        let (mime, base64_data) = base64_payload
             .split_once(";base64,")
             .ok_or_else(AdapterError::invalid_request)?;
         if !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime) {
             return Err(AdapterError::parameter_unsupported());
         }
         base64::engine::general_purpose::STANDARD
-            .decode(data)
+            .decode(base64_data)
             .map_err(|_| AdapterError::invalid_request())?;
     } else {
         let parsed = url::Url::parse(&url).map_err(|_| AdapterError::invalid_request())?;
@@ -233,13 +245,13 @@ pub(super) fn image(url: String, detail: Option<String>) -> AdapterResult<Block>
     Ok(Block::Image { url, detail })
 }
 
-pub(super) fn plain_text(value: &Value, protocol: WireApi) -> AdapterResult<String> {
-    let mut result = String::new();
-    for block in text_blocks(value, protocol)? {
+pub(super) fn plain_text(content_value: &Value, protocol: WireApi) -> AdapterResult<String> {
+    let mut plain_text = String::new();
+    for block in text_blocks(content_value, protocol)? {
         let Block::Text(text) = block else {
             return Err(AdapterError::parameter_unsupported());
         };
-        result.push_str(&text);
+        plain_text.push_str(&text);
     }
-    Ok(result)
+    Ok(plain_text)
 }

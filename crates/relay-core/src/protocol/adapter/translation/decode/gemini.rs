@@ -5,9 +5,9 @@ use super::super::{
 use crate::WireApi;
 use serde_json::Value;
 
-pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
+pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     checked(
-        value,
+        request_body,
         &[
             "model",
             "stream",
@@ -18,10 +18,10 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             "generationConfig",
         ],
     )?;
-    let mut request = Request::default();
-    if let Some(system) = value.get("systemInstruction") {
+    let mut decoded_request = Request::default();
+    if let Some(system) = request_body.get("systemInstruction") {
         checked(system, &["role", "parts"])?;
-        request.messages.push(Message {
+        decoded_request.messages.push(Message {
             role: Role::System,
             blocks: super::content::text_blocks(
                 system
@@ -31,13 +31,13 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             )?,
         });
     }
-    for content in value
+    for content in request_body
         .get("contents")
         .and_then(Value::as_array)
         .ok_or_else(AdapterError::invalid_request)?
     {
         checked(content, &["role", "parts"])?;
-        request.messages.push(Message {
+        decoded_request.messages.push(Message {
             role: super::content::role(content)?,
             blocks: super::content::text_blocks(
                 content
@@ -47,18 +47,21 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             )?,
         });
     }
-    request.tools = super::content::tools(value.get("tools"), WireApi::Gemini)?;
-    if let Some(config) = value.get("toolConfig") {
-        checked(config, &["functionCallingConfig"])?;
-        let choice = config
+    decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Gemini)?;
+    if let Some(tool_config) = request_body.get("toolConfig") {
+        checked(tool_config, &["functionCallingConfig"])?;
+        let choice_config = tool_config
             .get("functionCallingConfig")
             .ok_or_else(AdapterError::unsupported_tool)?;
-        checked(choice, &["mode", "allowedFunctionNames"])?;
-        request.tool_choice = Some(match required_text(choice, "mode")? {
+        checked(choice_config, &["mode", "allowedFunctionNames"])?;
+        decoded_request.tool_choice = Some(match required_text(choice_config, "mode")? {
             "AUTO" => ToolChoice::Auto,
             "NONE" => ToolChoice::None,
             "ANY" => {
-                if let Some(names) = choice.get("allowedFunctionNames").and_then(Value::as_array) {
+                if let Some(names) = choice_config
+                    .get("allowedFunctionNames")
+                    .and_then(Value::as_array)
+                {
                     if names.len() != 1 {
                         return Err(AdapterError::unsupported_tool());
                     }
@@ -75,9 +78,12 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             _ => return Err(AdapterError::unsupported_tool()),
         });
     }
-    if let Some(config) = value.get("generationConfig").filter(|v| !v.is_null()) {
+    if let Some(generation_config) = request_body
+        .get("generationConfig")
+        .filter(|generation_config_value| !generation_config_value.is_null())
+    {
         checked(
-            config,
+            generation_config,
             &[
                 "maxOutputTokens",
                 "temperature",
@@ -90,23 +96,26 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 "candidateCount",
             ],
         )?;
-        if optional_u64(config, "candidateCount")?.is_some_and(|n| n != 1) {
+        if optional_u64(generation_config, "candidateCount")?.is_some_and(|n| n != 1) {
             return Err(AdapterError::parameter_unsupported());
         }
         super::content::common(
-            &mut request,
-            config,
+            &mut decoded_request,
+            generation_config,
             "maxOutputTokens",
             "topP",
             "stopSequences",
         )?;
-        if let Some(mime) = config.get("responseMimeType").and_then(Value::as_str) {
-            request.output_format = match mime {
+        if let Some(mime) = generation_config
+            .get("responseMimeType")
+            .and_then(Value::as_str)
+        {
+            decoded_request.output_format = match mime {
                 "text/plain" => None,
                 "application/json" => Some(
-                    config
+                    generation_config
                         .get("responseJsonSchema")
-                        .or_else(|| config.get("responseSchema"))
+                        .or_else(|| generation_config.get("responseSchema"))
                         .map_or(OutputFormat::JsonObject, |schema| {
                             OutputFormat::JsonSchema {
                                 name: "response".into(),
@@ -118,9 +127,9 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 _ => return Err(AdapterError::parameter_unsupported()),
             };
         }
-        if let Some(thinking) = config.get("thinkingConfig") {
+        if let Some(thinking) = generation_config.get("thinkingConfig") {
             checked(thinking, &["thinkingLevel", "thinkingBudget"])?;
-            request.reasoning =
+            decoded_request.reasoning =
                 if let Some(level) = thinking.get("thinkingLevel").and_then(Value::as_str) {
                     Some(Reasoning::Effort(level.to_ascii_lowercase()))
                 } else {
@@ -128,5 +137,5 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 };
         }
     }
-    Ok(request)
+    Ok(decoded_request)
 }

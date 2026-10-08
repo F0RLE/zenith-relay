@@ -89,7 +89,7 @@ fn image_url_object_and_supported_signatures_decode() {
     };
     assert_eq!(image.media_type, "image/png");
     assert_eq!(image.filename, "image.png");
-    assert_eq!(image.data, png);
+    assert_eq!(image.bytes, png);
 
     let jpeg = expect_image(decode_inline_image("data:image/jpg;base64,/9j/AA=="));
     assert_eq!(jpeg.filename, "image.jpeg");

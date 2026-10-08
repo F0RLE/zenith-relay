@@ -32,29 +32,36 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
 
 pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
-    request: Request<Body>,
+    http_request: Request<Body>,
     client_wire_api: WireApi,
 ) -> Response<Body> {
-    execute_client_request_inner(runtime, request, client_wire_api, None, false).await
+    execute_client_request_inner(runtime, http_request, client_wire_api, None, false).await
 }
 
 pub(in crate::gateway) async fn execute_gemini_client_request(
     runtime: Arc<GatewayRuntime>,
-    request: Request<Body>,
+    http_request: Request<Body>,
     model: String,
     force_stream: bool,
 ) -> Response<Body> {
-    execute_client_request_inner(runtime, request, WireApi::Gemini, Some(model), force_stream).await
+    execute_client_request_inner(
+        runtime,
+        http_request,
+        WireApi::Gemini,
+        Some(model),
+        force_stream,
+    )
+    .await
 }
 
 async fn execute_client_request_inner(
     runtime: Arc<GatewayRuntime>,
-    request: Request<Body>,
+    http_request: Request<Body>,
     client_wire_api: WireApi,
     path_model: Option<String>,
     force_stream: bool,
 ) -> Response<Body> {
-    let (parts, body) = request.into_parts();
+    let (parts, request_body) = http_request.into_parts();
     let headers = parts.headers;
     if !valid_local_host(&headers) {
         return invalid_host();
@@ -72,22 +79,24 @@ async fn execute_client_request_inner(
     if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
     }
-    let mut request = match super::super::request_body::read_json_object(&headers, body).await {
-        Ok(object) => Value::Object(object),
-        Err(response) => return *response,
-    };
+    let mut request_json =
+        match super::super::request_body::read_json_object(&headers, request_body).await {
+            Ok(request_object) => Value::Object(request_object),
+            Err(error_response) => return *error_response,
+        };
     let tool_policy = parts
         .extensions
         .get::<super::super::request::RequestToolPolicy>()
         .cloned()
-        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request));
+        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request_json));
     let managed_codex_client = is_managed_codex_client(&headers);
     let service_tier_policy = if managed_codex_client {
-        ServiceTierPolicy::pool_owned(&request)
+        ServiceTierPolicy::pool_owned(&request_json)
     } else {
-        ServiceTierPolicy::client_owned(&request)
+        ServiceTierPolicy::client_owned(&request_json)
     };
-    if client_wire_api == WireApi::ChatCompletions && !chat_request_is_text_or_image_only(&request)
+    if client_wire_api == WireApi::ChatCompletions
+        && !chat_request_is_text_or_image_only(&request_json)
     {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -95,7 +104,7 @@ async fn execute_client_request_inner(
             error_codes::CHAT_FEATURE_NOT_SUPPORTED,
         );
     }
-    let body_model = request
+    let body_model = request_json
         .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.trim().is_empty())
@@ -117,7 +126,7 @@ async fn execute_client_request_inner(
         );
     };
     let background_kind = (client_wire_api == WireApi::Responses)
-        .then(|| codex_background_request_kind(&headers, &request))
+        .then(|| codex_background_request_kind(&headers, &request_json))
         .flatten();
     let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
     let transport = identity
@@ -133,7 +142,7 @@ async fn execute_client_request_inner(
         },
         |identity| (identity.request_id, identity.budget),
     );
-    let stream = match request.get("stream") {
+    let stream = match request_json.get("stream") {
         Some(Value::Bool(stream)) => *stream,
         Some(_) => {
             return api_error(
@@ -159,7 +168,7 @@ async fn execute_client_request_inner(
         }
     }
     let continuation = if client_wire_api == WireApi::Responses {
-        match prepare_response_continuation(&runtime, &key.id, &mut request, now_ms(), None) {
+        match prepare_response_continuation(&runtime, &key.id, &mut request_json, now_ms(), None) {
             Ok(continuation) => Some(continuation),
             Err(()) => {
                 return api_error(
@@ -214,7 +223,7 @@ async fn execute_client_request_inner(
         tool_policy,
         runtime: runtime.clone(),
         key,
-        request,
+        request: request_json,
         service_tier_policy,
         requested_model,
         resolved_model,
@@ -244,7 +253,7 @@ fn blocked_background_response(
     kind: &str,
 ) -> Response<Body> {
     let response_id = format!("resp_relay_blocked_{request_id}");
-    let body = if stream {
+    let response_body = if stream {
         format!(
             "event: response.completed\ndata: {}\n\n",
             serde_json::json!({
@@ -278,6 +287,6 @@ fn blocked_background_response(
                 "application/json"
             },
         )
-        .body(Body::from(body))
+        .body(Body::from(response_body))
         .expect("blocked response builder is valid")
 }

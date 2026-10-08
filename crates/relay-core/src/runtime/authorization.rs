@@ -48,9 +48,12 @@ mod tests {
             agent_identity_revision: Some(0),
         };
         let first = prepare(&agent, 1_000);
-        let next = prepare(&agent, 2_000);
-        assert_ne!(first.authorization, next.authorization);
-        assert_eq!(first.turn_state_credential(), next.turn_state_credential());
+        let later_authorization = prepare(&agent, 2_000);
+        assert_ne!(first.authorization, later_authorization.authorization);
+        assert_eq!(
+            first.turn_state_credential(),
+            later_authorization.turn_state_credential()
+        );
         let changed_task = prepare(&agent.with_task_id("another-task".into()).unwrap(), 2_000);
         assert_ne!(
             first.turn_state_credential(),

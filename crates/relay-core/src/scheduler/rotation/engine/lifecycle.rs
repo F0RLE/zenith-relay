@@ -201,8 +201,8 @@ impl RotationEngine {
         }
         // A verified auth/endpoint repair can retain the lease, but it must
         // present a newly charged, monotonically increasing wire dispatch.
-        if pending.attempt_id.is_some_and(|previous| {
-            !allow_retained_lease || previous.0 > u64::from(budget.dispatches())
+        if pending.attempt_id.is_some_and(|previous_dispatch| {
+            !allow_retained_lease || previous_dispatch.0 > u64::from(budget.dispatches())
         }) {
             return Err(DispatchStartError::AlreadyStarted);
         }

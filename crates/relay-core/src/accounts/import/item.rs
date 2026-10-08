@@ -16,18 +16,18 @@ use present::{present_import_item, PresentedImport};
 use profile::{read_import_profile, ImportFieldSources};
 
 pub(super) fn parse_item(
-    value: &Value,
+    import_item_json: &Value,
     ordinal: usize,
     format: ImportFormat,
     source_file: Option<&str>,
 ) -> Result<ParsedItem, ImportIssue> {
-    let object = value.as_object().ok_or_else(|| {
+    let import_object = import_item_json.as_object().ok_or_else(|| {
         ImportIssue::new(
             ImportIssueCode::UnsupportedValue,
             "import item must be a JSON object",
         )
     })?;
-    if object
+    if import_object
         .get(IMPORT_ERROR_MARKER)
         .is_some_and(Value::is_boolean)
     {
@@ -37,7 +37,7 @@ pub(super) fn parse_item(
         ));
     }
     let PresentedImport {
-        object,
+        import_object,
         credentials,
         account,
         identity,
@@ -45,8 +45,8 @@ pub(super) fn parse_item(
         user,
         session_profile,
         header_account_id,
-        agent_identity_data,
-        provider_data,
+        agent_identity_object,
+        provider_object,
         meta,
         tags_value,
         api_key,
@@ -57,7 +57,7 @@ pub(super) fn parse_item(
         agent_runtime_id,
         agent_task_id,
         explicit_auth_mode,
-    } = present_import_item(object, format)?;
+    } = present_import_item(import_object, format)?;
     let has_api_key = api_key.is_some();
     let has_tokens = access_token.is_some() || refresh_token.is_some() || id_token.is_some();
     let has_agent_identity =
@@ -84,17 +84,17 @@ pub(super) fn parse_item(
         explicit_auth_mode,
     )?;
     let jwt = imported_jwt_metadata(id_token.as_deref(), access_token.as_deref());
-    if object.contains_key("concurrency") {
+    if import_object.contains_key("concurrency") {
         warnings.push(ImportWarning::new(ImportWarningCode::ConcurrencyIgnored));
     }
 
     let profile = read_import_profile(
         ImportFieldSources {
-            object,
+            import_object,
             credentials,
-            agent_identity: agent_identity_data,
+            agent_identity: agent_identity_object,
             account,
-            provider: provider_data,
+            provider: provider_object,
             identity,
             meta,
             subscription,
@@ -109,7 +109,7 @@ pub(super) fn parse_item(
         ordinal,
         format,
         source_file,
-        object,
+        import_object,
         meta,
         tags_value,
         use_api_key,

@@ -166,7 +166,7 @@ fn retry_cap_allows_only_one_explicit_retry() {
             .state()
             .history()
             .iter()
-            .map(|entry| (entry.attempt, entry.outcome))
+            .map(|history_record| (history_record.attempt, history_record.outcome))
             .collect::<Vec<_>>(),
         vec![(1, WakeOutcome::Unconfirmed), (2, WakeOutcome::Failed)]
     );
@@ -423,12 +423,12 @@ fn task_and_account_cancellation_finish_pending_and_in_flight_cycles() {
     assert_eq!(coordinator.remove_pending_for_account("account-2", 123), 1);
     assert!(!coordinator.is_permit_active(&permit));
     assert_eq!(coordinator.state().history().len(), 3);
-    assert!(coordinator.state().history().iter().all(|entry| {
-        entry.outcome == WakeOutcome::SkippedIneligible
-            && entry.model_id.is_none()
-            && entry.input_tokens.is_none()
-            && entry.output_tokens.is_none()
-            && entry
+    assert!(coordinator.state().history().iter().all(|history_record| {
+        history_record.outcome == WakeOutcome::SkippedIneligible
+            && history_record.model_id.is_none()
+            && history_record.input_tokens.is_none()
+            && history_record.output_tokens.is_none()
+            && history_record
                 .error_code
                 .as_deref()
                 .is_some_and(|code| code.starts_with("wake_"))
@@ -468,14 +468,14 @@ fn natural_use_completes_pending_and_in_flight_cycles_with_redacted_history() {
     assert_eq!(coordinator.pending()[0].request.account_id, "account-2");
     let history = coordinator.state().history();
     assert_eq!(history.len(), 2);
-    assert!(history.iter().all(|entry| {
-        entry.account_id == "account-1"
-            && entry.outcome == WakeOutcome::SkippedAlreadyStarted
-            && entry.model_id.is_none()
-            && entry.latency_ms.is_none()
-            && entry.input_tokens.is_none()
-            && entry.output_tokens.is_none()
-            && entry.error_code.is_none()
+    assert!(history.iter().all(|history_record| {
+        history_record.account_id == "account-1"
+            && history_record.outcome == WakeOutcome::SkippedAlreadyStarted
+            && history_record.model_id.is_none()
+            && history_record.latency_ms.is_none()
+            && history_record.input_tokens.is_none()
+            && history_record.output_tokens.is_none()
+            && history_record.error_code.is_none()
     }));
     let serialized = serde_json::to_string(history).unwrap();
     for secret in ["small", "Bearer", "prompt", "response body"] {

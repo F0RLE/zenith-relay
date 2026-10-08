@@ -103,40 +103,41 @@ async fn handle_connection(
     key: AuthenticatedKey,
     headers: HeaderMap,
 ) {
-    let request = match read_initial_request(&mut downstream, &runtime, &key, &headers).await {
-        Ok(request) => request,
+    let client_request = match read_initial_request(&mut downstream, &runtime, &key, &headers).await
+    {
+        Ok(client_request) => client_request,
         Err((failure, stream_id)) => {
             send_gateway_error(&mut downstream, &failure, None, stream_id.as_deref()).await;
             return;
         }
     };
 
-    let request_id = request.request_id.clone();
-    if let Some(kind) = request.background_kind {
+    let request_id = client_request.request_id.clone();
+    if let Some(kind) = client_request.background_kind {
         if !runtime.codex_background_tasks_enabled() {
             runtime.blocked_codex_background_event(
-                &request.request_id,
+                &client_request.request_id,
                 &key.id,
-                &request.requested_model,
+                &client_request.requested_model,
                 WireApi::Responses,
                 UsageTransport::Websocket,
                 kind,
             );
-            let mut payload = serde_json::json!({
+            let mut blocked_response_payload = serde_json::json!({
                 "type": "response.completed",
-                "response": {"id": format!("resp_relay_blocked_{}", request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
+                "response": {"id": format!("resp_relay_blocked_{}", client_request.request_id), "object": "response", "status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "metadata": {"zenith_relay": {"blocked": true, "request_type": kind}}}
             });
-            if let Some(stream_id) = request.stream_id.as_deref() {
-                payload["stream_id"] = json!(stream_id);
+            if let Some(stream_id) = client_request.stream_id.as_deref() {
+                blocked_response_payload["stream_id"] = json!(stream_id);
             }
             let _ = downstream
-                .send(Message::Text(payload.to_string().into()))
+                .send(Message::Text(blocked_response_payload.to_string().into()))
                 .await;
             let _ = downstream.send(Message::Close(None)).await;
             return;
         }
     }
-    let fallback_request = request.clone();
+    let fallback_request = client_request.clone();
     if !runtime.codex_websockets_enabled() {
         bridge_http_fallback(downstream, runtime, key, headers, fallback_request).await;
         return;
@@ -146,7 +147,7 @@ async fn handle_connection(
         &runtime,
         &key,
         &headers,
-        request,
+        client_request,
         true,
         0,
     )

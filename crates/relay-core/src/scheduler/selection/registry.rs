@@ -9,21 +9,25 @@ impl PoolScheduler {
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         let candidate_id = candidate.id.clone();
-        if self.candidates.get(&candidate_id).is_some_and(|previous| {
-            previous.enabled != candidate.enabled
-                || previous.draining != candidate.draining
-                || previous.secret_available != candidate.secret_available
-                || previous.kind != candidate.kind
-                || previous.source_id != candidate.source_id
-                || previous.account_id != candidate.account_id
-                || previous.protocol != candidate.protocol
-                || previous.model_rules != candidate.model_rules
-                || previous
-                    .models
-                    .difference(&candidate.models)
-                    .next()
-                    .is_some()
-        }) {
+        if self
+            .candidates
+            .get(&candidate_id)
+            .is_some_and(|previous_candidate| {
+                previous_candidate.enabled != candidate.enabled
+                    || previous_candidate.draining != candidate.draining
+                    || previous_candidate.secret_available != candidate.secret_available
+                    || previous_candidate.kind != candidate.kind
+                    || previous_candidate.source_id != candidate.source_id
+                    || previous_candidate.account_id != candidate.account_id
+                    || previous_candidate.protocol != candidate.protocol
+                    || previous_candidate.model_rules != candidate.model_rules
+                    || previous_candidate
+                        .models
+                        .difference(&candidate.models)
+                        .next()
+                        .is_some()
+            })
+        {
             let revision = self
                 .candidate_permission_revisions
                 .entry(candidate_id.clone())
@@ -273,10 +277,10 @@ impl PoolScheduler {
     }
 
     pub fn clear_capability_blocks(&mut self, candidate_id: &str) -> bool {
-        let previous = self.capability_blocks.len();
+        let previous_block_count = self.capability_blocks.len();
         self.capability_blocks
             .retain(|(blocked_candidate, _)| blocked_candidate != candidate_id);
-        self.capability_blocks.len() != previous
+        self.capability_blocks.len() != previous_block_count
     }
 
     pub fn set_candidate_health(&mut self, candidate_id: &str, health: CandidateHealth) -> bool {

@@ -53,7 +53,9 @@ pub(super) struct RequestPrepareInput<'a> {
 
 /// Build the upstream body for one reserved route. An incompatible route
 /// continues the attempt loop; a client-shaped body returns immediately.
-pub(super) fn prepare_request_attempt(input: RequestPrepareInput<'_>) -> RequestPrepare {
+pub(super) fn prepare_request_attempt(
+    request_prepare_input: RequestPrepareInput<'_>,
+) -> RequestPrepare {
     let RequestPrepareInput {
         runtime,
         key,
@@ -73,7 +75,7 @@ pub(super) fn prepare_request_attempt(input: RequestPrepareInput<'_>) -> Request
         client_transport,
         basis_points_relay_retry_parameter,
         last_adapter_error,
-    } = input;
+    } = request_prepare_input;
     let allowed_protocols = candidate_protocols(client_wire_api);
     let Some(mut route) = runtime.executor_route(
         candidate_id,
@@ -258,14 +260,14 @@ fn normalize_prepared_responses_lite(request: &mut Value, enabled: bool) -> Opti
     if !enabled {
         return None;
     }
-    let Some(object) = request.as_object_mut() else {
+    let Some(request_fields) = request.as_object_mut() else {
         return Some(RequestPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
             error_codes::INVALID_REQUEST,
         )));
     };
-    if !responses_lite_parallel_tool_calls_valid(object) {
+    if !responses_lite_parallel_tool_calls_valid(request_fields) {
         return Some(RequestPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,
             "responses Lite requires parallel_tool_calls to be a boolean",
@@ -274,7 +276,7 @@ fn normalize_prepared_responses_lite(request: &mut Value, enabled: bool) -> Opti
     }
     // Apply the shared Lite contract before adapter translation. This
     // keeps native, bridged, OAuth, and API-source routes identical.
-    normalize_responses_lite_request(object);
+    normalize_responses_lite_request(request_fields);
     None
 }
 
@@ -321,7 +323,7 @@ fn translate_prepared_request(
     request: &Value,
     source_model: &str,
     stream: bool,
-    previous: Option<crate::MessagesBridgeState>,
+    previous_bridge_state: Option<crate::MessagesBridgeState>,
     request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<PreparedAdapterRequest, RequestPrepare> {
@@ -332,7 +334,7 @@ fn translate_prepared_request(
         stream,
         reasoning_mode: route.reasoning_mode,
         cache_write_ttl: route.cache_write_ttl,
-        previous,
+        previous: previous_bridge_state,
         response_scope: &route.candidate_id,
         response_id_seed: request_id,
     }) {
@@ -346,10 +348,10 @@ fn normalize_prepared_account_body(
     responses_lite: bool,
 ) {
     let upstream_body = adapter_request.upstream_body_mut();
-    let Value::Object(object) = upstream_body else {
+    let Value::Object(upstream_fields) = upstream_body else {
         unreachable!("request object was validated before execution")
     };
-    normalize_account_request(object, responses_lite);
+    normalize_account_request(upstream_fields, responses_lite);
 }
 
 fn apply_prepared_tool_policy(

@@ -135,7 +135,7 @@ impl CodexModelsClient {
         let status = response.status();
         let retry_after_ms =
             crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
-        let body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES)
+        let models_response_body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
                 Error::UpstreamBodyTooLarge => {
@@ -149,20 +149,20 @@ impl CodexModelsClient {
             })?;
         drop(permit);
         if !status.is_success() {
-            let (code, retryable) =
-                if is_agent_identity_task_invalid_response(status.as_u16(), &body) {
-                    (ModelDiscoveryFailureCode::AgentTaskInvalid, false)
-                } else {
-                    match status.as_u16() {
-                        401 => (ModelDiscoveryFailureCode::Unauthorized, false),
-                        403 => (ModelDiscoveryFailureCode::Forbidden, false),
-                        429 => (ModelDiscoveryFailureCode::RateLimited, true),
-                        _ if status.is_server_error() => {
-                            (ModelDiscoveryFailureCode::Upstream, true)
-                        }
-                        _ => (ModelDiscoveryFailureCode::HttpStatus, false),
-                    }
-                };
+            let (code, retryable) = if is_agent_identity_task_invalid_response(
+                status.as_u16(),
+                &models_response_body,
+            ) {
+                (ModelDiscoveryFailureCode::AgentTaskInvalid, false)
+            } else {
+                match status.as_u16() {
+                    401 => (ModelDiscoveryFailureCode::Unauthorized, false),
+                    403 => (ModelDiscoveryFailureCode::Forbidden, false),
+                    429 => (ModelDiscoveryFailureCode::RateLimited, true),
+                    _ if status.is_server_error() => (ModelDiscoveryFailureCode::Upstream, true),
+                    _ => (ModelDiscoveryFailureCode::HttpStatus, false),
+                }
+            };
             return Err(ModelDiscoveryFailure {
                 code,
                 retryable,
@@ -171,7 +171,7 @@ impl CodexModelsClient {
             });
         }
 
-        parse::parse_models(&body)
+        parse::parse_models(&models_response_body)
     }
 }
 

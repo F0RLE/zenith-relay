@@ -162,7 +162,7 @@ impl PoolScheduler {
     ) -> Option<Selection> {
         let mut rotation_request = self.prepare_rotation_request(&request, operation)?;
         if let Some(allowed) = &mut rotation_request.allowed_candidates {
-            allowed.retain(|id| self.lane_allows(&self.candidates[id], lane));
+            allowed.retain(|candidate_id| self.lane_allows(&self.candidates[candidate_id], lane));
         }
         let owner = rotation_request.owner.clone();
         let selected = self.rotation.select(&rotation_request, request.now_ms)?;

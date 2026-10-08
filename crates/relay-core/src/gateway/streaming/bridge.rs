@@ -48,40 +48,40 @@ pub(super) fn bridge_adapter_stream(
             finished: false,
             completed,
         },
-        |mut state| async move {
+        |mut stream_state| async move {
             loop {
-                if let Some(bytes) = state.pending.pop_front() {
-                    return Some((Ok(bytes), state));
+                if let Some(bytes) = stream_state.pending.pop_front() {
+                    return Some((Ok(bytes), stream_state));
                 }
-                if state.finished {
+                if stream_state.finished {
                     return None;
                 }
 
                 let mut preserved_error = None;
-                match state.inner.next().await {
+                match stream_state.inner.next().await {
                     Some(Ok(bytes)) => {
-                        state.bridge.push(&bytes);
-                        preserved_error = state
+                        stream_state.bridge.push(&bytes);
+                        preserved_error = stream_state
                             .bridge
                             .take_upstream_error()
                             .and_then(|error| preserved_stream_error(&error));
                     }
                     Some(Err(_)) | None => {
-                        state.bridge.finish();
-                        state.finished = true;
+                        stream_state.bridge.finish();
+                        stream_state.finished = true;
                     }
                 }
 
                 queue_bridge_output(
-                    &mut state.pending,
-                    || state.bridge.pop_output(),
+                    &mut stream_state.pending,
+                    || stream_state.bridge.pop_output(),
                     preserved_error.as_ref(),
                 );
-                if let Some(response) = state.bridge.completed().cloned() {
-                    *crate::poison::mutex(&state.completed) = Some(response);
+                if let Some(response) = stream_state.bridge.completed().cloned() {
+                    *crate::poison::mutex(&stream_state.completed) = Some(response);
                 }
-                if state.bridge.is_terminal() {
-                    state.finished = true;
+                if stream_state.bridge.is_terminal() {
+                    stream_state.finished = true;
                 }
             }
         },

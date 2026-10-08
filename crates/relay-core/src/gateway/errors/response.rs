@@ -15,7 +15,7 @@ pub(crate) fn cooldown_error(
         .unwrap_or_default()
         .max(1);
     let rate_limited = all_sources_rate_limited;
-    let mut response = if rate_limited {
+    let mut error_response = if rate_limited {
         failure
             .filter(|failure| failure.category == error_codes::UPSTREAM_QUOTA_EXHAUSTED)
             .map_or_else(
@@ -44,10 +44,12 @@ pub(crate) fn cooldown_error(
             error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE,
         )
     };
-    if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
-        response.headers_mut().insert(RETRY_AFTER, value);
+    if let Ok(retry_after_header) = HeaderValue::from_str(&seconds.to_string()) {
+        error_response
+            .headers_mut()
+            .insert(RETRY_AFTER, retry_after_header);
     }
-    response
+    error_response
 }
 
 pub(crate) fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
@@ -88,7 +90,7 @@ pub(crate) fn api_error_with_parameter(
     let message = origin.prefix_message(message);
     let code = api_error_code(code);
     let error_type = api_error_type(status, code);
-    let mut response = (
+    let mut error_response = (
         status,
         Json(json!({
             "error": {
@@ -105,9 +107,14 @@ pub(crate) fn api_error_with_parameter(
         })),
     )
         .into_response();
-    super::super::response::attach_error_diagnostics(&mut response, origin, category, request_id);
-    response.extensions_mut().insert(LocalGatewayError);
-    response
+    super::super::response::attach_error_diagnostics(
+        &mut error_response,
+        origin,
+        category,
+        request_id,
+    );
+    error_response.extensions_mut().insert(LocalGatewayError);
+    error_response
 }
 
 pub(crate) fn prefix_error_value(error_payload: &mut Value, origin: ErrorOrigin) -> bool {

@@ -111,17 +111,24 @@ pub trait PoolParticipant {
 }
 
 /// Pending work must be fenced when membership or model permission changes.
-pub fn pool_dispatch_permission_changed(previous: PoolAccess<'_>, next: PoolAccess<'_>) -> bool {
-    previous.enabled != next.enabled
-        || previous.in_pool != next.in_pool
-        || previous.draining != next.draining
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
+pub fn pool_dispatch_permission_changed(
+    previous_access: PoolAccess<'_>,
+    updated: PoolAccess<'_>,
+) -> bool {
+    previous_access.enabled != updated.enabled
+        || previous_access.in_pool != updated.in_pool
+        || previous_access.draining != updated.draining
+        || previous_access.allowed_models != updated.allowed_models
+        || previous_access.excluded_models != updated.excluded_models
 }
 
 /// A client catalog changes only for a participant that is or was in the pool.
-pub fn pool_catalog_visibility_changed(previous: PoolAccess<'_>, next: PoolAccess<'_>) -> bool {
-    (previous.in_pool || next.in_pool) && pool_dispatch_permission_changed(previous, next)
+pub fn pool_catalog_visibility_changed(
+    previous_access: PoolAccess<'_>,
+    updated: PoolAccess<'_>,
+) -> bool {
+    (previous_access.in_pool || updated.in_pool)
+        && pool_dispatch_permission_changed(previous_access, updated)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,22 +150,23 @@ pub trait RuntimeSourcePolicyRecord {
 /// outside this function because their executors are immutable and require a
 /// rebuild.
 pub fn changed_runtime_source_policy_updates<T: RuntimeSourcePolicyRecord>(
-    previous: &[T],
-    next: &[T],
+    previous_sources: &[T],
+    updated_sources: &[T],
 ) -> Vec<RuntimeSourcePolicyUpdate> {
-    let previous_updates = previous
+    let previous_updates = previous_sources
         .iter()
         .map(RuntimeSourcePolicyRecord::runtime_source_policy_update)
         .collect::<Vec<_>>();
-    next.iter()
-        .filter_map(|record| {
-            let update = record.runtime_source_policy_update();
+    updated_sources
+        .iter()
+        .filter_map(|updated_record| {
+            let update = updated_record.runtime_source_policy_update();
             let changed = previous_updates
                 .iter()
-                .find(|previous| previous.source_id == update.source_id)
-                .is_none_or(|previous| {
-                    previous.policy != update.policy
-                        || previous.recovery_delay_seconds != update.recovery_delay_seconds
+                .find(|previous_update| previous_update.source_id == update.source_id)
+                .is_none_or(|previous_update| {
+                    previous_update.policy != update.policy
+                        || previous_update.recovery_delay_seconds != update.recovery_delay_seconds
                 });
             changed.then_some(update)
         })
@@ -232,12 +240,12 @@ pub fn normalize_model_service_tier_overrides(
     overrides: BTreeMap<String, DefaultServiceTier>,
 ) -> std::result::Result<BTreeMap<String, DefaultServiceTier>, &'static str> {
     let mut normalized = BTreeMap::new();
-    for (model, tier) in overrides {
-        let model = model.trim();
-        if !is_valid_model_id(model) {
+    for (model_id, tier) in overrides {
+        let model_id = model_id.trim();
+        if !is_valid_model_id(model_id) {
             return Err("model service tier override has an invalid model id");
         }
-        normalized.insert(model_id_key(model), tier);
+        normalized.insert(model_id_key(model_id), tier);
     }
     Ok(normalized)
 }
@@ -253,8 +261,8 @@ impl DefaultServiceTier {
 
     /// Parses the durable service-tier spelling, including the legacy Codex
     /// `priority` alias for Relay's fast tier.
-    pub fn from_storage_value(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
+    pub fn from_storage_value(stored_tier: &str) -> Self {
+        match stored_tier.trim().to_ascii_lowercase().as_str() {
             "ultrafast" => Self::Ultrafast,
             "fast" | "priority" => Self::Fast,
             _ => Self::Standard,
@@ -269,8 +277,8 @@ impl DefaultServiceTier {
         }
     }
 
-    pub(crate) const fn from_atomic_value(value: u8) -> Self {
-        match value {
+    pub(crate) const fn from_atomic_value(atomic_tier: u8) -> Self {
+        match atomic_tier {
             1 => Self::Fast,
             2 => Self::Ultrafast,
             _ => Self::Standard,

@@ -27,8 +27,8 @@ impl WireApi {
 
     /// Parses canonical and legacy persisted values without accepting a new
     /// user-facing protocol spelling.
-    pub fn from_storage_value(value: &str) -> Option<Self> {
-        match value {
+    pub fn from_storage_value(stored_wire_api: &str) -> Option<Self> {
+        match stored_wire_api {
             "responses" => Some(Self::Responses),
             "chat_completions" | "chatcompletions" => Some(Self::ChatCompletions),
             "messages" => Some(Self::Messages),
@@ -65,8 +65,8 @@ impl CacheWriteTtl {
         }
     }
 
-    pub fn from_anthropic_ttl(value: &str) -> Option<Self> {
-        match value.trim() {
+    pub fn from_anthropic_ttl(ttl_text: &str) -> Option<Self> {
+        match ttl_text.trim() {
             "5m" => Some(Self::FiveMinutes),
             "1h" => Some(Self::OneHour),
             _ => None,

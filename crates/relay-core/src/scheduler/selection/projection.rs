@@ -85,8 +85,8 @@ impl PoolScheduler {
     pub(super) fn sync_all_rotation_candidates(&mut self) {
         self.rotation
             .set_quota_stale_after_ms(self.quota_stale_after_ms);
-        let current_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
-        let stale_ids = self
+        let current_candidate_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
+        let leased_candidate_ids = self
             .rotation_leases
             .values()
             .map(|lease| lease.candidate_id.clone())
@@ -186,7 +186,10 @@ impl PoolScheduler {
         for stale in self
             .rotation
             .candidate_ids()
-            .filter(|id| !current_ids.contains(id) && !stale_ids.contains(id))
+            .filter(|candidate_id| {
+                !current_candidate_ids.contains(candidate_id)
+                    && !leased_candidate_ids.contains(candidate_id)
+            })
             .collect::<Vec<_>>()
         {
             let _ = self.rotation.remove(&stale);
@@ -199,79 +202,87 @@ impl PoolScheduler {
         candidate_id: Option<&str>,
         model: &str,
         operation: RotationOperation,
-        allowed: BTreeSet<String>,
+        allowed_candidate_ids: BTreeSet<String>,
     ) -> RotationRequest {
-        let mut request = RotationRequest::new(
+        let mut rotation_request = RotationRequest::new(
             request_id.unwrap_or_else(RotationEngine::next_request_id),
             Self::rotation_route_key(model, operation),
             model,
         )
         .with_operation(operation)
-        .with_allowed_candidates(allowed);
+        .with_allowed_candidates(allowed_candidate_ids);
         if let Some(candidate_id) = candidate_id {
-            request = request.with_owner(candidate_id);
+            rotation_request = rotation_request.with_owner(candidate_id);
         }
-        request
+        rotation_request
     }
 
     pub(super) fn prepare_rotation_request(
         &mut self,
-        request: &SelectionRequest<'_>,
+        selection_request: &SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> Option<RotationRequest> {
         if self.retired {
             return None;
         }
         self.sync_all_rotation_candidates();
-        let mut allowed = BTreeSet::new();
+        let mut allowed_candidate_ids = BTreeSet::new();
         for candidate in self.candidates.values() {
-            if request.tried.contains(&candidate.id)
+            if selection_request.tried.contains(&candidate.id)
                 || !self.rotation_visible(
                     candidate,
-                    request.model,
-                    request.allowed_protocols,
-                    request.scope,
-                    request.now_ms,
+                    selection_request.model,
+                    selection_request.allowed_protocols,
+                    selection_request.scope,
+                    selection_request.now_ms,
                 )
             {
                 continue;
             }
-            allowed.insert(candidate.id.clone());
+            allowed_candidate_ids.insert(candidate.id.clone());
         }
-        let owner = request.response_affinity_key.and_then(|key| {
+        let affinity_candidate_id = selection_request.response_affinity_key.and_then(|key| {
             self.response_affinity
-                .get(key, request.now_ms)
+                .get(key, selection_request.now_ms)
                 .map(str::to_owned)
         });
-        if owner
+        if affinity_candidate_id
             .as_deref()
-            .is_some_and(|candidate_id| !allowed.contains(candidate_id))
+            .is_some_and(|candidate_id| !allowed_candidate_ids.contains(candidate_id))
         {
             return None;
         }
         // One physical member has one vote; prefer its native protocol route
         // before engine selection so aliases cannot alter weight or capacity.
         let mut members = BTreeMap::new();
-        for id in &allowed {
-            let candidate = &self.candidates[id];
-            let entry = members
+        for candidate_id in &allowed_candidate_ids {
+            let candidate = &self.candidates[candidate_id];
+            let preferred_candidate = members
                 .entry(members::member_key(candidate))
                 .or_insert(candidate);
-            if self.compare_member_routes(candidate, entry).is_gt() {
-                *entry = candidate;
+            if self
+                .compare_member_routes(candidate, preferred_candidate)
+                .is_gt()
+            {
+                *preferred_candidate = candidate;
             }
         }
-        if owner.is_none() {
-            allowed = members
+        if affinity_candidate_id.is_none() {
+            allowed_candidate_ids = members
                 .into_values()
                 .map(|candidate| candidate.id.clone())
                 .collect();
         }
-        let mut rotation_request =
-            self.rotation_request(None, owner.as_deref(), request.model, operation, allowed);
-        rotation_request.preferred = request.prompt_affinity_key.and_then(|key| {
+        let mut rotation_request = self.rotation_request(
+            None,
+            affinity_candidate_id.as_deref(),
+            selection_request.model,
+            operation,
+            allowed_candidate_ids,
+        );
+        rotation_request.preferred = selection_request.prompt_affinity_key.and_then(|key| {
             self.prompt_affinity
-                .get(key, request.now_ms)
+                .get(key, selection_request.now_ms)
                 .map(str::to_owned)
         });
         Some(rotation_request)

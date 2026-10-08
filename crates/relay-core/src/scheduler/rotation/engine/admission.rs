@@ -379,7 +379,9 @@ impl RotationEngine {
             .cloned()
             .unwrap_or_default();
         if let Some(not_before_ms) = circuit_state.not_before_ms.filter(|at| *at > now_ms) {
-            if earliest_wait.is_none_or(|(previous, _)| not_before_ms > previous) {
+            if earliest_wait
+                .is_none_or(|(previous_deadline_ms, _)| not_before_ms > previous_deadline_ms)
+            {
                 earliest_wait = Some((not_before_ms, CandidateBlockReason::CircuitOpen));
             }
         }

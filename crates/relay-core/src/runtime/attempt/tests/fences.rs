@@ -84,10 +84,10 @@ async fn changed_response_owner_revokes_pending_dispatch_without_spending_a_gene
     drop(rebound);
 
     let current_budget = SharedRequestBudget::for_incoming_request(3);
-    let current = reserve_owner(current_budget.clone()).await;
-    assert_eq!(current.candidate_id(), "source-b");
-    current.begin_rotation_http_dispatch().unwrap();
-    current.settle_rotation_success(crate::unix_time_ms());
+    let next_owner_lease = reserve_owner(current_budget.clone()).await;
+    assert_eq!(next_owner_lease.candidate_id(), "source-b");
+    next_owner_lease.begin_rotation_http_dispatch().unwrap();
+    next_owner_lease.settle_rotation_success(crate::unix_time_ms());
     assert_eq!(current_budget.dispatches(), 1);
 }
 
@@ -161,16 +161,18 @@ async fn host_policy_fence_covers_the_commit_gap_and_rejects_an_old_lease_after_
 #[test]
 fn source_host_fence_covers_every_protocol_candidate() {
     let runtime = runtime();
-    let before = runtime
+    let candidates_before_fence = runtime
         .candidate_runtime_order()
         .into_iter()
         .filter(|candidate| candidate.candidate_id.starts_with("source-a"))
         .collect::<Vec<_>>();
-    assert!(before.len() > 1);
-    assert!(before.iter().all(|candidate| candidate.available));
+    assert!(candidates_before_fence.len() > 1);
+    assert!(candidates_before_fence
+        .iter()
+        .all(|candidate| candidate.available));
 
     let fences = runtime.fence_source_dispatch("source-a");
-    assert_eq!(fences.len(), before.len());
+    assert_eq!(fences.len(), candidates_before_fence.len());
     let during = runtime.candidate_runtime_order();
     assert!(during
         .iter()
@@ -269,20 +271,29 @@ async fn replaced_runtime_rejects_pending_and_new_dispatch_without_losing_starte
 #[tokio::test]
 async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() {
     let runtime = runtime();
-    let old_budget = SharedRequestBudget::for_incoming_request(3);
-    let old = reserve(&runtime, &old_budget, WireApi::Responses).await;
-    let old_candidate_id = old.candidate_id().to_owned();
-    old.begin_rotation_dispatch().unwrap();
+    let initial_budget = SharedRequestBudget::for_incoming_request(3);
+    let initial_lease = reserve(&runtime, &initial_budget, WireApi::Responses).await;
+    let initial_candidate_id = initial_lease.candidate_id().to_owned();
+    initial_lease.begin_rotation_dispatch().unwrap();
     {
         let mut scheduler = runtime.lock_scheduler();
-        let original = scheduler.remove(old.candidate_id()).unwrap();
+        let original = scheduler.remove(initial_lease.candidate_id()).unwrap();
         scheduler.upsert(original);
     }
     let new_budget = SharedRequestBudget::for_incoming_request(3);
-    let current = reserve_from(&runtime, &new_budget, WireApi::Responses, &old_candidate_id).await;
-    assert_eq!(old.candidate_id(), current.candidate_id());
+    let readded_candidate_lease = reserve_from(
+        &runtime,
+        &new_budget,
+        WireApi::Responses,
+        &initial_candidate_id,
+    )
+    .await;
+    assert_eq!(
+        initial_lease.candidate_id(),
+        readded_candidate_lease.candidate_id()
+    );
     runtime.settle_rotation_failure(
-        &old,
+        &initial_lease,
         rejected(),
         Some(CooldownRequest {
             scope: "*",
@@ -292,9 +303,13 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
         crate::unix_time_ms(),
     );
     assert_eq!(
-        runtime.failure_state_for(current.candidate_id(), "model-a", crate::unix_time_ms()),
+        runtime.failure_state_for(
+            readded_candidate_lease.candidate_id(),
+            "model-a",
+            crate::unix_time_ms()
+        ),
         (0, None)
     );
-    assert!(current.begin_rotation_dispatch().is_ok());
-    current.settle_rotation_success(crate::unix_time_ms());
+    assert!(readded_candidate_lease.begin_rotation_dispatch().is_ok());
+    readded_candidate_lease.settle_rotation_success(crate::unix_time_ms());
 }

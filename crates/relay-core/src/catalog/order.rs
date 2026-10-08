@@ -21,14 +21,16 @@ enum KnownModelFamily {
 }
 
 /// Checks the common persisted model-ID boundary after callers trim their input.
-pub fn is_valid_model_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_MODEL_ID_BYTES && !value.chars().any(char::is_control)
+pub fn is_valid_model_id(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id.len() <= MAX_MODEL_ID_BYTES
+        && !model_id.chars().any(char::is_control)
 }
 
 /// OpenAI's internal downgrade route, for example `gpt-6-astra-degrade2-luna-...`.
 /// A numbered `degrade` segment is not a model Relay can send.
-pub fn is_degraded_route_model(value: &str) -> bool {
-    value
+pub fn is_degraded_route_model(model_id: &str) -> bool {
+    model_id
         .split(|character: char| !character.is_ascii_alphanumeric())
         .any(is_degrade_level_segment)
 }
@@ -42,8 +44,8 @@ fn is_degrade_level_segment(segment: &str) -> bool {
 }
 
 /// Checks a model ID that must be safe to use as one unescaped protocol token.
-pub fn is_valid_model_token(value: &str) -> bool {
-    is_valid_model_id(value) && !value.chars().any(char::is_whitespace)
+pub fn is_valid_model_token(model_id: &str) -> bool {
+    is_valid_model_id(model_id) && !model_id.chars().any(char::is_whitespace)
 }
 
 /// Returns the persisted reasoning-policy key for a model. Known vendor
@@ -200,16 +202,16 @@ pub fn normalize_bounded_model_ids(
     }
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() {
+    for model_id in models {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
             continue;
         }
-        if !is_valid_model_id(model) {
+        if !is_valid_model_id(model_id) {
             return Err(ModelIdListError::InvalidId);
         }
-        if seen.insert(model_id_key(model)) {
-            normalized.push(model.to_string());
+        if seen.insert(model_id_key(model_id)) {
+            normalized.push(model_id.to_string());
         }
     }
     Ok(normalized)

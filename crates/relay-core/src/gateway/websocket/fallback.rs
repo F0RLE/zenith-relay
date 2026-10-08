@@ -6,9 +6,9 @@ pub(super) async fn bridge_http_fallback(
     runtime: Arc<GatewayRuntime>,
     key: AuthenticatedKey,
     headers: HeaderMap,
-    mut request: ClientRequest,
+    mut client_request: ClientRequest,
 ) {
-    let mut stream_id = request.stream_id.clone();
+    let mut stream_id = client_request.stream_id.clone();
     loop {
         let mut client_visible_output = false;
         if let Err(failure) = serve_http_fallback_request(
@@ -16,18 +16,18 @@ pub(super) async fn bridge_http_fallback(
             runtime.clone(),
             &key,
             &headers,
-            &request,
+            &client_request,
             &mut client_visible_output,
         )
         .await
         {
             if !client_visible_output {
-                let request_id = Some(request.request_id.as_str());
+                let request_id = Some(client_request.request_id.as_str());
                 send_gateway_error(
                     &mut downstream,
                     &failure,
                     request_id,
-                    request.stream_id.as_deref(),
+                    client_request.stream_id.as_deref(),
                 )
                 .await;
             } else if failure.category != "client_closed" {
@@ -41,7 +41,7 @@ pub(super) async fn bridge_http_fallback(
             return;
         }
 
-        let next = timeout(WEBSOCKET_IDLE_TIMEOUT, async {
+        let next_request_result = timeout(WEBSOCKET_IDLE_TIMEOUT, async {
             loop {
                 let message = downstream.recv().await?;
                 let Ok(message) = message else {
@@ -50,8 +50,8 @@ pub(super) async fn bridge_http_fallback(
                 match message {
                     Message::Text(text) => return Some(Some(text.to_string().into_bytes())),
                     Message::Binary(bytes) => return Some(Some(bytes.to_vec())),
-                    Message::Ping(payload) => {
-                        if downstream.send(Message::Pong(payload)).await.is_err() {
+                    Message::Ping(ping_payload) => {
+                        if downstream.send(Message::Pong(ping_payload)).await.is_err() {
                             return None;
                         }
                     }
@@ -64,17 +64,18 @@ pub(super) async fn bridge_http_fallback(
             }
         })
         .await;
-        let Ok(Some(Some(payload))) = next else {
+        let Ok(Some(Some(next_request_payload))) = next_request_result else {
             return;
         };
-        let next_request = match ClientRequest::parse(&runtime, &key, &headers, &payload) {
-            Ok(request) => request,
-            Err(failure) => {
-                send_gateway_error(&mut downstream, &failure, None, None).await;
-                return;
-            }
-        };
-        if let Some(next_stream_id) = next_request.stream_id.as_deref() {
+        let next_client_request =
+            match ClientRequest::parse(&runtime, &key, &headers, &next_request_payload) {
+                Ok(client_request) => client_request,
+                Err(failure) => {
+                    send_gateway_error(&mut downstream, &failure, None, None).await;
+                    return;
+                }
+            };
+        if let Some(next_stream_id) = next_client_request.stream_id.as_deref() {
             if let Some(expected) = stream_id.as_deref() {
                 if expected != next_stream_id {
                     let failure = GatewayFailure::invalid_request(
@@ -83,8 +84,8 @@ pub(super) async fn bridge_http_fallback(
                     send_gateway_error(
                         &mut downstream,
                         &failure,
-                        Some(&next_request.request_id),
-                        next_request.stream_id.as_deref(),
+                        Some(&next_client_request.request_id),
+                        next_client_request.stream_id.as_deref(),
                     )
                     .await;
                     return;
@@ -93,7 +94,7 @@ pub(super) async fn bridge_http_fallback(
                 stream_id = Some(next_stream_id.to_string());
             }
         }
-        request = next_request;
+        client_request = next_client_request;
     }
 }
 
@@ -102,11 +103,11 @@ async fn serve_http_fallback_request(
     runtime: Arc<GatewayRuntime>,
     _key: &AuthenticatedKey,
     client_headers: &HeaderMap,
-    request: &ClientRequest,
+    client_request: &ClientRequest,
     client_visible_output: &mut bool,
 ) -> Result<(), GatewayFailure> {
     let mut headers = client_headers.clone();
-    for name in [
+    for header_name in [
         "connection",
         "upgrade",
         "sec-websocket-key",
@@ -114,30 +115,30 @@ async fn serve_http_fallback_request(
         "sec-websocket-protocol",
         "content-length",
     ] {
-        headers.remove(name);
+        headers.remove(header_name);
     }
     let http_request = Request::builder()
         .method(Method::POST)
         .uri("/v1/responses")
         .header("host", "localhost")
-        .body(Body::from(request.http_payload()?))
+        .body(Body::from(client_request.http_payload()?))
         .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
-        .map(|mut request| {
-            *request.headers_mut() = headers;
-            request
+        .map(|mut http_request| {
+            *http_request.headers_mut() = headers;
+            http_request
         })?;
     let mut http_request = http_request;
     http_request
         .extensions_mut()
-        .insert(request.tool_policy.clone());
+        .insert(client_request.tool_policy.clone());
     http_request
         .extensions_mut()
         .insert(super::super::execution::RoutedRequestIdentity {
-            request_id: request.request_id.clone(),
-            budget: request.budget.clone(),
+            request_id: client_request.request_id.clone(),
+            budget: client_request.budget.clone(),
             transport: crate::UsageTransport::Websocket,
         });
-    let response = await_while_client_connected(
+    let upstream_response = await_while_client_connected(
         downstream,
         execute_client_request(Arc::clone(&runtime), http_request, WireApi::Responses),
     )
@@ -146,26 +147,30 @@ async fn serve_http_fallback_request(
     // account or an API provider. Preserve that attribution across the
     // WebSocket bridge instead of turning every fallback response into a Relay
     // error merely because the bridge is the component reading it.
-    let response_origin = fallback_response_origin(&response);
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = await_while_client_connected(
+    let response_origin = fallback_response_origin(&upstream_response);
+    if !upstream_response.status().is_success() {
+        let status = upstream_response.status();
+        let error_body = await_while_client_connected(
             downstream,
-            axum::body::to_bytes(response.into_body(), MAX_WEBSOCKET_ERROR_BYTES),
+            axum::body::to_bytes(upstream_response.into_body(), MAX_WEBSOCKET_ERROR_BYTES),
         )
         .await?
         .ok();
-        return Err(
-            GatewayFailure::upstream_status(status, body.as_deref(), response_origin)
-                .apply_degraded_route_policy(&runtime),
-        );
+        return Err(GatewayFailure::upstream_status(
+            status,
+            error_body.as_deref(),
+            response_origin,
+        )
+        .apply_degraded_route_policy(&runtime));
     }
 
     let stream_origin = response_origin;
 
-    let mut body = response.into_body().into_data_stream();
+    let mut response_body_stream = upstream_response.into_body().into_data_stream();
     let mut pending = Vec::new();
-    while let Some(chunk) = await_while_client_connected(downstream, body.next()).await? {
+    while let Some(chunk) =
+        await_while_client_connected(downstream, response_body_stream.next()).await?
+    {
         let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
         pending.extend_from_slice(&chunk);
         while let Some(event) = crate::protocol::take_sse_event(&mut pending) {
@@ -175,15 +180,17 @@ async fn serve_http_fallback_request(
             }
             // An unframed [DONE] carries no Responses terminal payload for a
             // WebSocket client, even if an HTTP adapter treated it as complete.
-            if terminal.outcome.is_some() && terminal.payload.is_none() {
+            if terminal.outcome.is_some() && terminal.event_payload.is_none() {
                 return Err(GatewayFailure::closed(stream_origin));
             }
-            if let Some(payload) =
-                fallback_event_message(&terminal, request.stream_id.as_deref(), stream_origin)?
-            {
-                *client_visible_output |= payload.semantic_output;
+            if let Some(fallback_message) = fallback_event_message(
+                &terminal,
+                client_request.stream_id.as_deref(),
+                stream_origin,
+            )? {
+                *client_visible_output |= fallback_message.semantic_output;
                 downstream
-                    .send(payload.message)
+                    .send(fallback_message.message)
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
@@ -206,7 +213,7 @@ pub(super) fn fallback_event_message(
     origin: ErrorOrigin,
 ) -> Result<Option<FallbackEventMessage>, GatewayFailure> {
     if let Some(stream_id) = stream_id {
-        let Some(mut payload) = terminal.payload.clone() else {
+        let Some(mut stream_payload) = terminal.event_payload.clone() else {
             // A named lane requires JSON events so the lane can be identified.
             // An opaque, non-JSON compaction event cannot be routed safely.
             return if terminal.raw_data.is_some() {
@@ -215,21 +222,23 @@ pub(super) fn fallback_event_message(
                 Ok(None)
             };
         };
-        prefix_fallback_error(&mut payload, terminal, origin);
-        let Some(object) = payload.as_object_mut() else {
+        prefix_fallback_error(&mut stream_payload, terminal, origin);
+        let Some(payload_object) = stream_payload.as_object_mut() else {
             return Err(GatewayFailure::transport(origin));
         };
-        object.insert(
+        payload_object.insert(
             "stream_id".to_string(),
             Value::String(stream_id.to_string()),
         );
-        let payload =
-            serde_json::to_vec(&payload).map_err(|_| GatewayFailure::transport(origin))?;
-        if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+        let encoded_fallback_payload =
+            serde_json::to_vec(&stream_payload).map_err(|_| GatewayFailure::transport(origin))?;
+        if encoded_fallback_payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::message_too_large(origin));
         }
-        let semantic_output = !terminal.is_compaction && semantic_output_payload(&payload);
-        let text = String::from_utf8(payload).map_err(|_| GatewayFailure::transport(origin))?;
+        let semantic_output =
+            !terminal.is_compaction && semantic_output_payload(&encoded_fallback_payload);
+        let text = String::from_utf8(encoded_fallback_payload)
+            .map_err(|_| GatewayFailure::transport(origin))?;
         return Ok(Some(FallbackEventMessage {
             message: Message::Text(text.into()),
             semantic_output,
@@ -250,17 +259,19 @@ pub(super) fn fallback_event_message(
         }));
     }
 
-    let Some(payload) = terminal.payload.as_ref() else {
+    let Some(fallback_payload) = terminal.event_payload.as_ref() else {
         return Ok(None);
     };
-    let mut payload = payload.clone();
-    prefix_fallback_error(&mut payload, terminal, origin);
-    let payload = serde_json::to_vec(&payload).map_err(|_| GatewayFailure::transport(origin))?;
-    if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+    let mut fallback_payload = fallback_payload.clone();
+    prefix_fallback_error(&mut fallback_payload, terminal, origin);
+    let encoded_fallback_payload =
+        serde_json::to_vec(&fallback_payload).map_err(|_| GatewayFailure::transport(origin))?;
+    if encoded_fallback_payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
         return Err(GatewayFailure::message_too_large(origin));
     }
-    let semantic_output = semantic_output_payload(&payload);
-    let text = String::from_utf8(payload).map_err(|_| GatewayFailure::transport(origin))?;
+    let semantic_output = semantic_output_payload(&encoded_fallback_payload);
+    let text = String::from_utf8(encoded_fallback_payload)
+        .map_err(|_| GatewayFailure::transport(origin))?;
     Ok(Some(FallbackEventMessage {
         message: Message::Text(text.into()),
         semantic_output,
@@ -268,7 +279,7 @@ pub(super) fn fallback_event_message(
 }
 
 fn prefix_fallback_error(
-    payload: &mut Value,
+    fallback_payload: &mut Value,
     terminal: &super::super::streaming::TerminalEvent,
     origin: ErrorOrigin,
 ) {
@@ -284,19 +295,23 @@ fn prefix_fallback_error(
     let category = terminal
         .error_category
         .unwrap_or(crate::error_codes::UPSTREAM_TERMINAL);
-    super::super::errors::prefix_error_value(payload, origin.for_category(category));
+    super::super::errors::prefix_error_value(fallback_payload, origin.for_category(category));
 }
 
 pub(super) const RELAY_ERROR_ORIGIN_HEADER: &str = "x-zenith-relay-error-origin";
 pub(super) const RELAY_UPSTREAM_ORIGIN_HEADER: &str = "x-zenith-relay-upstream-origin";
 
-pub(super) fn fallback_response_origin(response: &Response<Body>) -> ErrorOrigin {
-    response
+pub(super) fn fallback_response_origin(upstream_response: &Response<Body>) -> ErrorOrigin {
+    upstream_response
         .headers()
         .get(RELAY_ERROR_ORIGIN_HEADER)
-        .or_else(|| response.headers().get(RELAY_UPSTREAM_ORIGIN_HEADER))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
+        .or_else(|| {
+            upstream_response
+                .headers()
+                .get(RELAY_UPSTREAM_ORIGIN_HEADER)
+        })
+        .and_then(|origin_header| origin_header.to_str().ok())
+        .and_then(|origin_text| origin_text.trim().parse().ok())
         .unwrap_or(ErrorOrigin::Relay)
 }
 

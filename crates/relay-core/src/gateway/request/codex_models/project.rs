@@ -62,7 +62,7 @@ pub(super) fn build_codex_models_response_from_manifests(
                 || object
                     .get("visibility")
                     .and_then(Value::as_str)
-                    .is_some_and(|value| value.eq_ignore_ascii_case("hide"))
+                    .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
             {
                 continue;
             }
@@ -109,15 +109,16 @@ pub(super) fn build_codex_models_response_from_manifests(
         // model or copy another account/model's transport controls.
         let native_catalog_model = has_native_account_route
             .then(|| {
-                native_entries.clone().find_map(|(_, entry)| {
+                native_entries.clone().find_map(|(_, account_manifest)| {
                     // Ignore participant semantic fields before validation too:
                     // malformed reasoning/image metadata must not discard the
                     // account's otherwise valid transport template.
-                    let official = entry.clone();
-                    let mut entry = entry.clone();
-                    capabilities.apply_to_codex(&mut entry);
-                    entry["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
-                    entry
+                    let official_manifest = account_manifest.clone();
+                    let mut catalog_entry = account_manifest.clone();
+                    capabilities.apply_to_codex(&mut catalog_entry);
+                    catalog_entry["display_name"] =
+                        json!(runtime.codex_model_display_name(&upstream_id));
+                    catalog_entry
                         .as_object()
                         .and_then(|normalized| {
                             normalize_native_codex_catalog_entry(
@@ -127,15 +128,15 @@ pub(super) fn build_codex_models_response_from_manifests(
                                 None,
                             )
                         })
-                        .map(|normalized| (normalized, official))
+                        .map(|normalized| (normalized, official_manifest))
                 })
             })
             .flatten();
-        let mut model = native_catalog_model
+        let mut catalog_model = native_catalog_model
             .as_ref()
             .map(|(normalized, _)| normalized.clone())
             .unwrap_or_else(|| routed_codex_catalog_entry(None, &display_id, priority, None));
-        model["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
+        catalog_model["display_name"] = json!(runtime.codex_model_display_name(&upstream_id));
         // Account models and unqualified GPT IDs retain their public spelling,
         // including an explicitly configured key prefix. Qualified provider
         // IDs keep reversible aliases; a similar leaf is not the same model.
@@ -144,13 +145,13 @@ pub(super) fn build_codex_models_response_from_manifests(
         if has_native_account_route
             || (normalized.starts_with("gpt-") && !upstream_id.contains('/'))
         {
-            model["slug"] = Value::String(display_id.clone());
+            catalog_model["slug"] = Value::String(display_id.clone());
         }
         for candidate_id in &native_account_ids {
             let uses_responses_lite = upstream_by_model
                 .get(&normalized)
                 .and_then(|entries| entries.iter().find(|(owner, _)| owner == candidate_id))
-                .and_then(|(_, entry)| entry.get("use_responses_lite"))
+                .and_then(|(_, account_manifest)| account_manifest.get("use_responses_lite"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             runtime.set_codex_model_uses_responses_lite(
@@ -159,13 +160,13 @@ pub(super) fn build_codex_models_response_from_manifests(
                 uses_responses_lite,
             );
         }
-        capabilities.apply_to_codex(&mut model);
+        capabilities.apply_to_codex(&mut catalog_model);
         if native_catalog_model.is_none() {
-            crate::publish_routed_codex_context(&mut model, capabilities.context_limit);
+            crate::publish_routed_codex_context(&mut catalog_model, capabilities.context_limit);
         }
         let mut supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
         let native_ultra = native_catalog_model.as_ref().is_some_and(|(_, official)| {
-            apply_codex_ultra_from_official_model(&mut model, official, &upstream_id)
+            apply_codex_ultra_from_official_model(&mut catalog_model, official, &upstream_id)
         });
         // Codex reads this live catalog, not the managed file. Use the same
         // installed official card, and only for that exact model.
@@ -173,34 +174,38 @@ pub(super) fn build_codex_models_response_from_manifests(
             && runtime
                 .official_codex_ultra_model(&upstream_id)
                 .is_some_and(|official| {
-                    apply_codex_ultra_from_official_model(&mut model, &official, &upstream_id)
+                    apply_codex_ultra_from_official_model(
+                        &mut catalog_model,
+                        &official,
+                        &upstream_id,
+                    )
                 });
         if (native_ultra || installed_ultra) && !supported.iter().any(|level| level == "ultra") {
             supported.push("ultra".into());
         }
-        let catalog_default = model["default_reasoning_level"]
+        let catalog_default = catalog_model["default_reasoning_level"]
             .as_str()
             .filter(|default| supported.iter().any(|level| level == default))
             .map(str::to_owned);
-        apply_model_reasoning_allowed_levels(&mut model, Some(&supported));
+        apply_model_reasoning_allowed_levels(&mut catalog_model, Some(&supported));
         if let Some(default) = catalog_default {
-            model["default_reasoning_level"] = json!(default);
+            catalog_model["default_reasoning_level"] = json!(default);
         }
         if let Some(allowed) = runtime.model_reasoning_policy_levels(&upstream_id) {
             let allowed = allowed
                 .into_iter()
                 .filter(|level| supported.contains(level))
                 .collect::<Vec<_>>();
-            apply_model_reasoning_allowed_levels(&mut model, Some(&allowed));
+            apply_model_reasoning_allowed_levels(&mut catalog_model, Some(&allowed));
         }
         // Speed follows the model family. Basis Points stays standard-only
         // and does not remove the picker.
         set_codex_service_tiers(
-            &mut model,
+            &mut catalog_model,
             runtime.model_supported_service_tiers(&upstream_id),
         );
-        sort_supported_reasoning_levels(&mut model);
-        models.push(model);
+        sort_supported_reasoning_levels(&mut catalog_model);
+        models.push(catalog_model);
     }
 
     normalize_codex_catalog_priorities(&mut models);
@@ -227,7 +232,7 @@ pub(super) fn sort_supported_reasoning_levels(model: &mut Value) {
         let effort = level
             .get("effort")
             .and_then(Value::as_str)
-            .map(|value| value.trim().to_ascii_lowercase())
+            .map(|effort_text| effort_text.trim().to_ascii_lowercase())
             .unwrap_or_default();
         order
             .iter()
@@ -315,8 +320,8 @@ pub(super) fn apply_model_reasoning_allowed_levels(
     model["supports_reasoning_summaries"] = Value::Bool(false);
 }
 
-pub(super) fn upstream_codex_models(payload: &Value) -> Option<&Vec<Value>> {
-    payload
+pub(super) fn upstream_codex_models(catalog_response: &Value) -> Option<&Vec<Value>> {
+    catalog_response
         .get("models")
         .and_then(Value::as_array)
         .filter(|models| models.len() <= 4_096)

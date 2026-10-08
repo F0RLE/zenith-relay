@@ -4,35 +4,40 @@ use serde_json::Value;
 
 pub(in crate::protocol::adapter::translation) fn decode(
     protocol: WireApi,
-    value: &Value,
+    upstream_response: &Value,
     seed: &str,
 ) -> AdapterResult<Response> {
     let invalid = AdapterError::upstream_response_invalid;
-    if value.get("error").is_some_and(|error| !error.is_null()) {
+    if upstream_response
+        .get("error")
+        .is_some_and(|error| !error.is_null())
+    {
         return Err(invalid());
     }
     let mut response = Response {
-        id: value
+        id: upstream_response
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or(seed)
             .into(),
         blocks: Vec::new(),
-        usage: usage(protocol, value),
+        usage: usage(protocol, upstream_response),
         finish: Finish::Stop,
     };
     match protocol {
         WireApi::ChatCompletions => {
-            decode_chat_completion(value, protocol, &mut response, invalid)?
+            decode_chat_completion(upstream_response, protocol, &mut response, invalid)?
         }
-        WireApi::Responses => decode_responses(value, &mut response, invalid)?,
-        WireApi::Messages => decode_messages(value, protocol, &mut response, invalid)?,
+        WireApi::Responses => decode_responses(upstream_response, &mut response, invalid)?,
+        WireApi::Messages => decode_messages(upstream_response, protocol, &mut response, invalid)?,
         WireApi::Gemini => {
-            if super::super::super::gemini::prompt_blocked(value).map_err(|()| invalid())? {
+            if super::super::super::gemini::prompt_blocked(upstream_response)
+                .map_err(|()| invalid())?
+            {
                 response.finish = Finish::Filter;
                 return Ok(response);
             }
-            decode_gemini(value, protocol, seed, &mut response, invalid)?;
+            decode_gemini(upstream_response, protocol, seed, &mut response, invalid)?;
         }
     }
     validate_calls(&response.blocks)?;
@@ -40,12 +45,12 @@ pub(in crate::protocol::adapter::translation) fn decode(
 }
 
 fn decode_chat_completion(
-    value: &Value,
+    upstream_response: &Value,
     protocol: WireApi,
     response: &mut Response,
     invalid: fn() -> AdapterError,
 ) -> AdapterResult<()> {
-    let choices = value
+    let choices = upstream_response
         .get("choices")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?;
@@ -63,22 +68,25 @@ fn decode_chat_completion(
     let message = choice.get("message").ok_or_else(invalid)?;
     let refusal = message
         .get("refusal")
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_str().ok_or_else(invalid))
+        .filter(|refusal_value| !refusal_value.is_null())
+        .map(|refusal_value| refusal_value.as_str().ok_or_else(invalid))
         .transpose()?
-        .filter(|value| !value.is_empty());
+        .filter(|refusal_text| !refusal_text.is_empty());
     if refusal.is_some() {
         response.finish = Finish::Filter;
     }
     if let Some(reasoning) = message
         .get("reasoning_content")
-        .filter(|value| !value.is_null())
+        .filter(|reasoning_value| !reasoning_value.is_null())
     {
         response.blocks.push(Block::Reasoning(
             reasoning.as_str().ok_or_else(invalid)?.into(),
         ));
     }
-    if let Some(text) = message.get("content").filter(|value| !value.is_null()) {
+    if let Some(text) = message
+        .get("content")
+        .filter(|content_value| !content_value.is_null())
+    {
         if let Some(text) = text.as_str() {
             response.blocks.push(Block::Text(text.into()));
         } else {
@@ -128,13 +136,13 @@ fn decode_chat_completion(
 }
 
 fn decode_responses(
-    value: &Value,
+    upstream_response: &Value,
     response: &mut Response,
     invalid: fn() -> AdapterError,
 ) -> AdapterResult<()> {
-    response.finish = match value.get("status").and_then(Value::as_str) {
+    response.finish = match upstream_response.get("status").and_then(Value::as_str) {
         Some("completed") => Finish::Stop,
-        Some("incomplete") => match value
+        Some("incomplete") => match upstream_response
             .pointer("/incomplete_details/reason")
             .and_then(Value::as_str)
         {
@@ -144,30 +152,30 @@ fn decode_responses(
         },
         _ => return Err(invalid()),
     };
-    for item in value
+    for response_item in upstream_response
         .get("output")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?
     {
-        match item.get("type").and_then(Value::as_str) {
+        match response_item.get("type").and_then(Value::as_str) {
             Some("message") => {
-                for content in item
+                for response_content in response_item
                     .get("content")
                     .and_then(Value::as_array)
                     .ok_or_else(invalid)?
                 {
-                    if content.get("type").and_then(Value::as_str) != Some("output_text") {
+                    if response_content.get("type").and_then(Value::as_str) != Some("output_text") {
                         return Err(invalid());
                     }
-                    if content
+                    if response_content
                         .get("annotations")
                         .and_then(Value::as_array)
-                        .is_some_and(|items| !items.is_empty())
+                        .is_some_and(|annotation_items| !annotation_items.is_empty())
                     {
                         return Err(invalid());
                     }
                     response.blocks.push(Block::Text(
-                        content
+                        response_content
                             .get("text")
                             .and_then(Value::as_str)
                             .ok_or_else(invalid)?
@@ -176,28 +184,30 @@ fn decode_responses(
                 }
             }
             Some("function_call") => response.blocks.push(Block::ToolCall {
-                id: required_text(item, "call_id")
+                id: required_text(response_item, "call_id")
                     .map_err(|_| invalid())?
                     .into(),
-                name: required_text(item, "name").map_err(|_| invalid())?.into(),
-                arguments: required_text(item, "arguments")
+                name: required_text(response_item, "name")
+                    .map_err(|_| invalid())?
+                    .into(),
+                arguments: required_text(response_item, "arguments")
                     .map_err(|_| invalid())?
                     .into(),
             }),
             Some("reasoning") => {
-                if item
+                if response_item
                     .get("encrypted_content")
-                    .is_some_and(|value| !value.is_null())
+                    .is_some_and(|encrypted_content| !encrypted_content.is_null())
                 {
                     return Err(invalid());
                 }
-                for summary in item
+                for reasoning_summary in response_item
                     .get("summary")
                     .and_then(Value::as_array)
                     .ok_or_else(invalid)?
                 {
                     response.blocks.push(Block::Reasoning(
-                        summary
+                        reasoning_summary
                             .get("text")
                             .and_then(Value::as_str)
                             .ok_or_else(invalid)?
@@ -221,28 +231,28 @@ fn decode_responses(
 }
 
 fn decode_messages(
-    value: &Value,
+    upstream_response: &Value,
     protocol: WireApi,
     response: &mut Response,
     invalid: fn() -> AdapterError,
 ) -> AdapterResult<()> {
     response.finish = finish(
         protocol,
-        value
+        upstream_response
             .get("stop_reason")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?,
     )?;
-    for block in value
+    for message_block in upstream_response
         .get("content")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?
     {
-        match block.get("type").and_then(Value::as_str) {
+        match message_block.get("type").and_then(Value::as_str) {
             Some("text") => {
-                checked(block, &["type", "text"])?;
+                checked(message_block, &["type", "text"])?;
                 response.blocks.push(Block::Text(
-                    block
+                    message_block
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or_else(invalid)?
@@ -250,9 +260,9 @@ fn decode_messages(
                 ));
             }
             Some("thinking") => {
-                checked(block, &["type", "thinking"])?;
+                checked(message_block, &["type", "thinking"])?;
                 response.blocks.push(Block::Reasoning(
-                    block
+                    message_block
                         .get("thinking")
                         .and_then(Value::as_str)
                         .ok_or_else(invalid)?
@@ -260,13 +270,17 @@ fn decode_messages(
                 ));
             }
             Some("tool_use") => {
-                checked(block, &["type", "id", "name", "input"])?;
+                checked(message_block, &["type", "id", "name", "input"])?;
                 response.blocks.push(Block::ToolCall {
-                    id: required_text(block, "id").map_err(|_| invalid())?.into(),
-                    name: required_text(block, "name").map_err(|_| invalid())?.into(),
-                    arguments: block
+                    id: required_text(message_block, "id")
+                        .map_err(|_| invalid())?
+                        .into(),
+                    name: required_text(message_block, "name")
+                        .map_err(|_| invalid())?
+                        .into(),
+                    arguments: message_block
                         .get("input")
-                        .filter(|value| value.is_object())
+                        .filter(|tool_input| tool_input.is_object())
                         .ok_or_else(invalid)?
                         .to_string(),
                 });
@@ -281,13 +295,13 @@ fn decode_messages(
 }
 
 fn decode_gemini(
-    value: &Value,
+    upstream_response: &Value,
     protocol: WireApi,
     seed: &str,
     response: &mut Response,
     invalid: fn() -> AdapterError,
 ) -> AdapterResult<()> {
-    let candidates = value
+    let candidates = upstream_response
         .get("candidates")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?;

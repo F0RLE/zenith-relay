@@ -74,10 +74,9 @@ pub(in crate::gateway) async fn bootstrap_stream(
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
                     if expected_model.is_some_and(|expected| {
-                        event
-                            .payload
-                            .as_ref()
-                            .is_some_and(|value| super::served_model_is_rejected(value, expected))
+                        event.event_payload.as_ref().is_some_and(|served_model| {
+                            super::served_model_is_rejected(served_model, expected)
+                        })
                     }) {
                         // The served model is known, and this buffer has not
                         // reached the client. Drop the attempt, including a
@@ -116,11 +115,11 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             upstream_error: event.upstream_error,
                             preserved: event.preserved_error,
                             zenith_gateway_invalid_request: event
-                                .payload
+                                .event_payload
                                 .as_ref()
                                 .is_some_and(zenith_gateway_invalid_request_value),
                             responses_tool_call_links_rejected: event
-                                .payload
+                                .event_payload
                                 .as_ref()
                                 .is_some_and(responses_tool_call_links_rejected_value),
                         });
@@ -134,9 +133,17 @@ pub(in crate::gateway) async fn bootstrap_stream(
                     // failure, allowing the request executor to retry another
                     // candidate. A non-empty incomplete response remains a
                     // terminal client response (for example max output).
-                    if event.payload.as_ref().is_some_and(|payload| {
-                        is_empty_responses_incomplete(payload, saw_output, completed_output_items)
-                    }) {
+                    if event
+                        .event_payload
+                        .as_ref()
+                        .is_some_and(|terminal_payload| {
+                            is_empty_responses_incomplete(
+                                terminal_payload,
+                                saw_output,
+                                completed_output_items,
+                            )
+                        })
+                    {
                         return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into());
                     }
                     let terminal = event.outcome.is_some();
