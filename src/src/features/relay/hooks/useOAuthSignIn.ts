@@ -40,14 +40,14 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
           const accountId = completed.account.id;
           if (draft && accountId && (draft.email || draft.phone || draft.password || draft.totpSecret)) {
             try {
-              const current = await relayCommands.revealLocalAccountLogin(accountId);
+              const storedLogin = await relayCommands.revealLocalAccountLogin(accountId);
               await relayCommands.updateAccountLogin({
                 accountId,
                 ...mergeAccountLoginDraft({
-                  email: current.email ?? "",
-                  phone: current.phone ?? "",
-                  password: current.password ?? "",
-                  totpSecret: current.totpSecret ?? "",
+                  email: storedLogin.email ?? "",
+                  phone: storedLogin.phone ?? "",
+                  password: storedLogin.password ?? "",
+                  totpSecret: storedLogin.totpSecret ?? "",
                 }, draft),
               });
             } catch {
@@ -75,11 +75,11 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
 
   handlerRef.current = (event) => {
     latestEventRef.current = event;
-    const current = flowRef.current;
-    if (!current || current.loginId !== event.loginId) return;
-    const next = { ...current, status: event.status };
-    flowRef.current = next;
-    setFlow(next);
+    const activeFlow = flowRef.current;
+    if (!activeFlow || activeFlow.loginId !== event.loginId) return;
+    const updatedFlow = { ...activeFlow, status: event.status };
+    flowRef.current = updatedFlow;
+    setFlow(updatedFlow);
     if (event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
   };
 
@@ -103,23 +103,23 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     const started = captured.value;
     if (!captured.ok || !started) return false;
     const earlyEvent = latestEventRef.current;
-    const next = earlyEvent?.loginId === started.loginId
+    const startedFlow = earlyEvent?.loginId === started.loginId
       ? { ...started, status: earlyEvent.status }
       : started;
-    flowRef.current = next;
-    setFlow(next);
-    if (next.status === "callback_received") void finishRef.current(next.loginId).catch(() => undefined);
+    flowRef.current = startedFlow;
+    setFlow(startedFlow);
+    if (startedFlow.status === "callback_received") void finishRef.current(startedFlow.loginId).catch(() => undefined);
     return true;
   }, [ensureListener, perform]);
 
   const cancel = useCallback(async () => {
-    const current = flowRef.current;
+    const activeFlow = flowRef.current;
     flowRef.current = null;
     setFlow(null);
-    if (current) {
-      forgetAccountLoginDraft(current.loginId);
+    if (activeFlow) {
+      forgetAccountLoginDraft(activeFlow.loginId);
       try {
-        await perform("oauth-cancel", () => relayCommands.cancelOAuth(current.loginId));
+        await perform("oauth-cancel", () => relayCommands.cancelOAuth(activeFlow.loginId));
       } catch {
         // Cancellation is best-effort after the dialog has already closed.
       }

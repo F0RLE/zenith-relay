@@ -28,11 +28,11 @@ export function readRelayPreference(
 
 export function writeRelayPreference(
   key: string,
-  value: string,
+  preferenceValue: string,
   storage: RelayStorage | undefined = browserStorage(),
 ) {
   try {
-    storage?.setItem(key, value);
+    storage?.setItem(key, preferenceValue);
   } catch {
     // Preferences are optional; a restricted browser storage must not block the app.
   }
@@ -59,12 +59,12 @@ export function readCodexPoolOauthSelection(storage: RelayStorage | undefined = 
 }
 
 export function readAccountValueVisibility(storage: RelayStorage | undefined = browserStorage()) {
-  const value = readRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, "", storage)
+  const visibilityValue = readRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, "", storage)
     || readRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, "", storage)
     || "true";
-  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, value, storage);
+  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, visibilityValue, storage);
   removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
-  return value !== "false";
+  return visibilityValue !== "false";
 }
 
 export function writeAccountValueVisibility(

@@ -8,14 +8,14 @@ export function useProxyPool(enabled = true, revision = 0) {
   const revisionRef = useRef(0);
   const load = useCallback(async () => {
     if (!enabled) return;
-    const current = ++revisionRef.current;
+    const requestRevision = ++revisionRef.current;
     try {
-      const next = await relayCommands.getProxyPool();
-      if (current !== revisionRef.current) return;
-      setPool(next);
+      const loadedPool = await relayCommands.getProxyPool();
+      if (requestRevision !== revisionRef.current) return;
+      setPool(loadedPool);
       setFailed(false);
     } catch {
-      if (current === revisionRef.current) setFailed(true);
+      if (requestRevision === revisionRef.current) setFailed(true);
     }
   }, [enabled]);
   useEffect(() => { void load(); return () => { revisionRef.current += 1; }; }, [load, revision]);

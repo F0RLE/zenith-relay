@@ -9,7 +9,7 @@ export function AccountErrorDialog({ account, onClose }: { account: AccountSumma
   const code = currentAccountErrorCode(account) ?? "unknown";
   const authState = account.authState.state;
   const observedAtMs = account.quota.error?.occurredAtMs ?? null;
-  const details = JSON.stringify({
+  const errorDetailsJson = JSON.stringify({
     code,
     message: accountErrorLabel(code, t),
     observed_at: observedAtMs ? new Date(observedAtMs).toISOString() : null,
@@ -24,7 +24,7 @@ export function AccountErrorDialog({ account, onClose }: { account: AccountSumma
       onClose={onClose}
       footer={(
         <>
-          <Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => void copyText(details)}>
+          <Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => void copyText(errorDetailsJson)}>
             {t("common.copy")}
           </Button>
           <Button variant="primary" onClick={onClose}>{t("common.close")}</Button>
@@ -32,7 +32,7 @@ export function AccountErrorDialog({ account, onClose }: { account: AccountSumma
       )}
     >
       <div className="config-preview account-error-json">
-        <pre><code>{details}</code></pre>
+        <pre><code>{errorDetailsJson}</code></pre>
       </div>
       <p className="form-note">{t("accounts.errorDetailsHint")}</p>
     </Dialog>

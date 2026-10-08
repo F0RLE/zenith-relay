@@ -109,14 +109,14 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const codexWebsocketsEnabled = runtime?.gateway.codexWebsocketsEnabled ?? true;
 
   const perform = useCallback(async (
-    id: string,
+    operationId: string,
     work: () => Promise<unknown>,
     successKey?: string,
     options?: PerformOptions,
-  ) => performOperation(id, work, refresh, successKey, options), [performOperation, refresh]);
+  ) => performOperation(operationId, work, refresh, successKey, options), [performOperation, refresh]);
 
   const activateCodexProfile = useCallback(async (
-    id: string,
+    profileOperationId: string,
     work: () => Promise<ProfileActivation>,
     launchAfter = false,
   ) => {
@@ -124,7 +124,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       title: t("profiles.switchBackupTitle"),
       confirmLabel: t("profiles.switchBackupAction"),
     })) return false;
-    return perform(id, work, launchAfter ? "feedback.launched" : "feedback.profileAttached",
+    return perform(profileOperationId, work, launchAfter ? "feedback.launched" : "feedback.profileAttached",
       { backgroundRefresh: true, ...(launchAfter ? { afterWork: relayCommands.launchManagedCodex } : {}) });
   }, [confirm, perform, profileSwitchBackupPrompt, t]);
 
@@ -155,15 +155,15 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "codex-websockets",
     mode === "remote"
       ? async () => {
-        const previous = codexWebsocketsEnabled;
+        const previousWebsocketSetting = codexWebsocketsEnabled;
         await relayCommands.setRemoteCodexWebsockets(enabled);
         try {
-          const result = await relayCommands.setCodexProfileWebsockets(enabled);
+          const commandResult = await relayCommands.setCodexProfileWebsockets(enabled);
           await restartManagedCodexIfRunning();
-          return result;
+          return commandResult;
         } catch (error) {
           try {
-            await relayCommands.setRemoteCodexWebsockets(previous);
+            await relayCommands.setRemoteCodexWebsockets(previousWebsocketSetting);
           } catch {
             // Keep the original profile error; the remote action is best-effort rollback.
           }
@@ -172,9 +172,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       }
       : mode === "local"
         ? async () => {
-          const result = await relayCommands.setCodexWebsockets(enabled);
+          const commandResult = await relayCommands.setCodexWebsockets(enabled);
           await restartManagedCodexIfRunning();
-          return result;
+          return commandResult;
         }
         : () => Promise.reject(new Error(t("errors.chatgpt_websockets_unavailable"))),
     "feedback.saved",
@@ -232,7 +232,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     () => projectRuntimeAccountLabels(runtime, accountDisplayName),
     [accountDisplayName, runtime],
   );
-  const value = useMemo<RelayContextValue>(() => ({
+  const relayContextValue = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
     page,
@@ -316,12 +316,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     remoteUsage,
     remoteUsagePage,
     loadRemoteUsage,
-    revision: usageRevision,
+    usageRevision,
   }), [loadLocalUsage, loadRemoteUsage, localUsagePage, remoteUsage, remoteUsagePage, usageRevision]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
   }, [i18n.language]);
 
-  return <RelayStateContexts value={value} activity={runtimeActivity} usage={usage}>{children}</RelayStateContexts>;
+  return <RelayStateContexts contextValue={relayContextValue} activity={runtimeActivity} usage={usage}>{children}</RelayStateContexts>;
 }

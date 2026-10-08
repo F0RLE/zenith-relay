@@ -25,24 +25,24 @@ export function forgetAccountLoginDraft(loginId: string) {
   drafts.delete(loginId);
 }
 
-export function mergeAccountLoginDraft(current: AccountLoginDraft, draft: AccountLoginDraft): AccountLoginDraft {
+export function mergeAccountLoginDraft(existingDraft: AccountLoginDraft, draft: AccountLoginDraft): AccountLoginDraft {
   return {
-    email: draft.email || current.email,
-    phone: draft.phone || current.phone,
-    password: draft.password || current.password,
-    totpSecret: draft.totpSecret || current.totpSecret,
+    email: draft.email || existingDraft.email,
+    phone: draft.phone || existingDraft.phone,
+    password: draft.password || existingDraft.password,
+    totpSecret: draft.totpSecret || existingDraft.totpSecret,
   };
 }
 
 export type LoginNoteEdits = Record<keyof AccountLoginDraft, boolean>;
 
-export function editedLoginNotes(saved: AccountLoginDraft, current: AccountLoginDraft, dirty: LoginNoteEdits): AccountLoginDraft | null {
-  const next = {
-    email: dirty.email ? current.email : saved.email,
-    phone: dirty.phone ? current.phone : saved.phone,
-    password: dirty.password ? current.password : saved.password,
-    totpSecret: dirty.totpSecret ? current.totpSecret : saved.totpSecret,
+export function editedLoginNotes(saved: AccountLoginDraft, latestDraft: AccountLoginDraft, dirty: LoginNoteEdits): AccountLoginDraft | null {
+  const updatedDraft = {
+    email: dirty.email ? latestDraft.email : saved.email,
+    phone: dirty.phone ? latestDraft.phone : saved.phone,
+    password: dirty.password ? latestDraft.password : saved.password,
+    totpSecret: dirty.totpSecret ? latestDraft.totpSecret : saved.totpSecret,
   };
-  if (next.email === saved.email && next.phone === saved.phone && next.password === saved.password && next.totpSecret === saved.totpSecret) return null;
-  return next;
+  if (updatedDraft.email === saved.email && updatedDraft.phone === saved.phone && updatedDraft.password === saved.password && updatedDraft.totpSecret === saved.totpSecret) return null;
+  return updatedDraft;
 }

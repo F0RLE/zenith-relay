@@ -59,8 +59,8 @@ import { sanitizeFeedbackError } from "../state/feedback";
  * observable in the native error log.  The reporter itself uses the raw
  * invoke function to avoid an error-reporting loop.
  */
-function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return tauriInvoke<T>(command, args).catch((cause) => {
+function invoke<T>(command: string, commandArgs?: Record<string, unknown>): Promise<T> {
+  return tauriInvoke<T>(command, commandArgs).catch((cause) => {
     if (command !== "record_frontend_diagnostic") {
       const error = sanitizeFeedbackError(cause, "ipc_failed", "Relay command failed");
       void tauriInvoke<void>("record_frontend_diagnostic", {
@@ -91,26 +91,26 @@ export const relayCommands = {
   localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
   remoteRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[] | null>("get_remote_runtime_order"),
-  remoteUsage: (input: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input }),
+  remoteUsage: (usageQuery: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input: usageQuery }),
   revealRemoteGatewayApiKey: () => invoke<string>("reveal_remote_gateway_api_key"),
   rotateRemoteGatewayApiKey: () => invoke<string>("rotate_remote_gateway_api_key"),
-  localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
-  localCacheSessions: (input: RemoteUsageQuery = {}) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", { input }),
+  localUsagePage: (usageQuery: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input: usageQuery }),
+  localCacheSessions: (usageQuery: RemoteUsageQuery = {}) => invoke<CacheSessionRecord[]>("get_local_cache_sessions", { input: usageQuery }),
   clearLocalUsage: () => invoke("clear_local_usage"),
   refreshLocalPricingCatalog: () => invoke<CatalogRefreshOutcome>("refresh_local_pricing_catalog"),
   refreshRemotePricingCatalog: () => invoke<CatalogRefreshOutcome>("execute_remote_server_action", {
     input: { action: { type: "refresh_pricing_catalog" }, payload: null },
   }),
 
-  createSource: (input: Record<string, unknown>) => invoke("create_local_source", { input }),
-  updateSource: (input: Record<string, unknown>) => invoke("update_local_source", { input }),
+  createSource: (sourceInput: Record<string, unknown>) => invoke("create_local_source", { input: sourceInput }),
+  updateSource: (sourceInput: Record<string, unknown>) => invoke("update_local_source", { input: sourceInput }),
   rotateSourceKey: (sourceId: string, apiKey: string) => invoke("rotate_local_source_key", { sourceId, apiKey }),
   setSourceEnabled: (sourceId: string, enabled: boolean) => invoke("set_local_source_enabled", { sourceId, enabled }),
   deleteSource: (sourceId: string) => invoke("delete_local_source", { sourceId }),
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
-  probeSource: (sourceId: string, input: SourceProbeInput) => invoke<SourceProbeResult>("probe_local_source", { sourceId, input }),
-  probeRemoteSource: (sourceId: string, input: SourceProbeInput) => invoke<SourceProbeResult>("execute_remote_server_action", {
-    input: { action: { type: "probe_source", id: sourceId }, payload: input },
+  probeSource: (sourceId: string, sourceProbeInput: SourceProbeInput) => invoke<SourceProbeResult>("probe_local_source", { sourceId, input: sourceProbeInput }),
+  probeRemoteSource: (sourceId: string, sourceProbeInput: SourceProbeInput) => invoke<SourceProbeResult>("execute_remote_server_action", {
+    input: { action: { type: "probe_source", id: sourceId }, payload: sourceProbeInput },
   }),
   refreshSourceData: (sourceId: string) => invoke("refresh_local_source_data", { sourceId }),
   localSourceStats: (sourceId: string, force = false) => invoke<SourceStats>("get_local_source_stats", { sourceId, force }),
@@ -129,7 +129,7 @@ export const relayCommands = {
   forceRefreshAccountCredentials: (accountId: string) => invoke<CredentialRefreshResult>("force_refresh_local_account_credentials", { accountId }),
   refreshAllAccountQuotas: () => invoke<Array<{ accountId: string; status: "succeeded" | "failed" }>>("refresh_all_local_account_quotas"),
   consumeResetCredit: (accountId: string) => invoke<ConsumeResetCreditResponse>("consume_local_reset_credit", { accountId }),
-  updateAccount: (input: Record<string, unknown>) => invoke("update_local_account", { input }),
+  updateAccount: (accountUpdate: Record<string, unknown>) => invoke("update_local_account", { input: accountUpdate }),
   setAccountEnabled: (accountId: string, enabled: boolean) => invoke("set_local_account_enabled", { accountId, enabled }),
   deleteAccount: (accountId: string) => invoke("delete_local_account", { accountId }),
   deleteAccounts: (accountIds: string[]) => invoke("delete_local_accounts", { accountIds }),
@@ -142,15 +142,15 @@ export const relayCommands = {
   assignStoredProxy: (accountId: string, proxyId: string) => invoke<StoredProxyAssignmentResult>("assign_local_stored_proxy", { input: { accountId, proxyId } }),
   setStoredProxyAccounts: (proxyId: string, accountIds: string[]) => invoke<StoredProxyAssignmentResult>("set_local_stored_proxy_accounts", { input: { proxyId, accountIds } }),
   assignAutomaticProxies: (accountIds: string[]) => invoke<StoredProxyAssignmentResult>("assign_free_local_account_proxies", { input: { accountIds } }),
-  exportLocalAccounts: (input: AccountExportInput) => invoke<AccountExportResult>("export_local_accounts", { input }),
-  exportRemoteAccounts: (input: AccountExportInput) => invoke<AccountExportResult>("export_remote_accounts", { input }),
+  exportLocalAccounts: (exportInput: AccountExportInput) => invoke<AccountExportResult>("export_local_accounts", { input: exportInput }),
+  exportRemoteAccounts: (exportInput: AccountExportInput) => invoke<AccountExportResult>("export_remote_accounts", { input: exportInput }),
   moveAccountsToRemote: (accountIds: string[]) => invoke<MoveAccountsToRemoteResult>("move_local_accounts_to_remote", { input: { accountIds } }),
   returnAccountToLocal: (localAccountId: string) => invoke<{ localAccountId: string }>("return_remote_account_to_local", { input: { localAccountId } }),
   forceActivateRemoteAccountLocally: (localAccountId: string) => invoke<{ localAccountId: string }>("force_activate_remote_account_locally", { input: { localAccountId, confirmRemoteMayStillBeRunning: true } }),
   onAccountTransferProgress: (callback: (event: AccountTransferProgress) => void) => listen<AccountTransferProgress>("relay-account-transfer-progress", (event) => callback(event.payload)),
   revealLocalAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_local_account_identity", { accountId }),
   revealLocalAccountLogin: (accountId: string) => invoke<AccountLoginDetails>("reveal_local_account_login", { accountId }),
-  updateAccountLogin: (input: AccountLoginUpdate) => invoke<AccountLoginDetails>("update_local_account_login", { input }),
+  updateAccountLogin: (loginUpdate: AccountLoginUpdate) => invoke<AccountLoginDetails>("update_local_account_login", { input: loginUpdate }),
   previewTotpCode: (secret: string) => invoke<AccountTotpPreview>("preview_totp_code", { secret }),
   revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
 
@@ -177,8 +177,8 @@ export const relayCommands = {
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),
   updateGatewayPort: (port: number) => invoke("update_local_gateway_port", { port }),
-  setToolPolicy: (input: ToolPolicyUpdate) => invoke("set_local_tool_policy", { input }),
-  setRemoteToolPolicy: (input: ToolPolicyUpdate) => invoke("execute_remote_server_action", { input: { action: { type: "set_tool_policy" }, payload: input } }),
+  setToolPolicy: (toolPolicy: ToolPolicyUpdate) => invoke("set_local_tool_policy", { input: toolPolicy }),
+  setRemoteToolPolicy: (toolPolicy: ToolPolicyUpdate) => invoke("execute_remote_server_action", { input: { action: { type: "set_tool_policy" }, payload: toolPolicy } }),
   revealLocalGatewayApiKey: () => invoke<string>("reveal_local_gateway_api_key"),
   rotateLocalGatewayApiKey: () => invoke<string>("rotate_local_gateway_api_key"),
   updateChatgptQuotaReserve: (reserveBasisPoints: number) => invoke("update_chatgpt_interface_quota_reserve", { input: { reserveBasisPoints } }),
@@ -194,8 +194,8 @@ export const relayCommands = {
   setCodexProfileWebsockets: (enabled: boolean) => invoke("set_codex_profile_websockets", { input: { enabled } }),
   setRemoteCodexWebsockets: (enabled: boolean) => invoke("execute_remote_server_action", { input: { action: { type: "set_codex_websockets" }, payload: { enabled } } }),
 
-  createAutomation: (input: Record<string, unknown>) => invoke("create_quota_wake_automation", { input }),
-  updateAutomation: (taskId: string, input: Record<string, unknown>) => invoke("update_quota_wake_automation", { taskId, input }),
+  createAutomation: (automationInput: Record<string, unknown>) => invoke("create_quota_wake_automation", { input: automationInput }),
+  updateAutomation: (taskId: string, automationInput: Record<string, unknown>) => invoke("update_quota_wake_automation", { taskId, input: automationInput }),
   setAutomationEnabled: (taskId: string, enabled: boolean) => invoke("set_quota_wake_automation_enabled", { taskId, enabled }),
   deleteAutomation: (taskId: string) => invoke("delete_quota_wake_automation", { taskId }),
 
@@ -204,14 +204,14 @@ export const relayCommands = {
   stopManagedCodex: () => invoke<boolean>("stop_managed_codex_profile"),
   launchManagedCodex: () => invoke("launch_managed_codex_profile"),
   getOpenCodeConfigStatus: () => invoke<OpenCodeConfigStatus>("get_opencode_config_status"),
-  createOpenCodeSnapshot: (name: string) => invoke<boolean>("create_opencode_snapshot", { name }),
+  createOpenCodeSnapshot: (snapshotName: string) => invoke<boolean>("create_opencode_snapshot", { name: snapshotName }),
   connectOpenCode: () => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("connect_opencode_to_local_gateway"),
   launchOpenCodeSource: (sourceId: string) => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("launch_opencode_source", { sourceId }),
   restartOpenCode: () => invoke<void>("restart_opencode_app"),
   restoreOpenCodeConfig: () => invoke<boolean>("restore_opencode_config"),
   restoreCodex: () => invoke("restore_codex_profile"),
   profileSnapshots: () => invoke<ProfileSnapshotList>("list_codex_profile_snapshots"),
-  createProfileSnapshot: (name: string) => invoke<ProfileSnapshot>("create_codex_profile_snapshot", { name }),
+  createProfileSnapshot: (snapshotName: string) => invoke<ProfileSnapshot>("create_codex_profile_snapshot", { name: snapshotName }),
   restoreProfileSnapshot: (snapshotId: string) => invoke<void>("restore_full_codex_profile_snapshot", { snapshotId }),
   deleteProfileSnapshot: (snapshotId: string) => invoke("delete_codex_profile_snapshot", { snapshotId }),
   attachCodexAccount: (accountId: string, profileDir?: string) => invoke<ProfileActivation>("attach_codex_to_account", { accountId, profileDir: profileDir || null }),
@@ -221,14 +221,14 @@ export const relayCommands = {
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
   restoreDefaultAccountProfile: () => invoke("restore_codex_account_profile", { profileDir: null }),
   storageInfo: () => invoke<RelayStorageInfo>("get_relay_storage_info"),
-  recordFrontendDiagnostic: (input: {
+  recordFrontendDiagnostic: (diagnosticInput: {
     source: string;
     message: string;
     operation?: string;
     code?: string;
     stack?: string;
     fatal?: boolean;
-  }) => invoke<void>("record_frontend_diagnostic", { input }),
+  }) => invoke<void>("record_frontend_diagnostic", { input: diagnosticInput }),
   diagnosticPaths: () => invoke<DiagnosticPaths>("get_diagnostic_paths"),
   diagnosticSettings: () => invoke<DiagnosticSettings>("get_diagnostic_settings"),
   setDiagnosticDebugMode: (enabled: boolean) => invoke<DiagnosticSettings>("set_diagnostic_debug_mode", { enabled }),
@@ -239,7 +239,7 @@ export const relayCommands = {
   exportSupportBundle: (context: SupportExportContext) => invoke<string | null>("export_support_bundle", { context }),
   previewSupportBundle: (context: SupportExportContext) => invoke<SupportBundlePreview>("preview_support_bundle", { context }),
 
-  connectRemote: (input: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input }),
+  connectRemote: (connectionInput: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input: connectionInput }),
   remoteLinkedAccountCount: () => invoke<number>("get_remote_linked_account_count"),
   disconnectRemote: () => invoke("disconnect_remote_server"),
   refreshRemoteCapabilities: () => invoke("refresh_remote_server_capabilities"),
@@ -250,9 +250,9 @@ export const relayCommands = {
   remoteAction: (action: Record<string, unknown>, payload?: unknown) => invoke("execute_remote_server_action", { input: { action, payload: payload ?? null } }),
 };
 
-export function defaultWakeInput(name: string): Omit<WakeTask, "id" | "createdAtMs" | "updatedAtMs" | "trigger"> {
+export function defaultWakeInput(taskName: string): Omit<WakeTask, "id" | "createdAtMs" | "updatedAtMs" | "trigger"> {
   return {
-    name,
+    name: taskName,
     enabled: true,
     accountSelector: { kind: "all_eligible" },
     windowKinds: ["primary"],

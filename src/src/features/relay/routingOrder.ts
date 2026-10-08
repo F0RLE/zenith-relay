@@ -63,8 +63,10 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
       // protocol source card aligned with the active route instead of pinning
       // it to whichever binding happened to be serialized first.
       const active = activeRequestCount(candidate) > 0;
-      const previous = sourcePositions.get(sourceId);
-      if (!previous || (active && !previous.active) || (active === previous.active && index < previous.index)) {
+      const previousSourcePosition = sourcePositions.get(sourceId);
+      if (!previousSourcePosition
+        || (active && !previousSourcePosition.active)
+        || (active === previousSourcePosition.active && index < previousSourcePosition.index)) {
         sourcePositions.set(sourceId, { index, active });
       }
     }

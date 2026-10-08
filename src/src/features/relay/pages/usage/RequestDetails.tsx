@@ -30,8 +30,8 @@ export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: 
     reasoningTokens: row.reasoningTokens,
     totalTokens: row.tokens,
   });
-  const formatTokens = (value: number | null) => value == null ? "—" : formatFullNumber(value, i18n.language);
-  const hasTokenValue = (value: number | null): value is number => value != null && value > 0;
+  const formatTokens = (tokenCount: number | null) => tokenCount == null ? "—" : formatFullNumber(tokenCount, i18n.language);
+  const hasTokenValue = (tokenCount: number | null): tokenCount is number => tokenCount != null && tokenCount > 0;
   const hasCacheRead = hasTokenValue(breakdown.cacheRead);
   const hasCacheWrite = hasTokenValue(breakdown.cacheWrite);
   const showCacheClock = hasCacheRead || hasCacheWrite;
@@ -54,7 +54,7 @@ export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: 
     setCacheTouch(null);
     relayCommands.localCacheSessions().then((sessions) => {
       if (!active) return;
-      const session = sessions.find((item) => item.clientContextId === row.clientContextId);
+      const session = sessions.find((cacheSession) => cacheSession.clientContextId === row.clientContextId);
       setCacheTouch(session
         ? { model: session.model ?? row.model, cacheWriteTtl: session.cacheWriteTtl ?? row.cacheWriteTtl, touchedAt: session.touchedAt }
         : own);
@@ -95,7 +95,7 @@ export function RequestDetails({ row, local, onClose }: { row: UsageRow; local: 
       <RequestDetailMetric label={t("usage.totalTime")} value={formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t)} />
       <RequestDetailMetric label={t("usage.visibleOutputTokens")} value={breakdown.visibleOutput == null ? "—" : formatCompactNumber(breakdown.visibleOutput, i18n.language)} />
     </div>
-    <Tabs value={section} items={tabs} onChange={(value) => setSection(value as typeof section)} label={t("usage.requestSectionsLabel")} />
+    <Tabs value={section} items={tabs} onChange={(selectedSection) => setSection(selectedSection as typeof section)} label={t("usage.requestSectionsLabel")} />
     {section === "overview" ? <>
       <dl className="request-details-list">
         {row.requestedModel && row.routedModel && row.requestedModel !== row.routedModel ? <>

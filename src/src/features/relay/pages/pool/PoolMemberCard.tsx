@@ -98,9 +98,9 @@ export function PoolMemberCard({
       ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
       : undefined;
   const activeRequests = activeRequestCount(runtimeState);
-  const name = member.kind === "source" ? member.name : member.label;
-  const editLabel = `${t("pool.editMember")}: ${name}`;
-  const removeLabel = `${t("pool.removeMember")}: ${name}`;
+  const memberName = member.kind === "source" ? member.name : member.label;
+  const editLabel = `${t("pool.editMember")}: ${memberName}`;
+  const removeLabel = `${t("pool.removeMember")}: ${memberName}`;
   const removing = busy === `pool-remove-${member.id}`;
   const statusLabel = t(`pool.memberStatus.${statusKey}`);
   const indicatorLabel = visibleMemberErrorCode
@@ -114,7 +114,7 @@ export function PoolMemberCard({
     <article
       className={`pool-member-card${selected ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
       role="listitem"
-      data-member-label={name}
+      data-member-label={memberName}
       data-current={isCurrent ? "true" : "false"}
       data-next={isNext ? "true" : "false"}
       data-last-used={isLastUsed ? "true" : "false"}

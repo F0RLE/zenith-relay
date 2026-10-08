@@ -39,8 +39,8 @@ export function ImportDialog({
 }) {
   const { t } = useTranslation();
   const { mode: currentMode, runtime, perform, busy } = useRelayState();
-  const mode = modeOverride ?? currentMode;
-  const { pool: proxyPool } = useProxyPool(mode === "local");
+  const relayMode = modeOverride ?? currentMode;
+  const { pool: proxyPool } = useProxyPool(relayMode === "local");
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(initialSession ?? null);
   const [ownedSessionId, setOwnedSessionId] = useState<string | null>(initialSession?.sessionId ?? null);
@@ -57,30 +57,30 @@ export function ImportDialog({
   const mounted = useRef(true);
   const confirmInFlight = useRef(false);
   const closing = useRef(false);
-  const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  const canImportToPool = relayMode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
   const importOperationBusy = busy?.startsWith("import-") ?? false;
-  const acceptSession = (next: ImportSession) => {
-    setSession(next);
-    setOwnedSessionId(next.sessionId);
-    activeSessionId.current = next.sessionId;
+  const acceptSession = (updatedSession: ImportSession) => {
+    setSession(updatedSession);
+    setOwnedSessionId(updatedSession.sessionId);
+    activeSessionId.current = updatedSession.sessionId;
     setCommandFailed(false);
     setCompleted(null);
     setProgress(null);
-    setSelected(selectedImportItemIds(next));
+    setSelected(selectedImportItemIds(updatedSession));
   };
   const cancel = async () => {
     if (importOperationBusy || confirmInFlight.current || closing.current) return;
     closing.current = true;
     const sessionId = session?.sessionId ?? ownedSessionId;
     try {
-      if (mode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId), undefined, { backgroundRefresh: true });
+      if (relayMode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId), undefined, { backgroundRefresh: true });
     } finally {
       activeSessionId.current = null;
       if (mounted.current) onClose();
     }
   };
   const preview = async () => {
-    if (mode === "local") {
+    if (relayMode === "local") {
       let startedSessionId: string | null = null;
       const captured = await captureOperationResult(
         (work) => perform("import-preview", work, undefined, { backgroundRefresh: true }),
@@ -103,7 +103,7 @@ export function ImportDialog({
         // repeated preview cannot accumulate stale state or crash cleanup.
         if (startedSessionId) {
           if (activeSessionId.current === startedSessionId) activeSessionId.current = null;
-          setOwnedSessionId((current) => current === startedSessionId ? null : current);
+          setOwnedSessionId((previousOwnedSessionId) => previousOwnedSessionId === startedSessionId ? null : previousOwnedSessionId);
           void relayCommands.cancelImport(startedSessionId).catch(() => undefined);
         }
         setCommandFailed(true);
@@ -126,7 +126,7 @@ export function ImportDialog({
       captured = await captureOperationResult(
         (work) => perform("import-files", work, undefined, { backgroundRefresh: true }),
         async () => {
-          const session = mode === "local"
+          const session = relayMode === "local"
             ? await relayCommands.previewImportFiles(paths)
             : await relayCommands.previewRemoteImportFiles(paths);
           if (session) {
@@ -140,15 +140,15 @@ export function ImportDialog({
       if (captured.ok && captured.value) acceptSession(captured.value);
       else if (!captured.ok) setCommandFailed(true);
     } finally {
-      if (!mounted.current && mode === "local" && createdSessionId) {
+      if (!mounted.current && relayMode === "local" && createdSessionId) {
         void relayCommands.cancelImport(createdSessionId).catch(() => undefined);
       }
       if (mounted.current) setFileLoading(false);
     }
   };
-  const finishConfirmedImport = (result: ConfirmAccountImportResponse | null) => {
+  const finishConfirmedImport = (importResult: ConfirmAccountImportResponse | null) => {
     if (!session) return;
-    const failures = collectImportFailures(result, session);
+    const failures = collectImportFailures(importResult, session);
     setProgress(null);
     if (failures.length) {
       setSelected(failures.map((failure) => failure.itemId));
@@ -166,7 +166,7 @@ export function ImportDialog({
     setCommandFailed(false);
     setProgress({ sessionId, completed: 0, total: selectedIds.length, succeeded: 0, failed: 0 });
     try {
-      if (mode === "local") {
+      if (relayMode === "local") {
         let captured: { ok: boolean; value: ConfirmAccountImportResponse | undefined } = { ok: false, value: undefined };
         beginAccountImportConfirmation();
         try {
@@ -184,7 +184,7 @@ export function ImportDialog({
           return;
         }
         if (assignProxy && captured.value) {
-          const accountIds = captured.value.results.flatMap((item) => item.status === "succeeded" && item.account ? [item.account.account.id] : []);
+          const accountIds = captured.value.results.flatMap((importResult) => importResult.status === "succeeded" && importResult.account ? [importResult.account.account.id] : []);
           if (accountIds.length) await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds), undefined, { backgroundRefresh: true });
         }
         if (!mounted.current) return;
@@ -226,7 +226,7 @@ export function ImportDialog({
     };
   }, []);
   useEffect(() => {
-    if (mode !== "local") return;
+    if (relayMode !== "local") return;
     let disposed = false;
     let stop: (() => void) | undefined;
     void relayCommands.onImportProgress((event) => {
@@ -239,21 +239,21 @@ export function ImportDialog({
       disposed = true;
       stop?.();
     };
-  }, [mode]);
+  }, [relayMode]);
   useEffect(() => {
     if (!initialPaths?.length || initialPreviewStarted.current) return;
     initialPreviewStarted.current = true;
     void chooseFiles(initialPaths);
   }, [initialPaths]);
   useEffect(() => () => {
-    if (mode === "local" && activeSessionId.current) {
+    if (relayMode === "local" && activeSessionId.current) {
       void relayCommands.cancelImport(activeSessionId.current).catch(() => undefined);
     }
-  }, [mode]);
+  }, [relayMode]);
   const importRows = session?.preview.rows ?? [];
-  const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
-    ? current.filter((id) => id !== itemId)
-    : [...current, itemId]);
+  const toggle = (itemId: string) => setSelected((previousSelectedItemIds) => previousSelectedItemIds.includes(itemId)
+    ? previousSelectedItemIds.filter((selectedItemId) => selectedItemId !== itemId)
+    : [...previousSelectedItemIds, itemId]);
   // Keep invalid rows selectable so the user can explicitly submit them and
   // receive a per-item failure result instead of losing the row silently.
   // Rust still validates the item and never imports unusable credentials.
@@ -266,7 +266,7 @@ export function ImportDialog({
   }, [someImportRowsSelected]);
   const toggleAll = (checked: boolean) => setSelected(checked ? importRowIds : []);
   const selectedAccountCount = session?.preview.rows.filter((row) => selected.includes(row.itemId) && row.authMode !== "api_key").length ?? 0;
-  const localProxyOptions = mode === "local";
+  const localProxyOptions = relayMode === "local";
   const footer = completed ? (
     <>
       <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.close")}</Button>
@@ -282,13 +282,13 @@ export function ImportDialog({
       )}
     </>
   );
-  let body;
+  let importContent;
   if (busy === "import-confirm" && progress) {
-    body = <ImportProgressView mode={mode} progress={progress} />;
+    importContent = <ImportProgressView mode={relayMode} progress={progress} />;
   } else if (completed) {
-    body = <ImportFailureSummary failures={completed} />;
+    importContent = <ImportFailureSummary failures={completed} />;
   } else if (session) {
-    body = (
+    importContent = (
       <ImportPreview
         session={session}
         selected={selected}
@@ -309,14 +309,14 @@ export function ImportDialog({
       />
     );
   } else if (fileLoading || busy === "import-preview") {
-    body = <ImportFileStatus />;
+    importContent = <ImportFileStatus />;
   } else {
-    body = <ImportSourceForm mode={mode} choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
+    importContent = <ImportSourceForm mode={relayMode} choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
   }
   return (
     <Dialog className="account-import-dialog" title={t("accounts.import")} onClose={cancel} footer={footer}>
       {commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}
-      {body}
+      {importContent}
     </Dialog>
   );
 }
@@ -382,7 +382,7 @@ function ImportSourceForm({
   mode: RelayMode;
   choosingFiles: boolean;
   content: string;
-  onContent: (value: string) => void;
+  onContent: (contentValue: string) => void;
   onChooseFiles: () => void;
 }) {
   const { t } = useTranslation();
@@ -508,12 +508,12 @@ function ImportPreview({
 function collectImportFailures(response: ConfirmAccountImportResponse | null, session: ImportSession): ImportFailure[] {
   const rows = new Map(session.preview.rows.map((row) => [row.itemId, row]));
   return (response?.results ?? [])
-    .filter((item) => item.status === "failed")
-    .map((item) => {
-      const row = rows.get(item.itemId);
+    .filter((importResult) => importResult.status === "failed")
+    .map((importResult) => {
+      const row = rows.get(importResult.itemId);
       return {
-        itemId: item.itemId,
-        code: item.error?.code ?? "unknown",
+        itemId: importResult.itemId,
+        code: importResult.error?.code ?? "unknown",
         ...(row?.label ? { label: row.label } : {}),
         ...(row?.identity ? { identity: row.identity } : {}),
       };

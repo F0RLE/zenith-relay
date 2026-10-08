@@ -15,23 +15,23 @@ import { SpeedValue, UsageModel, CompactNumber } from "./usageReportParts";
 type RequestsViewProps = {
   rows: UsageRow[];
   status: string;
-  setStatus: (value: string) => void;
+  setStatus: (statusValue: string) => void;
   modelQuery: string;
   modelOptions: Array<{ value: string; label: string }>;
-  setModelQuery: (value: string) => void;
+  setModelQuery: (modelQueryValue: string) => void;
   connectionQuery: string;
   poolMemberOptions: Array<{ value: string; label: string }>;
-  setConnectionQuery: (value: string) => void;
+  setConnectionQuery: (connectionQueryValue: string) => void;
   wireApi: string;
-  setWireApi: (value: string) => void;
+  setWireApi: (wireApiValue: string) => void;
   transport: string;
-  setTransport: (value: string) => void;
+  setTransport: (transportValue: string) => void;
   errorQuery: string;
-  setErrorQuery: (value: string) => void;
+  setErrorQuery: (errorQueryValue: string) => void;
   requestQuery: string;
-  setRequestQuery: (value: string) => void;
+  setRequestQuery: (requestQueryValue: string) => void;
   clearFilters: () => void;
-  formatTime: (value: string) => string;
+  formatTime: (timestamp: string) => string;
   onSelect: (row: UsageRow) => void;
 };
 
@@ -66,7 +66,7 @@ export function RequestsView({
     ...Array.from(new Set([
       ...rows.flatMap((row) => row.errorCategory ? [row.errorCategory] : []),
       ...(errorQuery ? [errorQuery] : []),
-    ])).sort().map((value) => ({ value, label: formatErrorCategory(value, t) })),
+    ])).sort().map((errorCategory) => ({ value: errorCategory, label: formatErrorCategory(errorCategory, t) })),
   ];
   return <><div className="usage-filter-panel">
     <div className="usage-filters usage-filter-primary">
@@ -92,7 +92,7 @@ export function RequestsView({
           label={t("usage.moreFilters")}
           icon={<SlidersHorizontal aria-hidden />}
           aria-expanded={showMoreFilters}
-          onClick={() => setShowMoreFilters((current) => !current)}
+          onClick={() => setShowMoreFilters((isVisible) => !isVisible)}
         />
         {secondaryCount ? <small>{secondaryCount}</small> : null}
       </span>
@@ -179,14 +179,14 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
       ),
     },
   };
-  const resized = REQUEST_COLUMN_IDS.every((id) => layout.widths[id] != null);
-  const totalWidth = resized ? REQUEST_COLUMN_IDS.reduce((total, id) => total + (layout.widths[id] ?? 0), 0) : 0;
+  const resized = REQUEST_COLUMN_IDS.every((columnId) => layout.widths[columnId] != null);
+  const totalWidth = resized ? REQUEST_COLUMN_IDS.reduce((total, columnId) => total + (layout.widths[columnId] ?? 0), 0) : 0;
   const captureWidths = (table: HTMLTableElement) => Object.fromEntries(Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]")).map((cell) => {
-    const id = cell.dataset["column"] as RequestColumnId;
-    return [id, Math.max(REQUEST_COLUMN_MIN_WIDTH[id], Math.round(cell.getBoundingClientRect().width))];
+    const columnId = cell.dataset["column"] as RequestColumnId;
+    return [columnId, Math.max(REQUEST_COLUMN_MIN_WIDTH[columnId], Math.round(cell.getBoundingClientRect().width))];
   })) as Record<RequestColumnId, number>;
-  const moveColumn = (column: RequestColumnId, target: RequestColumnId, after = false) => setLayout((current) => ({ ...current, order: reorderColumns(current.order, column, target, after) }));
-  const moveColumnBy = (column: RequestColumnId, offset: number) => setLayout((current) => ({ ...current, order: shiftColumn(current.order, column, offset) }));
+  const moveColumn = (column: RequestColumnId, target: RequestColumnId, after = false) => setLayout((previousLayout) => ({ ...previousLayout, order: reorderColumns(previousLayout.order, column, target, after) }));
+  const moveColumnBy = (column: RequestColumnId, offset: number) => setLayout((previousLayout) => ({ ...previousLayout, order: shiftColumn(previousLayout.order, column, offset) }));
   const { bind: bindColumnDrag, drag: columnDrag } = useColumnDrag(moveColumn, moveColumnBy);
   const startResize = (event: PointerEvent<HTMLSpanElement>, column: RequestColumnId) => {
     const table = event.currentTarget.closest("table");
@@ -194,18 +194,18 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     if (!(table instanceof HTMLTableElement) || !(header instanceof HTMLTableCellElement)) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
-    setLayout((current) => ({ ...current, widths: captureWidths(table) }));
+    setLayout((previousLayout) => ({ ...previousLayout, widths: captureWidths(table) }));
     setResize({ column, pointerId: event.pointerId, startX: event.clientX, startWidth: header.getBoundingClientRect().width });
   };
   const resizeColumn = (event: PointerEvent<HTMLSpanElement>, column: RequestColumnId) => {
     if (!resize || resize.column !== column || resize.pointerId !== event.pointerId) return;
     const width = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[column], Math.round(resize.startWidth + event.clientX - resize.startX)));
-    setLayout((current) => current.widths[column] === width ? current : { ...current, widths: { ...current.widths, [column]: width } });
+    setLayout((previousLayout) => previousLayout.widths[column] === width ? previousLayout : { ...previousLayout, widths: { ...previousLayout.widths, [column]: width } });
   };
   const resizeColumnByKeyboard = (event: KeyboardEvent<HTMLSpanElement>, column: RequestColumnId) => {
     if (event.key === "Home") {
       event.preventDefault();
-      setLayout((current) => ({ ...current, widths: {} }));
+      setLayout((previousLayout) => ({ ...previousLayout, widths: {} }));
       return;
     }
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -214,42 +214,42 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     event.preventDefault();
     const widths = captureWidths(table);
     widths[column] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[column], widths[column] + (event.key === "ArrowRight" ? 12 : -12)));
-    setLayout((current) => ({ ...current, widths }));
+    setLayout((previousLayout) => ({ ...previousLayout, widths }));
   };
 
   return <div className="relay-table-wrap">
     <table className="relay-table usage-request-table usage-sortable-table" data-resized={resized ? "true" : "false"}>
-      <colgroup>{layout.order.map((id) => <col key={id} data-column={id} style={resized ? { width: `${(layout.widths[id] ?? 0) / totalWidth * 100}%` } : undefined} />)}</colgroup>
-      <thead><tr>{layout.order.map((id) => <th
-        key={id}
-        data-column={id}
-        data-dragging={columnDrag?.column === id ? "true" : undefined}
-        data-drop={columnDrag?.target === id && columnDrag.column !== id ? (columnDrag.after ? "after" : "before") : undefined}
+      <colgroup>{layout.order.map((columnId) => <col key={columnId} data-column={columnId} style={resized ? { width: `${(layout.widths[columnId] ?? 0) / totalWidth * 100}%` } : undefined} />)}</colgroup>
+      <thead><tr>{layout.order.map((columnId) => <th
+        key={columnId}
+        data-column={columnId}
+        data-dragging={columnDrag?.column === columnId ? "true" : undefined}
+        data-drop={columnDrag?.target === columnId && columnDrag.column !== columnId ? (columnDrag.after ? "after" : "before") : undefined}
       >
-        <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bindColumnDrag(id)}><span>{columns[id].label}</span></button>
+        <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[columnId].label })} {...bindColumnDrag(columnId)}><span>{columns[columnId].label}</span></button>
         <span
           className="usage-column-resizer"
           role="separator"
           tabIndex={0}
           aria-orientation="vertical"
-          aria-label={t("usage.resizeColumn", { column: columns[id].label })}
-          aria-valuemin={REQUEST_COLUMN_MIN_WIDTH[id]}
+          aria-label={t("usage.resizeColumn", { column: columns[columnId].label })}
+          aria-valuemin={REQUEST_COLUMN_MIN_WIDTH[columnId]}
           aria-valuemax={REQUEST_COLUMN_MAX_WIDTH}
-          aria-valuenow={Math.round(layout.widths[id] ?? REQUEST_COLUMN_MIN_WIDTH[id])}
-          onPointerDown={(event) => startResize(event, id)}
-          onPointerMove={(event) => resizeColumn(event, id)}
+          aria-valuenow={Math.round(layout.widths[columnId] ?? REQUEST_COLUMN_MIN_WIDTH[columnId])}
+          onPointerDown={(event) => startResize(event, columnId)}
+          onPointerMove={(event) => resizeColumn(event, columnId)}
           onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); setResize(null); }}
           onLostPointerCapture={() => setResize(null)}
-          onDoubleClick={() => setLayout((current) => ({ ...current, widths: {} }))}
-          onKeyDown={(event) => resizeColumnByKeyboard(event, id)}
+          onDoubleClick={() => setLayout((previousLayout) => ({ ...previousLayout, widths: {} }))}
+          onKeyDown={(event) => resizeColumnByKeyboard(event, columnId)}
         />
       </th>)}</tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((id) => <td
-        key={id}
-        data-column={id}
-        data-label={columns[id].label}
-        data-relay-tooltip={id === "model" ? row.model ?? undefined : id === "connection" ? row.connection : undefined}
-      >{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+      <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((columnId) => <td
+        key={columnId}
+        data-column={columnId}
+        data-label={columns[columnId].label}
+        data-relay-tooltip={columnId === "model" ? row.model ?? undefined : columnId === "connection" ? row.connection : undefined}
+      >{columns[columnId].cell(row)}</td>)}</tr>)}</tbody>
     </table>
   </div>;
 }

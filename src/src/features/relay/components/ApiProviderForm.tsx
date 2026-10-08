@@ -58,13 +58,13 @@ export function ApiProviderForm({
             tabIndex={value.kind === kind || (!value.kind && index === 0) ? 0 : -1}
             onClick={() => select(kind)}
             onKeyDown={(event) => {
-              const next = nextProviderIndex(event.key, index, providerOrder.length);
-              if (next == null) return;
+              const nextProviderPosition = nextProviderIndex(event.key, index, providerOrder.length);
+              if (nextProviderPosition == null) return;
               event.preventDefault();
-              const nextKind = providerOrder[next];
+              const nextKind = providerOrder[nextProviderPosition];
               if (!nextKind) return;
               select(nextKind);
-              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus();
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[nextProviderPosition]?.focus();
             }}
           >
             <span className="api-provider-title"><Icon aria-hidden /><strong>{providerDefaults[kind].name || t("apiProviders.custom")}</strong></span>

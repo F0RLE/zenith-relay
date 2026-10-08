@@ -22,22 +22,22 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
   useEffect(() => {
     let active = true;
     void relayCommands.storageInfo()
-      .then((info) => { if (active) setStorageInfo(info); })
+      .then((storageInfo) => { if (active) setStorageInfo(storageInfo); })
       .catch(() => { if (active) setStorageUnavailable(true); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
     let active = true;
     void relayCommands.diagnosticSettings()
-      .then((settings) => { if (active) setDiagnosticSettings(settings); })
+      .then((diagnosticSettings) => { if (active) setDiagnosticSettings(diagnosticSettings); })
       .catch(() => { if (active) setDiagnosticsUnavailable(true); });
     return () => { active = false; };
   }, []);
   const debugMode = usePendingFlag(diagnosticSettings?.debugEnabled ?? false);
   const updateDiagnosticDebug = async (enabled: boolean) => {
-    const settings = await relayCommands.setDiagnosticDebugMode(enabled);
-    setDiagnosticSettings(settings);
-    return settings;
+    const updatedDiagnosticSettings = await relayCommands.setDiagnosticDebugMode(enabled);
+    setDiagnosticSettings(updatedDiagnosticSettings);
+    return updatedDiagnosticSettings;
   };
   const reset = async () => { if (await confirm(t("settings.resetDataConfirm"), { danger: true })) await perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
   const updateStatus = updateCheckState === "available" ? { status: "info" as const, label: t("updates.availableVersion", { version: updateVersion }) }
@@ -57,16 +57,16 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             className="field-option-menu"
             label={t("settings.language")}
             value={i18n.language.startsWith("ru") ? "ru" : "en"}
-            onChange={(value) => void setI18nLanguage(value)}
+            onChange={(languageCode) => void setI18nLanguage(languageCode)}
             options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]}
           />
         </div>
         <div className="settings-control-row">
           <div><strong>{t("settings.theme")}</strong></div>
           <div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>
-            {(["system", "light", "dark"] as const).map((value) => (
-              <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>
-                {t(`settings.themes.${value}`)}
+            {(["system", "light", "dark"] as const).map((themeName) => (
+              <button key={themeName} type="button" className={theme === themeName ? "active" : ""} aria-pressed={theme === themeName} onClick={() => setTheme(themeName)}>
+                {t(`settings.themes.${themeName}`)}
               </button>
             ))}
           </div>

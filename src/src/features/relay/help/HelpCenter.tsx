@@ -43,7 +43,7 @@ function HelpGuide({ language }: { language: keyof typeof guides }) {
     }).catch(() => { if (!abort.signal.aborted) setFailed(true); });
     return () => abort.abort();
   }, [language, attempt]);
-  if (failed) return <div role="alert"><p>{t("helpCenter.loadFailed")}</p><Button icon={<RotateCcw aria-hidden />} onClick={() => setAttempt((value) => value + 1)}>{t("helpCenter.retry")}</Button></div>;
+  if (failed) return <div role="alert"><p>{t("helpCenter.loadFailed")}</p><Button icon={<RotateCcw aria-hidden />} onClick={() => setAttempt((attempt) => attempt + 1)}>{t("helpCenter.retry")}</Button></div>;
   if (markdown === null) return <p role="status">{t("helpCenter.loading")}</p>;
   return <HelpDocument markdown={markdown} language={language} />;
 }

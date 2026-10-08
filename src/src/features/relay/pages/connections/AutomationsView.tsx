@@ -50,18 +50,18 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
   return (
     <div className="automation-list connection-list-wrap" role="list">
           {runtime.automations.map((task) => {
-            const type = automationType(task.trigger.kind);
-            const name = automationDisplayName(task, t);
-            const typeName = t(type.nameKey);
-            const history = runtime.wakeHistory.filter((item) => item.taskId === task.id);
-            const last = history[history.length - 1];
+            const triggerType = automationType(task.trigger.kind);
+            const automationName = automationDisplayName(task, t);
+            const triggerTypeName = t(triggerType.nameKey);
+            const history = runtime.wakeHistory.filter((wakeEvent) => wakeEvent.taskId === task.id);
+            const lastWakeEvent = history[history.length - 1];
             return (
               <article className="automation-card" role="listitem" key={task.id}>
                 <header>
                   <AutomationEnabledControl task={task} />
                   <div className="connection-identity">
-                    <strong>{name}</strong>
-                    {name !== typeName ? <small>{typeName}</small> : null}
+              <strong>{automationName}</strong>
+                    {automationName !== triggerTypeName ? <small>{triggerTypeName}</small> : null}
                   </div>
                   <div className="row-actions">
                     <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} />
@@ -85,8 +85,8 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
                   <div>
                     <dt>{t("automations.condition")}</dt>
                     <dd>
-                      {t(type.conditionKey)}
-                      {type.requiresModel ? <small>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</small> : null}
+                      {t(triggerType.conditionKey)}
+                      {triggerType.requiresModel ? <small>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</small> : null}
                     </dd>
                   </div>
                   <div>
@@ -95,13 +95,13 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
                       {task.accountSelector.kind === "all_eligible"
                         ? t("automations.allEligible")
                         : task.accountSelector.kind === "account_ids"
-                          ? task.accountSelector.values.map((id) => runtime.accounts.find((account) => account.id === id)?.label ?? t("accounts.importUnknownAccount")).join(", ")
+                          ? task.accountSelector.values.map((accountId) => runtime.accounts.find((account) => account.id === accountId)?.label ?? t("accounts.importUnknownAccount")).join(", ")
                           : task.accountSelector.values.join(", ")}
                     </dd>
                   </div>
                   <div>
                     <dt>{t("automations.lastResult")}</dt>
-                    <dd>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</dd>
+                    <dd>{lastWakeEvent ? t(`wake.${lastWakeEvent.outcome}`, { defaultValue: lastWakeEvent.outcome }) : t("common.never")}</dd>
                   </div>
                 </dl>
               </article>
@@ -116,20 +116,22 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const { mode, runtime, perform, busy } = useRelayState();
   const [customName, setCustomName] = useState(() => customAutomationName(task?.name));
   const [triggerKind, setTriggerKind] = useState<WakeTask["trigger"]["kind"]>(task?.trigger.kind ?? "quota_full");
-  const name = customName?.trim() || defaultAutomationName(triggerKind, t);
+  const automationName = customName?.trim() || defaultAutomationName(triggerKind, t);
   const [selectorKind, setSelectorKind] = useState<WakeTask["accountSelector"]["kind"]>(task?.accountSelector.kind ?? "all_eligible");
   const [accountIds, setAccountIds] = useState<string[]>(task?.accountSelector.kind === "account_ids" ? task.accountSelector.values : []);
   const [modelId, setModelId] = useState(task?.modelPolicy.kind === "explicit" ? task.modelPolicy.value : "");
   const accounts = runtime?.accounts ?? [];
   const poolAccounts = eligibleAutomationAccounts(accounts);
   const selectedAccounts = selectedAutomationAccounts(poolAccounts, accountIds);
-  const type = automationType(triggerKind);
+  const triggerType = automationType(triggerKind);
   const targetAccounts = selectorKind === "account_ids" ? selectedAccounts : selectorKind === "all_eligible" ? poolAccounts : [];
   const availableModels = runtime ? availableAutomationModels(runtime.gateway, targetAccounts, selectorKind) : [];
-  const toggleAccount = (id: string) => setAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const toggleAccount = (accountId: string) => setAccountIds((previousAccountIds) => previousAccountIds.includes(accountId)
+    ? previousAccountIds.filter((selectedId) => selectedId !== accountId)
+    : [...previousAccountIds, accountId]);
   const accountSelectionValid = automationAccountSelectionValid(selectorKind, poolAccounts, accountIds, selectedAccounts);
   const selectedModel = resolveAutomationModel(availableModels, modelId);
-  const valid = automationFormValid(name, accountSelectionValid, type.requiresModel, selectedModel);
+  const valid = automationFormValid(automationName, accountSelectionValid, triggerType.requiresModel, selectedModel);
   const selectorOptions = [
     { value: "all_eligible", label: t("automations.allEligible") },
     { value: "account_ids", label: t("automations.selectedAccounts") },
@@ -142,7 +144,7 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const save = async () => {
     if (!valid) return;
     const now = Date.now();
-    const submission = buildAutomationSubmission({ task, name, triggerKind, selectorKind, accountIds, selectedModel, nowMs: now });
+    const submission = buildAutomationSubmission({ task, automationName, triggerKind, selectorKind, accountIds, selectedModel, nowMs: now });
     const ok = await perform(
       submission.operationId,
       () => mode === "local"
@@ -185,10 +187,10 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
           className="field-option-menu"
           label={t("automations.type")}
           value={triggerKind}
-          onChange={(value) => setTriggerKind(value as WakeTask["trigger"]["kind"])}
+          onChange={(triggerKindValue) => setTriggerKind(triggerKindValue as WakeTask["trigger"]["kind"])}
           options={typeOptions}
         />
-        <small className="automation-trigger-note">{t(type.conditionKey)}</small>
+                <small className="automation-trigger-note">{t(triggerType.conditionKey)}</small>
       </div>
       <div className="automation-target-grid">
         <div className="relay-field">
@@ -197,11 +199,11 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
             className="field-option-menu"
             label={t("automations.accountSelection")}
             value={selectorKind}
-            onChange={(value) => setSelectorKind(value as WakeTask["accountSelector"]["kind"])}
+            onChange={(selectorKindValue) => setSelectorKind(selectorKindValue as WakeTask["accountSelector"]["kind"])}
             options={selectorOptions}
           />
         </div>
-        {type.requiresModel ? (
+        {triggerType.requiresModel ? (
           <div className="relay-field">
             <span>{t("common.model")}</span>
             <OptionMenu
@@ -246,7 +248,7 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
         />
       </label>
       {!accountSelectionValid ? <p role="alert" className="automation-validation">{t("automations.accountsRequired")}</p> : null}
-      {type.requiresModel && accountSelectionValid && !selectedModel ? <p role="alert" className="automation-validation">{t("automations.modelUnavailable")}</p> : null}
+      {triggerType.requiresModel && accountSelectionValid && !selectedModel ? <p role="alert" className="automation-validation">{t("automations.modelUnavailable")}</p> : null}
     </div>
     </Dialog>
   );

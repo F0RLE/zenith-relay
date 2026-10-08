@@ -140,10 +140,10 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         range.selectNodeContents(label);
         return range.getBoundingClientRect().width;
       }));
-      const item = list.querySelector<HTMLElement>("button");
-      if (!item) return list.getBoundingClientRect().width;
-      const pixels = (value: string) => Number.parseFloat(value) || 0;
-      const itemStyle = window.getComputedStyle(item);
+      const firstOptionButton = list.querySelector<HTMLElement>("button");
+      if (!firstOptionButton) return list.getBoundingClientRect().width;
+      const pixels = (cssLength: string) => Number.parseFloat(cssLength) || 0;
+      const itemStyle = window.getComputedStyle(firstOptionButton);
       const listStyle = window.getComputedStyle(list);
       const indicatorWidth = showSelectionIndicator ? 16 + pixels(itemStyle.columnGap) : 0;
       return Math.ceil(
@@ -235,7 +235,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       aria-expanded={open}
       data-value={value}
       disabled={disabled}
-      onClick={() => setOpen((current) => !current)}
+      onClick={() => setOpen((previousOpen) => !previousOpen)}
       onKeyDown={(event) => {
         if (event.key === "Escape" && open) {
           event.preventDefault();

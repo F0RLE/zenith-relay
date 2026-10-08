@@ -33,8 +33,8 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
   useEffect(() => {
     const savedPool = new Map(sourcesSnapshot.map((source) => [source.id, source.inPool]));
     const savedEnabled = new Map(sourcesSnapshot.map((source) => [source.id, source.enabled]));
-    setPendingPool((current) => dropConfirmedFlags(current, savedPool));
-    setPendingEnabled((current) => dropConfirmedFlags(current, savedEnabled));
+    setPendingPool((previousPendingPool) => dropConfirmedFlags(previousPendingPool, savedPool));
+    setPendingEnabled((previousPendingEnabled) => dropConfirmedFlags(previousPendingEnabled, savedEnabled));
   }, [membershipSignature]);
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
   const retryTimestamps = useMemo(() => runtimeOrder
@@ -51,9 +51,9 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
   const launchSource = launchSourceId ? sourcesSnapshot.find((source) => source.id === launchSourceId) ?? null : null;
-  const sortColumn = (key: SourceSortKey) => setSort((current) =>
-    current.key === key
-      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+  const sortColumn = (key: SourceSortKey) => setSort((previousSort) =>
+    previousSort.key === key
+      ? { key, direction: previousSort.direction === "asc" ? "desc" : "asc" }
       : { key, direction: "asc" },
   );
   const sortLabel = (key: SourceSortKey, label: string) => {
@@ -73,22 +73,22 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
     );
   };
   const rememberFlag = (
-    setFlag: (update: (current: Record<string, boolean>) => Record<string, boolean>) => void,
+    setFlag: (update: (previousFlags: Record<string, boolean>) => Record<string, boolean>) => void,
     id: string,
-    value: boolean,
+    flagValue: boolean,
   ) => {
-    setFlag((current) => ({ ...current, [id]: value }));
+    setFlag((previousFlags) => ({ ...previousFlags, [id]: flagValue }));
   };
   const rollbackFlag = (
-    setFlag: (update: (current: Record<string, boolean>) => Record<string, boolean>) => void,
+    setFlag: (update: (previousFlags: Record<string, boolean>) => Record<string, boolean>) => void,
     id: string,
-    value: boolean,
+    flagValue: boolean,
   ) => {
-    setFlag((current) => {
-      if (current[id] !== value) return current;
-      const next = { ...current };
-      delete next[id];
-      return next;
+    setFlag((previousFlags) => {
+      if (previousFlags[id] !== flagValue) return previousFlags;
+      const remainingFlags = { ...previousFlags };
+      delete remainingFlags[id];
+      return remainingFlags;
     });
   };
   const updateParticipation = (source: SourceSummary, inPool: boolean) => {
@@ -263,12 +263,12 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
 
 function dropConfirmedFlags(pending: Record<string, boolean>, saved: ReadonlyMap<string, boolean>) {
   let changed = false;
-  const next = { ...pending };
-  for (const [id, value] of Object.entries(pending)) {
-    if (saved.get(id) === value) {
-      delete next[id];
+  const remainingFlags = { ...pending };
+  for (const [id, pendingValue] of Object.entries(pending)) {
+    if (saved.get(id) === pendingValue) {
+      delete remainingFlags[id];
       changed = true;
     }
   }
-  return changed ? next : pending;
+  return changed ? remainingFlags : pending;
 }

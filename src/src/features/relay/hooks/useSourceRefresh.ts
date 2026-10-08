@@ -4,7 +4,7 @@ import type { PerformOptions } from "../state/relayOperationModel";
 import type { RelayMode, SourceSummary } from "../api/types";
 import { refreshSourceCatalog, refreshSourceCatalogs, type SourceRefreshExecutor, type SourceRefreshReport } from "./sourceRefresh";
 
-type Perform = (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
+type Perform = (operationId: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
 
 type UseSourceRefreshInput = {
   mode: RelayMode;
@@ -30,7 +30,7 @@ export function useSourceRefresh({ mode, sources, resetKey, perform }: UseSource
 
   const refresh = useCallback(() => {
     const revision = contextRevision.current;
-    const sourceSnapshot = sources.map(({ id, secretAvailable }) => ({ id, secretAvailable }));
+    const sourceSnapshot = sources.map(({ id: sourceId, secretAvailable }) => ({ id: sourceId, secretAvailable }));
     let nextReport: SourceRefreshReport | undefined;
     setReport(null);
     void perform("sources-refresh-all", async () => {

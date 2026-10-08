@@ -54,17 +54,17 @@ export function GatewayPage() {
       title={!canManage ? t("common.unsupported") : undefined}
       icon={running ? <Square aria-hidden /> : <Play aria-hidden />}
       onClick={() => {
-        const next = !running;
+        const shouldRunGateway = !running;
         void perform(
           "gateway-toggle",
           async () => {
             if (mode === "local") {
-              if (next) await relayCommands.startGateway();
+              if (shouldRunGateway) await relayCommands.startGateway();
               else await relayCommands.stopGateway();
-            } else await relayCommands.remoteAction({ type: next ? "start_gateway" : "stop_gateway" });
-            gatewayRunning.confirm(next);
+            } else await relayCommands.remoteAction({ type: shouldRunGateway ? "start_gateway" : "stop_gateway" });
+            gatewayRunning.confirm(shouldRunGateway);
           },
-          next ? "feedback.started" : "feedback.stopped",
+          shouldRunGateway ? "feedback.started" : "feedback.stopped",
           { backgroundRefresh: true },
         );
       }}
@@ -98,7 +98,7 @@ export function GatewayPage() {
   return <section className="relay-page relay-workspace-page gateway-page">
     <PageHeader
       title={t("nav.gateway")}
-      navigation={<Tabs value={activeTab} onChange={(value) => setActiveTab(value as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />}
+      navigation={<Tabs value={activeTab} onChange={(selectedTab) => setActiveTab(selectedTab as GatewayTab)} label={t("gateway.tabs.label")} items={tabs} />}
       actions={activeTab === "api" ? apiActions : activeTab === "chatgpt" ? chatGptActions : openCodeActions}
     />
     {activeTab === "api"
@@ -148,8 +148,8 @@ function ChatGPTSetup() {
 
   useEffect(() => {
     if (!runtime || mode !== "local" || codexPoolOauthSelection === "none" || codexPoolOauthSelection === "auto") return;
-    const ids = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
-    if (!ids.includes(codexPoolOauthSelection)) setCodexPoolOauthSelection("auto");
+    const accountIdList = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
+    if (!accountIdList.includes(codexPoolOauthSelection)) setCodexPoolOauthSelection("auto");
   }, [codexPoolOauthSelection, eligibleAccountIds, mode, runtime, setCodexPoolOauthSelection]);
 
   if (mode === "remote") {

@@ -15,7 +15,7 @@ type AccountLoginNotesProps = {
 
 type PendingSave = {
   accountId: string;
-  values: AccountLoginDraft;
+  loginValues: AccountLoginDraft;
   notify: boolean;
 };
 
@@ -47,17 +47,17 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
   const remaining = preview?.expiresAtMs ? secondsUntil(preview.expiresAtMs, now) : 0;
   accountIdRef.current = accountId;
   latestValues.current = { email, phone, password, totpSecret };
-  const updateDraftField = (field: keyof AccountLoginDraft, value: string, update: (next: string) => void) => {
+  const updateDraftField = (field: keyof AccountLoginDraft, fieldValue: string, setFieldValue: (value: string) => void) => {
     dirtyFields.current[field] = true;
-    latestValues.current = { ...latestValues.current, [field]: value };
-    update(value);
+    latestValues.current = { ...latestValues.current, [field]: fieldValue };
+    setFieldValue(fieldValue);
   };
 
   const persistQueuedSaves = async () => {
     while (queuedSaves.current.length > 0) {
       const pending = queuedSaves.current.shift()!;
       try {
-        await relayCommands.updateAccountLogin({ accountId: pending.accountId, ...pending.values });
+        await relayCommands.updateAccountLogin({ accountId: pending.accountId, ...pending.loginValues });
       } catch {
         // Keep the values dirty so the next blur can retry them. Never let a
         // failed background save look like a successful one.
@@ -70,19 +70,19 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
       }
       if (accountIdRef.current !== pending.accountId) continue;
       const latest = latestValues.current;
-      savedValues.current = pending.values;
+      savedValues.current = pending.loginValues;
       dirtyFields.current = {
-        email: latest.email !== pending.values.email,
-        phone: latest.phone !== pending.values.phone,
-        password: latest.password !== pending.values.password,
-        totpSecret: latest.totpSecret !== pending.values.totpSecret,
+        email: latest.email !== pending.loginValues.email,
+        phone: latest.phone !== pending.loginValues.phone,
+        password: latest.password !== pending.loginValues.password,
+        totpSecret: latest.totpSecret !== pending.loginValues.totpSecret,
       };
       if (mountedRef.current) {
         setSaveFailed(false);
         if (pending.notify) showSaved();
       }
-      if (pending.values.email !== savedEmail.current) {
-        savedEmail.current = pending.values.email;
+      if (pending.loginValues.email !== savedEmail.current) {
+        savedEmail.current = pending.loginValues.email;
         if (mountedRef.current) void refresh();
       }
     }
@@ -90,17 +90,17 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
 
   const enqueueCurrentSave = (notify = true, targetAccountId = accountId) => {
     if (!targetAccountId || !ready || !loadedRef.current) return;
-    const next = editedLoginNotes(savedValues.current, latestValues.current, dirtyFields.current);
-    if (!next) return;
+    const changedValues = editedLoginNotes(savedValues.current, latestValues.current, dirtyFields.current);
+    if (!changedValues) return;
     hideSaved();
     const existing = queuedSaves.current.find((pending) => pending.accountId === targetAccountId);
     const pending: PendingSave = {
       accountId: targetAccountId,
-      values: next,
+      loginValues: changedValues,
       notify: Boolean(existing?.notify || notify),
     };
     if (existing) {
-      existing.values = pending.values;
+      existing.loginValues = pending.loginValues;
       existing.notify = pending.notify;
     } else {
       queuedSaves.current.push(pending);
@@ -145,20 +145,20 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
       if (cancelled) return;
       setLoadFailed(false);
       setSaveFailed(false);
-      const next = {
+      const loadedValues = {
         email: details.email ?? "",
         phone: details.phone ?? "",
         password: details.password ?? "",
         totpSecret: details.totpSecret ?? "",
       };
-      savedValues.current = next;
-      savedEmail.current = next.email;
+      savedValues.current = loadedValues;
+      savedEmail.current = loadedValues.email;
       dirtyFields.current = { email: false, phone: false, password: false, totpSecret: false };
       loadedRef.current = true;
-      setEmail(next.email);
-      setPhone(next.phone);
-      setPassword(next.password);
-      setTotpSecret(next.totpSecret);
+      setEmail(loadedValues.email);
+      setPhone(loadedValues.phone);
+      setPassword(loadedValues.password);
+      setTotpSecret(loadedValues.totpSecret);
       setReady(true);
     }).catch(() => {
       if (!cancelled) setLoadFailed(true);
@@ -176,10 +176,10 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
-      const next = await relayCommands.previewTotpCode(totpSecret);
+      const totpPreview = await relayCommands.previewTotpCode(totpSecret);
       if (cancelled) return;
-      setPreview(next);
-      const delay = next.expiresAtMs ? Math.max(250, next.expiresAtMs - Date.now() + 50) : 30_000;
+      setPreview(totpPreview);
+      const delay = totpPreview.expiresAtMs ? Math.max(250, totpPreview.expiresAtMs - Date.now() + 50) : 30_000;
       previewTimer.current = window.setTimeout(() => void run(), delay);
     };
     if (!totpSecret.trim()) {

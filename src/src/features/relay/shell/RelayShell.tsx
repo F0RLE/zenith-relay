@@ -63,7 +63,7 @@ export function RelayShell() {
     openUpdateDialog,
     closeUpdateDialog,
   } = useAppUpdates();
-  const visiblePages = pages.filter((item) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(item.id));
+  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(pageItem.id));
   const focusModePicker = useCallback(() => {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
@@ -149,7 +149,7 @@ export function RelayShell() {
             aria-label={`${t("common.mode")}: ${t(`modes.${mode}`)}`}
             aria-haspopup="menu"
             aria-expanded={modeOpen}
-            onClick={() => setModeOpen((value) => !value)}
+            onClick={() => setModeOpen((isOpen) => !isOpen)}
           >
             <ModeIcon mode={mode} />
             <span>{t(`modes.${mode}`)}</span>
@@ -157,38 +157,38 @@ export function RelayShell() {
           </button>
           {modeOpen ? (
             <div className="mode-menu relay-popover-panel" role="menu">
-              {(["local", "zenith", "remote"] as RelayMode[]).map((value) => (
+              {(["local", "zenith", "remote"] as RelayMode[]).map((modeOption) => (
                 <button
                   className="relay-popover-item"
                   role="menuitemradio"
-                  aria-checked={mode === value}
-                  key={value}
+                  aria-checked={mode === modeOption}
+                  key={modeOption}
                   type="button"
                   onClick={() => {
-                    setMode(value);
+                    setMode(modeOption);
                     setModeOpen(false);
                   }}
                 >
-                  <ModeIcon mode={value} />
-                  <span>{t(`modes.${value}`)}</span>
-                  {mode === value ? <Check className="mode-check" aria-hidden /> : null}
+                  <ModeIcon mode={modeOption} />
+                  <span>{t(`modes.${modeOption}`)}</span>
+                  {mode === modeOption ? <Check className="mode-check" aria-hidden /> : null}
                 </button>
               ))}
             </div>
           ) : null}
         </div>
         <nav aria-label={t("nav.label")}>
-          {visiblePages.map(({ id, icon: Icon }) => (
+          {visiblePages.map(({ id: pageId, icon: Icon }) => (
             <button
-              key={id}
+              key={pageId}
               type="button"
-              className={page === id ? "active" : ""}
-              aria-label={t(`nav.${id}`)}
-              aria-current={page === id ? "page" : undefined}
-              onClick={() => setPage(id)}
+              className={page === pageId ? "active" : ""}
+              aria-label={t(`nav.${pageId}`)}
+              aria-current={page === pageId ? "page" : undefined}
+              onClick={() => setPage(pageId)}
             >
               <Icon aria-hidden />
-              <span>{t(`nav.${id}`)}</span>
+              <span>{t(`nav.${pageId}`)}</span>
             </button>
           ))}
         </nav>
@@ -222,7 +222,7 @@ export function RelayShell() {
               <IconButton
                 label={collapsed ? t("shell.expand") : t("shell.collapse")}
                 icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
-                onClick={() => setCollapsed((value) => !value)}
+                onClick={() => setCollapsed((isCollapsed) => !isCollapsed)}
               />
             </div>
           </div>

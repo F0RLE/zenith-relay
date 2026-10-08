@@ -30,9 +30,9 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
   const selectedFormat = formats.find((option) => option.value === format) ?? formats[0];
   if (!selectedFormat) return null;
   const loadMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    input.value = "";
+    const markdownInput = event.currentTarget;
+    const file = markdownInput.files?.[0];
+    markdownInput.value = "";
     if (!file) return;
     try {
       const content = (await file.text()).replace(/\r\n?/g, "\n");
@@ -49,18 +49,18 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
   };
   const run = async (destination: "copy" | "download") => {
     const ok = await perform(`account-export-${destination}`, async () => {
-      const input = {
+      const exportRequest = {
         accountIds,
         format: selectedFormat.value,
         destination,
         ...(selectedFormat.value === "zenith" && description.trim() ? { description } : {}),
       } as const;
-      const result = mode === "local"
-        ? await relayCommands.exportLocalAccounts(input)
-        : await relayCommands.exportRemoteAccounts(input);
+      const exportResult = mode === "local"
+        ? await relayCommands.exportLocalAccounts(exportRequest)
+        : await relayCommands.exportRemoteAccounts(exportRequest);
       if (destination === "copy") {
-        if (!result.content) throw new Error("account export content is missing");
-        await copyText(result.content);
+        if (!exportResult.content) throw new Error("account export content is missing");
+        await copyText(exportResult.content);
       }
     }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded", { backgroundRefresh: true });
     if (ok) onClose();

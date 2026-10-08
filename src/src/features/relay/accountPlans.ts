@@ -23,9 +23,9 @@ export function compareSubscriptionPlanPriority(left: { id: string; label: strin
 }
 
 export function formatAccountPlan(planType: string | null, unknown: string) {
-  const value = planType?.trim();
-  if (!value) return unknown;
-  const key = value.toLocaleLowerCase().replace(/[\s_-]/g, "");
+  const normalizedPlanType = planType?.trim();
+  if (!normalizedPlanType) return unknown;
+  const key = normalizedPlanType.toLocaleLowerCase().replace(/[\s_-]/g, "");
   if (key.includes("team") || key.includes("business")) return "Business";
   if (key.includes("enterprise")) return "Enterprise";
   const proTier = proTierLabels[key];
@@ -34,7 +34,7 @@ export function formatAccountPlan(planType: string | null, unknown: string) {
   if (key === "free") return "Free";
   if (key === "go") return "Go";
   if (key === "edu" || key.includes("education")) return "Edu";
-  return value;
+  return normalizedPlanType;
 }
 
 export function accountPlanOption(planType: string | null, unknown: string) {

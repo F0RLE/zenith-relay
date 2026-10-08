@@ -9,12 +9,12 @@ export type ModelGroup<T> = {
   id: string;
   provider: string;
   label: string;
-  items: T[];
+  models: T[];
 };
 
 type GroupModelsOptions<T> = {
-  metadata?: (item: T) => ModelCatalogIdentity | null | undefined;
-  isNativeChatGpt?: (item: T) => boolean;
+  metadata?: (model: T) => ModelCatalogIdentity | null | undefined;
+  isNativeChatGpt?: (model: T) => boolean;
 };
 
 const OTHER_PROVIDER = "other";
@@ -28,7 +28,7 @@ export function modelIdKey(modelId: string) {
 export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefined) {
   return new Map<string, ModelCatalogIdentity>([
     ...(gateway?.models ?? []).map((model): [string, ModelCatalogIdentity] => [modelIdKey(model.id), model]),
-    ...Object.entries(gateway?.modelCatalog ?? {}).map(([id, identity]): [string, ModelCatalogIdentity] => [modelIdKey(id), identity]),
+    ...Object.entries(gateway?.modelCatalog ?? {}).map(([modelId, identity]): [string, ModelCatalogIdentity] => [modelIdKey(modelId), identity]),
   ]);
 }
 
@@ -38,14 +38,14 @@ export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefin
  * manual order, and keep the source order inside each block.
  */
 export function groupModels<T>(
-  items: readonly T[],
+  models: readonly T[],
   options: GroupModelsOptions<T> = {},
 ): ModelGroup<T>[] {
   const groups = new Map<string, ModelGroup<T>>();
-  for (const item of items) {
-    const metadata = options.metadata?.(item);
+  for (const model of models) {
+    const metadata = options.metadata?.(model);
     const provider = normalizeCatalogValue(
-      options.isNativeChatGpt?.(item) ? "openai" : metadata?.catalogProvider,
+      options.isNativeChatGpt?.(model) ? "openai" : metadata?.catalogProvider,
     ) ?? OTHER_PROVIDER;
     const key = provider;
     let group = groups.get(key);
@@ -54,11 +54,11 @@ export function groupModels<T>(
         id: `catalog-${encodeURIComponent(provider)}`,
         provider,
         label: provider === OTHER_PROVIDER ? "Other" : displayCatalogValue(provider),
-        items: [],
+        models: [],
       };
       groups.set(key, group);
     }
-    group.items.push(item);
+    group.models.push(model);
   }
   return [...groups.values()];
 }

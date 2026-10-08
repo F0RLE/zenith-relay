@@ -23,7 +23,7 @@ export function PageHeader({ title, subtitle, actions, navigation, workspace = f
 }
 
 
-export function Tabs({ value, items, onChange, label }: { value: string; items: Array<{ id: string; label: string }>; onChange: (id: string) => void; label: string }) {
+export function Tabs({ value, items, onChange, label }: { value: string; items: Array<{ id: string; label: string }>; onChange: (itemId: string) => void; label: string }) {
   const selectAdjacent = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
     const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
     const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;

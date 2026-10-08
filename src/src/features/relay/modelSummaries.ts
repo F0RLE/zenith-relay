@@ -14,13 +14,15 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   const summaries = new Map<string, ModelSummary>();
   const order: string[] = [];
   const catalog = new Map(
-    Object.entries(runtime.gateway.modelCatalog ?? {}).map(([id, identity]) => [modelIdKey(id), identity]),
+    Object.entries(runtime.gateway.modelCatalog ?? {}).map(([modelId, identity]) => [modelIdKey(modelId), identity]),
   );
-  const add = (id: string, summary?: ModelSummary) => {
-    const normalizedModelId = modelIdKey(id);
+  const add = (modelId: string, incomingModelSummary?: ModelSummary) => {
+    const normalizedModelId = modelIdKey(modelId);
     if (!normalizedModelId) return;
     if (!summaries.has(normalizedModelId)) order.push(normalizedModelId);
-    const incomingSummary = summary ? normalizeModelSummary(summary) : fallbackModelSummary(id.trim());
+    const incomingSummary = incomingModelSummary
+      ? normalizeModelSummary(incomingModelSummary)
+      : fallbackModelSummary(modelId.trim());
     const identity = catalog.get(normalizedModelId);
     // A source/account model can arrive before the derived gateway row. Keep
     // its catalog provider so the pool view still groups it correctly.
@@ -35,28 +37,28 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   };
 
   for (const model of runtime.gateway.models ?? []) add(model.id, model);
-  for (const id of runtime.gateway.visibleModelIds) add(id);
+  for (const modelId of runtime.gateway.visibleModelIds) add(modelId);
   for (const source of runtime.sources) {
-    for (const id of source.models) add(id);
+    for (const modelId of source.models) add(modelId);
     // A partially migrated source can have the model only on its binding.
     for (const binding of source.protocolBindings ?? []) {
-      for (const id of binding.modelIds) add(id);
+      for (const modelId of binding.modelIds) add(modelId);
     }
   }
   for (const account of runtime.accounts) {
-    for (const id of account.models) add(id);
+    for (const modelId of account.models) add(modelId);
   }
 
   const memberCount = new Map<string, number>();
   for (const member of [...runtime.sources, ...runtime.accounts]) {
-    const ids = new Set(member.models.map((id) => modelIdKey(id)).filter(Boolean));
-    for (const id of ids) memberCount.set(id, (memberCount.get(id) ?? 0) + 1);
+    const memberModelIds = new Set(member.models.map((modelId) => modelIdKey(modelId)).filter(Boolean));
+    for (const modelId of memberModelIds) memberCount.set(modelId, (memberCount.get(modelId) ?? 0) + 1);
   }
 
-  return order.map((id) => {
-    const model = summaries.get(id)!;
-    const count = memberCount.get(id);
-    return count == null ? model : { ...model, memberCount: count };
+  return order.map((modelId) => {
+    const modelSummary = summaries.get(modelId)!;
+    const count = memberCount.get(modelId);
+    return count == null ? modelSummary : { ...modelSummary, memberCount: count };
   });
 }
 
@@ -70,8 +72,8 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
 export function currentPoolModelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   const memberCounts = new Map<string, number>();
   const addMember = (ids: string[]) => {
-    for (const id of new Set(ids.map((id) => modelIdKey(id)).filter(Boolean))) {
-      memberCounts.set(id, (memberCounts.get(id) ?? 0) + 1);
+    for (const modelId of new Set(ids.map((modelId) => modelIdKey(modelId)).filter(Boolean))) {
+      memberCounts.set(modelId, (memberCounts.get(modelId) ?? 0) + 1);
     }
   };
   for (const source of runtime.sources) {
@@ -128,8 +130,8 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
     const routes = new Map<string, NonNullable<ModelSummary["protocolRoutes"]>[number]>();
     for (const route of [...(existingRoutes ?? []), ...(incomingRoutes ?? [])]) {
       const key = `${route.clientWireApi}:${route.upstreamWireApi}`;
-      const previous = routes.get(key);
-      if (!previous) {
+      const existingRoute = routes.get(key);
+      if (!existingRoute) {
         routes.set(key, {
           ...route,
           features: { ...route.features },
@@ -138,9 +140,9 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
         continue;
       }
       routes.set(key, {
-        ...previous,
-        features: { ...previous.features, ...route.features },
-        reasoningEfforts: unionReasoningLevels(previous.reasoningEfforts, route.reasoningEfforts),
+        ...existingRoute,
+        features: { ...existingRoute.features, ...route.features },
+        reasoningEfforts: unionReasoningLevels(existingRoute.reasoningEfforts, route.reasoningEfforts),
       });
     }
     return [...routes.values()];
@@ -190,13 +192,13 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
   return merged;
 }
 
-function fallbackModelSummary(id: string): ModelSummary {
+function fallbackModelSummary(modelId: string): ModelSummary {
   return {
-    id,
+    id: modelId,
     enabled: true,
     memberCount: 0,
     codexVisible: false,
-    codexDisplayName: id,
+    codexDisplayName: modelId,
     catalogProvider: null,
     catalogSourceModelId: null,
     catalogCanonicalModelId: null,

@@ -3,8 +3,8 @@ import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
 export function mergeDescribedBy(...values: Array<string | undefined>) {
-  const ids = new Set(values.flatMap((value) => value?.split(/\s+/).filter(Boolean) ?? []));
-  return ids.size ? [...ids].join(" ") : undefined;
+  const describedByIds = new Set(values.flatMap((describedByValue) => describedByValue?.split(/\s+/).filter(Boolean) ?? []));
+  return describedByIds.size ? [...describedByIds].join(" ") : undefined;
 }
 
 // Both component-owned and delegated hints share one visible tooltip.
@@ -28,7 +28,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     dismissActiveTooltip = hide;
     setInstant(immediate);
     setPosition(null);
-    setActivation((value) => value + 1);
+    setActivation((activation) => activation + 1);
     setVisible(true);
   }, [hide]);
   const showNow = useCallback(() => activate(true), [activate]);

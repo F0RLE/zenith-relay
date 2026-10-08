@@ -10,9 +10,9 @@ export function useSourceStats(mode: RelayMode, sources: readonly SourceSummary[
   sourcesRef.current = sources;
   const scope = JSON.stringify([mode, sources.map((source) => [source.id, source.baseUrl, source.secretAvailable, source.refreshRevision]).sort()]);
   const observations = JSON.stringify(sources.map((source) => [source.id, source.providerStats]).sort());
-  const [snapshot, setSnapshot] = useState<{ scope: string; values: Record<string, SourceStatsState> }>({ scope, values: {} });
-  const setStats = useCallback((update: (previous: Record<string, SourceStatsState>) => Record<string, SourceStatsState>) => {
-    setSnapshot((previous) => ({ scope, values: update(previous.scope === scope ? previous.values : {}) }));
+  const [snapshot, setSnapshot] = useState<{ scope: string; bySource: Record<string, SourceStatsState> }>({ scope, bySource: {} });
+  const setStats = useCallback((update: (previousStats: Record<string, SourceStatsState>) => Record<string, SourceStatsState>) => {
+    setSnapshot((previousSnapshot) => ({ scope, bySource: update(previousSnapshot.scope === scope ? previousSnapshot.bySource : {}) }));
   }, [scope]);
   const activeScope = useRef<string | null>(null);
   const generation = useRef(0);
@@ -21,15 +21,15 @@ export function useSourceStats(mode: RelayMode, sources: readonly SourceSummary[
   const refresh = useCallback(async (sourceId: string, force = false) => {
     if (activeScope.current !== scope || !sourcesRef.current.some((source) => source.id === sourceId && source.secretAvailable)) return;
     const currentGeneration = generation.current;
-    const request = (requests.current[sourceId] ?? 0) + 1;
-    requests.current[sourceId] = request;
-    const current = () => generation.current === currentGeneration && requests.current[sourceId] === request;
-    setStats((previous) => ({ ...previous, [sourceId]: { value: previous[sourceId]?.value ?? null, loading: true, failed: false } }));
+    const requestRevision = (requests.current[sourceId] ?? 0) + 1;
+    requests.current[sourceId] = requestRevision;
+    const isCurrentRequest = () => generation.current === currentGeneration && requests.current[sourceId] === requestRevision;
+    setStats((previousStats) => ({ ...previousStats, [sourceId]: { stats: previousStats[sourceId]?.stats ?? null, loading: true, failed: false } }));
     try {
-      const value = await (mode === "remote" ? relayCommands.remoteSourceStats(sourceId, force) : relayCommands.localSourceStats(sourceId, force));
-      if (current()) setStats((previous) => ({ ...previous, [sourceId]: settledSourceStats(previous[sourceId]?.value ?? null, value) }));
+      const sourceStats = await (mode === "remote" ? relayCommands.remoteSourceStats(sourceId, force) : relayCommands.localSourceStats(sourceId, force));
+      if (isCurrentRequest()) setStats((previousStats) => ({ ...previousStats, [sourceId]: settledSourceStats(previousStats[sourceId]?.stats ?? null, sourceStats) }));
     } catch {
-      if (current()) setStats((previous) => ({ ...previous, [sourceId]: { value: previous[sourceId]?.value ?? null, loading: false, failed: true, error: "unavailable" } }));
+      if (isCurrentRequest()) setStats((previousStats) => ({ ...previousStats, [sourceId]: { stats: previousStats[sourceId]?.stats ?? null, loading: false, failed: true, error: "unavailable" } }));
     }
   }, [mode, scope, setStats]);
 
@@ -49,14 +49,14 @@ export function useSourceStats(mode: RelayMode, sources: readonly SourceSummary[
   }, [scope, refresh, setStats]);
 
   useEffect(() => {
-    setStats((previous) => {
-      const next = { ...previous };
+    setStats((previousStats) => {
+      const updatedStats = { ...previousStats };
       for (const source of sourcesRef.current) {
-        if (source.providerStats) next[source.id] = projectedSourceStats(previous[source.id], source.providerStats);
+        if (source.providerStats) updatedStats[source.id] = projectedSourceStats(previousStats[source.id], source.providerStats);
       }
-      return next;
+      return updatedStats;
     });
   }, [scope, observations, setStats]);
 
-  return { stats: snapshot.scope === scope ? snapshot.values : {}, refresh };
+  return { stats: snapshot.scope === scope ? snapshot.bySource : {}, refresh };
 }

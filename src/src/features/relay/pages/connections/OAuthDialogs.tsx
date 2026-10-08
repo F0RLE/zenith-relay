@@ -45,9 +45,9 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
   const repeatProxy = () => {
     if (!onUseProxy || flowUnavailable) return;
     const remembered = rememberedSignInProxyId();
-    const entry = proxies.pool?.entries.find((item) => item.id === remembered);
-    if (entry && isHttpProxyEndpoint(entry.endpoint)) {
-      onUseProxy(entry.id);
+    const proxyEntry = proxies.pool?.entries.find((candidateProxy) => candidateProxy.id === remembered);
+    if (proxyEntry && isHttpProxyEndpoint(proxyEntry.endpoint)) {
+      onUseProxy(proxyEntry.id);
       return;
     }
     setProxyOpen(true);
@@ -125,7 +125,7 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
   </Dialog>
   {proxyOpen && onUseProxy ? (
     <SignInProxyDialog
-      entries={proxies.pool?.entries ?? []}
+      proxyEntries={proxies.pool?.entries ?? []}
       loading={!proxies.pool && !proxies.failed}
       failed={proxies.failed}
       initialProxyId={rememberedSignInProxyId()}
@@ -145,7 +145,7 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
   const { pool } = useProxyPool();
   const [addToPool, setAddToPool] = useState(false);
   const [assignProxy, setAssignProxy] = useState(false);
-  const account = runtime?.accounts.find((item) => item.id === accountId);
+  const account = runtime?.accounts.find((candidateAccount) => candidateAccount.id === accountId);
   const hasAccountProxy = preserveProxy || account?.proxyMode === "account";
   const closeLocked = busy === "oauth-setup";
   const requestClose = () => {
@@ -198,14 +198,14 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
 }
 
 export function SignInProxyDialog({
-  entries,
+  proxyEntries,
   loading,
   failed,
   initialProxyId,
   onClose,
   onConfirm,
 }: {
-  entries: ProxyPoolEntry[];
+  proxyEntries: ProxyPoolEntry[];
   loading: boolean;
   failed: boolean;
   initialProxyId: string | null;
@@ -215,10 +215,10 @@ export function SignInProxyDialog({
   const { t } = useTranslation();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   useEffect(() => {
-    const initial = entries.find((entry) => entry.id === initialProxyId && isHttpProxyEndpoint(entry.endpoint));
+    const initial = proxyEntries.find((candidateProxy) => candidateProxy.id === initialProxyId && isHttpProxyEndpoint(candidateProxy.endpoint));
     setSelectedId(initial?.id ?? null);
-  }, [entries, initialProxyId]);
-  const selected = entries.find((entry) => entry.id === selectedId && isHttpProxyEndpoint(entry.endpoint));
+  }, [proxyEntries, initialProxyId]);
+  const selected = proxyEntries.find((candidateProxy) => candidateProxy.id === selectedId && isHttpProxyEndpoint(candidateProxy.endpoint));
   return (
     <Dialog
       layer="top"
@@ -235,21 +235,21 @@ export function SignInProxyDialog({
         <p className="form-note">{t("accounts.signInProxyDialogHint")}</p>
         {loading ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : null}
         {!loading && failed ? <p role="alert" className="form-note error-text">{t("accounts.signInProxyUnavailable")}</p> : null}
-        {!loading && !failed && entries.length === 0 ? <p className="form-note">{t("accounts.signInProxyEmpty")}</p> : null}
-        {!loading && !failed && entries.length > 0 ? (
+        {!loading && !failed && proxyEntries.length === 0 ? <p className="form-note">{t("accounts.signInProxyEmpty")}</p> : null}
+        {!loading && !failed && proxyEntries.length > 0 ? (
           <div className="proxy-route-options sign-in-proxy-options" role="radiogroup" aria-label={t("accounts.signInWithProxy")}>
-            {entries.map((entry) => {
-              const http = isHttpProxyEndpoint(entry.endpoint);
-              const place = [entry.countryCode, entry.region].filter(Boolean).join(" · ");
-              const selectedEntry = entry.id === selected?.id;
+            {proxyEntries.map((proxyEntry) => {
+              const isHttpProxy = isHttpProxyEndpoint(proxyEntry.endpoint);
+              const proxyLocation = [proxyEntry.countryCode, proxyEntry.region].filter(Boolean).join(" · ");
+              const isSelected = proxyEntry.id === selected?.id;
               return (
-                <button key={entry.id} type="button" role="radio" aria-checked={selectedEntry} disabled={!http} className={selectedEntry ? "selected" : ""} onClick={() => setSelectedId(entry.id)}>
+                <button key={proxyEntry.id} type="button" role="radio" aria-checked={isSelected} disabled={!isHttpProxy} className={isSelected ? "selected" : ""} onClick={() => setSelectedId(proxyEntry.id)}>
                   <Network aria-hidden />
                   <span>
-                    <strong>{entry.endpoint}</strong>
-                    <small>{http ? place : t("accounts.signInProxyHttps")}</small>
+                    <strong>{proxyEntry.endpoint}</strong>
+                    <small>{isHttpProxy ? proxyLocation : t("accounts.signInProxyHttps")}</small>
                   </span>
-                  {selectedEntry ? <Check className="proxy-route-check" aria-hidden /> : null}
+                  {isSelected ? <Check className="proxy-route-check" aria-hidden /> : null}
                 </button>
               );
             })}

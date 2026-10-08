@@ -24,7 +24,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const { modelIds, enabledModels: initialEnabledModels } = modelSelectionForMember(member);
   const [enabledModels, setEnabledModels] = useState(initialEnabledModels);
   const toggleEnabledModel = useCallback((model: string) => {
-    setEnabledModels((values) => toggle(values, model));
+    setEnabledModels((selectedModelIds) => toggle(selectedModelIds, model));
   }, []);
   const [draining, setDraining] = useState(member.draining);
   const [sourcePriceDraftsState, setSourcePriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(member.kind === "source" ? member.modelPriceOverrides ?? {} : {}));
@@ -50,15 +50,15 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
     const { allowedModels, excludedModels } = modelSelectionPayload(modelIds, enabledModels);
     const persist = () => {
       if (member.kind === "account") {
-        const payload = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
+        const accountUpdate = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
         return mode === "local"
-          ? relayCommands.updateAccount({ accountId: member.id, ...payload })
-          : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
+          ? relayCommands.updateAccount({ accountId: member.id, ...accountUpdate })
+          : relayCommands.remoteAction({ type: "update_account", id: member.id }, accountUpdate);
       }
       const protocolBindings = member.protocolBindings ?? [];
-      const payload = { allowedModels, excludedModels, draining, priority: member.priority, weight: member.weight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
-      const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
-      return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
+      const sourceUpdate = { allowedModels, excludedModels, draining, priority: member.priority, weight: member.weight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
+      const sourceCommand = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...sourceUpdate };
+      return mode === "local" ? relayCommands.updateSource(sourceCommand) : relayCommands.remoteAction({ type: "update_source", id: member.id }, sourceUpdate);
     };
     const ok = await perform(`member-${member.id}`, persist, "feedback.saved", { backgroundRefresh: true });
     if (ok) onClose();
@@ -89,7 +89,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
           <span>{t(`pool.types.${member.kind}`)}</span>
         </div>
         <Tabs value={tab} items={tabs} onChange={setTab} label={t("pool.editMember")} />
-        <div role="tabpanel" aria-label={tabs.find((item) => item.id === tab)?.label}>
+        <div role="tabpanel" aria-label={tabs.find((tabItem) => tabItem.id === tab)?.label}>
           {tab === "models" ? (
             <section className="member-model-rules">
               <div className="member-model-heading">
@@ -117,11 +117,11 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
                 >
                   <summary>
                     <strong>{group.provider === "other" ? t("modelGroups.other") : group.label}</strong>
-                    <span>{group.items.filter((model) => enabledModels.includes(model)).length} / {group.items.length}</span>
+                    <span>{group.models.filter((model) => enabledModels.includes(model)).length} / {group.models.length}</span>
                     <ChevronDown aria-hidden />
                   </summary>
                   <ul>
-                    {group.items.map((model) => {
+                    {group.models.map((model) => {
                       const enabled = enabledModels.includes(model);
                       return (
                         <li key={model} data-member-model-id={model} data-enabled={String(enabled)}>
@@ -160,7 +160,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
                     className="field-option-menu"
                     label={t("sources.recoveryDelay")}
                     value={String(recoveryDelaySeconds)}
-                    onChange={(value) => setRecoveryDelaySeconds(Number(value))}
+                    onChange={(secondsText) => setRecoveryDelaySeconds(Number(secondsText))}
                     options={[0, 5, 30, 60, 300, 900].map((seconds) => ({
                       value: String(seconds),
                       label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t),

@@ -1,7 +1,7 @@
-export function localizeReleaseNotes(body: string | undefined, language: string): string {
-  if (!body?.trim()) return "";
-  const markers = [...body.matchAll(/<!--\s*relay-notes:([a-z0-9-]+)\s*-->/gi)];
-  if (!markers.length) return body.trim();
+export function localizeReleaseNotes(releaseNotesMarkdown: string | undefined, language: string): string {
+  if (!releaseNotesMarkdown?.trim()) return "";
+  const markers = [...releaseNotesMarkdown.matchAll(/<!--\s*relay-notes:([a-z0-9-]+)\s*-->/gi)];
+  if (!markers.length) return releaseNotesMarkdown.trim();
 
   const sections = new Map<string, string>();
   markers.forEach((marker, index) => {
@@ -9,7 +9,7 @@ export function localizeReleaseNotes(body: string | undefined, language: string)
     if (!markerLocale) return;
     sections.set(
       markerLocale.toLowerCase(),
-      body.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index).trim(),
+      releaseNotesMarkdown.slice((marker.index ?? 0) + marker[0].length, markers[index + 1]?.index).trim(),
     );
   });
 
@@ -18,8 +18,8 @@ export function localizeReleaseNotes(body: string | undefined, language: string)
   return sections.get(locale) ?? sections.get(baseLocale) ?? sections.get("en") ?? sections.values().next().value ?? "";
 }
 
-export function prepareReleaseNotes(body: string | undefined, language: string, version: string): string {
-  const notes = localizeReleaseNotes(body, language);
+export function prepareReleaseNotes(releaseNotesMarkdown: string | undefined, language: string, version: string): string {
+  const notes = localizeReleaseNotes(releaseNotesMarkdown, language);
   if (!notes) return "";
 
   const normalizedVersion = version.replace(/^v/i, "");

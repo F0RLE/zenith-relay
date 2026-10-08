@@ -41,8 +41,8 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [signedInWithProxy, setSignedInWithProxy] = useState(false);
   const [proxyRevision, setProxyRevision] = useState(0);
   const proxyChecks = useProxyChecks(mode);
-  const oauth = useOAuthSignIn((result) => {
-    const isReauthentication = reauthenticatingAccountId === result.account.id;
+  const oauth = useOAuthSignIn((oauthResult) => {
+    const isReauthentication = reauthenticatingAccountId === oauthResult.account.id;
     setReauthenticatingAccountId(null);
     if (isReauthentication) {
       // Reauthentication updates an existing account in place. The setup
@@ -53,7 +53,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       setSignedInWithProxy(false);
       return;
     }
-    setOauthAccountId(result.account.id);
+    setOauthAccountId(oauthResult.account.id);
     setDialog("oauthSetup");
   });
   const startOAuth = () => {
@@ -81,7 +81,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 
   useEffect(() => {
     const requested = mode === "zenith" ? null : sessionStorage.getItem(CONNECTIONS_VIEW_REQUEST);
-    setView((current) => connectionInitialView(mode, current, requested, runtime?.capabilities.features ?? []));
+    setView((previousView) => connectionInitialView(mode, previousView, requested, runtime?.capabilities.features ?? []));
     setDialog(null);
     setEditingSource(null);
     setEditingAutomation(null);
@@ -97,7 +97,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   useEffect(() => {
     if (mode !== "remote") return;
     if (!runtime) {
-      setView((current) => reconcileRemoteConnectionView(mode, false, current));
+      setView((previousView) => reconcileRemoteConnectionView(mode, false, previousView));
       return;
     }
     if (!availableViews.includes(view)) setView("remote");
@@ -110,7 +110,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     automations: t("connections.automations"),
     remote: t("connections.remoteServer"),
   };
-  const tabs = availableViews.map((id) => ({ id, label: tabLabels[id] }));
+  const tabs = availableViews.map((viewId) => ({ id: viewId, label: tabLabels[viewId] }));
 
   const primaryLabel = view === "accounts"
     ? mode === "local" ? t("accounts.signIn") : t("connections.import")
@@ -159,7 +159,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     <section className="relay-page relay-workspace-page" data-view={view}>
       <PageHeader
         title={t("nav.connections")}
-        navigation={<Tabs value={view} items={tabs} onChange={(id) => { if (id === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, id); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(id as ConnectionView); }} label={t("connections.views")} />}
+        navigation={<Tabs value={view} items={tabs} onChange={(nextView) => { if (nextView === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, nextView); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(nextView as ConnectionView); }} label={t("connections.views")} />}
         actions={
           <>
             {view === "accounts" && mode === "local" ? (
@@ -222,7 +222,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog accountIds={bulkProxyAccountIds} onClose={() => setDialog(null)} /> : null}
-      {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((value) => value + 1)} onClose={() => setDialog(null)} /> : null}
+      {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((revision) => revision + 1)} onClose={() => setDialog(null)} /> : null}
       {dialog === "oauthSetup" && oauthAccountId ? <OAuthAccountSetupDialog accountId={oauthAccountId} preserveProxy={signedInWithProxy} onClose={() => { setDialog(null); setOauthAccountId(null); setSignedInWithProxy(false); }} /> : null}
       {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}

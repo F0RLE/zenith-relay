@@ -11,8 +11,8 @@ import { routingMemberKey } from "./poolRoutingEdits";
 import { usePoolRoutingEditor } from "./usePoolRoutingEditor";
 
 const MODES = [
-  { value: "automatic", policyMode: "automatic", icon: Sparkles },
-  { value: "manual", policyMode: "in_order", icon: ListOrdered },
+  { modeId: "automatic", policyMode: "automatic", icon: Sparkles },
+  { modeId: "manual", policyMode: "in_order", icon: ListOrdered },
 ] as const;
 
 export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
@@ -32,17 +32,17 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     const offset = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[event.key];
     if (offset === undefined && event.key !== "Home" && event.key !== "End") return;
     event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? MODES.length - 1 : (index + (offset ?? 0) + MODES.length) % MODES.length;
-    const option = MODES[next];
+    const nextModeIndex = event.key === "Home" ? 0 : event.key === "End" ? MODES.length - 1 : (index + (offset ?? 0) + MODES.length) % MODES.length;
+    const option = MODES[nextModeIndex];
     if (!option) return;
     edit({ type: "mode", mode: option.policyMode });
-    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextModeIndex]?.focus();
   };
-  const move = (from: number, to: number) => {
-    const member = policy.members[from];
-    const target = policy.members[to];
-    if (!manualOrder || from === to || !member || !target) return;
-    edit({ type: "move", member: routingMemberKey(member), target: routingMemberKey(target), placement: from < to ? "after" : "before" });
+  const move = (sourceIndex: number, targetIndex: number) => {
+    const member = policy.members[sourceIndex];
+    const target = policy.members[targetIndex];
+    if (!manualOrder || sourceIndex === targetIndex || !member || !target) return;
+    edit({ type: "move", member: routingMemberKey(member), target: routingMemberKey(target), placement: sourceIndex < targetIndex ? "after" : "before" });
   };
   const clearDrag = () => { dragRef.current = null; setDragged(null); setDropTarget(null); };
   const targetAt = (x: number, y: number) => {
@@ -67,11 +67,11 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     dragRef.current = { member, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
     setDragged(member);
   };
-  const updateMember = (member: string, field: "weight" | "maxConcurrency", value: number) => {
+  const updateMember = (memberKey: string, field: "weight" | "maxConcurrency", numericValue: number) => {
     const min = field === "weight" ? 1 : 0;
     const max = field === "weight" ? 100 : 1024;
-    if (!Number.isFinite(value)) return;
-    edit({ type: "member", member, field, value: Math.min(max, Math.max(min, Math.trunc(value))) });
+    if (!Number.isFinite(numericValue)) return;
+    edit({ type: "member", member: memberKey, field, value: Math.min(max, Math.max(min, Math.trunc(numericValue))) });
   };
   return <Dialog wide className="pool-routing-dialog" title={t("pool.routingSettingsTitle")} onClose={() => { if (dragRef.current) clearDrag(); else void close(); }} footer={
     <Button variant="secondary" busy={saving} onClick={() => void close()}>{t("common.close")}</Button>
@@ -88,18 +88,18 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
       }}
     >
       <div className="pool-routing-modes" role="radiogroup" aria-label={t("pool.routingStrategy")}>
-        {MODES.map(({ value, policyMode, icon: Icon }, index) => (
+        {MODES.map(({ modeId, policyMode, icon: Icon }, index) => (
           <button
-            key={value}
+            key={modeId}
             type="button"
             role="radio"
-            aria-checked={value === "automatic" ? policy.mode === "automatic" : manualOrder}
-            tabIndex={(value === "automatic" ? policy.mode === "automatic" : manualOrder) ? 0 : -1}
+            aria-checked={modeId === "automatic" ? policy.mode === "automatic" : manualOrder}
+            tabIndex={(modeId === "automatic" ? policy.mode === "automatic" : manualOrder) ? 0 : -1}
             disabled={!available}
             onKeyDown={(event) => chooseModeWithKeyboard(event, index)}
             onClick={() => edit({ type: "mode", mode: policyMode })}
           >
-          <Icon aria-hidden /><span>{t(`pool.rotationModes.${value}`)}</span>
+          <Icon aria-hidden /><span>{t(`pool.rotationModes.${modeId}`)}</span>
           </button>
         ))}
       </div>

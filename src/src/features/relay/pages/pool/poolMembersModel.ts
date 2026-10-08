@@ -37,11 +37,11 @@ export function poolMembersFromRuntime(runtime: RuntimeSnapshot | null): PoolMem
   if (!runtime) return [];
   return [
     ...runtime.accounts
-      .filter((item) => item.inPool)
-      .map((item) => ({ ...item, kind: "account" as const })),
+      .filter((account) => account.inPool)
+      .map((account) => ({ ...account, kind: "account" as const })),
     ...runtime.sources
-      .filter((item) => item.inPool)
-      .map((item) => ({ ...item, kind: "source" as const })),
+      .filter((source) => source.inPool)
+      .map((source) => ({ ...source, kind: "source" as const })),
   ];
 }
 
@@ -149,7 +149,7 @@ export function memberRoutingRemainder(member: PoolMember): number | null {
   if (member.kind !== "account") return null;
   const windows = [member.quota?.primary, member.quota?.secondary]
     .map((window) => window?.availableBasisPoints)
-    .filter((value): value is number => value != null);
+    .filter((basisPointRemainder): basisPointRemainder is number => basisPointRemainder != null);
   const remaining = windows.length ? Math.min(...windows) : null;
   return remaining != null && remaining > 0 ? remaining : null;
 }
@@ -192,7 +192,8 @@ function memberProviderCredits(member: PoolMember): number | "unlimited" | null 
 function savedMemberPositions(members: readonly { id: string }[] | undefined) {
   const positions = new Map<string, number>();
   for (const member of members ?? []) {
-    if (member.id && !positions.has(member.id)) positions.set(member.id, positions.size);
+    const memberId = member.id;
+    if (memberId && !positions.has(memberId)) positions.set(memberId, positions.size);
   }
   return positions;
 }

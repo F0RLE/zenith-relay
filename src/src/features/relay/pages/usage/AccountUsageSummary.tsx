@@ -57,7 +57,7 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
         <strong>{account.label}</strong>
       </div>
       <details ref={calculationRef} open={calculationOpen}>
-        <summary onClick={(event) => { event.preventDefault(); setCalculationOpen((value) => !value); }}>
+        <summary onClick={(event) => { event.preventDefault(); setCalculationOpen((isOpen) => !isOpen); }}>
           {t("usage.howCalculated")}
         </summary>
         <p className="relay-popover-panel">{t("usage.calculationHint")}</p>

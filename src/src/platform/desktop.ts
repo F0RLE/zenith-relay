@@ -82,10 +82,10 @@ export function revealWindowAfterBackgroundColor(color: string) {
   }
 }
 
-export function recordPerformance(name: string, durationMs: number, context?: string) {
+export function recordPerformance(metricName: string, durationMs: number, context?: string) {
   if (!Number.isFinite(durationMs) || durationMs < 0) return Promise.resolve();
   return invoke<void>("record_local_performance_sample", {
-    name,
+    name: metricName,
     durationMs,
     context,
   }).catch(() => undefined);

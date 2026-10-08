@@ -36,8 +36,8 @@ export type RelayContextValue = {
   busy: string | null;
   feedback: Feedback;
   refresh: (force?: boolean) => Promise<void>;
-  perform: (id: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
-  activateCodexProfile: (id: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
+  perform: (operationId: string, work: () => Promise<unknown>, successKey?: string, options?: PerformOptions) => Promise<boolean>;
+  activateCodexProfile: (profileId: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
   launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
   clearFeedback: () => void;
   onboardingComplete: boolean;
@@ -65,7 +65,7 @@ export type RelayUsageContextValue = {
   remoteUsage: RemoteUsage[];
   remoteUsagePage: RemoteUsagePage | null;
   loadRemoteUsage: (query: RemoteUsageQuery, options?: UsageLoadOptions) => Promise<RemoteUsagePage | null>;
-  revision: number;
+  usageRevision: number;
 };
 
 export const RelayContext = createContext<RelayContextValue | null>(null);
@@ -73,17 +73,17 @@ const RelayActivityContext = createContext<RuntimeActivityState | null>(null);
 const RelayUsageContext = createContext<RelayUsageContextValue | null>(null);
 
 export function RelayStateContexts({
-  value,
+  contextValue,
   activity,
   usage,
   children,
 }: {
-  value: RelayContextValue;
+  contextValue: RelayContextValue;
   activity: RuntimeActivityState;
   usage: RelayUsageContextValue;
   children: ReactNode;
 }) {
-  return <RelayContext.Provider value={value}>
+  return <RelayContext.Provider value={contextValue}>
     <RelayActivityContext.Provider value={activity}>
       <RelayUsageContext.Provider value={usage}>{children}</RelayUsageContext.Provider>
     </RelayActivityContext.Provider>
@@ -91,19 +91,19 @@ export function RelayStateContexts({
 }
 
 export function useRelayState() {
-  const value = useContext(RelayContext);
-  if (!value) throw new Error("RelayStateProvider is missing");
-  return value;
+  const relayState = useContext(RelayContext);
+  if (!relayState) throw new Error("RelayStateProvider is missing");
+  return relayState;
 }
 
 export function useRelayActivity() {
-  const value = useContext(RelayActivityContext);
-  if (!value) throw new Error("RelayStateProvider is missing");
-  return value;
+  const activityState = useContext(RelayActivityContext);
+  if (!activityState) throw new Error("RelayStateProvider is missing");
+  return activityState;
 }
 
 export function useRelayUsageContext() {
-  const value = useContext(RelayUsageContext);
-  if (!value) throw new Error("RelayStateProvider is missing");
-  return value;
+  const usageContext = useContext(RelayUsageContext);
+  if (!usageContext) throw new Error("RelayStateProvider is missing");
+  return usageContext;
 }

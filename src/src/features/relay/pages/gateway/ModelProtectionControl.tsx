@@ -16,7 +16,7 @@ export function ModelProtectionControl() {
 function ModelProtectionToggle() {
   const { t } = useTranslation();
   const { mode, runtime, perform } = useRelayState();
-  const id = useId();
+  const controlId = useId();
   const saved = Boolean(runtime?.gateway.basisPointsEnabled);
   const { checked, saving, select } = usePendingFlag(saved);
   if (!runtime) return null;
@@ -32,12 +32,12 @@ function ModelProtectionToggle() {
 
   return <div className="model-protection-control gateway-api-toggle-setting">
     <div className="relay-toggle-setting">
-      <label htmlFor={id} data-relay-tooltip={t("gateway.modelProtectionHint")}>
+      <label htmlFor={controlId} data-relay-tooltip={t("gateway.modelProtectionHint")}>
         <strong>{t("gateway.modelProtection")}</strong>
-        <span id={`${id}-description`}>{t("gateway.modelProtectionDescription")}</span>
+        <span id={`${controlId}-description`}>{t("gateway.modelProtectionDescription")}</span>
       </label>
-      <ToggleSwitch id={id} label={t("gateway.modelProtection")}
-        aria-describedby={`${id}-description`}
+      <ToggleSwitch id={controlId} label={t("gateway.modelProtection")}
+        aria-describedby={`${controlId}-description`}
         checked={checked}
         disabled={saving}
         onChange={(enabled) => void change(enabled)} />

@@ -65,9 +65,9 @@ export type UsageRow = {
 };
 
 /** Retains a safe raw tier reported by an upstream response for diagnostics. */
-export function normalizeObservedServiceTier(value: unknown): ObservedServiceTier | null {
-  if (typeof value !== "string") return null;
-  const tier = value.trim().toLowerCase();
+export function normalizeObservedServiceTier(serviceTierValue: unknown): ObservedServiceTier | null {
+  if (typeof serviceTierValue !== "string") return null;
+  const tier = serviceTierValue.trim().toLowerCase();
   return /^[a-z0-9_-]{1,48}$/.test(tier) ? tier : null;
 }
 

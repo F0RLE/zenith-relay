@@ -64,33 +64,33 @@ export function defaultApiProviderValue(): ApiProviderValue {
   };
 }
 
-export function selectApiProvider(value: ApiProviderValue, kind: ApiProviderKind): ApiProviderValue {
+export function selectApiProvider(providerValue: ApiProviderValue, kind: ApiProviderKind): ApiProviderValue {
   const definition = providerDefaults[kind];
   return {
     ...definition,
-    apiKey: value.apiKey,
+    apiKey: providerValue.apiKey,
     pricingProvider: definition.pricingProvider ?? null,
     officialProviderFamily: definition.officialProviderFamily ?? null,
   };
 }
 
-export function apiProviderReady(value: ApiProviderValue) {
+export function apiProviderReady(providerValue: ApiProviderValue) {
   return Boolean(
-    value.kind
-      && value.apiKey.trim()
-      && value.name.trim()
-      && value.baseUrl.trim(),
+    providerValue.kind
+      && providerValue.apiKey.trim()
+      && providerValue.name.trim()
+      && providerValue.baseUrl.trim(),
   );
 }
 
-export function apiProviderSourceInput(value: ApiProviderValue) {
+export function apiProviderSourceInput(providerValue: ApiProviderValue) {
   return {
-    name: value.name.trim(),
-    baseUrl: value.baseUrl.trim(),
-    apiKey: value.apiKey.trim(),
-    pricingProvider: value.pricingProvider?.trim() || null,
-    officialProviderFamily: value.officialProviderFamily?.trim() || null,
-    wireApi: value.wireApi,
+    name: providerValue.name.trim(),
+    baseUrl: providerValue.baseUrl.trim(),
+    apiKey: providerValue.apiKey.trim(),
+    pricingProvider: providerValue.pricingProvider?.trim() || null,
+    officialProviderFamily: providerValue.officialProviderFamily?.trim() || null,
+    wireApi: providerValue.wireApi,
     // New sources rely on endpoint/service discovery. Persisted bindings are
     // accepted only as migration hints for existing or mixed-protocol sources.
     protocolBindings: [],

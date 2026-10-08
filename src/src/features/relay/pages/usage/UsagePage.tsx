@@ -39,7 +39,7 @@ function loadUsageSummaryMetrics(): Record<UsageSummaryMetric, boolean> {
 export function UsagePage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, loading, busy, perform, accountDisplayName } = useRelayState();
-  const { revision: usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage } = useRelayUsageContext();
+  const { usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage } = useRelayUsageContext();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -154,17 +154,17 @@ export function UsagePage() {
     const normalizedModelQuery = requestFiltersActive ? modelQuery.trim().toLocaleLowerCase() : "";
     const normalizedConnectionQuery = requestFiltersActive ? connectionQuery.trim().toLocaleLowerCase() : "";
     const normalizedErrorQuery = requestFiltersActive ? errorQuery.trim() : "";
-    return rows.filter((item) => {
-      if (new Date(item.time).getTime() < cutoff) return false;
-      if (view === "errors") return !item.success;
+    return rows.filter((usageRow) => {
+      if (new Date(usageRow.time).getTime() < cutoff) return false;
+      if (view === "errors") return !usageRow.success;
       if (!requestFiltersActive) return true;
-      return (status === "all" || (status === "success" ? item.success : !item.success))
-        && (!normalizedRequestQuery || item.requestId?.toLocaleLowerCase().includes(normalizedRequestQuery))
-        && (!normalizedModelQuery || item.model?.toLocaleLowerCase().includes(normalizedModelQuery))
-        && (!normalizedConnectionQuery || item.connection.toLocaleLowerCase().includes(normalizedConnectionQuery))
-        && (!wireApi || item.wireApi === wireApi)
-        && (!transport || item.transport === transport)
-        && (!normalizedErrorQuery || item.errorCategory === normalizedErrorQuery);
+      return (status === "all" || (status === "success" ? usageRow.success : !usageRow.success))
+        && (!normalizedRequestQuery || usageRow.requestId?.toLocaleLowerCase().includes(normalizedRequestQuery))
+        && (!normalizedModelQuery || usageRow.model?.toLocaleLowerCase().includes(normalizedModelQuery))
+        && (!normalizedConnectionQuery || usageRow.connection.toLocaleLowerCase().includes(normalizedConnectionQuery))
+        && (!wireApi || usageRow.wireApi === wireApi)
+        && (!transport || usageRow.transport === transport)
+        && (!normalizedErrorQuery || usageRow.errorCategory === normalizedErrorQuery);
     });
   }, [connectionQuery, cutoff, errorQuery, mode, modelQuery, requestFiltersActive, requestQuery, rows, status, transport, view, wireApi]);
   const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
@@ -176,7 +176,7 @@ export function UsagePage() {
     try { localStorage.setItem(USAGE_SUMMARY_LAYOUT_KEY, JSON.stringify(summaryMetrics)); } catch { }
   }, [summaryMetrics]);
   const timeFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
-  const formatTime = useCallback((value: string) => timeFormatter.format(new Date(value)), [timeFormatter]);
+  const formatTime = useCallback((timestamp: string) => timeFormatter.format(new Date(timestamp)), [timeFormatter]);
   const resetPage = (work: () => void) => { work(); setPage(1); setSelectedRequest(null); };
   const changePage = (nextPage: number) => { setPage(nextPage); setSelectedRequest(null); };
   const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({
@@ -237,7 +237,7 @@ export function UsagePage() {
     ],
     runtime?.gateway.models ?? [],
   ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.visibleModelIds]);
-  const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))], [modelOptionIds, t]);
+  const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((modelId) => ({ value: modelId, label: modelId }))], [modelOptionIds, t]);
   const poolMemberOptionSource = useMemo(() => [
     ...(poolMemberGroups ?? []),
     ...(runtime?.accounts ?? []).map((account) => ({ key: account.id, label: account.label })),
@@ -249,7 +249,7 @@ export function UsagePage() {
     .map((group) => ({ value: group.key, label: group.label || group.key }))
     .sort((left, right) => left.label.localeCompare(right.label, i18n.language))
     .map((option) => [option.label, option] as const)).values())], [i18n.language, poolMemberOptionSource, t]);
-  const errorRows = useMemo(() => filtered.filter((item) => !item.success), [filtered]);
+  const errorRows = useMemo(() => filtered.filter((usageRow) => !usageRow.success), [filtered]);
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
@@ -265,7 +265,7 @@ export function UsagePage() {
       title={t("nav.usage")}
       navigation={<Tabs
         value={view}
-        onChange={(id) => { setView(id as View); setPage(1); setSelectedRequest(null); }}
+        onChange={(nextView) => { setView(nextView as View); setPage(1); setSelectedRequest(null); }}
         label={t("usage.views")}
         items={[
           { id: "requests", label: t("usage.requests") },
@@ -290,8 +290,8 @@ export function UsagePage() {
             className="usage-account-menu"
             label={t("usage.account")}
             value={selectedAccountId}
-            onChange={(value) => resetPage(() => {
-              setSelectedAccountId(value);
+            onChange={(accountId) => resetPage(() => {
+              setSelectedAccountId(accountId);
               setConnectionQuery("");
             })}
             options={[
@@ -304,7 +304,7 @@ export function UsagePage() {
           className="usage-range-menu"
           label={t("usage.range")}
           value={range}
-          onChange={(value) => resetPage(() => setRange(value as Range))}
+          onChange={(rangeValue) => resetPage(() => setRange(rangeValue as Range))}
           icon={<CalendarDays aria-hidden />}
           options={[
             { value: "daily", label: t("usage.daily") },
@@ -330,21 +330,21 @@ export function UsagePage() {
     {view === "requests" ? <RequestsView
       rows={filtered}
       status={status}
-      setStatus={(value) => resetPage(() => setStatus(value))}
+      setStatus={(statusValue) => resetPage(() => setStatus(statusValue))}
       modelQuery={modelQuery}
       modelOptions={modelOptions}
-      setModelQuery={(value) => resetPage(() => setModelQuery(value))}
+      setModelQuery={(modelQueryValue) => resetPage(() => setModelQuery(modelQueryValue))}
       connectionQuery={connectionQuery}
       poolMemberOptions={poolMemberOptions}
-      setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))}
+      setConnectionQuery={(connectionQueryValue) => resetPage(() => setConnectionQuery(connectionQueryValue))}
       wireApi={wireApi}
-      setWireApi={(value) => resetPage(() => setWireApi(value))}
+      setWireApi={(wireApiValue) => resetPage(() => setWireApi(wireApiValue))}
       transport={transport}
-      setTransport={(value) => resetPage(() => setTransport(value))}
+      setTransport={(transportValue) => resetPage(() => setTransport(transportValue))}
       errorQuery={errorQuery}
-      setErrorQuery={(value) => resetPage(() => setErrorQuery(value))}
+      setErrorQuery={(errorQueryValue) => resetPage(() => setErrorQuery(errorQueryValue))}
       requestQuery={requestQuery}
-      setRequestQuery={(value) => resetPage(() => setRequestQuery(value))}
+      setRequestQuery={(requestQueryValue) => resetPage(() => setRequestQuery(requestQueryValue))}
       clearFilters={clearFilters}
       formatTime={formatTime}
       onSelect={setSelectedRequest}
@@ -366,7 +366,7 @@ export function UsagePage() {
     {summarySettingsOpen ? (
       <UsageSummarySettings
         metrics={summaryMetrics}
-        onChange={(metric, checked) => setSummaryMetrics((current) => ({ ...current, [metric]: checked }))}
+        onChange={(metric, checked) => setSummaryMetrics((previousSummaryMetrics) => ({ ...previousSummaryMetrics, [metric]: checked }))}
         onClose={() => setSummarySettingsOpen(false)}
       />
     ) : null}

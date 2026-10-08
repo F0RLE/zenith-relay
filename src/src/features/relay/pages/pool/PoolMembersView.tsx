@@ -82,7 +82,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       member.subscription.activeUntilMs,
       member.quota.primary?.resetAtMs,
       member.quota.secondary?.resetAtMs,
-      ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
+      ...(member.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),
     ] : []),
     runtimeByMember.get(member.id)?.nextRetryAtMs,
   ]), [members, runtimeByMember]);
@@ -185,8 +185,8 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     if (ok) setSelectedId(null);
   };
   const confirmRemove = async (member: Member) => {
-    const name = member.kind === "source" ? member.name : member.label;
-    if (!await confirm(t("pool.removeMemberConfirm", { name }), { danger: true, confirmLabel: t("pool.removeMember") })) return;
+    const memberName = member.kind === "source" ? member.name : member.label;
+    if (!await confirm(t("pool.removeMemberConfirm", { name: memberName }), { danger: true, confirmLabel: t("pool.removeMember") })) return;
     await remove(member);
   };
   const quotaAccountCount = members.filter((member) => member.kind === "account" && member.enabled).length;
@@ -210,7 +210,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
       maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
       defaultServiceTier,
     }), "feedback.saved", { backgroundRefresh: true, uiLock: false });
-    if (!ok) setPendingServiceTier((current) => current === defaultServiceTier ? null : current);
+    if (!ok) setPendingServiceTier((previousServiceTier) => previousServiceTier === defaultServiceTier ? null : previousServiceTier);
   };
   if (!members.length) {
     return (
@@ -272,7 +272,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
               value={serviceTier}
               disabled={!supportsRoutingSettings}
               saving={pendingServiceTier !== null || busy === "pool-service-tier"}
-              onChange={(value) => void updateServiceTier(value)}
+              onChange={(serviceTier) => void updateServiceTier(serviceTier)}
             />
             <IconButton
               label={t("pool.routingSettings")}

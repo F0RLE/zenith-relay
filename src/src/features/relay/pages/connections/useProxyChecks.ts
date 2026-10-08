@@ -19,28 +19,28 @@ export function useProxyChecks(resetKey: string) {
 
   const check = useCallback(async (proxyId: string) => {
     if (inFlight.current.has(proxyId)) return;
-    const run = generation.current;
+    const generationAtStart = generation.current;
     inFlight.current.add(proxyId);
-    setChecks((current) => ({ ...current, [proxyId]: { pending: true } }));
-    let result: ProxyCheckResult;
+    setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { pending: true } }));
+    let proxyCheckResult: ProxyCheckResult;
     try {
-      result = await relayCommands.checkStoredProxy(proxyId);
+      proxyCheckResult = await relayCommands.checkStoredProxy(proxyId);
     } catch {
-      result = { proxyId, checkedAtMs: Date.now(), elapsedMs: 0, ip: null, countryCode: null, errorCode: "proxy_check_unavailable" };
+      proxyCheckResult = { proxyId, checkedAtMs: Date.now(), elapsedMs: 0, ip: null, countryCode: null, errorCode: "proxy_check_unavailable" };
     }
-    if (run !== generation.current) return;
+    if (generationAtStart !== generation.current) return;
     inFlight.current.delete(proxyId);
-    setChecks((current) => ({ ...current, [proxyId]: { pending: false, result } }));
+    setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { pending: false, result: proxyCheckResult } }));
   }, []);
 
   const checkMany = useCallback(async (proxyIds: string[]) => {
-    const run = generation.current;
+    const generationAtStart = generation.current;
     const queue = [...new Set(proxyIds)];
     await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
-      while (run === generation.current) {
-        const id = queue.shift();
-        if (!id) break;
-        await check(id);
+      while (generationAtStart === generation.current) {
+        const queuedProxyId = queue.shift();
+        if (!queuedProxyId) break;
+        await check(queuedProxyId);
       }
     }));
   }, [check]);

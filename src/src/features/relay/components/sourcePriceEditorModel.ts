@@ -31,19 +31,19 @@ export function updateSourcePriceDraft(
   drafts: SourcePriceDrafts,
   model: string,
   field: SourcePriceDraftField,
-  value: string,
+  priceText: string,
 ): SourcePriceDrafts {
   const key = modelIdKey(model);
   return {
     ...drafts,
-    [key]: { ...(drafts[key] ?? emptyDraft()), [field]: value },
+    [key]: { ...(drafts[key] ?? emptyDraft()), [field]: priceText },
   };
 }
 
 export function removeSourcePriceDraft(drafts: SourcePriceDrafts, model: string): SourcePriceDrafts {
-  const next = { ...drafts };
-  delete next[modelIdKey(model)];
-  return next;
+  const updatedDrafts = { ...drafts };
+  delete updatedDrafts[modelIdKey(model)];
+  return updatedDrafts;
 }
 
 export function sourcePriceDrafts(prices: Record<string, ApiModelPriceOverride>): SourcePriceDrafts {
@@ -59,15 +59,15 @@ export function sourcePriceDrafts(prices: Record<string, ApiModelPriceOverride>)
 export function parseSourcePriceDrafts(drafts: SourcePriceDrafts): Record<string, ApiModelPriceOverride> | null {
   const prices: Record<string, ApiModelPriceOverride> = {};
   for (const [model, draft] of Object.entries(drafts)) {
-    const input = parseEditableModelPrice(draft.input);
-    const output = parseEditableModelPrice(draft.output);
+    const inputPrice = parseEditableModelPrice(draft.input);
+    const outputPrice = parseEditableModelPrice(draft.output);
     const cached = optionalSourcePrice(draft.cached);
     const cacheWrite5m = optionalSourcePrice(draft.cacheWrite5m);
     const cacheWrite1h = optionalSourcePrice(draft.cacheWrite1h);
-    if (input == null || output == null || cached === null || cacheWrite5m === null || cacheWrite1h === null) return null;
+    if (inputPrice == null || outputPrice == null || cached === null || cacheWrite5m === null || cacheWrite1h === null) return null;
     prices[model] = {
-      inputMicroUsdPerMillion: input,
-      outputMicroUsdPerMillion: output,
+      inputMicroUsdPerMillion: inputPrice,
+      outputMicroUsdPerMillion: outputPrice,
       ...(cached == null ? {} : { cachedInputMicroUsdPerMillion: cached }),
       ...(cacheWrite5m == null ? {} : { cacheWrite5mMicroUsdPerMillion: cacheWrite5m }),
       ...(cacheWrite1h == null ? {} : { cacheWrite1hMicroUsdPerMillion: cacheWrite1h }),
@@ -76,6 +76,6 @@ export function parseSourcePriceDrafts(drafts: SourcePriceDrafts): Record<string
   return prices;
 }
 
-function optionalSourcePrice(value: string) {
-  return value.trim() === "" ? undefined : parseEditableModelPrice(value);
+function optionalSourcePrice(priceText: string) {
+  return priceText.trim() === "" ? undefined : parseEditableModelPrice(priceText);
 }

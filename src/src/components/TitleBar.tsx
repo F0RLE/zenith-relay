@@ -15,8 +15,8 @@ export function TitleBar({ platform }: TitleBarProps) {
     if (!macos) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void watchWindowFullscreen((value) => {
-      if (!disposed) setFullscreen(value);
+    void watchWindowFullscreen((isFullscreen) => {
+      if (!disposed) setFullscreen(isFullscreen);
     }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;

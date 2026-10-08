@@ -8,15 +8,15 @@ export function formatApiEquivalent(microUsd: number, locale: string) {
   })}`;
 }
 
-export function formatProviderMicroUsd(value: number, locale: string) {
-  return formatMicroUsd(value, locale, {
+export function formatProviderMicroUsd(microUsdAmount: number, locale: string) {
+  return formatMicroUsd(microUsdAmount, locale, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
 }
 
-export function formatAccountValueMicroUsd(value: number, locale: string, approximate = false) {
-  const formatted = formatMicroUsd(value, locale, {
+export function formatAccountValueMicroUsd(accountValueMicroUsd: number, locale: string, approximate = false) {
+  const formatted = formatMicroUsd(accountValueMicroUsd, locale, {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
@@ -55,6 +55,6 @@ export function sortReasoningEfforts(levels: string[]) {
     .map(({ level }) => level);
 }
 
-export function normalizeReasoningEffort(value: string) {
-  return value.trim().toLowerCase();
+export function normalizeReasoningEffort(effortText: string) {
+  return effortText.trim().toLowerCase();
 }

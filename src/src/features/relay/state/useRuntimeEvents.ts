@@ -68,9 +68,9 @@ export function useRuntimeEvents({
       pendingRuntimeActivity = null;
       if (pending) {
         const candidates = Object.fromEntries(runtimeActivityOverlay.current);
-        setRuntimeActivity((current) => compareRuntimeActivity(pending, current) > 0
+        setRuntimeActivity((previousActivitySnapshot) => compareRuntimeActivity(pending, previousActivitySnapshot) > 0
           ? { ...pending, candidates }
-          : current);
+          : previousActivitySnapshot);
       }
       if (document.visibilityState !== "visible" || !isRuntimeRefreshPage(pageRef.current)) return;
       setRuntime((snapshot) => {
@@ -109,7 +109,7 @@ export function useRuntimeEvents({
       usageRefreshTimer = window.setTimeout(() => {
         usageRefreshTimer = undefined;
         if (!active || document.visibilityState !== "visible" || !isUsageRefreshPage(pageRef.current)) return;
-        setUsageRevision((current) => current + 1);
+        setUsageRevision((previousRevision) => previousRevision + 1);
       }, usageRefreshDebounceMs(targetPage));
     };
     void relayCommands.onStateChanged(() => {
@@ -140,8 +140,8 @@ export function useRuntimeEvents({
         runtimeActivityOverlay.current.clear();
         runtimeActivityRuntimeId.current = runtimeId;
       }
-      const previous = runtimeActivityOverlay.current.get(activity.candidateId);
-      if (previous && compareRuntimeActivity(activity, previous) <= 0) return;
+      const previousActivity = runtimeActivityOverlay.current.get(activity.candidateId);
+      if (previousActivity && compareRuntimeActivity(activity, previousActivity) <= 0) return;
       // Keep both active and zero-count snapshots. A zero-count snapshot is a
       // tombstone for an older live poll state and must be applied to the next
       // base order as well as the current one.
