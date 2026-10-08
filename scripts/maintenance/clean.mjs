@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 
-const mode = process.argv.includes("--all") ? "all" : "default";
-const paths = mode === "all"
+const cleanMode = process.argv.includes("--all") ? "all" : "default";
+const artifactPaths = cleanMode === "all"
   ? [
       ".build",
       "dist",
@@ -16,8 +16,8 @@ const paths = mode === "all"
     ]
   : [".build", "dist"];
 
-for (const path of paths) {
-  rmSync(path, { recursive: true, force: true });
+for (const artifactPath of artifactPaths) {
+  rmSync(artifactPath, { recursive: true, force: true });
 }
 
-console.log(`Cleaned ${mode === "all" ? "all local" : "frontend"} build artifacts.`);
+console.log(`Cleaned ${cleanMode === "all" ? "all local" : "frontend"} build artifacts.`);

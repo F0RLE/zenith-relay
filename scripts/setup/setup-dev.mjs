@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { repoRoot, withZenithRustEnv } from "../lib/tauri-env.mjs";
 
 const root = repoRoot();
@@ -22,14 +22,19 @@ if (!process.versions.bun) {
 
 function prependPath(env, entries) {
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
-  const current = env[pathKey] ?? env.PATH ?? "";
-  const additions = entries.filter((entry) => entry && existsSync(entry));
-  env[pathKey] = [...additions, current].filter(Boolean).join(delimiter);
+  const existingPathValue = env[pathKey] ?? env.PATH ?? "";
+  const availableEntries = entries.filter((entry) => entry && existsSync(entry));
+  env[pathKey] = [...availableEntries, existingPathValue].filter(Boolean).join(delimiter);
   env.PATH = env[pathKey];
 }
 
 function setupEnvironment() {
   const env = { ...process.env };
+  if (process.platform === "win32") {
+    env.DEVELOPMENT_HOME ??= env.USERPROFILE
+      ? join(env.USERPROFILE, "Development")
+      : undefined;
+  }
   if (process.platform === "win32" && env.DEVELOPMENT_HOME) {
     env.CARGO_HOME ??= join(env.DEVELOPMENT_HOME, "rust", "cargo-home");
     env.RUSTUP_HOME ??= join(env.DEVELOPMENT_HOME, "rust", "rustup-home");
@@ -42,32 +47,86 @@ function setupEnvironment() {
   return withZenithRustEnv(env);
 }
 
+function commandAvailable(command, args, env) {
+  const commandResult = spawnSync(command, args, {
+    cwd: root,
+    env,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  return !commandResult.error && commandResult.status === 0;
+}
+
+function windowsToolchainReady(env) {
+  return [
+    ["where.exe", ["cl.exe"]],
+    ["where.exe", ["link.exe"]],
+    ["where.exe", ["rc.exe"]],
+    ["where.exe", ["cmake.exe"]],
+    ["where.exe", ["ninja.exe"]],
+  ].every(([command, args]) => commandAvailable(command, args, env));
+}
+
 function run(label, command, args, cwd, env) {
   console.log(`[setup] ${label}`);
-  const result = spawnSync(command, args, {
+  const processResult = spawnSync(command, args, {
     cwd,
     env,
     stdio: "inherit",
     windowsHide: true,
   });
-  if (result.error) {
-    throw new Error(`${label} failed: ${result.error.message}`);
+  if (processResult.error) {
+    throw new Error(`${label} failed: ${processResult.error.message}`);
   }
-  if (result.status !== 0) {
-    throw new Error(`${label} failed with exit code ${result.status ?? 1}`);
+  if (processResult.status !== 0) {
+    throw new Error(`${label} failed with exit code ${processResult.status ?? 1}`);
   }
 }
 
-const env = setupEnvironment();
 const bun = process.execPath;
 const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
 
 try {
+  let env = setupEnvironment();
+  if (process.platform === "win32" && !windowsToolchainReady(env)) {
+    const workspaceSetup = resolve(root, "..", "scripts", "setup", "setup-development.ps1");
+    if (!existsSync(workspaceSetup)) {
+      throw new Error(
+        "Portable Windows tools are missing. Run the workspace setup script " +
+        "scripts\\setup\\setup-development.ps1 -InstallBuildTools, then run setup again.",
+      );
+    }
+
+    run(
+      "install portable Windows toolchain",
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        workspaceSetup,
+        "-SkipProjectDependencies",
+      ],
+      root,
+      process.env,
+    );
+    env = setupEnvironment();
+    if (!windowsToolchainReady(env)) {
+      throw new Error(
+        "Portable Windows setup finished without cl.exe, link.exe, rc.exe, cmake.exe, and ninja.exe.",
+      );
+    }
+  }
+
   run("check Bun", bun, ["--version"], root, env);
   run("check Rust", cargo, ["--version"], root, env);
   if (process.platform === "win32") {
     run("check MSVC", "cl.exe", [], root, env);
+    run("check MSVC linker", "where.exe", ["link.exe"], root, env);
+    run("check Windows SDK", "where.exe", ["rc.exe"], root, env);
     run("check CMake", "cmake.exe", ["--version"], root, env);
+    run("check Ninja", "ninja.exe", ["--version"], root, env);
   }
   run("install frontend dependencies", bun, ["install", "--frozen-lockfile"], frontendRoot, env);
 

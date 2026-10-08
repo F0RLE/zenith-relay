@@ -56,17 +56,17 @@ function visibleLines(body) {
 
 function readSections(body) {
   const sections = new Map();
-  let current;
+  let currentSection;
   for (const line of visibleLines(body)) {
     const heading = line.match(/^ {0,3}##[ \t]+(.+?)[ \t]*#*[ \t]*$/);
     if (heading) {
-      const name = heading[1].toLowerCase();
-      current = [];
-      const matches = sections.get(name) ?? [];
-      matches.push(current);
-      sections.set(name, matches);
+      const sectionName = heading[1].toLowerCase();
+      currentSection = [];
+      const matches = sections.get(sectionName) ?? [];
+      matches.push(currentSection);
+      sections.set(sectionName, matches);
     } else {
-      current?.push(line);
+      currentSection?.push(line);
     }
   }
   return sections;

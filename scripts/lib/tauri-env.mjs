@@ -7,16 +7,16 @@ export function repoRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
-function versionParts(value) {
-  return value.split(".").map((part) => Number.parseInt(part, 10) || 0);
+function versionParts(versionText) {
+  return versionText.split(".").map((part) => Number.parseInt(part, 10) || 0);
 }
 
-function compareVersions(left, right) {
-  const a = versionParts(left);
-  const b = versionParts(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const difference = (a[index] ?? 0) - (b[index] ?? 0);
-    if (difference !== 0) return difference;
+function compareVersions(leftVersion, rightVersion) {
+  const leftParts = versionParts(leftVersion);
+  const rightParts = versionParts(rightVersion);
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const versionDifference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (versionDifference !== 0) return versionDifference;
   }
   return 0;
 }
@@ -36,16 +36,19 @@ function existingPathEntries(entries) {
 
 function prependPath(env, entries) {
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
-  const current = env[pathKey] ?? env.PATH ?? "";
-  const allEntries = [...existingPathEntries(entries), ...current.split(delimiter).filter(Boolean)];
+  const existingPathValue = env[pathKey] ?? env.PATH ?? "";
+  const pathEntries = [
+    ...existingPathEntries(entries),
+    ...existingPathValue.split(delimiter).filter(Boolean),
+  ];
   const seen = new Set();
-  const unique = allEntries.filter((entry) => {
-    const key = process.platform === "win32" ? entry.toLowerCase() : entry;
-    if (seen.has(key)) return false;
-    seen.add(key);
+  const uniqueEntries = pathEntries.filter((entry) => {
+    const normalizedEntry = process.platform === "win32" ? entry.toLowerCase() : entry;
+    if (seen.has(normalizedEntry)) return false;
+    seen.add(normalizedEntry);
     return true;
   });
-  env[pathKey] = unique.join(delimiter);
+  env[pathKey] = uniqueEntries.join(delimiter);
   env.PATH = env[pathKey];
 }
 
@@ -66,11 +69,11 @@ function locateMsvcTools(root) {
   return null;
 }
 
-function locateWindowsSdk(roots) {
-  for (const root of roots.filter(Boolean)) {
-    const includeRoot = join(root, "Include");
-    const libRoot = join(root, "Lib");
-    const binRoot = join(root, "bin");
+function locateWindowsSdk(sdkRoots) {
+  for (const sdkRoot of sdkRoots.filter(Boolean)) {
+    const includeRoot = join(sdkRoot, "Include");
+    const libRoot = join(sdkRoot, "Lib");
+    const binRoot = join(sdkRoot, "bin");
     for (const version of versionDirectories(includeRoot)) {
       const include = join(includeRoot, version);
       const lib = join(libRoot, version);
@@ -83,7 +86,7 @@ function locateWindowsSdk(roots) {
         existsSync(join(lib, "um", "x64")) &&
         existsSync(join(bin, "rc.exe"))
       ) {
-        return { root, version, include, lib, bin };
+        return { root: sdkRoot, version, include, lib, bin };
       }
     }
   }
@@ -146,16 +149,16 @@ function configurePortableWindowsToolchain(env, developmentHome) {
 }
 
 export function withZenithRustEnv(env = process.env) {
-  const next = { ...env };
+  const nextEnvironment = { ...env };
   const nodeBin = dirname(process.execPath);
   const pathKey = process.platform === "win32" ? "Path" : "PATH";
-  const existingPath = next[pathKey] ?? next.PATH ?? "";
-  next[pathKey] = `${nodeBin}${delimiter}${existingPath}`;
-  next.PATH = next[pathKey];
+  const existingPath = nextEnvironment[pathKey] ?? nextEnvironment.PATH ?? "";
+  nextEnvironment[pathKey] = `${nodeBin}${delimiter}${existingPath}`;
+  nextEnvironment.PATH = nextEnvironment[pathKey];
 
   if (process.platform === "win32") {
     const probe = spawnSync("rustc", ["--print", "sysroot"], {
-      env: next,
+      env: nextEnvironment,
       encoding: "utf8",
       shell: true,
       windowsHide: true,
@@ -166,18 +169,21 @@ export function withZenithRustEnv(env = process.env) {
       const rustupHome = dirname(dirname(sysroot));
       const cargoHome = join(dirname(rustupHome), "cargo-home");
       if (existsSync(join(cargoHome, "bin", "cargo.exe"))) {
-        next.CARGO_HOME = cargoHome;
-        next.RUSTUP_HOME = rustupHome;
+        nextEnvironment.CARGO_HOME = cargoHome;
+        nextEnvironment.RUSTUP_HOME = rustupHome;
       }
-      next[pathKey] = `${toolchainBin}${delimiter}${next[pathKey]}`;
-      next.PATH = next[pathKey];
+      nextEnvironment[pathKey] = `${toolchainBin}${delimiter}${nextEnvironment[pathKey]}`;
+      nextEnvironment.PATH = nextEnvironment[pathKey];
     }
 
-    const developmentHome = next.DEVELOPMENT_HOME
-      || (next.USERPROFILE ? join(next.USERPROFILE, "Development") : "");
-    const portableToolchainConfigured = configurePortableWindowsToolchain(next, developmentHome);
+    const developmentHome = nextEnvironment.DEVELOPMENT_HOME
+      || (nextEnvironment.USERPROFILE ? join(nextEnvironment.USERPROFILE, "Development") : "");
+    const portableToolchainConfigured = configurePortableWindowsToolchain(
+      nextEnvironment,
+      developmentHome,
+    );
 
-    const programFilesX86 = next["ProgramFiles(x86)"];
+    const programFilesX86 = nextEnvironment["ProgramFiles(x86)"];
     const vswhere = programFilesX86
       ? join(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe")
       : "";
@@ -199,7 +205,7 @@ export function withZenithRustEnv(env = process.env) {
       const vcvars = join(install, "VC", "Auxiliary", "Build", "vcvars64.bat");
       if (install && existsSync(vcvars)) {
         const initialized = spawnSync(`chcp 65001 >nul && call "${vcvars}" >nul && set`, {
-          env: next,
+          env: nextEnvironment,
           encoding: "utf8",
           shell: true,
           windowsHide: true,
@@ -207,15 +213,17 @@ export function withZenithRustEnv(env = process.env) {
         if (initialized.status === 0) {
           for (const line of initialized.stdout.split(/\r?\n/)) {
             const separator = line.indexOf("=");
-            if (separator > 0) next[line.slice(0, separator)] = line.slice(separator + 1);
+            if (separator > 0) {
+              nextEnvironment[line.slice(0, separator)] = line.slice(separator + 1);
+            }
           }
-          next.PATH = next[pathKey];
+          nextEnvironment.PATH = nextEnvironment[pathKey];
         }
       }
     }
 
-    const visualStudioRoot = next.VSINSTALLDIR
-      || (next.VCINSTALLDIR ? dirname(next.VCINSTALLDIR) : "")
+    const visualStudioRoot = nextEnvironment.VSINSTALLDIR
+      || (nextEnvironment.VCINSTALLDIR ? dirname(nextEnvironment.VCINSTALLDIR) : "")
       || (developmentHome ? join(developmentHome, "visual-studio", "build-tools") : "");
     const cmakeRoot = visualStudioRoot
       ? join(
@@ -246,30 +254,30 @@ export function withZenithRustEnv(env = process.env) {
     }
 
     if (toolPaths.length > 0) {
-      const existingPath = next[pathKey] ?? next.PATH ?? "";
-      next[pathKey] = `${toolPaths.join(delimiter)}${delimiter}${existingPath}`;
-      next.PATH = next[pathKey];
+      const existingToolPath = nextEnvironment[pathKey] ?? nextEnvironment.PATH ?? "";
+      nextEnvironment[pathKey] = `${toolPaths.join(delimiter)}${delimiter}${existingToolPath}`;
+      nextEnvironment.PATH = nextEnvironment[pathKey];
     }
 
     // The portable SDK is not registered with CMake. Ninja keeps native
     // builds on the configured MSVC/SDK environment instead of asking the
     // Visual Studio generator to discover a system SDK from the registry.
     if (portableToolchainConfigured && existsSync(ninjaExecutable)) {
-      next.CMAKE_GENERATOR = "Ninja";
-      next.CMAKE_MAKE_PROGRAM = ninjaExecutable;
+      nextEnvironment.CMAKE_GENERATOR = "Ninja";
+      nextEnvironment.CMAKE_MAKE_PROGRAM = ninjaExecutable;
     }
 
     // Keep MSBuild's temporary archive files inside Cargo's writable target tree.
     const buildTemp = join(repoRoot(), "target", "msbuild-temp");
     mkdirSync(buildTemp, { recursive: true });
-    next.TEMP = buildTemp;
-    next.TMP = buildTemp;
-    next.AWS_LC_SYS_CMAKE_BUILDER ??= "1";
-    next.CARGO_BUILD_JOBS ??= "1";
-    next.CMAKE_BUILD_PARALLEL_LEVEL ??= "1";
+    nextEnvironment.TEMP = buildTemp;
+    nextEnvironment.TMP = buildTemp;
+    nextEnvironment.AWS_LC_SYS_CMAKE_BUILDER ??= "1";
+    nextEnvironment.CARGO_BUILD_JOBS ??= "1";
+    nextEnvironment.CMAKE_BUILD_PARALLEL_LEVEL ??= "1";
   }
 
-  return next;
+  return nextEnvironment;
 }
 
 export function tauriInvocation(args) {

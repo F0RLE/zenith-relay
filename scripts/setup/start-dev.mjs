@@ -28,19 +28,19 @@ function run(label, script, args = []) {
   }
 
   console.log(`[dev] ${label}`);
-  const result = spawnSync(process.execPath, [script, ...args], {
+  const processResult = spawnSync(process.execPath, [script, ...args], {
     cwd: root,
     env: process.env,
     stdio: "inherit",
     windowsHide: true,
   });
 
-  if (result.error) {
-    console.error(`[dev] ${label} failed: ${result.error.message}`);
+  if (processResult.error) {
+    console.error(`[dev] ${label} failed: ${processResult.error.message}`);
     process.exit(1);
   }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+  if (processResult.status !== 0) {
+    process.exit(processResult.status ?? 1);
   }
 }
 
