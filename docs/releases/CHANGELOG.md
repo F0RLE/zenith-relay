@@ -8,6 +8,8 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Documentation now separates current behavior from the roadmap, removes
+  obsolete feature claims, and keeps the localized error reference unchanged.
 - ChatGPT account discovery and Codex model catalog requests accept up to 4 MiB,
   so larger official model catalogs do not leave the pool without models.
   ([#86](https://github.com/F0RLE/zenith-relay/pull/86))

@@ -95,15 +95,17 @@ Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
 ## Development setup
 
 Clone this repository. The commands below are the same on Windows, macOS, and
-Linux. Install the host tools first; `bun run setup` does not install them:
+Linux. `bun run setup` installs the locked project dependencies and, on
+Windows, bootstraps the portable native toolchain under
+`%USERPROFILE%\Development` when it is missing:
 
 - [Bun](https://bun.sh) 1.4.2 or newer.
 - [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
   Rust version.
 - Native libraries for the desktop shell:
-  - Windows: the portable MSVC/Windows SDK bundle described below, and the
-    WebView2 runtime. A regular MSVC installation is supported when no
-    portable bundle is present.
+  - Windows: the portable MSVC/Windows SDK bundle installed by the setup
+    script, and the WebView2 runtime. A regular MSVC installation is supported
+    when no portable bundle is present.
   - macOS: Xcode Command Line Tools.
   - Linux: GTK 3, WebKitGTK 4.1, librsvg, and a secret service such as
     gnome-keyring. The Build workflow lists the packages CI installs.
@@ -128,6 +130,17 @@ the same environment is applied:
 
 ~~~powershell
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
+~~~
+
+On a fresh Windows checkout the setup command calls the workspace
+`scripts/setup/setup-development.ps1` and keeps all downloaded tools in
+`Development`; `winget` and an elevated PowerShell window are required for
+that first installation. Use `-InstallBuildTools` when running that PowerShell
+script directly to force a repair. For a direct `cargo` invocation in
+an existing PowerShell session, load the same portable environment first:
+
+~~~powershell
+. ..\scripts\setup\use-development-env.ps1
 ~~~
 
 Playwright browsers are optional and kept out of the default setup:
@@ -208,16 +221,19 @@ the frontend, desktop host, shared runtime, or server, run the corresponding
 commands below.
 
 These two checks are the same ones CI runs. They need Bun, not PowerShell.
-Pass the branch you branched from; CI selects that base automatically:
+Use the branch targeted by the pull request as the base reference:
 
 ~~~sh
 git fetch origin
-bun ./scripts/check/check-agent-guardrails.mjs origin/main
-bun ./scripts/check/check-duplicate-code.mjs origin/main
+BASE_REF=origin/main
+bun ./scripts/check/check-agent-guardrails.mjs "$BASE_REF"
+bun ./scripts/check/check-duplicate-code.mjs "$BASE_REF"
 ~~~
 
-From `src`, the same commands are `bun run check:guardrails -- origin/main`
-and `bun run check:duplicates -- origin/main`.
+Replace `origin/main` with the target branch for a release or development pull
+request. From `src`, the same commands are
+`bun run check:guardrails -- "$BASE_REF"` and
+`bun run check:duplicates -- "$BASE_REF"`.
 
 For PR template or metadata-workflow changes, run the isolated policy tests:
 
@@ -330,14 +346,13 @@ in-app updates; it is separate from macOS code signing.
 
 ### GitHub merge requirements
 
-In GitHub branch protection or rulesets for the development/release branches
-and <code>main</code>, require PRs, the <code>Release context</code> status check,
-an up-to-date branch, and code-owner review for the paths in
-<code>.github/CODEOWNERS</code>. Restrict
-bypass permissions to the intended maintainers. These files alone do not enable
-branch protection. A PR author cannot approve their own PR as a code owner;
-owner-authored policy changes need another authorized reviewer or an explicitly
-managed maintainer exception.
+Maintainers should configure branch protection or rulesets for the branches
+that accept changes. Require pull requests, the <code>Release context</code>
+status check, an up-to-date branch, and code-owner review for the paths in
+<code>.github/CODEOWNERS</code>. Restrict bypass permissions to the intended
+maintainers. These files alone do not enable branch protection. A PR author
+cannot approve their own PR as a code owner; owner-authored policy changes need
+another authorized reviewer or an explicitly managed maintainer exception.
 
 GitHub loads the <code>pull_request_target</code> workflow from the repository's
 default branch; this workflow explicitly loads the validator from the PR's base
