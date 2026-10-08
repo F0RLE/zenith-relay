@@ -31,7 +31,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let account_records = state.store.accounts()?;
     let account_secret_refs = account_records
         .iter()
-        .map(|record| (record.id.clone(), record.secret_ref.clone()))
+        .map(|account_record| (account_record.id.clone(), account_record.secret_ref.clone()))
         .collect();
     let key_records = state
         .store
@@ -178,34 +178,36 @@ pub(super) fn pool_member_ids(
 ) -> (Vec<String>, Vec<String>) {
     let source_ids = sources
         .iter()
-        .filter(|record| record.in_pool && record.supports_any_wire_api().unwrap_or(false))
-        .map(|record| record.id.clone())
+        .filter(|source_record| {
+            source_record.in_pool && source_record.supports_any_wire_api().unwrap_or(false)
+        })
+        .map(|source_record| source_record.id.clone())
         .collect();
     let account_ids = accounts
         .iter()
-        .filter(|record| record.in_pool)
-        .map(|record| record.id.clone())
+        .filter(|account_record| account_record.in_pool)
+        .map(|account_record| account_record.id.clone())
         .collect();
     (source_ids, account_ids)
 }
 
 fn build_sources(
     state: &AppState,
-    records: Vec<SourceRecord>,
+    source_records: Vec<SourceRecord>,
 ) -> Result<Vec<RuntimeSource>, String> {
     let mut sources = Vec::new();
-    for record in records {
-        let Some(api_key) = state.vault.load(&record.secret_ref)? else {
+    for source_record in source_records {
+        let Some(api_key) = state.vault.load(&source_record.secret_ref)? else {
             continue;
         };
-        sources.push(runtime_source(record, api_key));
+        sources.push(runtime_source(source_record, api_key));
     }
     Ok(sources)
 }
 
 async fn build_accounts(
     state: &Arc<AppState>,
-    records: Vec<ServerAccountRecord>,
+    account_records: Vec<ServerAccountRecord>,
     basis_points_enabled: bool,
 ) -> Result<AccountRuntimeBuild, String> {
     let mut build = AccountRuntimeBuild {
@@ -214,35 +216,43 @@ async fn build_accounts(
         refresh_clients: HashMap::new(),
         agent_identities: HashMap::new(),
     };
-    for record in records {
-        let Some(secret) = state.vault.load(&record.secret_ref)? else {
+    for account_record in account_records {
+        let Some(secret) = state.vault.load(&account_record.secret_ref)? else {
             continue;
         };
         let credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
-        let Ok(proxy) = account_proxy_config(state, &record, &credential) else {
+        let Ok(proxy) = account_proxy_config(state, &account_record, &credential) else {
             continue;
         };
         if let Some(agent) = credential.agent_identity()? {
-            build.agent_identities.insert(record.id.clone(), agent);
+            build
+                .agent_identities
+                .insert(account_record.id.clone(), agent);
         }
         if credential.has_oauth() {
             state
                 .token_authority
-                .register_if_not_stale(&record.id, credential.tokens()?, record.auth_state)
+                .register_if_not_stale(
+                    &account_record.id,
+                    credential.tokens()?,
+                    account_record.auth_state,
+                )
                 .await
                 .map_err(|error| error.to_string())?;
             if proxy.is_some() {
                 build.refresh_clients.insert(
-                    record.id.clone(),
+                    account_record.id.clone(),
                     CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
                 );
             } else {
-                build.direct_refresh_accounts.insert(record.id.clone());
+                build
+                    .direct_refresh_accounts
+                    .insert(account_record.id.clone());
             }
         }
         build.accounts.push(runtime_account(
-            record,
+            account_record,
             &credential,
             proxy,
             basis_points_enabled,
@@ -272,31 +282,31 @@ fn retain_active_pool_members(
         .filter(|source| source.enabled && !source.draining)
         .map(|source| source.source.id.as_str())
         .collect::<HashSet<_>>();
-    source_ids.retain(|id| active_source_ids.contains(id.as_str()));
+    source_ids.retain(|source_id| active_source_ids.contains(source_id.as_str()));
     let active_account_ids = accounts
         .iter()
         .filter(|account| account.enabled && !account.draining)
         .map(|account| account.id.as_str())
         .collect::<HashSet<_>>();
-    account_ids.retain(|id| active_account_ids.contains(id.as_str()));
+    account_ids.retain(|account_id| active_account_ids.contains(account_id.as_str()));
 }
 
 fn build_keys(
     state: &AppState,
-    records: Vec<GatewayKeyRecord>,
+    key_records: Vec<GatewayKeyRecord>,
     pool_source_ids: &[String],
     pool_account_ids: &[String],
 ) -> Result<Vec<RuntimeMixedLocalKey>, String> {
     let mut keys = Vec::new();
-    for record in records {
-        let Some(secret) = state.vault.load(&record.secret_ref)? else {
+    for key_record in key_records {
+        let Some(secret) = state.vault.load(&key_record.secret_ref)? else {
             continue;
         };
         if pool_source_ids.is_empty() && pool_account_ids.is_empty() {
             continue;
         }
         keys.push(runtime_key(
-            record,
+            key_record,
             secret,
             pool_source_ids,
             pool_account_ids,

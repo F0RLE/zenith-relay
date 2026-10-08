@@ -178,13 +178,13 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
         .unwrap();
     state.rebuild_runtime().await.unwrap();
     let runtime = state.runtime().unwrap().unwrap();
-    let next = || {
+    let has_next_candidate = || {
         runtime
             .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
             .into_iter()
             .any(|candidate| candidate.next_for_new_request)
     };
-    assert!(next());
+    assert!(has_next_candidate());
 
     // Validation must happen before any candidate is fenced or any durable
     // member is changed, even when another id in the same batch exists.
@@ -198,7 +198,7 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
     )
     .await;
     assert!(missing.is_err());
-    assert!(next());
+    assert!(has_next_candidate());
     assert!(state.store.account(&account.id).unwrap().unwrap().in_pool);
 
     let membership = |in_pool| PoolMembershipInput {
@@ -211,7 +211,7 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
         .unwrap();
     assert!(removed.accounts.iter().all(|account| !account.in_pool));
     assert!(removed.sources.iter().all(|source| !source.in_pool));
-    assert!(!next());
+    assert!(!has_next_candidate());
     assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
 
     let Json(joined) = set_pool_membership(State(state.clone()), Json(membership(true)))
@@ -219,7 +219,7 @@ async fn mixed_membership_batch_updates_scopes_without_replacing_the_runtime() {
         .unwrap();
     assert!(joined.accounts.iter().all(|account| account.in_pool));
     assert!(joined.sources.iter().all(|source| source.in_pool));
-    assert!(next());
+    assert!(has_next_candidate());
     assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
     state.shutdown_runtime().await.unwrap();
 }

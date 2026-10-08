@@ -46,7 +46,7 @@ pub fn backup(config: &Config, destination: &Path) -> Result<(), String> {
     let store = Store::open(config.data_dir.join("relay.sqlite"))?;
     let vault = Vault::open(&config.data_dir.join("vault"), config.vault_key)?;
     validate_store_secrets(&store, &vault)?;
-    let result = (|| {
+    let backup_result = (|| {
         store.backup_to(&staging.join("relay.sqlite"))?;
         let vault_path = config.data_dir.join("vault").join("secrets.enc");
         if vault_path.is_file() {
@@ -66,10 +66,10 @@ pub fn backup(config: &Config, destination: &Path) -> Result<(), String> {
         }
         fs::rename(&staging, destination).map_err(io_error)
     })();
-    if result.is_err() {
+    if backup_result.is_err() {
         let _ = fs::remove_dir_all(staging);
     }
-    result
+    backup_result
 }
 
 pub fn restore(config: &Config, source: &Path) -> Result<(), String> {
@@ -82,7 +82,7 @@ pub fn restore(config: &Config, source: &Path) -> Result<(), String> {
         .data_dir
         .join(format!(".restore-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&staging).map_err(io_error)?;
-    let result = (|| {
+    let restore_result = (|| {
         fs::copy(source.join("manifest.json"), staging.join("manifest.json")).map_err(io_error)?;
         fs::copy(&database, staging.join("relay.sqlite")).map_err(io_error)?;
         let vault = source.join("vault").join("secrets.enc");
@@ -94,7 +94,7 @@ pub fn restore(config: &Config, source: &Path) -> Result<(), String> {
         activate_restore(&config.data_dir, &staging)
     })();
     let _ = fs::remove_dir_all(staging);
-    result
+    restore_result
 }
 
 fn validate_manifest(source: &Path) -> Result<BackupManifest, String> {
@@ -115,13 +115,13 @@ fn validate_backup(root: &Path, vault_key: [u8; 32]) -> Result<(), String> {
     }
     let store = Store::open(database)?;
     let vault = Vault::open(&root.join("vault"), vault_key)?;
-    let result = validate_store_secrets(&store, &vault);
+    let validation_result = validate_store_secrets(&store, &vault);
     drop(vault);
     drop(store);
     for suffix in [".migration.lock", "-wal", "-shm"] {
         let _ = fs::remove_file(append_suffix(&root.join("relay.sqlite"), suffix));
     }
-    result
+    validation_result
 }
 
 fn validate_store_secrets(store: &Store, vault: &Vault) -> Result<(), String> {
@@ -129,12 +129,12 @@ fn validate_store_secrets(store: &Store, vault: &Vault) -> Result<(), String> {
     let proxies = store.proxies()?;
     let proxy_ids = proxies
         .iter()
-        .map(|record| record.id.clone())
+        .map(|proxy_record| proxy_record.id.clone())
         .collect::<std::collections::HashSet<_>>();
     let accounts = store.accounts()?;
     if accounts
         .iter()
-        .filter_map(|record| record.proxy_id.as_deref())
+        .filter_map(|account_record| account_record.proxy_id.as_deref())
         .any(|proxy_id| !proxy_ids.contains(proxy_id))
         || store
             .common_proxy_id()?
@@ -145,10 +145,23 @@ fn validate_store_secrets(store: &Store, vault: &Vault) -> Result<(), String> {
     let secret_refs = store
         .sources()?
         .into_iter()
-        .map(|record| record.secret_ref)
-        .chain(accounts.into_iter().map(|record| record.secret_ref))
-        .chain(store.keys()?.into_iter().map(|record| record.secret_ref))
-        .chain(proxies.into_iter().map(|record| record.secret_ref));
+        .map(|source_record| source_record.secret_ref)
+        .chain(
+            accounts
+                .into_iter()
+                .map(|account_record| account_record.secret_ref),
+        )
+        .chain(
+            store
+                .keys()?
+                .into_iter()
+                .map(|gateway_key_record| gateway_key_record.secret_ref),
+        )
+        .chain(
+            proxies
+                .into_iter()
+                .map(|proxy_record| proxy_record.secret_ref),
+        );
     for secret_ref in secret_refs {
         if vault.load(&secret_ref)?.is_none() {
             return Err("backup references a missing encrypted secret".to_string());
@@ -222,11 +235,11 @@ fn rollback_restore(moved: &[(PathBuf, PathBuf)], installed: &[PathBuf]) {
 }
 
 fn temporary_sibling(path: &Path, label: &str) -> Result<PathBuf, String> {
-    let name = path
+    let file_name = path
         .file_name()
         .ok_or_else(|| "backup path has no file name".to_string())?
         .to_string_lossy();
-    Ok(path.with_file_name(format!(".{name}.{label}-{}", uuid::Uuid::new_v4())))
+    Ok(path.with_file_name(format!(".{file_name}.{label}-{}", uuid::Uuid::new_v4())))
 }
 
 fn io_error(error: std::io::Error) -> String {

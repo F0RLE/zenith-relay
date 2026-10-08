@@ -95,17 +95,17 @@ pub async fn preview_account_batch_import(
         .iter()
         .map(batch_import_warning)
         .collect();
-    let mut items = parsed
+    let mut parsed_items_by_id = parsed
         .items
         .into_iter()
-        .map(|item| (item.item_id.clone(), item))
+        .map(|import_item| (import_item.item_id.clone(), import_item))
         .collect::<HashMap<_, _>>();
     let session_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
     let mut rows = Vec::with_capacity(parsed.preview.rows.len());
     for preview_row in parsed.preview.rows {
-        let row = match items.remove(&preview_row.item_id) {
-            Some(item) => {
-                let prepared = match parsed_account_import_input(item, &preview_row) {
+        let row = match parsed_items_by_id.remove(&preview_row.item_id) {
+            Some(import_item) => {
+                let prepared = match parsed_account_import_input(import_item, &preview_row) {
                     Ok(input) => prepare_account_import(&state, input, Some(&session_id)).await,
                     Err(error) => Err(error),
                 };
@@ -166,10 +166,10 @@ pub async fn preview_account_batch_import(
 pub(super) fn parse_batch_import_input(
     input: BatchImportPreviewInput,
 ) -> Result<ParsedImport, ManagementError> {
-    let content = zenith_relay_core::omit_blank(input.content);
-    let content = if input.documents.is_empty() {
-        content.unwrap_or_default()
-    } else if content.is_some() {
+    let pasted_import_text = zenith_relay_core::omit_blank(input.content);
+    let combined_import_text = if input.documents.is_empty() {
+        pasted_import_text.unwrap_or_default()
+    } else if pasted_import_text.is_some() {
         return Err(ManagementError::validation(
             error_codes::IMPORT_INPUT_CONFLICT,
             "paste content and file documents cannot be imported together",
@@ -179,11 +179,11 @@ pub(super) fn parse_batch_import_input(
     } else {
         combine_import_documents(&input.documents).map_err(import_error)?
     };
-    parse_import(&content, None, &[]).map_err(import_error)
+    parse_import(&combined_import_text, None, &[]).map_err(import_error)
 }
 
 fn parsed_account_import_input(
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     preview: &ImportPreviewRow,
 ) -> Result<AccountImportInput, ManagementError> {
     if preview.auth_mode == ImportAuthMode::ApiKey {
@@ -192,31 +192,31 @@ fn parsed_account_import_input(
             "API keys must be imported as API sources, not pool accounts",
         ));
     }
-    let account_id = item.account_id.clone();
-    let secrets = item.secrets();
+    let account_id = import_item.account_id.clone();
+    let secrets = import_item.secrets();
     Ok(AccountImportInput {
-        label: item.label.clone(),
+        label: import_item.label.clone(),
         access_token: secrets.access_token().unwrap_or_default().to_string(),
         agent_private_key: secrets.agent_private_key().map(str::to_string),
         agent_runtime_id: secrets.agent_runtime_id().map(str::to_string),
         agent_task_id: secrets.agent_task_id().map(str::to_string),
         refresh_token: secrets.refresh_token().map(str::to_string),
         id_token: secrets.id_token().map(str::to_string),
-        expires_at_ms: preview
-            .expires_at
-            .as_ref()
-            .and_then(|value| parse_subscription_timestamp_ms(&Value::String(value.clone()))),
+        expires_at_ms: preview.expires_at.as_ref().and_then(|timestamp_text| {
+            parse_subscription_timestamp_ms(&Value::String(timestamp_text.clone()))
+        }),
         plan_type: preview.plan.clone(),
-        subscription_active_until_ms: preview
-            .subscription_expires_at
-            .as_ref()
-            .and_then(|value| parse_subscription_timestamp_ms(&Value::String(value.clone()))),
+        subscription_active_until_ms: preview.subscription_expires_at.as_ref().and_then(
+            |timestamp_text| {
+                parse_subscription_timestamp_ms(&Value::String(timestamp_text.clone()))
+            },
+        ),
         chatgpt_account_id: account_id,
-        responses_url: item.base_url.clone(),
+        responses_url: import_item.base_url.clone(),
         models: Vec::new(),
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
-        priority: item.priority.unwrap_or_default(),
+        priority: import_item.priority.unwrap_or_default(),
         weight: default_weight(),
     })
 }
@@ -341,7 +341,7 @@ pub async fn confirm_account_batch_import(
         if !seen.insert(item_id.clone()) {
             continue;
         }
-        let result = match confirm_one_account_import(
+        let import_result = match confirm_one_account_import(
             &state,
             &item_id,
             Some(&input.session_id),
@@ -368,7 +368,7 @@ pub async fn confirm_account_batch_import(
                 }),
             },
         };
-        results.push(result);
+        results.push(import_result);
     }
     Ok(Json(BatchImportConfirmResponse {
         session_id: input.session_id,
@@ -376,8 +376,8 @@ pub async fn confirm_account_batch_import(
     }))
 }
 
-fn import_format_name(value: ImportFormat) -> &'static str {
-    match value {
+fn import_format_name(import_format: ImportFormat) -> &'static str {
+    match import_format {
         ImportFormat::JsonObject => "json_object",
         ImportFormat::JsonArray => "json_array",
         ImportFormat::JsonLines => "json_lines",
@@ -386,8 +386,8 @@ fn import_format_name(value: ImportFormat) -> &'static str {
     }
 }
 
-fn import_preview_status_name(value: ImportPreviewStatus) -> &'static str {
-    match value {
+fn import_preview_status_name(preview_status: ImportPreviewStatus) -> &'static str {
+    match preview_status {
         ImportPreviewStatus::Ready => "ready",
         ImportPreviewStatus::Existing => "existing",
         ImportPreviewStatus::QuotaFailed => "quota_failed",
@@ -395,16 +395,16 @@ fn import_preview_status_name(value: ImportPreviewStatus) -> &'static str {
     }
 }
 
-fn import_quota_status_name(value: ImportQuotaStatus) -> &'static str {
-    match value {
+fn import_quota_status_name(quota_status: ImportQuotaStatus) -> &'static str {
+    match quota_status {
         ImportQuotaStatus::Skipped => "skipped",
         ImportQuotaStatus::Success => "success",
         ImportQuotaStatus::Failed => "failed",
     }
 }
 
-fn import_warning_code_name(value: ImportWarningCode) -> &'static str {
-    match value {
+fn import_warning_code_name(warning_code: ImportWarningCode) -> &'static str {
+    match warning_code {
         ImportWarningCode::AccessTokenOnly => "access_token_only",
         ImportWarningCode::ConcurrencyIgnored => "concurrency_ignored",
         ImportWarningCode::InvalidMetadataIgnored => "invalid_metadata_ignored",
@@ -415,8 +415,8 @@ fn import_warning_code_name(value: ImportWarningCode) -> &'static str {
     }
 }
 
-fn import_issue_code_name(value: ImportIssueCode) -> &'static str {
-    match value {
+fn import_issue_code_name(issue_code: ImportIssueCode) -> &'static str {
+    match issue_code {
         ImportIssueCode::AmbiguousCredentials => error_codes::AMBIGUOUS_CREDENTIALS,
         ImportIssueCode::DuplicateItem => error_codes::DUPLICATE_ITEM,
         ImportIssueCode::InvalidCredentials => error_codes::INVALID_CREDENTIALS,

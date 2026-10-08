@@ -207,12 +207,11 @@ impl AppState {
             .runtime
             .write()
             .map_err(|_| "runtime lock poisoned".to_string())?;
-        if let Some(previous) = active.as_ref() {
-            if runtime
-                .as_ref()
-                .is_none_or(|next| !Arc::ptr_eq(previous, next))
-            {
-                previous.retire_for_replacement();
+        if let Some(previous_runtime) = active.as_ref() {
+            if runtime.as_ref().is_none_or(|replacement_runtime| {
+                !Arc::ptr_eq(previous_runtime, replacement_runtime)
+            }) {
+                previous_runtime.retire_for_replacement();
             }
         }
         *active = runtime;

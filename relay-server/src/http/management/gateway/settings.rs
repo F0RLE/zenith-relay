@@ -91,12 +91,12 @@ fn commit_runtime_flag(
     write: fn(&Store, bool) -> Result<(), String>,
     apply: fn(&GatewayRuntime, bool),
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
-    let previous = read(state.store.as_ref()).map_err(store_error)?;
+    let previous_value = read(state.store.as_ref()).map_err(store_error)?;
     write(state.store.as_ref(), enabled).map_err(store_error)?;
     let runtime = match state.runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = write(state.store.as_ref(), previous);
+            let _ = write(state.store.as_ref(), previous_value);
             return Err(runtime_error(error));
         }
     };
@@ -104,9 +104,9 @@ fn commit_runtime_flag(
         apply(runtime.as_ref(), enabled);
     }
     if let Err(error) = state.snapshot() {
-        let _ = write(state.store.as_ref(), previous);
+        let _ = write(state.store.as_ref(), previous_value);
         if let Some(runtime) = state.runtime().ok().flatten() {
-            apply(runtime.as_ref(), previous);
+            apply(runtime.as_ref(), previous_value);
         }
         return Err(runtime_error(error));
     }

@@ -88,12 +88,12 @@ pub(super) async fn confirm_one_account_import(
     let configuration = state.configuration_lock.lock().await;
     let build = state.lock_runtime_rebuild().await;
     let credential = state.account_credential_lock.lock().await;
-    let existing = state
+    let existing_account = state
         .store
         .accounts()
         .map_err(store_error)?
         .into_iter()
-        .find(|record| record.id == preview.account_id);
+        .find(|account_record| account_record.id == preview.account_id);
     let mut subscription =
         if preview.plan_type.is_some() || preview.subscription_active_until_ms.is_some() {
             Subscription::normalize(SubscriptionInput {
@@ -103,74 +103,85 @@ pub(super) async fn confirm_one_account_import(
                 observed_at_ms: now_ms(),
             })
         } else {
-            existing
+            existing_account
                 .as_ref()
-                .map(|value| value.subscription.clone())
+                .map(|existing_record| existing_record.subscription.clone())
                 .unwrap_or_default()
         };
     if subscription.active_until_ms.is_none() {
         subscription.updated_at_ms = None;
     }
-    let mut record = ServerAccountRecord {
+    let mut account_record = ServerAccountRecord {
         id: preview.account_id.clone(),
-        label: existing
+        label: existing_account
             .as_ref()
-            .map(|value| value.label.clone())
+            .map(|existing_record| existing_record.label.clone())
             .unwrap_or(preview.label),
         identity_hint: preview.identity_hint,
-        enabled: existing.as_ref().is_none_or(|value| value.enabled),
-        in_pool: add_to_pool || existing.as_ref().is_some_and(|value| value.in_pool),
-        draining: existing.as_ref().is_some_and(|value| value.draining),
+        enabled: existing_account
+            .as_ref()
+            .is_none_or(|existing_record| existing_record.enabled),
+        in_pool: add_to_pool
+            || existing_account
+                .as_ref()
+                .is_some_and(|existing_record| existing_record.in_pool),
+        draining: existing_account
+            .as_ref()
+            .is_some_and(|existing_record| existing_record.draining),
         source_id: "openai_codex".to_string(),
         secret_ref: pending.secret_ref.clone(),
-        provider_family: existing
+        provider_family: existing_account
             .as_ref()
-            .and_then(|value| value.provider_family.clone())
+            .and_then(|existing_record| existing_record.provider_family.clone())
             .or_else(|| Some("openai".to_string())),
         auth_state: preview.auth_state,
         health: AccountHealthState::Healthy,
-        models: existing
+        models: existing_account
             .as_ref()
-            .map(|value| value.models.clone())
+            .map(|existing_record| existing_record.models.clone())
             .unwrap_or(preview.models),
-        discovered_models: existing
+        discovered_models: existing_account
             .as_ref()
-            .and_then(|value| value.discovered_models.clone()),
-        allowed_models: existing
+            .and_then(|existing_record| existing_record.discovered_models.clone()),
+        allowed_models: existing_account
             .as_ref()
-            .map(|value| value.allowed_models.clone())
+            .map(|existing_record| existing_record.allowed_models.clone())
             .unwrap_or(preview.allowed_models),
-        excluded_models: existing
+        excluded_models: existing_account
             .as_ref()
-            .map(|value| value.excluded_models.clone())
+            .map(|existing_record| existing_record.excluded_models.clone())
             .unwrap_or(preview.excluded_models),
-        priority: existing
+        priority: existing_account
             .as_ref()
-            .map_or(preview.priority, |value| value.priority),
-        weight: existing
+            .map_or(preview.priority, |existing_record| existing_record.priority),
+        weight: existing_account
             .as_ref()
-            .map_or(preview.weight, |value| value.weight),
+            .map_or(preview.weight, |existing_record| existing_record.weight),
         subscription,
-        quota: existing
+        quota: existing_account
             .as_ref()
-            .map(|value| value.quota.clone())
+            .map(|existing_record| existing_record.quota.clone())
             .unwrap_or_default(),
-        purchase_cost_micro_usd: existing
+        purchase_cost_micro_usd: existing_account
             .as_ref()
-            .and_then(|value| value.purchase_cost_micro_usd),
+            .and_then(|existing_record| existing_record.purchase_cost_micro_usd),
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
-        created_at_ms: existing
+        created_at_ms: existing_account
             .as_ref()
-            .map(|value| value.created_at_ms)
-            .filter(|value| *value > 0)
+            .map(|existing_record| existing_record.created_at_ms)
+            .filter(|created_at_ms| *created_at_ms > 0)
             .unwrap_or(pending.created_at_ms),
-        last_used_at_ms: existing.as_ref().and_then(|value| value.last_used_at_ms),
-        last_error_code: None,
-        proxy_id: existing.as_ref().and_then(|value| value.proxy_id.clone()),
-        bypass_common_proxy: existing
+        last_used_at_ms: existing_account
             .as_ref()
-            .is_some_and(|value| value.bypass_common_proxy),
+            .and_then(|existing_record| existing_record.last_used_at_ms),
+        last_error_code: None,
+        proxy_id: existing_account
+            .as_ref()
+            .and_then(|existing_record| existing_record.proxy_id.clone()),
+        bypass_common_proxy: existing_account
+            .as_ref()
+            .is_some_and(|existing_record| existing_record.bypass_common_proxy),
     };
     // A replacement login must close pending final dispatches before its
     // durable reference changes. The build lock prevents another publication;
@@ -178,14 +189,14 @@ pub(super) async fn confirm_one_account_import(
     let previous_runtime = state.runtime().map_err(super::super::runtime_error)?;
     let _dispatch_fence = previous_runtime
         .as_ref()
-        .and_then(|runtime| runtime.fence_candidate_dispatch(&record.id));
+        .and_then(|runtime| runtime.fence_candidate_dispatch(&account_record.id));
     let created = state
         .store
-        .save_account_and_consume_pending_import(&record, session_id)
+        .save_account_and_consume_pending_import(&account_record, session_id)
         .map_err(store_error)?;
-    state.token_authority.remove(&record.id);
+    state.token_authority.remove(&account_record.id);
     if let Some(runtime) = previous_runtime.as_ref() {
-        runtime.remove_candidate(&record.id);
+        runtime.remove_candidate(&account_record.id);
     }
     drop(credential);
     drop(configuration);
@@ -194,34 +205,34 @@ pub(super) async fn confirm_one_account_import(
     let rebuilt = build.rebuild(state).await.is_ok();
     drop(build);
     if probe_metadata {
-        match jobs::refresh_account_now(state, record.clone()).await {
-            Ok(updated) => record = updated,
+        match jobs::refresh_account_now(state, account_record.clone()).await {
+            Ok(updated_account) => account_record = updated_account,
             Err(_) => {
-                mark_import_failure(state, &record, "metadata_refresh_failed");
+                mark_import_failure(state, &account_record, "metadata_refresh_failed");
             }
         }
     } else if !rebuilt {
-        mark_import_failure(state, &record, "runtime_rebuild_failed");
+        mark_import_failure(state, &account_record, "runtime_rebuild_failed");
     }
-    if let Some(previous) = existing {
-        if previous.secret_ref != record.secret_ref {
-            let _ = state.vault.delete(&previous.secret_ref);
+    if let Some(previous_account) = existing_account {
+        if previous_account.secret_ref != account_record.secret_ref {
+            let _ = state.vault.delete(&previous_account.secret_ref);
         }
     }
     Ok(ConfirmedAccountImport {
-        account: record,
+        account: account_record,
         created,
     })
 }
 
-fn mark_import_failure(state: &AppState, imported: &ServerAccountRecord, code: &str) {
+fn mark_import_failure(state: &AppState, imported_account: &ServerAccountRecord, code: &str) {
     // A later import may already have installed another credential under the
     // same account id. Never save the captured pre-HTTP record over it.
-    if let Ok((current, fence)) = state.store.account_refresh_scope(&imported.id) {
-        if current.secret_ref == imported.secret_ref {
-            let _ = state.store.apply_account_refresh(&fence, |record| {
-                record.health = AccountHealthState::Degraded;
-                record.last_error_code = Some(code.to_string());
+    if let Ok((stored_account, fence)) = state.store.account_refresh_scope(&imported_account.id) {
+        if stored_account.secret_ref == imported_account.secret_ref {
+            let _ = state.store.apply_account_refresh(&fence, |account_record| {
+                account_record.health = AccountHealthState::Degraded;
+                account_record.last_error_code = Some(code.to_string());
                 Ok(())
             });
         }

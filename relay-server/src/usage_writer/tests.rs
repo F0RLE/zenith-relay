@@ -151,7 +151,7 @@ fn persisted_passive_quota_is_fresh_for_the_registered_account_only() {
             |_| {
                 Box::pin(async {
                     RefreshResult {
-                        value: Err("synthetic read".into()),
+                        refresh_value: Err("synthetic read".into()),
                         outcome: RefreshOutcome::Success,
                     }
                 })

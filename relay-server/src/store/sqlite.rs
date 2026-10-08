@@ -76,12 +76,12 @@ impl Store {
     }
 
     pub fn server_id(&self) -> Result<String, String> {
-        if let Some(value) = self.metadata("server_id")? {
-            return Ok(value);
+        if let Some(server_id) = self.metadata("server_id")? {
+            return Ok(server_id);
         }
-        let value = uuid::Uuid::new_v4().to_string();
-        self.set_metadata("server_id", &value)?;
-        Ok(value)
+        let server_id = uuid::Uuid::new_v4().to_string();
+        self.set_metadata("server_id", &server_id)?;
+        Ok(server_id)
     }
 
     pub(super) fn metadata(&self, key: &str) -> Result<Option<String>, String> {
@@ -93,11 +93,11 @@ impl Store {
             .map_err(db_error)
     }
 
-    pub(super) fn set_metadata(&self, key: &str, value: &str) -> Result<(), String> {
+    pub(super) fn set_metadata(&self, key: &str, metadata_value: &str) -> Result<(), String> {
         self.lock()?
             .execute(
                 "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![key, value],
+                params![key, metadata_value],
             )
             .map_err(db_error)?;
         self.notify_refresh_changed();
@@ -120,13 +120,13 @@ impl Store {
         table: &str,
         id: &str,
         secret_ref: &str,
-        value: &T,
+        stored_record: &T,
     ) -> Result<(), String> {
         let sql = format!(
             "INSERT INTO {table}(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref"
         );
         self.lock()?
-            .execute(&sql, params![id, to_json(value)?, secret_ref])
+            .execute(&sql, params![id, to_json(stored_record)?, secret_ref])
             .map_err(db_error)?;
         self.notify_refresh_changed();
         Ok(())
@@ -149,7 +149,7 @@ impl Store {
             transaction.execute(&delete, [id]).map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
-        json.map(|value| parse_json(&value)).transpose()
+        json.map(|record_json| parse_json(&record_json)).transpose()
     }
 
     pub(super) fn lock(&self) -> Result<MutexGuard<'_, Connection>, String> {
@@ -171,12 +171,12 @@ impl Store {
     }
 }
 
-pub(super) fn to_json(value: &impl Serialize) -> Result<String, String> {
-    serde_json::to_string(value).map_err(|_| "record serialization failed".to_string())
+pub(super) fn to_json(stored_record: &impl Serialize) -> Result<String, String> {
+    serde_json::to_string(stored_record).map_err(|_| "record serialization failed".to_string())
 }
 
-pub(super) fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
-    serde_json::from_str(value).map_err(|_| "stored record is invalid".to_string())
+pub(super) fn parse_json<T: DeserializeOwned>(record_json: &str) -> Result<T, String> {
+    serde_json::from_str(record_json).map_err(|_| "stored record is invalid".to_string())
 }
 
 pub(super) fn db_error(error: rusqlite::Error) -> String {

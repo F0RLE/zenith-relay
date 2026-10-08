@@ -9,29 +9,34 @@ impl Store {
         self.list_records("accounts")
     }
 
-    pub fn account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
+    pub fn account(&self, account_id: &str) -> Result<Option<ServerAccountRecord>, String> {
         self.lock()?
             .query_row(
                 "SELECT data_json FROM accounts WHERE id = ?1",
-                [id],
+                [account_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(db_error)?
-            .map(|value| parse_json(&value))
+            .map(|record_json| parse_json(&record_json))
             .transpose()
     }
 
-    pub fn save_account(&self, record: &ServerAccountRecord) -> Result<(), String> {
-        self.save_record("accounts", &record.id, &record.secret_ref, record)
+    pub fn save_account(&self, account_record: &ServerAccountRecord) -> Result<(), String> {
+        self.save_record(
+            "accounts",
+            &account_record.id,
+            &account_record.secret_ref,
+            account_record,
+        )
     }
 
     pub fn save_account_and_consume_pending_import(
         &self,
-        record: &ServerAccountRecord,
+        account_record: &ServerAccountRecord,
         pending_import_id: &str,
     ) -> Result<bool, String> {
-        let data_json = to_json(record)?;
+        let data_json = to_json(account_record)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -39,7 +44,7 @@ impl Store {
         let existed = transaction
             .query_row(
                 "SELECT 1 FROM accounts WHERE id = ?1",
-                [record.id.as_str()],
+                [account_record.id.as_str()],
                 |_| Ok(()),
             )
             .optional()
@@ -48,7 +53,7 @@ impl Store {
         transaction
             .execute(
                 "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref",
-                params![record.id, data_json, record.secret_ref],
+                params![account_record.id, data_json, account_record.secret_ref],
             )
             .map_err(db_error)?;
         if transaction
@@ -70,11 +75,11 @@ impl Store {
     /// observations cannot overwrite an operator's concurrent configuration.
     pub fn update_account<T>(
         &self,
-        id: &str,
+        account_id: &str,
         update: impl FnOnce(&mut ServerAccountRecord) -> Result<T, String>,
     ) -> Result<Option<T>, String> {
-        self.update_account_with_refresh_identity(id, update)
-            .map(|updated| updated.map(|(value, _)| value))
+        self.update_account_with_refresh_identity(account_id, update)
+            .map(|updated| updated.map(|(updated_value, _)| updated_value))
     }
 
     /// Return the durable identity from the same transaction as this usage
@@ -82,7 +87,7 @@ impl Store {
     /// passive quota or Retry-After hint target the replacement registration.
     pub(crate) fn update_account_with_refresh_identity<T>(
         &self,
-        id: &str,
+        account_id: &str,
         update: impl FnOnce(&mut ServerAccountRecord) -> Result<T, String>,
     ) -> Result<Option<(T, RefreshIdentity)>, String> {
         let mut connection = self.lock()?;
@@ -92,7 +97,7 @@ impl Store {
         let snapshot = transaction
             .query_row(
                 "SELECT data_json, refresh_revision, (SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'refresh_config_revision') FROM accounts WHERE id = ?1",
-                [id],
+                [account_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .optional()
@@ -103,36 +108,40 @@ impl Store {
             return Ok(None);
         };
         let identity = RefreshIdentity::new(
-            account_member_key(id),
+            account_member_key(account_id),
             u64::try_from(revision).map_err(|_| "account refresh revision is invalid")?,
             u64::try_from(configuration_revision)
                 .map_err(|_| "refresh configuration revision is invalid")?,
         );
-        let mut record: ServerAccountRecord = parse_json(&json)?;
+        let mut account_record: ServerAccountRecord = parse_json(&json)?;
         let previous_monitoring = (
-            record.enabled,
-            record.auth_state,
-            record.secret_ref.clone(),
-            record.source_id.clone(),
-            record.proxy_id.clone(),
-            record.bypass_common_proxy,
-            record.created_at_ms,
+            account_record.enabled,
+            account_record.auth_state,
+            account_record.secret_ref.clone(),
+            account_record.source_id.clone(),
+            account_record.proxy_id.clone(),
+            account_record.bypass_common_proxy,
+            account_record.created_at_ms,
         );
-        let value = update(&mut record)?;
+        let update_result = update(&mut account_record)?;
         let monitoring_changed = previous_monitoring
             != (
-                record.enabled,
-                record.auth_state,
-                record.secret_ref.clone(),
-                record.source_id.clone(),
-                record.proxy_id.clone(),
-                record.bypass_common_proxy,
-                record.created_at_ms,
+                account_record.enabled,
+                account_record.auth_state,
+                account_record.secret_ref.clone(),
+                account_record.source_id.clone(),
+                account_record.proxy_id.clone(),
+                account_record.bypass_common_proxy,
+                account_record.created_at_ms,
             );
         transaction
             .execute(
                 "UPDATE accounts SET data_json = ?1, secret_ref = ?2 WHERE id = ?3",
-                params![to_json(&record)?, record.secret_ref, id],
+                params![
+                    to_json(&account_record)?,
+                    account_record.secret_ref,
+                    account_id
+                ],
             )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
@@ -141,7 +150,7 @@ impl Store {
         if monitoring_changed {
             self.notify_refresh_changed();
         }
-        Ok(Some((value, identity)))
+        Ok(Some((update_result, identity)))
     }
 
     /// Persists Team breaker sibling state without recording synthetic usage.
@@ -167,8 +176,8 @@ impl Store {
         self.save_batch_records(records)
     }
 
-    pub fn delete_account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
-        let candidate_hint = hex::encode(Sha256::digest(id.as_bytes()))[..12].to_string();
+    pub fn delete_account(&self, account_id: &str) -> Result<Option<ServerAccountRecord>, String> {
+        let candidate_hint = hex::encode(Sha256::digest(account_id.as_bytes()))[..12].to_string();
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -176,14 +185,14 @@ impl Store {
         let json = transaction
             .query_row(
                 "SELECT data_json FROM accounts WHERE id = ?1",
-                [id],
+                [account_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(db_error)?;
         if json.is_some() {
             transaction
-                .execute("DELETE FROM accounts WHERE id = ?1", [id])
+                .execute("DELETE FROM accounts WHERE id = ?1", [account_id])
                 .map_err(db_error)?;
             transaction
                 .execute(
@@ -211,12 +220,12 @@ impl Store {
             transaction
                 .execute(
                     "DELETE FROM response_affinity WHERE candidate_id = ?1",
-                    [id],
+                    [account_id],
                 )
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
         self.notify_refresh_changed();
-        json.map(|value| parse_json(&value)).transpose()
+        json.map(|record_json| parse_json(&record_json)).transpose()
     }
 }

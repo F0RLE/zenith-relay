@@ -51,36 +51,36 @@ pub fn preview(
     let mut preset = normalize_preset(preset)?;
     resolve_references(state, &mut preset.settings)?;
     validate_references(state, &preset.settings)?;
-    let current = state
+    let existing_settings = state
         .store
         .configuration_settings()
         .map_err(PresetError::Store)?;
-    let target = merge_settings(&current, &preset.settings)?;
-    validate_references(state, &target)?;
+    let merged_settings = merge_settings(&existing_settings, &preset.settings)?;
+    validate_references(state, &merged_settings)?;
     Ok(ConfigurationPresetPreview {
-        base_revision: configuration_revision(&current).map_err(PresetError::Store)?,
-        changes: configuration_diff(&current, &target)?,
+        base_revision: configuration_revision(&existing_settings).map_err(PresetError::Store)?,
+        changes: configuration_diff(&existing_settings, &merged_settings)?,
         preset,
     })
 }
 
 pub async fn apply(
     state: &std::sync::Arc<AppState>,
-    input: ConfigurationPresetApplyInput,
+    preset_input: ConfigurationPresetApplyInput,
 ) -> Result<ConfigurationPresetApplyResult, PresetError> {
     let _guard = state.configuration_lock.lock().await;
-    let preview = preview(state, input.preset)?;
-    if preview.base_revision != input.base_revision {
+    let preview = preview(state, preset_input.preset)?;
+    if preview.base_revision != preset_input.base_revision {
         return Err(PresetError::Stale(preview.base_revision));
     }
-    let current = state
+    let existing_settings = state
         .store
         .configuration_settings()
         .map_err(PresetError::Store)?;
-    let target = merge_settings(&current, &preview.preset.settings)?;
+    let merged_settings = merge_settings(&existing_settings, &preview.preset.settings)?;
     let replacement = state
         .store
-        .replace_configuration_if_revision(&input.base_revision, &target)
+        .replace_configuration_if_revision(&preset_input.base_revision, &merged_settings)
         .map_err(|error| match error {
             ConfigurationReplaceError::Stale { current_revision } => {
                 PresetError::Stale(current_revision)
@@ -104,24 +104,25 @@ fn normalize_preset(preset: ConfigurationPreset) -> Result<ConfigurationPreset, 
 }
 
 fn merge_settings(
-    current: &ConfigurationPresetSettings,
-    requested: &ConfigurationPresetSettings,
+    existing_settings: &ConfigurationPresetSettings,
+    requested_settings: &ConfigurationPresetSettings,
 ) -> Result<ConfigurationPresetSettings, PresetError> {
-    merge_configuration_preset_settings(current, requested).map_err(PresetError::Missing)
+    merge_configuration_preset_settings(existing_settings, requested_settings)
+        .map_err(PresetError::Missing)
 }
 
 fn configuration_diff(
-    before: &ConfigurationPresetSettings,
-    after: &ConfigurationPresetSettings,
+    previous_settings: &ConfigurationPresetSettings,
+    updated_settings: &ConfigurationPresetSettings,
 ) -> Result<Vec<ConfigurationPresetChange>, PresetError> {
-    let before = serde_json::to_value(before).map_err(|_| {
+    let previous_value = serde_json::to_value(previous_settings).map_err(|_| {
         PresetError::Store("configuration preview could not be created".to_string())
     })?;
-    let after = serde_json::to_value(after).map_err(|_| {
+    let updated_value = serde_json::to_value(updated_settings).map_err(|_| {
         PresetError::Store("configuration preview could not be created".to_string())
     })?;
     let mut changes = Vec::new();
-    diff_value("", &before, &after, &mut changes);
+    diff_value("", &previous_value, &updated_value, &mut changes);
     Ok(changes)
 }
 
@@ -163,8 +164,8 @@ fn diff_value(
     }
 }
 
-fn pointer_segment(value: &str) -> String {
-    value.replace('~', "~0").replace('/', "~1")
+fn pointer_segment(pointer_text: &str) -> String {
+    pointer_text.replace('~', "~0").replace('/', "~1")
 }
 
 #[cfg(test)]

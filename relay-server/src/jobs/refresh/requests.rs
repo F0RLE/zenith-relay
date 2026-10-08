@@ -42,22 +42,22 @@ pub(crate) async fn refresh_account_quota_now(
 pub(crate) async fn refresh_all_accounts_now(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), String> {
-    let results = stream::iter(state.store.accounts()?.into_iter().map(|account| {
-        let state = state.clone();
-        async move { refresh_account_quota_now(&state, account).await }
+    let refresh_results = stream::iter(state.store.accounts()?.into_iter().map(|account| {
+        let app_state = state.clone();
+        async move { refresh_account_quota_now(&app_state, account).await }
     }))
     // This bounds retained callers only; all HTTP admission, including other
     // concurrent batches and background work, belongs to the shared service.
     .buffer_unordered(16)
     .collect::<Vec<_>>()
     .await;
-    let refreshed = results
+    let refreshed = refresh_results
         .iter()
-        .filter(|result| {
-            result
+        .filter(|refresh_result| {
+            refresh_result
                 .as_ref()
                 .is_ok_and(|account| account.quota.error.is_none())
         })
         .count();
-    Ok((refreshed, results.len() - refreshed))
+    Ok((refreshed, refresh_results.len() - refreshed))
 }

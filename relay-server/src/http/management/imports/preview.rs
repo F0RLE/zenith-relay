@@ -114,11 +114,11 @@ pub(super) async fn prepare_account_import(
     } else {
         validate_secret(&input.access_token, "access token")?;
     }
-    if let Some(value) = input.refresh_token.as_deref() {
-        validate_secret(value, "refresh token")?;
+    if let Some(refresh_token) = input.refresh_token.as_deref() {
+        validate_secret(refresh_token, "refresh token")?;
     }
-    if let Some(value) = input.id_token.as_deref() {
-        validate_secret(value, "ID token")?;
+    if let Some(id_token) = input.id_token.as_deref() {
+        validate_secret(id_token, "ID token")?;
     }
     let account_id_hints = imported_account_id_hints(
         input.chatgpt_account_id.as_deref(),
@@ -145,9 +145,9 @@ pub(super) async fn prepare_account_import(
     let plan_type = input
         .plan_type
         .as_deref()
-        .filter(|value| {
+        .filter(|plan_type_text| {
             !contains_sensitive(
-                value,
+                plan_type_text,
                 &[
                     Some(input.access_token.as_str()),
                     input.refresh_token.as_deref(),
@@ -167,23 +167,29 @@ pub(super) async fn prepare_account_import(
         .accounts()
         .map_err(store_error)?
         .into_iter()
-        .find(|record| record.identity_hint == identity_hint);
-    let duplicate_account_id = duplicate_account.as_ref().map(|record| record.id.clone());
+        .find(|account_record| account_record.identity_hint == identity_hint);
+    let duplicate_account_id = duplicate_account
+        .as_ref()
+        .map(|account_record| account_record.id.clone());
     let account_id = duplicate_account_id
         .clone()
         .unwrap_or_else(|| format!("account_{}", uuid::Uuid::new_v4().simple()));
     let session_id = format!("import_{}", uuid::Uuid::new_v4().simple());
     let secret_ref = format!("account:{account_id}:{}", uuid::Uuid::new_v4().simple());
     let existing_credential = match duplicate_account.as_ref() {
-        Some(record) => match state.vault.load(&record.secret_ref).map_err(vault_error)? {
-            Some(value) => Some(serde_json::from_str::<AccountCredential>(&value).map_err(
-                |_| {
+        Some(account_record) => match state
+            .vault
+            .load(&account_record.secret_ref)
+            .map_err(vault_error)?
+        {
+            Some(credential_json) => Some(
+                serde_json::from_str::<AccountCredential>(&credential_json).map_err(|_| {
                     ManagementError::internal(
                         error_codes::ACCOUNT_SECRET_INVALID,
                         "account secret is invalid",
                     )
-                },
-            )?),
+                })?,
+            ),
             None => None,
         },
         None => None,

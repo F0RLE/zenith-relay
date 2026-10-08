@@ -248,14 +248,14 @@ async fn membership_refresh_applies_saved_routing_without_losing_runtime_state()
     state.store.set_routing_policy(&routing).unwrap();
     state.rebuild_runtime().await.unwrap();
     let runtime = state.runtime().unwrap().unwrap();
-    let next = || {
+    let select_next_candidate = || {
         runtime
             .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
             .into_iter()
             .find(|candidate| candidate.next_for_new_request)
             .map(|candidate| candidate.candidate_id)
     };
-    assert_eq!(next().as_deref(), Some("fallback"));
+    assert_eq!(select_next_candidate().as_deref(), Some("fallback"));
 
     let retry_at = now_ms() + 60_000;
     runtime.set_candidate_cooldown(&fallback.id, "gpt-test", retry_at);
@@ -264,7 +264,7 @@ async fn membership_refresh_applies_saved_routing_without_losing_runtime_state()
     assert!(state.refresh_internal_gateway_key_scopes(&runtime).unwrap());
 
     assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
-    assert_eq!(next().as_deref(), Some("primary"));
+    assert_eq!(select_next_candidate().as_deref(), Some("primary"));
     let snapshot = state.snapshot().unwrap();
     assert_eq!(snapshot.gateway.pool_routing, Some(policy));
     assert_eq!(
@@ -280,9 +280,9 @@ async fn membership_refresh_applies_saved_routing_without_losing_runtime_state()
     primary.in_pool = false;
     state.store.save_source(&primary).unwrap();
     assert!(state.refresh_internal_gateway_key_scopes(&runtime).unwrap());
-    assert!(next().is_none());
+    assert!(select_next_candidate().is_none());
     runtime.clear_candidate_cooldown(&fallback.id, "gpt-test");
-    assert_eq!(next().as_deref(), Some("fallback"));
+    assert_eq!(select_next_candidate().as_deref(), Some("fallback"));
     state.shutdown_runtime().await.unwrap();
 }
 

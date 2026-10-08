@@ -13,10 +13,10 @@ pub async fn delete_account(
     let configuration = state.configuration_lock.lock().await;
     let build = state.lock_runtime_rebuild().await;
     let credential = state.account_credential_lock.lock().await;
-    let record = find_account(&state, &id)?;
+    let account_record = find_account(&state, &id)?;
     let secret = state
         .vault
-        .load(&record.secret_ref)
+        .load(&account_record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
             ManagementError::not_found(
@@ -32,11 +32,11 @@ pub async fn delete_account(
         .as_ref()
         .and_then(|runtime| runtime.fence_candidate_dispatch(&id));
     state.store.delete_account(&id).map_err(store_error)?;
-    if let Err(error) = state.vault.delete(&record.secret_ref) {
+    if let Err(error) = state.vault.delete(&account_record.secret_ref) {
         drop(credential);
         drop(configuration);
         build
-            .rollback_and_rebuild(&state, || state.store.save_account(&record))
+            .rollback_and_rebuild(&state, || state.store.save_account(&account_record))
             .await
             .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
         return Err(vault_error(error));
@@ -50,8 +50,8 @@ pub async fn delete_account(
     if let Err(error) = build.rebuild(&state).await {
         build
             .rollback_and_rebuild(&state, || {
-                state.vault.save(&record.secret_ref, &secret)?;
-                state.store.save_account(&record)
+                state.vault.save(&account_record.secret_ref, &secret)?;
+                state.store.save_account(&account_record)
             })
             .await
             .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;

@@ -28,12 +28,15 @@ pub(crate) struct ServerTokenPersistence {
     pub(crate) secret_refs: HashMap<String, String>,
 }
 
-pub(crate) fn find_account(state: &AppState, id: &str) -> Result<ServerAccountRecord, String> {
+pub(crate) fn find_account(
+    state: &AppState,
+    account_id: &str,
+) -> Result<ServerAccountRecord, String> {
     state
         .store
         .accounts()?
         .into_iter()
-        .find(|record| record.id == id)
+        .find(|account_record| account_record.id == account_id)
         .ok_or_else(|| "account not found".to_string())
 }
 

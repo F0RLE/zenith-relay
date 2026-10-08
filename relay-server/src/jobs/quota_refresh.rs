@@ -20,13 +20,14 @@ pub(super) async fn read_one(
     force_subscription_refresh: bool,
 ) -> Result<super::refresh::AccountRead, String> {
     let account_id = &fence.account_id;
-    let (checked, current) = state.store.account_refresh_scope(account_id)?;
-    if &current != fence {
+    let (account_snapshot, stored_fence) = state.store.account_refresh_scope(account_id)?;
+    if &stored_fence != fence {
         return Err("account changed during refresh".into());
     }
     let observed_at_ms = now_ms();
-    let result = refresh_data(state, &checked, fence, force_subscription_refresh).await;
-    let retry_after_ms = result
+    let quota_refresh_result =
+        refresh_data(state, &account_snapshot, fence, force_subscription_refresh).await;
+    let retry_after_ms = quota_refresh_result
         .as_ref()
         .err()
         .and_then(QuotaRefreshFailure::retry_after_ms);
@@ -37,7 +38,7 @@ pub(super) async fn read_one(
             delay,
         );
     }
-    let access_only_rejected = result.as_ref().err().is_some_and(|failure| {
+    let access_only_rejected = quota_refresh_result.as_ref().err().is_some_and(|failure| {
         failure.http_status() == Some(401) || failure.code == error_codes::QUOTA_TOKEN_PREPARE
     });
     let auth_state = state.token_authority.auth_state(account_id).await;
@@ -68,7 +69,7 @@ pub(super) async fn read_one(
             &account.subscription,
             account.health,
             account.last_error_code.as_deref(),
-            result,
+            quota_refresh_result,
             observed_at_ms,
         )
         .map_err(|error| error.to_string())?;
@@ -83,7 +84,7 @@ pub(super) async fn read_one(
         account.last_error_code = update.last_error_code;
         // Credential authority already persists its state. Never replace a
         // concurrently changed login/auth state with a pre-HTTP snapshot.
-        if account.auth_state == checked.auth_state {
+        if account.auth_state == account_snapshot.auth_state {
             if let Some(auth_state) = auth_state {
                 account.auth_state = auth_state;
             }
@@ -160,7 +161,7 @@ async fn refresh_data(
         )
         .await;
     let failure = match first {
-        Ok(data) => return Ok(data),
+        Ok(quota_result) => return Ok(quota_result),
         Err(failure)
             if oauth_tokens.is_none()
                 && credential.is_agent_identity()

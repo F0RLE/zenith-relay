@@ -23,10 +23,10 @@ pub(super) fn write_configuration(
         || account_rules.len() != accounts.len()
         || sources
             .iter()
-            .any(|record| !source_rules.contains_key(record.id.as_str()))
+            .any(|source_record| !source_rules.contains_key(source_record.id.as_str()))
         || accounts
             .iter()
-            .any(|record| !account_rules.contains_key(record.id.as_str()))
+            .any(|account_record| !account_rules.contains_key(account_record.id.as_str()))
     {
         return Err(ConfigurationReplaceError::Invalid(
             "configuration preset object set is incomplete".to_string(),
@@ -52,32 +52,32 @@ pub(super) fn write_configuration(
             )));
         }
     }
-    for record in &mut sources {
-        let rule = source_rules[record.id.as_str()];
-        record.enabled = rule.enabled;
-        record.in_pool = rule.in_pool;
-        record.protocol_bindings = rule.protocol_bindings.clone();
-        record.pricing_provider = rule.pricing_provider.clone();
-        record.official_provider_family = rule.official_provider_family.clone();
-        record.allowed_models = rule.allowed_models.clone();
-        record.excluded_models = rule.excluded_models.clone();
-        record.priority = rule.priority;
-        record.weight = rule.weight;
-        record.recovery_delay_seconds = rule.recovery_delay_seconds;
-        record.model_price_overrides = rule.model_price_overrides.clone();
-        update_record(transaction, "sources", &record.id, record)?;
+    for source_record in &mut sources {
+        let rule = source_rules[source_record.id.as_str()];
+        source_record.enabled = rule.enabled;
+        source_record.in_pool = rule.in_pool;
+        source_record.protocol_bindings = rule.protocol_bindings.clone();
+        source_record.pricing_provider = rule.pricing_provider.clone();
+        source_record.official_provider_family = rule.official_provider_family.clone();
+        source_record.allowed_models = rule.allowed_models.clone();
+        source_record.excluded_models = rule.excluded_models.clone();
+        source_record.priority = rule.priority;
+        source_record.weight = rule.weight;
+        source_record.recovery_delay_seconds = rule.recovery_delay_seconds;
+        source_record.model_price_overrides = rule.model_price_overrides.clone();
+        update_record(transaction, "sources", &source_record.id, source_record)?;
     }
-    for record in &mut accounts {
-        let rule = account_rules[record.id.as_str()];
-        record.enabled = rule.enabled;
-        record.in_pool = rule.in_pool;
-        record.allowed_models = rule.allowed_models.clone();
-        record.excluded_models = rule.excluded_models.clone();
-        record.priority = rule.priority;
-        record.weight = rule.weight;
-        record.proxy_id = rule.proxy_id.clone();
-        record.bypass_common_proxy = rule.bypass_common_proxy;
-        update_record(transaction, "accounts", &record.id, record)?;
+    for account_record in &mut accounts {
+        let rule = account_rules[account_record.id.as_str()];
+        account_record.enabled = rule.enabled;
+        account_record.in_pool = rule.in_pool;
+        account_record.allowed_models = rule.allowed_models.clone();
+        account_record.excluded_models = rule.excluded_models.clone();
+        account_record.priority = rule.priority;
+        account_record.weight = rule.weight;
+        account_record.proxy_id = rule.proxy_id.clone();
+        account_record.bypass_common_proxy = rule.bypass_common_proxy;
+        update_record(transaction, "accounts", &account_record.id, account_record)?;
     }
     let default_service_tier = match settings.routing.default_service_tier {
         DefaultServiceTier::Standard => "standard",
@@ -150,11 +150,11 @@ pub(super) fn write_configuration(
             to_json(&settings.model_display_order).map_err(ConfigurationReplaceError::Store)?,
         ),
     ];
-    for (key, value) in metadata {
+    for (metadata_key, metadata_value) in metadata {
         transaction
             .execute(
                 "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![key, value],
+                params![metadata_key, metadata_value],
             )
             .map_err(db_error)
             .map_err(ConfigurationReplaceError::Store)?;
@@ -166,13 +166,13 @@ pub(super) fn update_record(
     transaction: &Transaction<'_>,
     table: &str,
     id: &str,
-    record: &impl Serialize,
+    stored_record: &impl Serialize,
 ) -> Result<(), ConfigurationReplaceError> {
     let changed = transaction
         .execute(
             &format!("UPDATE {table} SET data_json = ?1 WHERE id = ?2"),
             params![
-                to_json(record).map_err(ConfigurationReplaceError::Store)?,
+                to_json(stored_record).map_err(ConfigurationReplaceError::Store)?,
                 id
             ],
         )
@@ -213,16 +213,16 @@ pub(super) fn routing_policy_from_connection(
 ) -> Result<PresetRoutingPolicy, String> {
     let max_retry_candidates = metadata_from(connection, "max_retry_candidates")?.map_or(
         Ok(DEFAULT_MAX_RETRY_CANDIDATES),
-        |value| {
-            value
+        |retry_candidate_count_text| {
+            retry_candidate_count_text
                 .parse::<u8>()
                 .map_err(|_| "max retry candidates is invalid".to_string())
         },
     )?;
     let pool_routing: Option<zenith_relay_core::PoolRoutingPolicy> =
         metadata_from(connection, "pool_routing")?
-            .map(|value| {
-                serde_json::from_str(&value)
+            .map(|pool_routing_json| {
+                serde_json::from_str(&pool_routing_json)
                     .map_err(|_| "pool routing policy is invalid".to_string())
             })
             .transpose()?
@@ -239,14 +239,14 @@ pub(super) fn routing_policy_from_connection(
     let image_base_model =
         normalize_image_base_model(metadata_from(connection, "image_base_model")?)
             .map_err(|error| error.to_string())?;
-    let basis_points_enabled =
-        metadata_from(connection, "basis_points_enabled")?.is_some_and(|value| value == "true");
+    let basis_points_enabled = metadata_from(connection, "basis_points_enabled")?
+        .is_some_and(|basis_points_flag| basis_points_flag == "true");
     validate_routing_policy(max_retry_candidates)?;
     Ok(PresetRoutingPolicy {
         tool_policy: Some(
             metadata_from(connection, "tool_policy")?
-                .map(|value| {
-                    serde_json::from_str::<zenith_relay_core::ToolPolicy>(&value)
+                .map(|tool_policy_json| {
+                    serde_json::from_str::<zenith_relay_core::ToolPolicy>(&tool_policy_json)
                         .map_err(|_| "stored tool policy is invalid".to_string())
                 })
                 .transpose()?

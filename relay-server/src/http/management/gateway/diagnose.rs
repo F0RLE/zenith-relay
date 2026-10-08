@@ -61,21 +61,31 @@ pub async fn diagnose_gateway(
     let models =
         internal_gateway_request(runtime.clone(), "GET", "/v1/models", &secret, Body::empty())
             .await?;
-    let model = serde_json::from_slice::<Value>(&models)
+    let model_id = serde_json::from_slice::<Value>(&models)
         .ok()
-        .and_then(|value| value.get("data").and_then(Value::as_array).cloned())
+        .and_then(|response_payload| {
+            response_payload
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+        })
         .into_iter()
         .flatten()
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-        .find(|id| is_valid_model_token(id))
+        .filter_map(|model_record| {
+            model_record
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .find(|model_id| is_valid_model_token(model_id))
         .ok_or_else(|| {
             ManagementError::validation(
                 error_codes::DIAGNOSTIC_MODEL_UNAVAILABLE,
                 "managed profile exposes no usable model",
             )
         })?;
-    let body = serde_json::to_vec(&serde_json::json!({
-        "model": model,
+    let diagnostic_request_body = serde_json::to_vec(&serde_json::json!({
+        "model": model_id,
         "input": "Reply with OK.",
         "stream": input.stream,
         "max_output_tokens": 8,
@@ -85,9 +95,14 @@ pub async fn diagnose_gateway(
         ManagementError::internal(error_codes::DIAGNOSTIC_FAILED, "diagnostic request failed")
     })?;
     let started = Instant::now();
-    let response =
-        internal_gateway_request(runtime, "POST", "/v1/responses", &secret, Body::from(body))
-            .await?;
+    let response = internal_gateway_request(
+        runtime,
+        "POST",
+        "/v1/responses",
+        &secret,
+        Body::from(diagnostic_request_body),
+    )
+    .await?;
     if input.stream {
         let text = std::str::from_utf8(&response).map_err(|_| {
             ManagementError::internal(
@@ -101,9 +116,9 @@ pub async fn diagnose_gateway(
                 "stream diagnostic did not reach a terminal event",
             ));
         }
-    } else if !serde_json::from_slice::<Value>(&response)
-        .is_ok_and(|value| value.is_object() && value.get("error").is_none_or(Value::is_null))
-    {
+    } else if !serde_json::from_slice::<Value>(&response).is_ok_and(|response_payload| {
+        response_payload.is_object() && response_payload.get("error").is_none_or(Value::is_null)
+    }) {
         return Err(ManagementError::internal(
             error_codes::DIAGNOSTIC_INVALID,
             "non-stream diagnostic was invalid",
@@ -111,7 +126,7 @@ pub async fn diagnose_gateway(
     }
     Ok(Json(GatewayDiagnostic {
         stream: input.stream,
-        model,
+        model: model_id,
         latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         bytes_received: response.len(),
     }))
@@ -124,7 +139,7 @@ async fn internal_gateway_request(
     method: &str,
     uri: &str,
     secret: &str,
-    body: Body,
+    request_body: Body,
 ) -> Result<Vec<u8>, ManagementError> {
     let request = Request::builder()
         .method(method)
@@ -132,7 +147,7 @@ async fn internal_gateway_request(
         .header(header::HOST, "127.0.0.1")
         .header(header::AUTHORIZATION, format!("Bearer {secret}"))
         .header(header::CONTENT_TYPE, "application/json")
-        .body(body)
+        .body(request_body)
         .map_err(|_| {
             ManagementError::internal(error_codes::DIAGNOSTIC_FAILED, "diagnostic request failed")
         })?;

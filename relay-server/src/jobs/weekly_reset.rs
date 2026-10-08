@@ -100,13 +100,13 @@ pub(crate) async fn try_auto_reset_weekly(
     if !snapshot.status().is_success() {
         return Ok(false);
     }
-    let body = collect_reset_body(snapshot).await?;
+    let reset_response_body = collect_reset_body(snapshot).await?;
     drop(permit);
-    let available = serde_json::from_slice::<Value>(&body)
+    let available_reset_credits = serde_json::from_slice::<Value>(&reset_response_body)
         .ok()
-        .and_then(|value| find_available_reset_credits(&value))
+        .and_then(|response_payload| find_available_reset_credits(&response_payload))
         .unwrap_or(0);
-    if available == 0 {
+    if available_reset_credits == 0 {
         return Ok(false);
     }
     ensure_reset_scope(state, fence, account)?;
@@ -140,39 +140,43 @@ fn ensure_reset_scope(
     fence: &AccountRefreshFence,
     observed: &ServerAccountRecord,
 ) -> Result<(), String> {
-    let (current, revision) = state.store.account_refresh_scope(&fence.account_id)?;
-    if &revision != fence || current.quota != observed.quota {
+    let (stored_account, stored_fence) = state.store.account_refresh_scope(&fence.account_id)?;
+    if &stored_fence != fence || stored_account.quota != observed.quota {
         return Err("account changed during reset verification".into());
     }
     Ok(())
 }
 
 async fn collect_reset_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| "reset_credits_fetch_failed".to_string())?
     {
-        if chunk.len() > MAX_RESET_RESPONSE_BYTES.saturating_sub(body.len()) {
+        if chunk.len() > MAX_RESET_RESPONSE_BYTES.saturating_sub(response_bytes.len()) {
             return Err("reset_credits_response_too_large".into());
         }
-        body.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(response_bytes)
 }
 
-fn find_available_reset_credits(value: &Value) -> Option<u32> {
-    match value {
-        Value::Object(object) => {
+fn find_available_reset_credits(response_payload: &Value) -> Option<u32> {
+    match response_payload {
+        Value::Object(response_object) => {
             for key in ["available_count", "availableCount", "count"] {
-                if let Some(number) = object.get(key).and_then(Value::as_u64) {
+                if let Some(number) = response_object.get(key).and_then(Value::as_u64) {
                     return u32::try_from(number).ok();
                 }
             }
-            object.values().find_map(find_available_reset_credits)
+            response_object
+                .values()
+                .find_map(find_available_reset_credits)
         }
-        Value::Array(values) => values.iter().find_map(find_available_reset_credits),
+        Value::Array(response_items) => {
+            response_items.iter().find_map(find_available_reset_credits)
+        }
         _ => None,
     }
 }
@@ -212,8 +216,8 @@ mod tests {
         assert!(ensure_reset_scope(&state, &fence, &observed).is_ok());
         state
             .store
-            .apply_account_refresh(&fence, |record| {
-                record.quota.updated_at_ms = Some(123);
+            .apply_account_refresh(&fence, |account_record| {
+                account_record.quota.updated_at_ms = Some(123);
                 Ok(())
             })
             .unwrap();

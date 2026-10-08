@@ -77,13 +77,15 @@ fn preset_ignores_legacy_routing_settings() {
     preset = super::normalize_preset(imported).unwrap();
     assert_eq!(preset.settings.routing.max_retry_candidates, 3);
     let serialized = serde_json::to_value(preset).unwrap();
-    for old in [
+    for legacy_field in [
         "cooldownAfterFailures",
         "subscriptionPlanOrder",
         "routingStrategy",
         "keepLastCandidateAvailable",
     ] {
-        assert!(serialized["settings"]["routing"].get(old).is_none());
+        assert!(serialized["settings"]["routing"]
+            .get(legacy_field)
+            .is_none());
     }
 }
 

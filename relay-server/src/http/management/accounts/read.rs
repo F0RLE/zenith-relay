@@ -23,8 +23,8 @@ pub(super) async fn reveal_account_identity(
     Path(account_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, ManagementError> {
-    let record = find_account(&state, &account_id)?;
-    let credential = load_account_credential(&state, &record.secret_ref)?;
+    let account_record = find_account(&state, &account_id)?;
+    let credential = load_account_credential(&state, &account_record.secret_ref)?;
     Ok(no_store_json(RevealedAccountIdentity {
         account_id,
         identity: credential.chatgpt_account_id,
@@ -40,10 +40,10 @@ pub(super) async fn export_accounts(
         .map_err(|error| validation_error(error.to_string()))?;
     let mut accounts = Vec::with_capacity(input.account_ids.len());
     for account_id in &input.account_ids {
-        let record = find_account(&state, account_id)?;
-        let credential = load_account_credential(&state, &record.secret_ref)?;
+        let account_record = find_account(&state, account_id)?;
+        let credential = load_account_credential(&state, &account_record.secret_ref)?;
         accounts.push(AccountExportCredential {
-            label: record.label,
+            label: account_record.label,
             email: None,
             phone: None,
             password: None,
@@ -54,13 +54,13 @@ pub(super) async fn export_accounts(
             account_id: Some(credential.chatgpt_account_id),
             user_id: None,
             organization_id: None,
-            plan_type: record.subscription.plan_type.clone(),
+            plan_type: account_record.subscription.plan_type.clone(),
             expires_at_ms: credential.expires_at_ms,
             issued_at_ms: credential.issued_at_ms,
-            subscription_active_until_ms: record.subscription.active_until_ms,
+            subscription_active_until_ms: account_record.subscription.active_until_ms,
             created_at_ms: credential.issued_at_ms,
-            priority: record.priority,
-            enabled: record.enabled,
+            priority: account_record.priority,
+            enabled: account_record.enabled,
             tags: BTreeSet::new(),
         });
     }
@@ -101,8 +101,8 @@ fn load_account_credential(
     })
 }
 
-fn no_store_json<T: Serialize>(value: T) -> Response {
-    let mut response = Json(value).into_response();
+fn no_store_json<T: Serialize>(response_body: T) -> Response {
+    let mut response = Json(response_body).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store, max-age=0"),

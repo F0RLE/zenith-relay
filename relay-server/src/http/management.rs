@@ -115,13 +115,16 @@ pub async fn runtime_order(
     Ok(Json(state.runtime_order().map_err(runtime_error)?))
 }
 
-fn find_account(state: &AppState, id: &str) -> Result<ServerAccountRecord, ManagementError> {
+fn find_account(
+    state: &AppState,
+    account_id: &str,
+) -> Result<ServerAccountRecord, ManagementError> {
     state
         .store
         .accounts()
         .map_err(store_error)?
         .into_iter()
-        .find(|record| record.id == id)
+        .find(|account_record| account_record.id == account_id)
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::ACCOUNT_NOT_FOUND, "account not found")
         })
@@ -129,45 +132,48 @@ fn find_account(state: &AppState, id: &str) -> Result<ServerAccountRecord, Manag
 
 fn account_summary(
     state: &AppState,
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
 ) -> Result<AccountSummary, ManagementError> {
     state
         .snapshot()
         .map_err(store_error)?
         .accounts
         .into_iter()
-        .find(|value| value.id == record.id)
+        .find(|account_summary| account_summary.id == account_record.id)
         .ok_or_else(|| {
             ManagementError::internal(error_codes::SNAPSHOT_MISSING, "account snapshot missing")
         })
 }
 
-fn validate_secret(value: &str, name: &str) -> Result<(), ManagementError> {
-    if value.is_empty()
-        || value.len() > MAX_SECRET_BYTES
-        || value.bytes().any(|byte| byte.is_ascii_control())
+fn validate_secret(secret_text: &str, field_name: &str) -> Result<(), ManagementError> {
+    if secret_text.is_empty()
+        || secret_text.len() > MAX_SECRET_BYTES
+        || secret_text.bytes().any(|byte| byte.is_ascii_control())
     {
-        Err(validation_error(format!("{name} is invalid")))
+        Err(validation_error(format!("{field_name} is invalid")))
     } else {
         Ok(())
     }
 }
 
 pub(super) fn clean_text(
-    value: &str,
-    name: &str,
+    raw_text: &str,
+    field_name: &str,
     max_len: usize,
 ) -> Result<String, ManagementError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > max_len || value.chars().any(char::is_control) {
-        Err(validation_error(format!("{name} is invalid")))
+    let trimmed_text = raw_text.trim();
+    if trimmed_text.is_empty()
+        || trimmed_text.len() > max_len
+        || trimmed_text.chars().any(char::is_control)
+    {
+        Err(validation_error(format!("{field_name} is invalid")))
     } else {
-        Ok(value.to_string())
+        Ok(trimmed_text.to_string())
     }
 }
 
-fn clean_label(value: &str, name: &str) -> Result<String, ManagementError> {
-    clean_text(value, name, 128)
+fn clean_label(label_value: &str, field_name: &str) -> Result<String, ManagementError> {
+    clean_text(label_value, field_name, 128)
 }
 
 pub(super) use zenith_relay_core::normalize_model_ids as normalized_values;
@@ -176,9 +182,9 @@ fn default_weight() -> u32 {
     1
 }
 
-fn valid_weight(value: u32) -> Result<u32, ManagementError> {
-    (value > 0)
-        .then_some(value)
+fn valid_weight(requested_weight: u32) -> Result<u32, ManagementError> {
+    (requested_weight > 0)
+        .then_some(requested_weight)
         .ok_or_else(|| validation_error("weight must be positive"))
 }
 

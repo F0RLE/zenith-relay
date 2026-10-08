@@ -102,14 +102,30 @@ impl Store {
                         i64::from(event.http_status),
                         event.error_category,
                         event.latency_ms as i64,
-                        event.ttft_ms.map(|value| value as i64),
-                        event.generation_ms.map(|value| value as i64),
-                        event.input_tokens.map(|value| value as i64),
-                        event.cached_input_tokens.map(|value| value as i64),
-                        event.cache_write_input_tokens.map(|value| value as i64),
-                        event.reasoning_tokens.map(|value| value as i64),
-                        event.output_tokens.map(|value| value as i64),
-                        event.total_tokens.map(|value| value as i64),
+                        event.ttft_ms.map(|ttft_ms| ttft_ms as i64),
+                        event
+                            .generation_ms
+                            .map(|generation_ms| generation_ms as i64),
+                        event
+                            .input_tokens
+                            .map(|input_token_count| input_token_count as i64),
+                        event
+                            .cached_input_tokens
+                            .map(|cached_input_token_count| { cached_input_token_count as i64 }),
+                        event
+                            .cache_write_input_tokens
+                            .map(|cache_write_input_token_count| {
+                                cache_write_input_token_count as i64
+                            }),
+                        event
+                            .reasoning_tokens
+                            .map(|reasoning_token_count| reasoning_token_count as i64),
+                        event
+                            .output_tokens
+                            .map(|output_token_count| output_token_count as i64),
+                        event
+                            .total_tokens
+                            .map(|total_token_count| total_token_count as i64),
                         *created_at_ms as i64,
                         routing_json,
                         event.service_tier.as_str(),

@@ -41,20 +41,20 @@ impl Store {
     ) -> Result<UsagePage, String> {
         let (page, page_size) = query.normalized_page();
         let connection = self.lock()?;
-        let (where_sql, values) = usage_filter(query);
-        let mut totals = usage_totals(&connection, &where_sql, &values)?;
+        let (where_sql, query_parameters) = usage_filter(query);
+        let mut totals = usage_totals(&connection, &where_sql, &query_parameters)?;
         let mut models = if query.includes_models() {
             usage_groups(
                 &connection,
                 &where_sql,
-                &values,
+                &query_parameters,
                 "COALESCE(resolved_model, requested_model, '')",
             )?
         } else {
             Vec::new()
         };
         let (mut model_equivalents, pricing_sources) =
-            usage_model_equivalents(&connection, &where_sql, &values, resolver)?;
+            usage_model_equivalents(&connection, &where_sql, &query_parameters, resolver)?;
         if query.includes_models() {
             for group in &mut models {
                 group.totals.api_equivalent =
@@ -70,13 +70,13 @@ impl Store {
             usage_groups(
                 &connection,
                 &where_sql,
-                &values,
+                &query_parameters,
                 "COALESCE(candidate_hint, '')",
             )?
         } else {
             Vec::new()
         };
-        let buckets = usage_buckets(&connection, &where_sql, &values, query, resolver)?;
+        let buckets = usage_buckets(&connection, &where_sql, &query_parameters, query, resolver)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
@@ -91,25 +91,25 @@ impl Store {
                  FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
             );
             let mut statement = connection.prepare(&sql).map_err(db_error)?;
-            let mut page_values = values;
-            page_values.push(SqlValue::Integer(i64::from(page_size)));
-            page_values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
+            let mut event_parameters = query_parameters;
+            event_parameters.push(SqlValue::Integer(i64::from(page_size)));
+            event_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
             let rows = statement
-                .query_map(params_from_iter(page_values.iter()), map_usage_event)
+                .query_map(params_from_iter(event_parameters.iter()), map_usage_event)
                 .map_err(db_error)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
         } else {
             Vec::new()
         };
         for event in &mut events {
-            let model = event
+            let model_id = event
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
             event.api_equivalent = resolver.estimate(
                 &event.candidate_kind,
                 &event.candidate_hint,
-                model,
+                model_id,
                 ApiEquivalentUsage::from_reported_tokens(
                     event.tokens.input_tokens,
                     event.tokens.cached_input_tokens,
@@ -153,7 +153,7 @@ fn map_usage_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageSummary> {
         routing: row
             .get::<_, Option<String>>(22)?
             .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+            .and_then(|routing_json| serde_json::from_str(routing_json).ok()),
         requested_model: row.get(5)?,
         resolved_model: row.get(6)?,
         requested_reasoning_effort: row
@@ -168,7 +168,7 @@ fn map_usage_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageSummary> {
         transport: row
             .get::<_, Option<String>>(8)?
             .as_deref()
-            .and_then(|value| value.parse().ok())
+            .and_then(|transport_text| transport_text.parse().ok())
             .unwrap_or_default(),
         service_tier: DefaultServiceTier::from_storage_value(&row.get::<_, String>(23)?),
         applied_service_tier: row
@@ -178,18 +178,18 @@ fn map_usage_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageSummary> {
         tool_use: row
             .get::<_, Option<String>>(25)?
             .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+            .and_then(|tool_use_json| serde_json::from_str(tool_use_json).ok()),
         success: row.get::<_, i64>(9)? != 0,
         http_status: row.get::<_, i64>(10)?.clamp(0, i64::from(u16::MAX)) as u16,
         error_category: row.get(11)?,
         upstream_error: row
             .get::<_, Option<String>>(31)?
             .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+            .and_then(|upstream_error_json| serde_json::from_str(upstream_error_json).ok()),
         error_origin: row
             .get::<_, Option<String>>(26)?
             .as_deref()
-            .and_then(|value| value.parse().ok()),
+            .and_then(|error_origin_text| error_origin_text.parse().ok()),
         latency_ms: row.get::<_, i64>(12)?.max(0) as u64,
         ttft_ms: optional_u64(row.get(13)?),
         generation_ms: optional_u64(row.get(14)?),

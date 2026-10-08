@@ -23,41 +23,41 @@ use zenith_relay_core::{
 pub(super) fn reconcile(
     state: &Arc<AppState>,
     activity: &BTreeSet<String>,
-    current: &mut BTreeSet<RefreshIdentity>,
+    active_refresh_ids: &mut BTreeSet<RefreshIdentity>,
 ) -> Result<(), String> {
-    for (record, fence) in state.store.source_refresh_scopes()? {
-        current.insert(fence.identity());
+    for (source_record, fence) in state.store.source_refresh_scopes()? {
+        active_refresh_ids.insert(fence.identity());
         for kind in [RefreshKind::Models, RefreshKind::Balance] {
             register(
                 state,
-                &record,
+                &source_record,
                 fence.clone(),
                 kind,
                 true,
-                is_active(&record, activity),
+                is_active(&source_record, activity),
             )?;
         }
     }
     Ok(())
 }
 
-fn is_active(record: &SourceRecord, activity: &BTreeSet<String>) -> bool {
-    activity.contains(&source_member_key(&record.id))
+fn is_active(source_record: &SourceRecord, activity: &BTreeSet<String>) -> bool {
+    activity.contains(&source_member_key(&source_record.id))
 }
 
 fn register(
     state: &Arc<AppState>,
-    record: &SourceRecord,
+    source_record: &SourceRecord,
     fence: SourceRefreshFence,
     kind: RefreshKind,
     due_now: bool,
     active: bool,
 ) -> Result<(), String> {
-    let origin = url::Url::parse(record.base_url.trim())
+    let origin = url::Url::parse(source_record.base_url.trim())
         .map_err(|_| "invalid source address".to_string())?
         .origin()
         .ascii_serialization();
-    let automatic = record.enabled;
+    let automatic = source_record.enabled;
     let weak = Arc::downgrade(state);
     state
         .refresh
@@ -75,12 +75,12 @@ fn register(
                 Box::pin(async move {
                     let Some(state) = weak.upgrade() else {
                         return RefreshResult {
-                            value: Err("refresh owner stopped".into()),
+                            refresh_value: Err("refresh owner stopped".into()),
                             outcome: RefreshOutcome::NoProgress,
                         };
                     };
-                    let value = read::execute(&state, &fence, job.kind, job.manual).await;
-                    let outcome = match &value {
+                    let refresh_read = read::execute(&state, &fence, job.kind, job.manual).await;
+                    let outcome = match &refresh_read {
                         Ok(RefreshRead::SourceModels(source))
                             if source.last_error_code.is_none() =>
                         {
@@ -91,7 +91,10 @@ fn register(
                         }
                         _ => RefreshOutcome::retry_after(state.refresh.now_ms(), None),
                     };
-                    RefreshResult { value, outcome }
+                    RefreshResult {
+                        refresh_value: refresh_read,
+                        outcome,
+                    }
                 })
             },
         )

@@ -126,11 +126,11 @@ fn policy(account: &ServerAccountRecord) -> WakeAdapterPolicy {
         models: account
             .effective_models()
             .iter()
-            .filter(|id| rules.allows(id))
+            .filter(|model_id| rules.allows(model_id))
             .enumerate()
-            .map(|(index, id)| WakeModel {
-                id: id.clone(),
-                lightness_rank: model_lightness_rank(id, index),
+            .map(|(index, model_id)| WakeModel {
+                id: model_id.clone(),
+                lightness_rank: model_lightness_rank(model_id, index),
                 wake_capable: true,
             })
             .collect(),
@@ -166,12 +166,12 @@ mod tests {
         account.allowed_models = vec!["gpt-*".into()];
         account.excluded_models = vec!["gpt-excluded".into()];
 
-        let ids = policy(&account)
+        let model_ids = policy(&account)
             .models
             .into_iter()
             .map(|model| model.id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["gpt-codex".to_string()]);
+        assert_eq!(model_ids, vec!["gpt-codex".to_string()]);
     }
 
     fn sample_account() -> ServerAccountRecord {

@@ -17,20 +17,20 @@ pub(super) use super::runtime_records::{runtime_account, runtime_key, runtime_so
 
 pub(crate) fn account_proxy_config(
     state: &AppState,
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
     credential: &AccountCredential,
 ) -> Result<Option<ProxyConfig>, String> {
-    if let Some(proxy_id) = record.proxy_id.as_deref() {
+    if let Some(proxy_id) = account_record.proxy_id.as_deref() {
         return proxy_config_by_id(state, proxy_id).map(Some);
     }
-    if record.bypass_common_proxy {
+    if account_record.bypass_common_proxy {
         if state.store.account_proxy_required()? {
             return Err("an account proxy is required; direct account traffic is blocked".into());
         }
         return Ok(None);
     }
-    if let Some(value) = credential.proxy_url.as_deref() {
-        return ProxyConfig::parse(value)
+    if let Some(proxy_url) = credential.proxy_url.as_deref() {
+        return ProxyConfig::parse(proxy_url)
             .map(Some)
             .map_err(|_| "stored account proxy URL is invalid".to_string());
     }
@@ -43,18 +43,18 @@ pub(crate) fn account_proxy_config(
     if let Some(proxy_id) = state.store.common_proxy_id()? {
         return proxy_config_by_id(state, &proxy_id).map(Some);
     }
-    let value = state
+    let common_proxy_secret = state
         .vault
         .load(COMMON_PROXY_SECRET_REF)?
         .ok_or_else(|| "common account proxy is configured but unavailable".to_string())?;
-    ProxyConfig::parse(&value)
+    ProxyConfig::parse(&common_proxy_secret)
         .map(Some)
         .map_err(|_| "stored common proxy URL is invalid".to_string())
 }
 
 pub(crate) async fn ensure_server_agent_identity_task(
     state: &Arc<AppState>,
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
     credential: AccountCredential,
     expected_task_id: Option<&str>,
 ) -> Result<AccountCredential, String> {
@@ -66,7 +66,7 @@ pub(crate) async fn ensure_server_agent_identity_task(
     {
         return Ok(credential);
     }
-    let proxy = account_proxy_config(state, record, &credential)?;
+    let proxy = account_proxy_config(state, account_record, &credential)?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(30))
@@ -81,38 +81,43 @@ pub(crate) async fn ensure_server_agent_identity_task(
         .register_task(&client)
         .await
         .map_err(|error| format!("failed to register Agent Identity task: {error}"))?;
-    ServerTokenPersistence::for_account(state.clone(), record)
-        .persist_agent_task_id_for_identity(&record.id, &agent, &new_task_id)
+    ServerTokenPersistence::for_account(state.clone(), account_record)
+        .persist_agent_task_id_for_identity(&account_record.id, &agent, &new_task_id)
         .await
         .map_err(|error| error.code)?;
     let secret = state
         .vault
-        .load(&record.secret_ref)?
+        .load(&account_record.secret_ref)?
         .ok_or_else(|| "stored Agent Identity credential is unavailable".to_string())?;
-    let updated = serde_json::from_str(&secret)
+    let updated_credential = serde_json::from_str(&secret)
         .map_err(|_| "stored Agent Identity credential is invalid".to_string())?;
     if state
         .store
-        .account(&record.id)?
+        .account(&account_record.id)?
         .as_ref()
-        .map(|current| &current.secret_ref)
-        != Some(&record.secret_ref)
+        .map(|stored_account| &stored_account.secret_ref)
+        != Some(&account_record.secret_ref)
     {
         return Err("account login changed during Agent task registration".into());
     }
     state.rebuild_runtime().await?;
-    Ok(updated)
+    Ok(updated_credential)
 }
 
 pub(crate) async fn prepare_server_account_authorization(
     state: &Arc<AppState>,
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
     credential: AccountCredential,
     expected_task_id: Option<&str>,
 ) -> Result<(AccountCredential, HeaderValue, Option<TokenSet>), String> {
     if credential.is_agent_identity() {
-        match ensure_server_agent_identity_task(state, record, credential.clone(), expected_task_id)
-            .await
+        match ensure_server_agent_identity_task(
+            state,
+            account_record,
+            credential.clone(),
+            expected_task_id,
+        )
+        .await
         {
             Ok(credential) => {
                 let authorization = credential.authorization(now_ms())?;
@@ -122,7 +127,7 @@ pub(crate) async fn prepare_server_account_authorization(
             Err(_) => {}
         }
     }
-    let tokens = state.prepare_account_tokens(record).await?;
+    let tokens = state.prepare_account_tokens(account_record).await?;
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
         .map_err(|_| "stored account access token is invalid".to_string())?;
     authorization.set_sensitive(true);
@@ -130,15 +135,15 @@ pub(crate) async fn prepare_server_account_authorization(
 }
 
 fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
-    let record = state
+    let proxy_record = state
         .store
         .proxy(proxy_id)?
         .ok_or_else(|| "stored proxy reference is missing".to_string())?;
-    let value = state
+    let proxy_secret = state
         .vault
-        .load(&record.secret_ref)?
+        .load(&proxy_record.secret_ref)?
         .ok_or_else(|| "stored proxy secret is missing".to_string())?;
-    ProxyConfig::parse(&value).map_err(|_| "stored proxy URL is invalid".to_string())
+    ProxyConfig::parse(&proxy_secret).map_err(|_| "stored proxy URL is invalid".to_string())
 }
 
 pub(super) fn common_proxy_available(state: &AppState, configured: bool) -> bool {
@@ -150,7 +155,7 @@ pub(super) fn common_proxy_available(state: &AppState, configured: bool) -> bool
                     .load(COMMON_PROXY_SECRET_REF)
                     .ok()
                     .flatten()
-                    .is_some_and(|value| ProxyConfig::parse(&value).is_ok())
+                    .is_some_and(|proxy_secret| ProxyConfig::parse(&proxy_secret).is_ok())
             },
             |proxy_id| proxy_config_by_id(state, &proxy_id).is_ok(),
         )
@@ -158,23 +163,23 @@ pub(super) fn common_proxy_available(state: &AppState, configured: bool) -> bool
 
 pub(super) fn account_proxy_status(
     state: &AppState,
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
     credential: &AccountCredential,
     common_configured: bool,
     common_available: bool,
     account_proxy_required: bool,
 ) -> (ProxyMode, bool) {
-    if let Some(proxy_id) = record.proxy_id.as_deref() {
+    if let Some(proxy_id) = account_record.proxy_id.as_deref() {
         return (
             ProxyMode::Account,
             proxy_config_by_id(state, proxy_id).is_ok(),
         );
     }
-    if record.bypass_common_proxy {
+    if account_record.bypass_common_proxy {
         return (ProxyMode::Direct, !account_proxy_required);
     }
-    if let Some(value) = credential.proxy_url.as_deref() {
-        return (ProxyMode::Account, ProxyConfig::parse(value).is_ok());
+    if let Some(proxy_url) = credential.proxy_url.as_deref() {
+        return (ProxyMode::Account, ProxyConfig::parse(proxy_url).is_ok());
     }
     if common_configured {
         return (ProxyMode::Common, common_available);
@@ -183,17 +188,17 @@ pub(super) fn account_proxy_status(
 }
 
 pub(super) fn source_summary(
-    record: &SourceRecord,
+    source_record: &SourceRecord,
     secret_available: bool,
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
 ) -> SourceSummary {
     SourceSummary::from_stored_source(
-        record,
+        source_record,
         secret_available,
         runtime_available,
         api_equivalent,
-        record.last_error_code.clone(),
+        source_record.last_error_code.clone(),
         None,
     )
 }
@@ -210,7 +215,7 @@ pub(super) struct AccountSummaryInputs {
 }
 
 pub(super) fn account_summary(
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
     inputs: AccountSummaryInputs,
 ) -> AccountSummary {
     let AccountSummaryInputs {
@@ -224,38 +229,38 @@ pub(super) fn account_summary(
         quota_stale_after_ms,
     } = inputs;
     let operational = account_operational_state(AccountOperationalInput::from_source(
-        record,
+        account_record,
         secret_available,
         proxy_available,
         now_ms(),
         quota_stale_after_ms,
     ));
     AccountSummary {
-        id: record.id.clone(),
-        label: record.label.clone(),
-        identity_hint: record.identity_hint.clone(),
-        provider_family: record.provider_family.clone(),
+        id: account_record.id.clone(),
+        label: account_record.label.clone(),
+        identity_hint: account_record.identity_hint.clone(),
+        provider_family: account_record.provider_family.clone(),
         basis_points_available,
         basis_points_enabled: basis_points_available && basis_points_enabled,
-        enabled: record.enabled,
-        in_pool: record.in_pool,
-        draining: record.draining,
+        enabled: account_record.enabled,
+        in_pool: account_record.in_pool,
+        draining: account_record.draining,
         operational_status: operational.status,
-        auth_state: record.auth_state,
-        health: record.health.summary_label(),
-        models: record.effective_models().to_vec(),
-        allowed_models: record.allowed_models.clone(),
-        excluded_models: record.excluded_models.clone(),
-        priority: record.priority,
-        weight: record.weight,
+        auth_state: account_record.auth_state,
+        health: account_record.health.summary_label(),
+        models: account_record.effective_models().to_vec(),
+        allowed_models: account_record.allowed_models.clone(),
+        excluded_models: account_record.excluded_models.clone(),
+        priority: account_record.priority,
+        weight: account_record.weight,
         api_equivalent,
         quota_window_usage,
-        purchase_cost_micro_usd: record.purchase_cost_micro_usd,
-        subscription: record.subscription.clone(),
-        quota: record.quota.clone(),
+        purchase_cost_micro_usd: account_record.purchase_cost_micro_usd,
+        subscription: account_record.subscription.clone(),
+        quota: account_record.quota.clone(),
         quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
-            record.auth_state,
-            &record.quota,
+            account_record.auth_state,
+            &account_record.quota,
             false,
         ),
         refresh_state: Default::default(),
@@ -263,9 +268,9 @@ pub(super) fn account_summary(
         remote_location: None,
         proxy_mode,
         proxy_available,
-        proxy_id: record.proxy_id.clone(),
+        proxy_id: account_record.proxy_id.clone(),
         routing_block_reason: operational.routing_block_reason,
-        last_error_code: record.last_error_code.clone(),
+        last_error_code: account_record.last_error_code.clone(),
         client_auth_status: None,
         last_client_login_redirect_at_ms: None,
     }

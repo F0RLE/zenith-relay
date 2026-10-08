@@ -48,13 +48,13 @@ impl Store {
         let mut equivalents = HashMap::with_capacity(windows.len());
         for (hint, from_ms, to_ms) in windows {
             let mut total = ApiEquivalentSummary::default();
-            for (model, usage) in
+            for (model_id, usage) in
                 query::candidate_window_usage(&connection, hint, *from_ms, *to_ms)?
             {
                 total.merge(resolver.estimate(
                     "account",
                     hint,
-                    (!model.is_empty()).then_some(model.as_str()),
+                    (!model_id.is_empty()).then_some(model_id.as_str()),
                     usage,
                 ));
             }
@@ -104,14 +104,14 @@ impl Store {
             .query_map([], |row| {
                 let kind = row.get::<_, String>(0)?;
                 let candidate_id = row.get::<_, String>(1)?;
-                let model = row.get::<_, Option<String>>(2)?;
+                let model_id = row.get::<_, Option<String>>(2)?;
                 let price_class: String = row.get(3)?;
                 let context_band: String = row.get(4)?;
                 Ok((candidate_id.clone(), {
                     resolver.estimate(
                         &kind,
                         &candidate_id,
-                        model.as_deref(),
+                        model_id.as_deref(),
                         ApiEquivalentUsage::from_observed_sums(
                             ObservedUsageSums::from_rollup_aggregate(
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),

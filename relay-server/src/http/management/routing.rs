@@ -48,7 +48,7 @@ pub async fn set_routing_policy(
             "max retry candidates must be between 1 and 8",
         ));
     }
-    let previous = state.store.routing_policy().map_err(store_error)?;
+    let previous_policy = state.store.routing_policy().map_err(store_error)?;
     let current_pool = state
         .snapshot()
         .map_err(store_error)?
@@ -64,18 +64,20 @@ pub async fn set_routing_policy(
     }
     let default_service_tier = input
         .default_service_tier
-        .unwrap_or(previous.default_service_tier);
+        .unwrap_or(previous_policy.default_service_tier);
     let image_base_model = input
         .image_base_model
-        .unwrap_or(previous.image_base_model.clone());
+        .unwrap_or(previous_policy.image_base_model.clone());
     let basis_points_enabled = input
         .basis_points_enabled
-        .unwrap_or(previous.basis_points_enabled);
+        .unwrap_or(previous_policy.basis_points_enabled);
     let policy = PresetRoutingPolicy {
-        tool_policy: previous.tool_policy.clone(),
+        tool_policy: previous_policy.tool_policy.clone(),
         // An unrelated scalar edit must not persist a newly reconciled,
         // malformed inventory entry or silently migrate a legacy policy.
-        pool_routing: input.pool_routing.or_else(|| previous.pool_routing.clone()),
+        pool_routing: input
+            .pool_routing
+            .or_else(|| previous_policy.pool_routing.clone()),
         basis_points_enabled,
         max_retry_candidates: input.max_retry_candidates,
         default_service_tier,
@@ -85,9 +87,9 @@ pub async fn set_routing_policy(
         .store
         .set_routing_policy(&policy)
         .map_err(store_error)?;
-    if policy.image_base_model != previous.image_base_model {
+    if policy.image_base_model != previous_policy.image_base_model {
         state
-            .rebuild_runtime_or_rollback(|| state.store.set_routing_policy(&previous))
+            .rebuild_runtime_or_rollback(|| state.store.set_routing_policy(&previous_policy))
             .await
             .map_err(runtime_error)?;
     } else if let Some(runtime) = state.runtime().map_err(runtime_error)? {
@@ -97,7 +99,7 @@ pub async fn set_routing_policy(
         ) {
             state
                 .store
-                .set_routing_policy(&previous)
+                .set_routing_policy(&previous_policy)
                 .map_err(store_error)?;
             return Err(runtime_error(error.to_string()));
         }

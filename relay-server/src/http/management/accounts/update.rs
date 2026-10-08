@@ -38,70 +38,80 @@ pub(super) async fn update_account(
     // window. The dispatch fence is acquired before writing the new policy.
     let _configuration = state.configuration_lock.lock().await;
     let build = state.lock_runtime_rebuild().await;
-    let mut record = find_account(&state, &id)?;
-    let old = record.clone();
-    if let Some(value) = input.label {
-        record.label = clean_label(&value, "account label")?;
+    let mut account_record = find_account(&state, &id)?;
+    let previous_account_record = account_record.clone();
+    if let Some(label) = input.label {
+        account_record.label = clean_label(&label, "account label")?;
     }
-    if let Some(value) = input.enabled {
-        record.enabled = value;
+    if let Some(enabled) = input.enabled {
+        account_record.enabled = enabled;
     }
-    if let Some(value) = input.in_pool {
-        record.in_pool = value;
+    if let Some(in_pool) = input.in_pool {
+        account_record.in_pool = in_pool;
     }
-    if let Some(value) = input.draining {
-        record.draining = value;
+    if let Some(draining) = input.draining {
+        account_record.draining = draining;
     }
-    if let Some(value) = input.allowed_models {
-        record.allowed_models = normalized_values(value);
+    if let Some(allowed_models) = input.allowed_models {
+        account_record.allowed_models = normalized_values(allowed_models);
     }
-    if let Some(value) = input.excluded_models {
-        record.excluded_models = normalized_values(value);
+    if let Some(excluded_models) = input.excluded_models {
+        account_record.excluded_models = normalized_values(excluded_models);
     }
-    if let Some(value) = input.priority {
-        record.priority = value;
+    if let Some(priority) = input.priority {
+        account_record.priority = priority;
     }
-    if let Some(value) = input.weight {
-        record.weight = valid_weight(value)?;
+    if let Some(weight) = input.weight {
+        account_record.weight = valid_weight(weight)?;
     }
-    if let Some(value) = input.purchase_cost_micro_usd {
-        if value > MAX_PURCHASE_COST_MICRO_USD {
+    if let Some(purchase_cost_micro_usd) = input.purchase_cost_micro_usd {
+        if purchase_cost_micro_usd > MAX_PURCHASE_COST_MICRO_USD {
             return Err(ManagementError::validation(
                 error_codes::ACCOUNT_PURCHASE_COST_INVALID,
                 "account purchase cost is too large",
             ));
         }
-        record.purchase_cost_micro_usd = (value > 0).then_some(value);
+        account_record.purchase_cost_micro_usd =
+            (purchase_cost_micro_usd > 0).then_some(purchase_cost_micro_usd);
     }
-    let policy_changed = account_runtime_policy_changed(&old, &record);
+    let policy_changed = account_runtime_policy_changed(&previous_account_record, &account_record);
     let runtime = state.runtime().map_err(runtime_error)?;
-    let _dispatch_fence = if account_dispatch_permission_changed(&old, &record) {
-        runtime
-            .as_ref()
-            .and_then(|runtime| runtime.fence_candidate_dispatch(&record.id))
-    } else {
-        None
-    };
-    state.store.save_account(&record).map_err(store_error)?;
-    let runtime_applied = if policy_changed || old.in_pool != record.in_pool {
-        match apply_account_policy_if_running(&state, &record) {
-            Ok(applied) => applied,
-            Err(error) => {
-                build
-                    .rollback_and_rebuild(&state, || state.store.save_account(&old))
-                    .await
-                    .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
-                return Err(runtime_error(error));
+    let _dispatch_fence =
+        if account_dispatch_permission_changed(&previous_account_record, &account_record) {
+            runtime
+                .as_ref()
+                .and_then(|runtime| runtime.fence_candidate_dispatch(&account_record.id))
+        } else {
+            None
+        };
+    state
+        .store
+        .save_account(&account_record)
+        .map_err(store_error)?;
+    let runtime_applied =
+        if policy_changed || previous_account_record.in_pool != account_record.in_pool {
+            match apply_account_policy_if_running(&state, &account_record) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    build
+                        .rollback_and_rebuild(&state, || {
+                            state.store.save_account(&previous_account_record)
+                        })
+                        .await
+                        .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
+                    return Err(runtime_error(error));
+                }
             }
-        }
-    } else {
-        true
-    };
+        } else {
+            true
+        };
     if !runtime_applied {
         build
-            .rebuild_or_rollback(&state, || state.store.save_account(&old))
+            .rebuild_or_rollback(&state, || {
+                state.store.save_account(&previous_account_record)
+            })
             .await
             .map_err(runtime_error)?;
     }
-    Ok(Json(account_summary(&state, &record)?))
+    Ok(Json(account_summary(&state, &account_record)?))
 }
