@@ -172,8 +172,8 @@ pub async fn set_local_pool_membership(
         let catalog_app = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = catalog_app.state::<DesktopState>();
-            let result = super::profiles::refresh_active_client_catalogs(&state).await;
-            super::record_catalog_refresh_result(&state, &result);
+            let refresh_result = super::profiles::refresh_active_client_catalogs(&state).await;
+            super::record_catalog_refresh_result(&state, &refresh_result);
             let _ = catalog_app.emit("zenith-state-changed", ());
         });
     }
@@ -218,8 +218,8 @@ async fn update_local_routing_at(
             .map_err(|message| LocalPoolError::new(ErrorCode::Conflict, message))?;
         gateway.pool_routing = Some(policy);
     }
-    if let Some(value) = input.basis_points_enabled {
-        gateway.basis_points_enabled = value;
+    if let Some(basis_points_enabled) = input.basis_points_enabled {
+        gateway.basis_points_enabled = basis_points_enabled;
     }
     gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {

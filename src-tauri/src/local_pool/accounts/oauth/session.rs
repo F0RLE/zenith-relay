@@ -56,17 +56,17 @@ impl OAuthPendingSession {
         }
 
         let mut code = None;
-        let mut state = None;
+        let mut callback_state = None;
         let mut provider_error = None;
-        for (key, value) in callback_url.query_pairs() {
+        for (key, query_value) in callback_url.query_pairs() {
             match key.as_ref() {
-                "code" => set_once(&mut code, value.into_owned())?,
-                "state" => set_once(&mut state, value.into_owned())?,
-                "error" => set_once(&mut provider_error, value.into_owned())?,
+                "code" => set_once(&mut code, query_value.into_owned())?,
+                "state" => set_once(&mut callback_state, query_value.into_owned())?,
+                "error" => set_once(&mut provider_error, query_value.into_owned())?,
                 _ => {}
             }
         }
-        if state.as_deref() != Some(self.state.as_str()) {
+        if callback_state.as_deref() != Some(self.state.as_str()) {
             return Err(OAuthError::new(OAuthErrorCode::StateMismatch, false));
         }
         if let Some(provider_error) = provider_error {

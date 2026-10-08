@@ -161,9 +161,11 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
             |_| {
                 Box::pin(async {
                     RefreshResult {
-                        value: Err(crate::local_pool::error::LocalPoolError::invalid_state(
-                            "synthetic read",
-                        )),
+                        refresh_value: Err(
+                            crate::local_pool::error::LocalPoolError::invalid_state(
+                                "synthetic read",
+                            ),
+                        ),
                         outcome: RefreshOutcome::Success,
                     }
                 })

@@ -18,8 +18,8 @@ async fn refresh_account_quota_item(
     state: &DesktopState,
     account_id: String,
 ) -> AccountQuotaRefreshItemResult {
-    let result = refresh_manual_account_quota(state, &account_id).await;
-    match result {
+    let quota_result = refresh_manual_account_quota(state, &account_id).await;
+    match quota_result {
         Ok(response) => AccountQuotaRefreshItemResult {
             account_id,
             status: AccountQuotaRefreshStatus::Succeeded,

@@ -42,7 +42,7 @@ pub async fn import_local_proxy_pool(
         .summary()
         .entries
         .into_iter()
-        .map(|entry| entry.id)
+        .map(|proxy_summary| proxy_summary.id)
         .collect();
     let (added, duplicates) = pool.import(&input.proxy_urls, current_time_ms())?;
     pool.save()?;
@@ -53,8 +53,8 @@ pub async fn import_local_proxy_pool(
         added_proxy_ids: summary
             .entries
             .iter()
-            .filter(|entry| !previous_ids.contains(&entry.id))
-            .map(|entry| entry.id.clone())
+            .filter(|proxy_summary| !previous_ids.contains(&proxy_summary.id))
+            .map(|proxy_summary| proxy_summary.id.clone())
             .collect(),
         pool: summary,
     })
@@ -123,9 +123,10 @@ pub async fn set_local_stored_proxy_accounts(
     let proxy_id = input.proxy_id.trim().to_string();
     let account_ids = normalize_ids(input.account_ids, true)?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let current = load_reconciled_pool(&state, &credentials)?.assigned_account_ids(&proxy_id)?;
+    let currently_assigned_account_ids =
+        load_reconciled_pool(&state, &credentials)?.assigned_account_ids(&proxy_id)?;
     let selected = account_ids.iter().cloned().collect::<HashSet<_>>();
-    let mut choices = current
+    let mut choices = currently_assigned_account_ids
         .into_iter()
         .filter(|account_id| !selected.contains(account_id.as_str()))
         .map(|account_id| (account_id, ProxyChoice::Inherited))

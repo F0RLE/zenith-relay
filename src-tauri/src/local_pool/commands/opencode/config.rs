@@ -32,24 +32,24 @@ pub(super) fn backup_name_path(state: &DesktopState) -> PathBuf {
     backup_root(state).join("original-opencode.name")
 }
 
-pub(super) fn normalize_snapshot_name(value: &str) -> Result<String, LocalPoolError> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.chars().count() > MAX_SNAPSHOT_NAME_CHARS
-        || value.chars().any(char::is_control)
+pub(super) fn normalize_snapshot_name(snapshot_name: &str) -> Result<String, LocalPoolError> {
+    let normalized_name = snapshot_name.trim();
+    if normalized_name.is_empty()
+        || normalized_name.chars().count() > MAX_SNAPSHOT_NAME_CHARS
+        || normalized_name.chars().any(char::is_control)
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "OpenCode snapshot name is invalid",
         ));
     }
-    Ok(value.to_string())
+    Ok(normalized_name.to_string())
 }
 
 pub(super) fn backup_name(state: &DesktopState) -> Option<String> {
     fs::read_to_string(backup_name_path(state))
         .ok()
-        .and_then(|value| normalize_snapshot_name(&value).ok())
+        .and_then(|stored_name| normalize_snapshot_name(&stored_name).ok())
 }
 
 pub(super) fn backup_created_at_ms(state: &DesktopState) -> Option<u64> {
@@ -76,13 +76,13 @@ pub(super) fn read_config(path: &Path) -> Result<Map<String, Value>, LocalPoolEr
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
         Err(error) => return Err(LocalPoolError::new(ErrorCode::Io, error.to_string())),
     };
-    let value: Value = parse_jsonc(&content).map_err(|error| {
+    let parsed_config: Value = parse_jsonc(&content).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             format!("OpenCode config is not valid JSON: {error}"),
         )
     })?;
-    value.as_object().cloned().ok_or_else(|| {
+    parsed_config.as_object().cloned().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             "OpenCode config root must be a JSON object",
@@ -110,8 +110,8 @@ pub(super) fn remove_managed_configuration(config: &mut Map<String, Value>) -> b
             (
                 super::protocols::GROUPS
                     .iter()
-                    .fold(false, |removed, (_, id, _)| {
-                        providers.remove(*id).is_some() || removed
+                    .fold(false, |removed, (_, provider_id, _)| {
+                        providers.remove(*provider_id).is_some() || removed
                     }),
                 providers.is_empty(),
             )
@@ -140,12 +140,16 @@ pub(super) fn current_config_is_managed(path: &Path) -> Result<bool, LocalPoolEr
     Ok(config
         .get("provider")
         .and_then(Value::as_object)
-        .is_some_and(|providers| providers.keys().any(|id| super::protocols::managed_id(id))))
+        .is_some_and(|providers| {
+            providers
+                .keys()
+                .any(|provider_id| super::protocols::managed_id(provider_id))
+        }))
 }
 
 pub(super) fn restore_original_config_preserving_user_changes(
     original: &Path,
-    current: &Path,
+    target_config_path: &Path,
 ) -> Result<(), LocalPoolError> {
     let original_content = fs::read_to_string(original)
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
@@ -164,10 +168,10 @@ pub(super) fn restore_original_config_preserving_user_changes(
                 "OpenCode snapshot root must be a JSON object",
             )
         })?;
-    let current_config = read_config(current)?;
-    for (key, value) in &current_config {
+    let current_config = read_config(target_config_path)?;
+    for (key, config_value) in &current_config {
         if key != "provider" && key != "model" {
-            restored.insert(key.clone(), value.clone());
+            restored.insert(key.clone(), config_value.clone());
         }
     }
 
@@ -177,9 +181,9 @@ pub(super) fn restore_original_config_preserving_user_changes(
         .cloned()
         .unwrap_or_default();
     if let Some(current_providers) = current_config.get("provider").and_then(Value::as_object) {
-        for (id, provider) in current_providers {
-            if !super::protocols::managed_id(id) {
-                providers.insert(id.clone(), provider.clone());
+        for (provider_id, provider) in current_providers {
+            if !super::protocols::managed_id(provider_id) {
+                providers.insert(provider_id.clone(), provider.clone());
             }
         }
     }
@@ -195,15 +199,15 @@ pub(super) fn restore_original_config_preserving_user_changes(
         .is_some_and(super::protocols::managed_model);
     if !current_model_is_managed {
         match current_config.get("model") {
-            Some(model) => {
-                restored.insert("model".into(), model.clone());
+            Some(model_value) => {
+                restored.insert("model".into(), model_value.clone());
             }
             None => {
                 restored.remove("model");
             }
         }
     }
-    write_config(current, &restored)
+    write_config(target_config_path, &restored)
 }
 
 /// OpenCode accepts JSONC. Strip comments and trailing commas without
@@ -233,8 +237,8 @@ pub(super) fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
         }
         if ch == '/' && chars.peek() == Some(&'/') {
             chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
+            for line_char in chars.by_ref() {
+                if line_char == '\n' {
                     cleaned.push('\n');
                     break;
                 }
@@ -243,27 +247,27 @@ pub(super) fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
         }
         if ch == '/' && chars.peek() == Some(&'*') {
             chars.next();
-            let mut previous = '\0';
-            for next in chars.by_ref() {
-                if previous == '*' && next == '/' {
+            let mut previous_char = '\0';
+            for block_char in chars.by_ref() {
+                if previous_char == '*' && block_char == '/' {
                     break;
                 }
-                if next == '\n' {
+                if block_char == '\n' {
                     cleaned.push('\n');
                 }
-                previous = next;
+                previous_char = block_char;
             }
             continue;
         }
         cleaned.push(ch);
     }
     let chars = cleaned.chars().collect::<Vec<_>>();
-    let mut output = String::with_capacity(chars.len());
+    let mut normalized_json = String::with_capacity(chars.len());
     let mut in_string = false;
     let mut escaped = false;
     for (index, ch) in chars.iter().copied().enumerate() {
         if in_string {
-            output.push(ch);
+            normalized_json.push(ch);
             if escaped {
                 escaped = false;
             } else if ch == '\\' {
@@ -275,21 +279,23 @@ pub(super) fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
         }
         if ch == '"' {
             in_string = true;
-            output.push(ch);
+            normalized_json.push(ch);
             continue;
         }
         if ch == ',' {
-            let mut next = index + 1;
-            while next < chars.len() && chars[next].is_whitespace() {
-                next += 1;
+            let mut lookahead_index = index + 1;
+            while lookahead_index < chars.len() && chars[lookahead_index].is_whitespace() {
+                lookahead_index += 1;
             }
-            if next < chars.len() && (chars[next] == '}' || chars[next] == ']') {
+            if lookahead_index < chars.len()
+                && (chars[lookahead_index] == '}' || chars[lookahead_index] == ']')
+            {
                 continue;
             }
         }
-        output.push(ch);
+        normalized_json.push(ch);
     }
-    serde_json::from_str(&output)
+    serde_json::from_str(&normalized_json)
 }
 
 pub(super) fn backup_original_config(

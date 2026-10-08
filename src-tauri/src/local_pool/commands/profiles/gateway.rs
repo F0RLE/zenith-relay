@@ -88,7 +88,7 @@ pub async fn attach_codex_to_local_gateway(
     let base_url = format!("http://127.0.0.1:{port}/v1");
     let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let result: Result<ProfileActivation, CommandError> = async {
+    let activation_result: Result<ProfileActivation, CommandError> = async {
         let bound_oauth =
             resolve_gateway_oauth_binding(&state, binding_request, &profile_dir).await?;
         let history_backup = if sync_history {
@@ -139,7 +139,7 @@ pub async fn attach_codex_to_local_gateway(
         Ok(ProfileActivation { binding })
     }
     .await;
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+    restart_codex_after_failed_change(stopped, activation_result, launch_codex_with_profile)
 }
 
 #[tauri::command]
@@ -186,7 +186,7 @@ pub async fn attach_codex_to_remote_gateway(
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let result: Result<ProfileActivation, CommandError> = async {
+    let activation_result: Result<ProfileActivation, CommandError> = async {
         let rotation = if rotate_profile_key {
             Some(
                 client
@@ -292,7 +292,7 @@ pub async fn attach_codex_to_remote_gateway(
         Ok(ProfileActivation { binding })
     }
     .await;
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+    restart_codex_after_failed_change(stopped, activation_result, launch_codex_with_profile)
 }
 
 async fn abort_profile_rotation(

@@ -65,23 +65,26 @@ struct AuthClaims {
     chatgpt_account_is_fedramp: bool,
 }
 
-pub(super) fn parse_token_response(body: &[u8], now_ms: u64) -> Result<OAuthTokenSet, OAuthError> {
-    let response: TokenResponse = serde_json::from_slice(body)
+pub(super) fn parse_token_response(
+    token_response_body: &[u8],
+    now_ms: u64,
+) -> Result<OAuthTokenSet, OAuthError> {
+    let token_response: TokenResponse = serde_json::from_slice(token_response_body)
         .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidResponse, false))?;
-    let access_token = response
+    let access_token = token_response
         .access_token
         .ok_or_else(|| OAuthError::new(OAuthErrorCode::InvalidResponse, false))?;
     validate_token(&access_token)?;
-    validate_optional_token(response.refresh_token.as_deref())?;
-    validate_optional_token(response.id_token.as_deref())?;
-    let expires_at_ms = response
+    validate_optional_token(token_response.refresh_token.as_deref())?;
+    validate_optional_token(token_response.id_token.as_deref())?;
+    let expires_at_ms = token_response
         .expires_in
         .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000)))
         .or_else(|| jwt_expiration_ms(&access_token).ok().flatten());
     Ok(OAuthTokenSet {
         access_token,
-        refresh_token: omit_blank(response.refresh_token),
-        id_token: omit_blank(response.id_token),
+        refresh_token: omit_blank(token_response.refresh_token),
+        id_token: omit_blank(token_response.id_token),
         expires_at_ms,
     })
 }
@@ -141,8 +144,11 @@ fn validate_optional_token(token: Option<&str>) -> Result<(), OAuthError> {
     }
 }
 
-pub(super) fn set_once(slot: &mut Option<String>, value: String) -> Result<(), OAuthError> {
-    if slot.replace(value).is_some() {
+pub(super) fn set_once(
+    slot: &mut Option<String>,
+    candidate_value: String,
+) -> Result<(), OAuthError> {
+    if slot.replace(candidate_value).is_some() {
         Err(OAuthError::new(OAuthErrorCode::InvalidCallback, false))
     } else {
         Ok(())

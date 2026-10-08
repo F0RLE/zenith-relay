@@ -48,7 +48,7 @@ impl SecretLookup for OsSecretLookup {
 #[derive(Default)]
 pub(super) struct CredentialCache {
     generation: u64,
-    values: HashMap<String, Option<StoredCodexCredentials>>,
+    cached_by_account_id: HashMap<String, Option<StoredCodexCredentials>>,
 }
 
 pub(crate) struct LocalRuntimeInputs {
@@ -85,8 +85,9 @@ impl AccountCredentialFacts {
             agent_identity: credentials.is_agent_identity(),
             has_provider_account_id: credentials.provider_account_id().is_some(),
             has_account_proxy: proxy_url.is_some(),
-            account_proxy_valid: proxy_url
-                .is_some_and(|value| zenith_relay_core::ProxyConfig::parse(value).is_ok()),
+            account_proxy_valid: proxy_url.is_some_and(|account_proxy_url| {
+                zenith_relay_core::ProxyConfig::parse(account_proxy_url).is_ok()
+            }),
             bypass_common_proxy: credentials.bypass_common_proxy(),
         }
     }
@@ -188,7 +189,8 @@ impl DesktopState {
         let source_api_keys = sources
             .iter()
             .map(|source| {
-                secret_store::load(&source.secret_ref).map(|value| (source.id.clone(), value))
+                secret_store::load(&source.secret_ref)
+                    .map(|source_api_key| (source.id.clone(), source_api_key))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let account_credentials = self.cached_account_credentials(&accounts)?;
@@ -284,32 +286,36 @@ impl DesktopState {
             LocalPoolError::new(ErrorCode::Io, "credential cache lock is unavailable")
         })?;
         if cache.generation != generation {
-            cache.values.clear();
+            cache.cached_by_account_id.clear();
             cache.generation = generation;
         }
         let credential_store = CredentialStore::from_backend(NativeSecretBackend);
         let mut loaded = HashMap::with_capacity(accounts.len());
         for account in accounts {
-            let id = &account.account.id;
-            if let Some(credentials) = cache.values.get(id) {
-                loaded.insert(id.clone(), project(credentials));
+            let account_id = &account.account.id;
+            if let Some(credentials) = cache.cached_by_account_id.get(account_id) {
+                loaded.insert(account_id.clone(), project(credentials));
                 continue;
             }
-            let credentials = credential_store.load(id).map_err(|error| {
+            let credentials = credential_store.load(account_id).map_err(|error| {
                 LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
             })?;
             let projected = project(&credentials);
-            cache.values.insert(id.clone(), credentials);
-            loaded.insert(id.clone(), projected);
+            cache
+                .cached_by_account_id
+                .insert(account_id.clone(), credentials);
+            loaded.insert(account_id.clone(), projected);
         }
         let live = accounts
             .iter()
             .map(|account| account.account.id.as_str())
             .collect::<std::collections::HashSet<_>>();
-        cache.values.retain(|id, _| live.contains(id.as_str()));
+        cache
+            .cached_by_account_id
+            .retain(|id, _| live.contains(id.as_str()));
         if secret_store::generation() != generation {
             cache.generation = 0;
-            cache.values.clear();
+            cache.cached_by_account_id.clear();
         }
         Ok(loaded)
     }
@@ -352,20 +358,20 @@ impl DesktopState {
             let account_refresh = store
                 .accounts()
                 .iter()
-                .map(|record| {
-                    let (_, fence) = store.account_refresh_scope(&record.account.id)?;
+                .map(|account_record| {
+                    let (_, fence) = store.account_refresh_scope(&account_record.account.id)?;
                     Ok((
-                        record.account.id.clone(),
+                        account_record.account.id.clone(),
                         AccountRefreshState {
                             models: RefreshStatus::from_evidence(
                                 self.refresh
                                     .freshness(&fence.identity(), RefreshKind::Models),
-                                !record.effective_models().is_empty(),
+                                !account_record.effective_models().is_empty(),
                             ),
                             quota: RefreshStatus::from_evidence(
                                 self.refresh
                                     .freshness(&fence.identity(), RefreshKind::Quota),
-                                record.account.quota.updated_at_ms.is_some(),
+                                account_record.account.quota.updated_at_ms.is_some(),
                             ),
                         },
                     ))
@@ -416,12 +422,15 @@ pub(super) fn account_secret_available(
     secrets.contains(&secret_ref)
 }
 
-fn warning_code(code: &str, id: &str) -> String {
-    let id = id.trim();
-    let redacted = if id.chars().count() <= 12 {
-        id.to_string()
+fn warning_code(code: &str, identifier: &str) -> String {
+    let normalized_identifier = identifier.trim();
+    let redacted = if normalized_identifier.chars().count() <= 12 {
+        normalized_identifier.to_string()
     } else {
-        format!("{}...", id.chars().take(8).collect::<String>())
+        format!(
+            "{}...",
+            normalized_identifier.chars().take(8).collect::<String>()
+        )
     };
     format!("{code}:{redacted}")
 }

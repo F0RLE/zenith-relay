@@ -43,46 +43,52 @@ pub(super) fn find_existing_account<'a>(
 }
 
 pub(super) fn preserve_existing_settings(
-    next: &mut LocalAccountRecord,
-    current: &LocalAccountRecord,
+    account_to_update: &mut LocalAccountRecord,
+    existing_account: &LocalAccountRecord,
 ) {
-    next.account.id = current.account.id.clone();
-    next.account.label = current.account.label.clone();
-    next.account.tags = current.account.tags.clone();
-    next.account.enabled = current.account.enabled;
-    next.account.in_pool = current.account.in_pool;
-    next.account.draining = current.account.draining;
-    next.account.created_at_ms = current.account.created_at_ms;
-    next.account.last_used_at_ms = current.account.last_used_at_ms;
-    next.account.quota = current.account.quota.clone();
-    next.purchase_cost_micro_usd = current.purchase_cost_micro_usd;
-    next.remote_location = current.remote_location.clone();
-    let fresh_models = std::mem::take(&mut next.models);
+    account_to_update.account.id = existing_account.account.id.clone();
+    account_to_update.account.label = existing_account.account.label.clone();
+    account_to_update.account.tags = existing_account.account.tags.clone();
+    account_to_update.account.enabled = existing_account.account.enabled;
+    account_to_update.account.in_pool = existing_account.account.in_pool;
+    account_to_update.account.draining = existing_account.account.draining;
+    account_to_update.account.created_at_ms = existing_account.account.created_at_ms;
+    account_to_update.account.last_used_at_ms = existing_account.account.last_used_at_ms;
+    account_to_update.account.quota = existing_account.account.quota.clone();
+    account_to_update.purchase_cost_micro_usd = existing_account.purchase_cost_micro_usd;
+    account_to_update.remote_location = existing_account.remote_location.clone();
+    let fresh_models = std::mem::take(&mut account_to_update.models);
     // Some([]) is not a live catalog and must not hide models already shown.
-    let fresh_discovered_models = next
+    let fresh_discovered_models = account_to_update
         .discovered_models
         .take()
         .filter(|models| !models.is_empty());
-    next.models = current.models.clone();
-    next.discovered_models = fresh_discovered_models.or_else(|| {
+    account_to_update.models = existing_account.models.clone();
+    account_to_update.discovered_models = fresh_discovered_models.or_else(|| {
         if fresh_models.is_empty() {
-            current.discovered_models.clone()
+            existing_account.discovered_models.clone()
         } else {
             Some(fresh_models)
         }
     });
-    if next.account.subscription.plan_type.is_none() {
-        next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
+    if account_to_update.account.subscription.plan_type.is_none() {
+        account_to_update.account.subscription.plan_type =
+            existing_account.account.subscription.plan_type.clone();
     }
-    if next.account.subscription.active_until_ms.is_none()
-        && current.account.subscription.status != SubscriptionStatus::Expired
+    if account_to_update
+        .account
+        .subscription
+        .active_until_ms
+        .is_none()
+        && existing_account.account.subscription.status != SubscriptionStatus::Expired
     {
-        next.account.subscription.active_until_ms = current.account.subscription.active_until_ms;
+        account_to_update.account.subscription.active_until_ms =
+            existing_account.account.subscription.active_until_ms;
     }
-    next.allowed_models = current.allowed_models.clone();
-    next.excluded_models = current.excluded_models.clone();
-    next.priority = current.priority;
-    next.weight = current.weight;
+    account_to_update.allowed_models = existing_account.allowed_models.clone();
+    account_to_update.excluded_models = existing_account.excluded_models.clone();
+    account_to_update.priority = existing_account.priority;
+    account_to_update.weight = existing_account.weight;
 }
 
 pub(super) fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModelIssue {
@@ -94,18 +100,21 @@ pub(super) fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModel
     }
 }
 
-pub(super) fn apply_initial_model_issue(record: &mut LocalAccountRecord, issue: InitialModelIssue) {
-    record.account.last_error_code = Some(issue.code.to_string());
+pub(super) fn apply_initial_model_issue(
+    account_record: &mut LocalAccountRecord,
+    issue: InitialModelIssue,
+) {
+    account_record.account.last_error_code = Some(issue.code.to_string());
     if issue.auth_error {
-        record.account.auth_state = AccountAuthState::Error;
-        record.account.health = AccountHealthState::Unhealthy;
+        account_record.account.auth_state = AccountAuthState::Error;
+        account_record.account.health = AccountHealthState::Unhealthy;
     } else if issue.blocked {
-        record.account.health = AccountHealthState::Blocked;
+        account_record.account.health = AccountHealthState::Blocked;
     } else if !matches!(
-        record.account.health,
+        account_record.account.health,
         AccountHealthState::Blocked | AccountHealthState::Unhealthy
     ) {
-        record.account.health = if issue.retryable {
+        account_record.account.health = if issue.retryable {
             AccountHealthState::Degraded
         } else {
             AccountHealthState::Unhealthy

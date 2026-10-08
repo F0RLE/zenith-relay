@@ -32,27 +32,30 @@ pub(super) struct SnapshotPayload {
 }
 
 pub(super) fn load_payload(
-    record: &SnapshotRecord,
+    snapshot_record: &SnapshotRecord,
     secrets: &impl SnapshotSecrets,
 ) -> Result<SnapshotPayload> {
-    let content = secrets.load(&record.payload_secret_ref)?.ok_or_else(|| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT snapshot payload is missing",
-        )
-    })?;
-    let payload: SnapshotPayload = serde_json::from_str(&content).map_err(io::invalid_data)?;
-    if payload.version != PAYLOAD_VERSION {
+    let content = secrets
+        .load(&snapshot_record.payload_secret_ref)?
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT snapshot payload is missing",
+            )
+        })?;
+    let snapshot_payload: SnapshotPayload =
+        serde_json::from_str(&content).map_err(io::invalid_data)?;
+    if snapshot_payload.version != PAYLOAD_VERSION {
         return Err(LocalPoolError::new(
             ErrorCode::UnsupportedSchema,
             "ChatGPT snapshot payload uses an unsupported version",
         ));
     }
     validate_profile_content(&UserProfileSnapshot {
-        config: payload.config.clone(),
-        auth: payload.auth.clone(),
+        config: snapshot_payload.config.clone(),
+        auth: snapshot_payload.auth.clone(),
     })?;
-    Ok(payload)
+    Ok(snapshot_payload)
 }
 
 pub(super) fn read_record(path: &Path) -> Result<SnapshotRecord> {
@@ -66,16 +69,16 @@ pub(super) fn read_record(path: &Path) -> Result<SnapshotRecord> {
     serde_json::from_str(content).map_err(io::invalid_data)
 }
 
-pub(super) fn validate_record(record: &SnapshotRecord, expected_id: &str) -> Result<()> {
-    let id = io::parse_id(&record.id)?;
-    if record.version != SNAPSHOT_VERSION
-        || id != expected_id
-        || record.name != normalize_name(&record.name)?
-        || record.profile_dir.trim().is_empty()
-        || !Path::new(&record.profile_dir).is_absolute()
-        || record.profile_dir.chars().any(char::is_control)
-        || record.created_at_ms == 0
-        || record.payload_secret_ref != io::payload_secret_ref(&id)
+pub(super) fn validate_record(snapshot_record: &SnapshotRecord, expected_id: &str) -> Result<()> {
+    let snapshot_id = io::parse_snapshot_id(&snapshot_record.id)?;
+    if snapshot_record.version != SNAPSHOT_VERSION
+        || snapshot_id != expected_id
+        || snapshot_record.name != normalize_name(&snapshot_record.name)?
+        || snapshot_record.profile_dir.trim().is_empty()
+        || !Path::new(&snapshot_record.profile_dir).is_absolute()
+        || snapshot_record.profile_dir.chars().any(char::is_control)
+        || snapshot_record.created_at_ms == 0
+        || snapshot_record.payload_secret_ref != io::payload_secret_ref(&snapshot_id)
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -89,11 +92,11 @@ pub(super) fn validate_profile_content(snapshot: &UserProfileSnapshot) -> Result
     if snapshot
         .config
         .as_ref()
-        .is_some_and(|value| value.len() > MAX_PROFILE_FILE_BYTES)
+        .is_some_and(|profile_content| profile_content.len() > MAX_PROFILE_FILE_BYTES)
         || snapshot
             .auth
             .as_ref()
-            .is_some_and(|value| value.len() > MAX_PROFILE_FILE_BYTES)
+            .is_some_and(|profile_content| profile_content.len() > MAX_PROFILE_FILE_BYTES)
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -103,28 +106,28 @@ pub(super) fn validate_profile_content(snapshot: &UserProfileSnapshot) -> Result
     Ok(())
 }
 
-pub(super) fn normalize_name(value: &str) -> Result<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.chars().count() > MAX_NAME_CHARS
-        || value.chars().any(char::is_control)
+pub(super) fn normalize_name(snapshot_name: &str) -> Result<String> {
+    let snapshot_name = snapshot_name.trim();
+    if snapshot_name.is_empty()
+        || snapshot_name.chars().count() > MAX_NAME_CHARS
+        || snapshot_name.chars().any(char::is_control)
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "ChatGPT snapshot name is invalid",
         ));
     }
-    Ok(value.to_string())
+    Ok(snapshot_name.to_string())
 }
 
-pub(super) fn summary(record: &SnapshotRecord) -> ProfileSnapshotSummary {
+pub(super) fn summary(snapshot_record: &SnapshotRecord) -> ProfileSnapshotSummary {
     ProfileSnapshotSummary {
-        id: record.id.clone(),
-        name: record.name.clone(),
-        profile_dir: codex::portable_path_value(&record.profile_dir),
-        created_at_ms: record.created_at_ms,
-        config_available: record.config_available,
-        auth_available: record.auth_available,
-        is_original: record.is_original,
+        id: snapshot_record.id.clone(),
+        name: snapshot_record.name.clone(),
+        profile_dir: codex::portable_path_value(&snapshot_record.profile_dir),
+        created_at_ms: snapshot_record.created_at_ms,
+        config_available: snapshot_record.config_available,
+        auth_available: snapshot_record.auth_available,
+        is_original: snapshot_record.is_original,
     }
 }

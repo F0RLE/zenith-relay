@@ -204,15 +204,15 @@ async fn read_request(stream: &mut TcpStream) -> Result<CallbackRequest, Request
 }
 
 pub(super) fn callback_language(headers: &str) -> CallbackLanguage {
-    let Some(value) = headers.lines().find_map(|line| {
+    let Some(accept_language_header) = headers.lines().find_map(|line| {
         line.split_once(':')
             .filter(|(name, _)| name.eq_ignore_ascii_case("accept-language"))
-            .map(|(_, value)| value)
+            .map(|(_, header_value)| header_value)
     }) else {
         return CallbackLanguage::English;
     };
 
-    for preference in value.split(',') {
+    for preference in accept_language_header.split(',') {
         match preference
             .split(';')
             .next()
@@ -256,8 +256,12 @@ fn callback_url(pending: &OAuthPendingSession, target: &str) -> Result<String, O
     Ok(callback_url.to_string())
 }
 
-async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> io::Result<()> {
-    write_http_response(stream, status, "text/plain; charset=utf-8", body).await
+async fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    response_body: &str,
+) -> io::Result<()> {
+    write_http_response(stream, status, "text/plain; charset=utf-8", response_body).await
 }
 
 async fn write_callback_success(
@@ -277,7 +281,7 @@ async fn write_http_response(
     stream: &mut TcpStream,
     status: u16,
     content_type: &str,
-    body: &str,
+    response_body: &str,
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -286,8 +290,8 @@ async fn write_http_response(
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+        response_body.len()
     );
     stream.write_all(response.as_bytes()).await?;
     stream.shutdown().await

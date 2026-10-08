@@ -166,7 +166,7 @@ async fn missing_credentials_do_not_erase_a_same_scope_cached_observation() {
                 let observation = observation.clone();
                 Box::pin(async move {
                     RefreshResult {
-                        value: Ok(RefreshRead::SourceStats(observation)),
+                        refresh_value: Ok(RefreshRead::SourceStats(observation)),
                         outcome: RefreshOutcome::Success,
                     }
                 })

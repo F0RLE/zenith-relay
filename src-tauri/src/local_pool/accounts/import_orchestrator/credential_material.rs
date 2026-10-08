@@ -186,7 +186,7 @@ impl ImportedCredentialMaterial {
 }
 
 pub(in crate::local_pool::accounts) async fn build_import_credential_material(
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     issued_at_ms: u64,
     plan_hint: Option<&str>,
     subscription_active_until_hint: Option<u64>,
@@ -204,15 +204,15 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             "ChatGPT account lookup endpoint is invalid",
         ));
     }
-    let email = item.email().map(str::to_string);
-    let phone = item.phone().map(str::to_string);
-    let password = item.password().map(str::to_string);
-    let totp_secret = item.totp_secret().map(str::to_string);
-    let item_account_id = item.account_id.clone();
-    let item_user_id = item.chatgpt_user_id.clone();
-    let organization_id = item.organization_id.clone();
-    let item_account_is_fedramp = item.account_is_fedramp;
-    let secrets = item.into_secrets();
+    let email = import_item.email().map(str::to_string);
+    let phone = import_item.phone().map(str::to_string);
+    let password = import_item.password().map(str::to_string);
+    let totp_secret = import_item.totp_secret().map(str::to_string);
+    let item_account_id = import_item.account_id.clone();
+    let item_user_id = import_item.chatgpt_user_id.clone();
+    let organization_id = import_item.organization_id.clone();
+    let item_account_is_fedramp = import_item.account_is_fedramp;
+    let secrets = import_item.into_secrets();
     let original_refresh = secrets.refresh_token().map(str::to_string);
     let imported_identity = super::imported_identity(secrets.id_token(), secrets.access_token());
     let account_id_hints = account_id_hints(item_account_id, &imported_identity)?;

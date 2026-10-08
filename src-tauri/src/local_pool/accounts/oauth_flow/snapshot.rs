@@ -16,19 +16,19 @@ pub(super) fn load_snapshots(root: &Path) -> Result<Vec<PendingSnapshot>, OAuthF
     let directory = pending_directory(root);
     ensure_pending_directory(&directory)?;
     let mut snapshots = Vec::new();
-    for entry in fs::read_dir(&directory).map_err(|_| snapshot_io())? {
-        let entry = entry.map_err(|_| snapshot_io())?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("tmp") {
+    for directory_entry in fs::read_dir(&directory).map_err(|_| snapshot_io())? {
+        let directory_entry = directory_entry.map_err(|_| snapshot_io())?;
+        let path = directory_entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") {
             remove_snapshot(&path).map_err(|_| recovery_required())?;
             continue;
         }
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             return Err(recovery_required());
         }
         let login_id = path
             .file_stem()
-            .and_then(|value| value.to_str())
+            .and_then(|file_stem| file_stem.to_str())
             .ok_or_else(recovery_required)?;
         let login_id = validate_login_id(login_id).map_err(|_| recovery_required())?;
         snapshots.push(read_snapshot(root, &login_id)?);

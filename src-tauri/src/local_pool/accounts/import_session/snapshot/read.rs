@@ -171,19 +171,19 @@ pub(in crate::local_pool::accounts::import_session) fn validate_snapshot(
 pub(in crate::local_pool::accounts::import_session) fn validate_preview(
     preview: &Value,
 ) -> Result<(), ImportSessionError> {
-    let object = preview.as_object().ok_or_else(|| {
+    let preview_object = preview.as_object().ok_or_else(|| {
         ImportSessionError::new(
             ImportSessionErrorCode::SnapshotInvalid,
             "import preview snapshot must be an object",
         )
     })?;
-    if !object.contains_key("format") || !object.contains_key("rows") {
+    if !preview_object.contains_key("format") || !preview_object.contains_key("rows") {
         return Err(ImportSessionError::new(
             ImportSessionErrorCode::SnapshotInvalid,
             "import preview snapshot is incomplete",
         ));
     }
-    let rows = object
+    let rows = preview_object
         .get("rows")
         .and_then(Value::as_array)
         .ok_or_else(|| {
@@ -201,7 +201,7 @@ pub(in crate::local_pool::accounts::import_session) fn validate_preview(
 
     let mut stack = vec![(preview, 1usize)];
     let mut nodes = 0usize;
-    while let Some((value, depth)) = stack.pop() {
+    while let Some((snapshot_value, depth)) = stack.pop() {
         nodes = nodes.saturating_add(1);
         if depth > MAX_SNAPSHOT_DEPTH || nodes > MAX_SNAPSHOT_NODES {
             return Err(ImportSessionError::new(
@@ -209,22 +209,26 @@ pub(in crate::local_pool::accounts::import_session) fn validate_preview(
                 "import preview snapshot exceeds safety limits",
             ));
         }
-        match value {
-            Value::Object(values) => {
-                for (key, value) in values {
+        match snapshot_value {
+            Value::Object(object_values) => {
+                for (key, field_value) in object_values {
                     if sensitive_snapshot_key(key) {
                         return Err(ImportSessionError::new(
                             ImportSessionErrorCode::SnapshotUnsafe,
                             "import preview snapshot contains credential fields",
                         ));
                     }
-                    stack.push((value, depth + 1));
+                    stack.push((field_value, depth + 1));
                 }
             }
-            Value::Array(values) => {
-                stack.extend(values.iter().map(|value| (value, depth + 1)));
+            Value::Array(array_values) => {
+                stack.extend(
+                    array_values
+                        .iter()
+                        .map(|array_value| (array_value, depth + 1)),
+                );
             }
-            Value::String(value) if value.len() > MAX_SNAPSHOT_STRING_BYTES => {
+            Value::String(string_value) if string_value.len() > MAX_SNAPSHOT_STRING_BYTES => {
                 return Err(ImportSessionError::new(
                     ImportSessionErrorCode::SnapshotUnsafe,
                     "import preview snapshot contains an oversized value",

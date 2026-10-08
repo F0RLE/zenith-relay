@@ -72,8 +72,8 @@ pub(in crate::local_pool::commands::opencode) fn apply_source(
         let mut configured = model_config_ids(&models, metadata);
         // Direct connections cannot execute Relay translations. The SDK must
         // speak the exact native protocol declared by this source.
-        for value in configured.values_mut() {
-            set_variants(value, protocol);
+        for provider_model_config in configured.values_mut() {
+            set_variants(provider_model_config, protocol);
         }
         let generated = provider_with_models(&source.base_url, secret, configured, protocol)?;
         generated_groups.push(generated);

@@ -50,9 +50,9 @@ pub struct OpenCodeConnectionResult {
 }
 
 fn config_status_for(state: &DesktopState) -> Result<OpenCodeConfigStatus, LocalPoolError> {
-    let path = default_opencode_config_path();
-    let config = read_config(&path)?;
-    let providers = config
+    let config_path = default_opencode_config_path();
+    let config_document = read_config(&config_path)?;
+    let providers = config_document
         .get("provider")
         .and_then(Value::as_object)
         .into_iter()
@@ -61,7 +61,7 @@ fn config_status_for(state: &DesktopState) -> Result<OpenCodeConfigStatus, Local
         .collect::<Vec<_>>();
     let model_count = providers
         .iter()
-        .filter_map(|(_, value)| value.get("models"))
+        .filter_map(|(_, provider_config)| provider_config.get("models"))
         .filter_map(Value::as_object)
         .map(Map::len)
         .sum();
@@ -72,7 +72,7 @@ fn config_status_for(state: &DesktopState) -> Result<OpenCodeConfigStatus, Local
         has_backup,
         backup_created_at_ms: backup_created_at_ms(state),
         backup_name: has_backup.then(|| backup_name(state)).flatten(),
-        path: path.display().to_string(),
+        path: config_path.display().to_string(),
     })
 }
 
@@ -92,8 +92,13 @@ pub async fn create_opencode_snapshot(
     name: String,
 ) -> Result<bool, CommandError> {
     let _mutation = state.setup_guard().await;
-    let name = normalize_snapshot_name(&name).map_err(CommandError::from)?;
-    backup_original_config(&state, &default_opencode_config_path(), Some(&name)).map_err(Into::into)
+    let normalized_snapshot_name = normalize_snapshot_name(&name).map_err(CommandError::from)?;
+    backup_original_config(
+        &state,
+        &default_opencode_config_path(),
+        Some(&normalized_snapshot_name),
+    )
+    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -101,27 +106,32 @@ pub async fn connect_opencode_to_local_gateway(
     state: State<'_, DesktopState>,
 ) -> Result<OpenCodeConnectionResult, CommandError> {
     let _mutation = state.setup_guard().await;
-    let path = default_opencode_config_path();
+    let config_path = default_opencode_config_path();
     let prepared = super::state::build_local_runtime_state(&state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
-    let key = super::pool::ensure_system_gateway_key(&state)?;
-    if !key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
+    let gateway_key = super::pool::ensure_system_gateway_key(&state)?;
+    if !gateway_key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "managed pool is not available for any enabled candidate",
         )
         .into());
     }
-    let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
-    let models = model_ids(&prepared.gateway.models);
-    let mut config = read_config(&path)?;
-    let backup_created = backup_original_config(&state, &path, None)?;
-    apply_managed_provider(&mut config, &prepared.gateway.base_url, &secret, &models)?;
-    write_config(&path, &config)?;
+    let gateway_secret = super::pool::ensure_local_gateway_key_secret(&gateway_key)?;
+    let model_ids = model_ids(&prepared.gateway.models);
+    let mut config_document = read_config(&config_path)?;
+    let backup_created = backup_original_config(&state, &config_path, None)?;
+    apply_managed_provider(
+        &mut config_document,
+        &prepared.gateway.base_url,
+        &gateway_secret,
+        &model_ids,
+    )?;
+    write_config(&config_path, &config_document)?;
     Ok(OpenCodeConnectionResult {
-        path: path.display().to_string(),
-        model_count: models.len(),
+        path: config_path.display().to_string(),
+        model_count: model_ids.len(),
         backup_created,
     })
 }
@@ -136,32 +146,32 @@ pub async fn launch_opencode_source(
     state: State<'_, DesktopState>,
 ) -> Result<OpenCodeConnectionResult, CommandError> {
     let _mutation = state.setup_guard().await;
-    let source = state
+    let source_record = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    if !source.enabled {
+    if !source_record.enabled {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "source must be enabled before launching OpenCode",
         )
         .into());
     }
-    let models = source_opencode_models(&source)?;
-    let secret = secret_store::load(&source.secret_ref)?
+    let models = source_opencode_models(&source_record)?;
+    let secret = secret_store::load(&source_record.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    let path = default_opencode_config_path();
-    let mut config = read_config(&path)?;
-    let backup_created = backup_original_config(&state, &path, None)?;
+    let config_path = default_opencode_config_path();
+    let mut config_document = read_config(&config_path)?;
+    let backup_created = backup_original_config(&state, &config_path, None)?;
     protocols::apply_source(
-        &mut config,
-        &source,
+        &mut config_document,
+        &source_record,
         &secret,
         &state.model_metadata_catalog(),
         true,
     )?;
-    write_config(&path, &config)?;
+    write_config(&config_path, &config_document)?;
     restart_opencode().map_err(|error| {
         LocalPoolError::new(
             ErrorCode::Io,
@@ -169,7 +179,7 @@ pub async fn launch_opencode_source(
         )
     })?;
     Ok(OpenCodeConnectionResult {
-        path: path.display().to_string(),
+        path: config_path.display().to_string(),
         model_count: models.len(),
         backup_created,
     })
@@ -213,31 +223,31 @@ pub fn restart_opencode_app() -> Result<(), CommandError> {
 #[tauri::command]
 pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<bool, CommandError> {
     let _mutation = state.setup_guard().await;
-    let path = default_opencode_config_path();
+    let config_path = default_opencode_config_path();
     let backup = backup_path(&state);
     if backup.exists() {
-        if !current_config_is_managed(&path)? {
+        if !current_config_is_managed(&config_path)? {
             return Err(LocalPoolError::new(
                 ErrorCode::ProfileRestoreBlocked,
                 "OpenCode config was changed outside Relay; restore was blocked",
             )
             .into());
         }
-        restore_original_config_preserving_user_changes(&backup, &path)?;
+        restore_original_config_preserving_user_changes(&backup, &config_path)?;
         fs::remove_file(&backup)
             .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
         let _ = fs::remove_file(backup_name_path(&state));
         return Ok(true);
     }
     if missing_marker_path(&state).exists() {
-        let mut config = read_config(&path)?;
-        let managed = remove_managed_configuration(&mut config);
+        let mut config_document = read_config(&config_path)?;
+        let managed = remove_managed_configuration(&mut config_document);
         if managed {
-            if config.is_empty() {
-                fs::remove_file(&path)
+            if config_document.is_empty() {
+                fs::remove_file(&config_path)
                     .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
             } else {
-                write_config(&path, &config)?;
+                write_config(&config_path, &config_document)?;
             }
         }
         fs::remove_file(missing_marker_path(&state))

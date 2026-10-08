@@ -14,34 +14,34 @@ const AUTH_FIELDS: &[&str] = &[
 /// Credentials are mutually exclusive; extension fields are not credentials.
 /// Callers must verify credential ownership before restoring a saved login.
 pub(in crate::local_pool::profiles::codex) fn merge_auth(
-    current: Option<&str>,
+    existing_auth_text: Option<&str>,
     credential: Option<&str>,
 ) -> Result<Option<String>> {
-    let mut current = auth_object(current)?;
+    let mut existing_auth = auth_object(existing_auth_text)?;
     let target = auth_object(credential)?;
-    let extensions: serde_json::Map<_, _> = current
+    let extensions: serde_json::Map<_, _> = existing_auth
         .iter()
         .filter(|(key, _)| !AUTH_FIELDS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .map(|(field_name, field_value)| (field_name.clone(), field_value.clone()))
         .collect();
     let target_extensions: serde_json::Map<_, _> = target
         .iter()
         .filter(|(key, _)| !AUTH_FIELDS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .map(|(field_name, field_value)| (field_name.clone(), field_value.clone()))
         .collect();
     if extensions == target_extensions {
         return Ok(credential.map(str::to_owned));
     }
     for key in AUTH_FIELDS {
-        current.remove(*key);
-        if let Some(value) = target.get(*key) {
-            current.insert((*key).to_owned(), value.clone());
+        existing_auth.remove(*key);
+        if let Some(field_value) = target.get(*key) {
+            existing_auth.insert((*key).to_owned(), field_value.clone());
         }
     }
-    if current.is_empty() && credential.is_none() {
+    if existing_auth.is_empty() && credential.is_none() {
         return Ok(None);
     }
-    serde_json::to_string_pretty(&current)
+    serde_json::to_string_pretty(&existing_auth)
         .map(|text| Some(format!("{text}\n")))
         .map_err(LocalPoolError::invalid_state)
 }
@@ -52,7 +52,7 @@ fn auth_object(content: Option<&str>) -> Result<serde_json::Map<String, Value>> 
     };
     serde_json::from_str::<Value>(content)
         .ok()
-        .and_then(|value| value.as_object().cloned())
+        .and_then(|auth_document| auth_document.as_object().cloned())
         .ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
@@ -67,15 +67,15 @@ mod tests {
 
     #[test]
     fn auth_switch_preserves_extensions_but_not_old_tokens() {
-        let current = r#"{"tokens":{"access_token":"old"},"extension":{"flag":true}}"#;
-        let next = merge_auth(
-            Some(current),
+        let previous_auth_json = r#"{"tokens":{"access_token":"old"},"extension":{"flag":true}}"#;
+        let switched_auth = merge_auth(
+            Some(previous_auth_json),
             Some(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test"}"#),
         )
         .unwrap()
         .unwrap();
-        let next: Value = serde_json::from_str(&next).unwrap();
-        assert!(next.get("tokens").is_none());
-        assert_eq!(next["extension"]["flag"], true);
+        let switched_auth: Value = serde_json::from_str(&switched_auth).unwrap();
+        assert!(switched_auth.get("tokens").is_none());
+        assert_eq!(switched_auth["extension"]["flag"], true);
     }
 }

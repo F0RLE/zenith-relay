@@ -287,18 +287,18 @@ fn persist_usage_observation(
             key.last_used_at = Some(observed_at.to_string());
         }
         let mut coordinator = wake.lock().map_err(|_| ())?;
-        let mut next = coordinator.clone();
+        let mut updated_coordinator = coordinator.clone();
         let mut automations = store.automations().clone();
         let natural_use = if event.success {
-            next.mark_natural_use_for_account(account_id, observed_at_ms)
+            updated_coordinator.mark_natural_use_for_account(account_id, observed_at_ms)
         } else {
             0
         };
-        automations.state = next.state().clone();
+        automations.state = updated_coordinator.state().clone();
         store
             .replace_account_state(accounts, keys, automations)
             .map_err(|_| ())?;
-        *coordinator = next;
+        *coordinator = updated_coordinator;
         let (_, fence) = store.account_refresh_scope(account_id).map_err(|_| ())?;
         Ok((
             natural_use,

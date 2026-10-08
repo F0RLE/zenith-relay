@@ -21,12 +21,16 @@ pub(super) const GROUPS: [(WireApi, &str, &str); 4] = [
     (WireApi::Gemini, "zenith-relay-gemini", "@ai-sdk/google"),
 ];
 
-pub(super) fn managed_id(id: &str) -> bool {
-    GROUPS.iter().any(|(_, candidate, _)| id == *candidate)
+pub(super) fn managed_id(provider_id: &str) -> bool {
+    GROUPS
+        .iter()
+        .any(|(_, candidate_provider_id, _)| provider_id == *candidate_provider_id)
 }
 
 pub(super) fn managed_model(model: &str) -> bool {
-    model.split_once('/').is_some_and(|(id, _)| managed_id(id))
+    model
+        .split_once('/')
+        .is_some_and(|(provider_id, _)| managed_id(provider_id))
 }
 
 fn supports(model: &ModelSummary, protocol: WireApi) -> bool {
@@ -73,15 +77,18 @@ pub(super) fn provider(
     protocol: WireApi,
 ) -> Result<Value, LocalPoolError> {
     let mut configured = model_config(models);
-    for (id, value) in &mut configured {
-        let model = models.iter().find(|model| model.id == *id).unwrap();
-        if !model.protocol_routes.is_empty() {
-            let routes = model
+    for (model_id, provider_model_config) in &mut configured {
+        let model_record = models.iter().find(|model| model.id == *model_id).unwrap();
+        if !model_record.protocol_routes.is_empty() {
+            let routes = model_record
                 .protocol_routes
                 .iter()
                 .filter(|route| route.client_wire_api == protocol)
                 .collect::<Vec<_>>();
-            if let Some(variants) = value.get_mut("variants").and_then(Value::as_object_mut) {
+            if let Some(variants) = provider_model_config
+                .get_mut("variants")
+                .and_then(Value::as_object_mut)
+            {
                 variants.retain(|effort, _| {
                     routes
                         .iter()
@@ -99,11 +106,11 @@ pub(super) fn provider(
                     route.features.get(&feature)
                         == Some(&zenith_relay_core::CapabilityStatus::Unsupported)
                 }) {
-                    value[key] = false.into();
+                    provider_model_config[key] = false.into();
                 }
             }
         }
-        set_variants(value, protocol);
+        set_variants(provider_model_config, protocol);
     }
     provider_with_models(base, secret, configured, protocol)
 }

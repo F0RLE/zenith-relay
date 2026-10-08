@@ -22,17 +22,17 @@ pub(in crate::local_pool::accounts::import_orchestrator) fn hinted_import_proxy(
     state: &DesktopState,
     credential_store: &CredentialStore<NativeSecretBackend>,
     settings: &GatewaySettings,
-    item: &ParsedImportItem,
+    import_item: &ParsedImportItem,
 ) -> ItemResult<Option<ProxyConfig>> {
-    let Some(provider_account_id) = item.account_id.as_deref() else {
+    let Some(provider_account_id) = import_item.account_id.as_deref() else {
         return Ok(None);
     };
     let Some(existing) = find_existing_account(
         state,
         credential_store,
         provider_account_id,
-        item.chatgpt_user_id.as_deref(),
-        item.email(),
+        import_item.chatgpt_user_id.as_deref(),
+        import_item.email(),
     )?
     else {
         return Ok(None);

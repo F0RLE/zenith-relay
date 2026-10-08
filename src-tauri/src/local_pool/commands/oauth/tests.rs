@@ -229,50 +229,53 @@ fn duplicate_identity_preserves_local_id_and_user_settings() {
         find_existing_account(std::slice::from_ref(&current), &credentials, &identity_hash)
             .unwrap()
             .unwrap();
-    let mut next = account("account_existing", "provider-account", "new-refresh");
-    next.models = vec!["new-model".into()];
-    preserve_existing_settings(&mut next, existing);
+    let mut updated_account = account("account_existing", "provider-account", "new-refresh");
+    updated_account.models = vec!["new-model".into()];
+    preserve_existing_settings(&mut updated_account, existing);
 
-    assert_eq!(next.account.id, "account_existing");
-    assert_eq!(next.account.label, "My Codex");
+    assert_eq!(updated_account.account.id, "account_existing");
+    assert_eq!(updated_account.account.label, "My Codex");
     assert_eq!(
-        next.account.identity.identity_hash,
+        updated_account.account.identity.identity_hash,
         current.account.identity.identity_hash
     );
     assert_ne!(
-        next.account.identity.stable_index,
+        updated_account.account.identity.stable_index,
         current.account.identity.stable_index
     );
-    assert_eq!(next.account.tags, current.account.tags);
-    assert!(!next.account.enabled);
-    assert!(next.account.in_pool);
-    assert!(next.account.draining);
-    assert_eq!(next.account.created_at_ms, 7);
-    assert_eq!(next.account.last_used_at_ms, Some(8));
-    assert_eq!(next.allowed_models, vec!["allowed"]);
-    assert_eq!(next.excluded_models, vec!["excluded"]);
-    assert_eq!(next.priority, -10);
-    assert_eq!(next.weight, 4);
-    assert_eq!(next.purchase_cost_micro_usd, Some(42_000_000));
-    assert!(next.cooldowns.is_empty());
-    assert_eq!(next.consecutive_failures, 0);
-    assert_eq!(next.models, vec!["gpt-test"]);
-    assert_eq!(next.discovered_models, Some(vec!["new-model".into()]));
-    assert_eq!(next.effective_models(), ["new-model"]);
+    assert_eq!(updated_account.account.tags, current.account.tags);
+    assert!(!updated_account.account.enabled);
+    assert!(updated_account.account.in_pool);
+    assert!(updated_account.account.draining);
+    assert_eq!(updated_account.account.created_at_ms, 7);
+    assert_eq!(updated_account.account.last_used_at_ms, Some(8));
+    assert_eq!(updated_account.allowed_models, vec!["allowed"]);
+    assert_eq!(updated_account.excluded_models, vec!["excluded"]);
+    assert_eq!(updated_account.priority, -10);
+    assert_eq!(updated_account.weight, 4);
+    assert_eq!(updated_account.purchase_cost_micro_usd, Some(42_000_000));
+    assert!(updated_account.cooldowns.is_empty());
+    assert_eq!(updated_account.consecutive_failures, 0);
+    assert_eq!(updated_account.models, vec!["gpt-test"]);
+    assert_eq!(
+        updated_account.discovered_models,
+        Some(vec!["new-model".into()])
+    );
+    assert_eq!(updated_account.effective_models(), ["new-model"]);
 }
 
 #[test]
 fn duplicate_identity_keeps_models_when_the_new_snapshot_is_empty() {
     let current = account("account_empty_models", "provider-account", "old-refresh");
-    let mut next = account("account_empty_models", "provider-account", "new-refresh");
-    next.models.clear();
-    next.discovered_models = Some(Vec::new());
+    let mut updated_account = account("account_empty_models", "provider-account", "new-refresh");
+    updated_account.models.clear();
+    updated_account.discovered_models = Some(Vec::new());
 
-    preserve_existing_settings(&mut next, &current);
+    preserve_existing_settings(&mut updated_account, &current);
 
-    assert_eq!(next.models, current.models);
-    assert!(next.discovered_models.is_none());
-    assert_eq!(next.effective_models(), ["gpt-test"]);
+    assert_eq!(updated_account.models, current.models);
+    assert!(updated_account.discovered_models.is_none());
+    assert_eq!(updated_account.effective_models(), ["gpt-test"]);
 }
 
 #[test]
@@ -286,12 +289,12 @@ fn reauth_does_not_restore_an_expired_subscription_date_without_new_metadata() {
             observed_at_ms: 2_000,
         },
     );
-    let mut next = account("account_expired", "provider-account", "new-refresh");
-    preserve_existing_settings(&mut next, &current);
+    let mut updated_account = account("account_expired", "provider-account", "new-refresh");
+    preserve_existing_settings(&mut updated_account, &current);
 
-    assert_eq!(next.account.subscription.active_until_ms, None);
+    assert_eq!(updated_account.account.subscription.active_until_ms, None);
     assert_eq!(
-        next.account.subscription.status,
+        updated_account.account.subscription.status,
         zenith_relay_core::quota::SubscriptionStatus::Active
     );
 }

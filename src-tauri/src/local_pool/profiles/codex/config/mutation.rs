@@ -138,7 +138,7 @@ pub(in crate::local_pool::profiles::codex) fn enable_show_ultra_picker(document:
     document["desktop"][DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY] = value(true);
 }
 
-fn restore_show_ultra_picker(document: &mut DocumentMut, previous: Option<bool>) {
+fn restore_show_ultra_picker(document: &mut DocumentMut, previous_picker_setting: Option<bool>) {
     if document.get("desktop").is_some()
         && document
             .get("desktop")
@@ -147,7 +147,7 @@ fn restore_show_ultra_picker(document: &mut DocumentMut, previous: Option<bool>)
     {
         return;
     }
-    match previous {
+    match previous_picker_setting {
         Some(enabled) => {
             if document.get("desktop").is_none() {
                 document["desktop"] = Item::Table(Table::new());
@@ -323,10 +323,10 @@ pub(in crate::local_pool::profiles::codex) fn reasoning_effort_for_attach(
 pub(in crate::local_pool::profiles::codex) fn restore_root_string(
     document: &mut DocumentMut,
     key: &str,
-    previous: Option<&str>,
+    previous_value: Option<&str>,
 ) {
-    match previous {
-        Some(previous) => document[key] = value(previous),
+    match previous_value {
+        Some(previous_value) => document[key] = value(previous_value),
         None => {
             document.remove(key);
         }

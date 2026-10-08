@@ -6,7 +6,7 @@ use rusqlite::{params, TransactionBehavior};
 use std::collections::HashMap;
 
 impl TelemetryDb {
-    pub(crate) fn state_json_values(&self) -> Result<HashMap<String, String>> {
+    pub(crate) fn state_json_entries(&self) -> Result<HashMap<String, String>> {
         let connection = self.connection.lock().map_err(lock_error)?;
         let mut statement = connection
             .prepare("SELECT key, value_json FROM app_state")
@@ -45,36 +45,36 @@ impl TelemetryDb {
         })
     }
 
-    pub(crate) fn replace_state_json(&self, values: &[(&str, String)]) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, &[])
+    pub(crate) fn replace_state_json(&self, state_entries: &[(&str, String)]) -> Result<()> {
+        self.replace_state_json_with_account_purge(state_entries, &[])
     }
 
     pub(crate) fn replace_state_json_and_delete_account_data(
         &self,
-        values: &[(&str, String)],
+        state_entries: &[(&str, String)],
         account_id: &str,
     ) -> Result<()> {
         let account_ids = vec![account_id.to_string()];
-        self.replace_state_json_and_delete_accounts_data(values, &account_ids)
+        self.replace_state_json_and_delete_accounts_data(state_entries, &account_ids)
     }
 
     pub(crate) fn replace_state_json_and_delete_accounts_data(
         &self,
-        values: &[(&str, String)],
+        state_entries: &[(&str, String)],
         account_ids: &[String],
     ) -> Result<()> {
         let account_ids = account_ids.iter().map(String::as_str).collect::<Vec<_>>();
-        self.replace_state_json_with_account_purge(values, &account_ids)
+        self.replace_state_json_with_account_purge(state_entries, &account_ids)
     }
 
     fn replace_state_json_with_account_purge(
         &self,
-        values: &[(&str, String)],
+        state_entries: &[(&str, String)],
         account_ids: &[&str],
     ) -> Result<()> {
-        for (key, value) in values {
+        for (key, state_json) in state_entries {
             validate_state_key(key)?;
-            if value.len() > MAX_STATE_JSON_BYTES {
+            if state_json.len() > MAX_STATE_JSON_BYTES {
                 return Err(LocalPoolError::new(
                     ErrorCode::InvalidState,
                     "local state value is too large",
@@ -85,12 +85,12 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        for (key, value) in values {
+        for (key, state_json) in state_entries {
             transaction
                 .execute(
                     "INSERT INTO app_state(key, value_json) VALUES (?1, ?2)
                      ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-                    params![key, value],
+                    params![key, state_json],
                 )
                 .map_err(db_error)?;
         }

@@ -15,7 +15,7 @@ pub async fn execute_with_runtime(
     request: &WakeExecutionRequest,
 ) -> Result<WakeExecutionMetrics, WakeExecutionFailure> {
     let started = Instant::now();
-    let response = execute_account_wake(
+    let wake_response = execute_account_wake(
         runtime,
         AccountWakeRequest {
             local_key_id: local_key_id.to_string(),
@@ -25,13 +25,13 @@ pub async fn execute_with_runtime(
         },
     )
     .await;
-    let status = response.status();
-    let category = response
+    let status = wake_response.status();
+    let category = wake_response
         .headers()
         .get("x-zenith-relay-error-category")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|header_value| header_value.to_str().ok())
         .map(str::to_string);
-    let response_body = axum::body::to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+    let response_body = axum::body::to_bytes(wake_response.into_body(), MAX_RESPONSE_BYTES)
         .await
         .map_err(|_| {
             WakeExecutionFailure::runtime(
@@ -48,15 +48,16 @@ pub async fn execute_with_runtime(
             elapsed_ms(started),
         ));
     }
-    let value: serde_json::Value = serde_json::from_slice(&response_body).map_err(|_| {
-        WakeExecutionFailure::runtime(
-            WakeExecutionErrorCode::InvalidResponse,
-            false,
-            Some(status.as_u16()),
-            elapsed_ms(started),
-        )
-    })?;
-    let usage = wake_usage(&value);
+    let response_json: serde_json::Value =
+        serde_json::from_slice(&response_body).map_err(|_| {
+            WakeExecutionFailure::runtime(
+                WakeExecutionErrorCode::InvalidResponse,
+                false,
+                Some(status.as_u16()),
+                elapsed_ms(started),
+            )
+        })?;
+    let usage = wake_usage(&response_json);
     Ok(WakeExecutionMetrics {
         http_status: status.as_u16(),
         latency_ms: elapsed_ms(started),
@@ -94,16 +95,18 @@ fn runtime_status_failure(
     WakeExecutionFailure::runtime(code, retryable, Some(status.as_u16()), latency_ms)
 }
 
-fn wake_usage(value: &serde_json::Value) -> Option<&serde_json::Value> {
-    value
+fn wake_usage(response_payload: &serde_json::Value) -> Option<&serde_json::Value> {
+    response_payload
         .get("usage")
-        .or_else(|| value.pointer("/response/usage"))
-        .or_else(|| value.pointer("/response/response/usage"))
-        .or_else(|| value.get("usageMetadata"))
+        .or_else(|| response_payload.pointer("/response/usage"))
+        .or_else(|| response_payload.pointer("/response/response/usage"))
+        .or_else(|| response_payload.get("usageMetadata"))
 }
 
-fn usage_token(usage: &serde_json::Value, names: &[&str]) -> Option<u64> {
-    names
-        .iter()
-        .find_map(|name| usage.get(*name).and_then(serde_json::Value::as_u64))
+fn usage_token(usage_value: &serde_json::Value, token_field_names: &[&str]) -> Option<u64> {
+    token_field_names.iter().find_map(|field_name| {
+        usage_value
+            .get(*field_name)
+            .and_then(serde_json::Value::as_u64)
+    })
 }

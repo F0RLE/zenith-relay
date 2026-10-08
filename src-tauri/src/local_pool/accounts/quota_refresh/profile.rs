@@ -62,7 +62,7 @@ pub(crate) async fn sync_managed_account_profile(
     if identity
         .provider_account_id
         .as_deref()
-        .is_some_and(|value| value != provider_account_id)
+        .is_some_and(|refreshed_account_id| refreshed_account_id != provider_account_id)
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,

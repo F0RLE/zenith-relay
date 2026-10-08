@@ -26,9 +26,11 @@ pub(in crate::local_pool::commands::oauth) fn rollback_completion_before_authori
     let current_account = state.store()?.account(local_account_id).cloned();
     let record_requires_restore = current_account
         .as_ref()
-        .is_some_and(|current| current.matches_rollback_snapshot(attempted_account));
+        .is_some_and(|stored_account| stored_account.matches_rollback_snapshot(attempted_account));
     let record_already_previous = match (previous_account, current_account.as_ref()) {
-        (Some(previous), Some(current)) => current.matches_rollback_snapshot(previous),
+        (Some(previous_account_snapshot), Some(stored_account)) => {
+            stored_account.matches_rollback_snapshot(previous_account_snapshot)
+        }
         (None, None) => true,
         _ => false,
     };
@@ -42,7 +44,9 @@ pub(in crate::local_pool::commands::oauth) fn rollback_completion_before_authori
     }
 
     match previous_credentials {
-        Some(previous) => credentials.save(previous).map_err(credential_error)?,
+        Some(previous_credentials_snapshot) => credentials
+            .save(previous_credentials_snapshot)
+            .map_err(credential_error)?,
         None => credentials
             .delete(local_account_id)
             .map_err(credential_error)?,
@@ -51,14 +55,14 @@ pub(in crate::local_pool::commands::oauth) fn rollback_completion_before_authori
         let restore_record = (|| -> LocalResult<()> {
             let mut store = state.store()?;
             match previous_account {
-                Some(previous) => {
-                    let mut restored = previous.clone();
+                Some(previous_account_snapshot) => {
+                    let mut restored = previous_account_snapshot.clone();
                     // The watchdog is informational and can update while the OAuth
                     // command runs. It is unrelated to the failed token write.
-                    if let Some(current) = current_account {
-                        restored.client_auth_status = current.client_auth_status;
+                    if let Some(account_snapshot) = current_account {
+                        restored.client_auth_status = account_snapshot.client_auth_status;
                         restored.last_client_login_redirect_at_ms =
-                            current.last_client_login_redirect_at_ms;
+                            account_snapshot.last_client_login_redirect_at_ms;
                     }
                     store.upsert_account(restored)?;
                 }
@@ -107,10 +111,10 @@ pub(in crate::local_pool::commands::oauth) fn restore_attempted_completion_crede
     previous_credentials: Option<&StoredCodexCredentials>,
     attempted_credentials: &StoredCodexCredentials,
 ) -> LocalResult<bool> {
-    let current = credentials
+    let stored_credentials = credentials
         .load(local_account_id)
         .map_err(credential_error)?;
-    if !StoredCodexCredentials::snapshots_match(current.as_ref(), previous_credentials) {
+    if !StoredCodexCredentials::snapshots_match(stored_credentials.as_ref(), previous_credentials) {
         return Ok(false);
     }
     credentials
@@ -130,7 +134,7 @@ pub(in crate::local_pool::commands::oauth) fn next_completion_generation(
     credentials: Option<&StoredCodexCredentials>,
 ) -> u64 {
     account
-        .map(|record| record.account.token_generation)
+        .map(|account_record| account_record.account.token_generation)
         .into_iter()
         .chain(credentials.map(StoredCodexCredentials::generation))
         .max()
@@ -144,8 +148,9 @@ pub(in crate::local_pool::commands::oauth) fn completion_rollback_owns_state(
     record_requires_restore: bool,
     record_already_previous: bool,
 ) -> bool {
-    current_credentials.is_some_and(|current| current.matches_snapshot(attempted_credentials))
-        && (record_requires_restore || record_already_previous)
+    current_credentials.is_some_and(|stored_credentials| {
+        stored_credentials.matches_snapshot(attempted_credentials)
+    }) && (record_requires_restore || record_already_previous)
 }
 
 pub(in crate::local_pool::commands::oauth) fn reconcile_completion_authority(
@@ -156,16 +161,16 @@ pub(in crate::local_pool::commands::oauth) fn reconcile_completion_authority(
     authoritative_auth_state: AccountAuthState,
 ) -> LocalResult<bool> {
     let mut store = state.store()?;
-    let mut current = store
+    let mut account_record = store
         .account(account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    if !current.matches_rollback_snapshot(attempted_account) {
+    if !account_record.matches_rollback_snapshot(attempted_account) {
         return Ok(false);
     }
-    current.account.token_generation = authoritative_tokens.generation();
-    current.account.token_updated_at_ms = Some(authoritative_tokens.issued_at_ms());
-    current.account.auth_state = authoritative_auth_state;
-    store.upsert_account(current)?;
+    account_record.account.token_generation = authoritative_tokens.generation();
+    account_record.account.token_updated_at_ms = Some(authoritative_tokens.issued_at_ms());
+    account_record.account.auth_state = authoritative_auth_state;
+    store.upsert_account(account_record)?;
     Ok(true)
 }

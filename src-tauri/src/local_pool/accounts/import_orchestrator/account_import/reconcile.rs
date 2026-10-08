@@ -76,8 +76,8 @@ pub(super) fn reconcile_imported_credentials(
         .saturating_add(1);
     let subscription_active_until_ms = material.subscription_active_until_ms;
     let mut credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
-    if let Some(previous) = old_credential.as_ref() {
-        credentials = credentials.fill_missing_login_from(previous);
+    if let Some(previous_credentials) = old_credential.as_ref() {
+        credentials = credentials.fill_missing_login_from(previous_credentials);
     }
     if let Some(proxy_url) = old_credential
         .as_ref()

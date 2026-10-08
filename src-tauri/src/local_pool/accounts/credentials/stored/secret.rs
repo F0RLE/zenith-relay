@@ -8,31 +8,31 @@ impl StoredCodexCredentials {
         &self,
     ) -> Result<String, CredentialError> {
         let wire = CredentialWire::from(self);
-        let value = serde_json::to_string(&wire).map_err(|_| {
+        let secret_json = serde_json::to_string(&wire).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
                 "failed to encode stored ChatGPT credentials",
             )
         })?;
-        if value.len() > MAX_SECRET_JSON_BYTES {
+        if secret_json.len() > MAX_SECRET_JSON_BYTES {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
                 "stored ChatGPT credentials exceed the size limit",
             ));
         }
-        Ok(value)
+        Ok(secret_json)
     }
 
     pub(in crate::local_pool::accounts::credentials) fn from_secret_json(
-        value: &str,
+        secret_json: &str,
     ) -> Result<Self, CredentialError> {
-        if value.is_empty() || value.len() > MAX_SECRET_JSON_BYTES {
+        if secret_json.is_empty() || secret_json.len() > MAX_SECRET_JSON_BYTES {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
                 "stored ChatGPT credentials are invalid",
             ));
         }
-        let wire: CredentialWire = serde_json::from_str(value).map_err(|_| {
+        let wire: CredentialWire = serde_json::from_str(secret_json).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
                 "stored ChatGPT credentials are invalid",

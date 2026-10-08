@@ -101,8 +101,8 @@ pub(crate) struct DesktopOAuthEvents {
 
 impl DesktopOAuthEvents {
     fn set_app_handle(&self, app: tauri::AppHandle) {
-        if let Ok(mut current) = self.app.lock() {
-            *current = Some(app);
+        if let Ok(mut app_handle) = self.app.lock() {
+            *app_handle = Some(app);
         }
     }
 

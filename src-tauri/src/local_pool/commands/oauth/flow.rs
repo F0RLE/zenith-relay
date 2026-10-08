@@ -20,7 +20,10 @@ pub(super) fn validate_oauth_target(
     state: &DesktopState,
     account_id: Option<&str>,
 ) -> LocalResult<Option<String>> {
-    let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(account_id) = account_id
+        .map(str::trim)
+        .filter(|account_id_text| !account_id_text.is_empty())
+    else {
         return Ok(None);
     };
     let store = state.store()?;
@@ -92,9 +95,9 @@ pub(super) fn validated_authorization_url(start: &OAuthFlowStart) -> LocalResult
     Ok(authorization.to_string())
 }
 
-pub(super) fn valid_oauth_nonce(value: &str) -> bool {
-    (32..=256).contains(&value.len())
-        && value
+pub(super) fn valid_oauth_nonce(nonce: &str) -> bool {
+    (32..=256).contains(&nonce.len())
+        && nonce
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }

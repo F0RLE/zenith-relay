@@ -103,21 +103,21 @@ where
         if revision.is_some_and(|revision| revision.guard().is_none()) {
             return Err(superseded());
         }
-        let current = self.credentials.require(local_account_id).map_err(|_| {
+        let stored_credentials = self.credentials.require(local_account_id).map_err(|_| {
             TokenRefreshFailure::new(
                 TokenRefreshFailureKind::Transient,
                 error_codes::CREDENTIAL_LOAD_FAILED,
             )
         })?;
-        if current.is_access_usable(now_ms, self.refresh_skew_ms) {
-            return current.to_token_refresh().map_err(|_| {
+        if stored_credentials.is_access_usable(now_ms, self.refresh_skew_ms) {
+            return stored_credentials.to_token_refresh().map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
                     "invalid_stored_credential",
                 )
             });
         }
-        let refresh_token = current.refresh_token().ok_or_else(|| {
+        let refresh_token = stored_credentials.refresh_token().ok_or_else(|| {
             TokenRefreshFailure::new(
                 TokenRefreshFailureKind::ExpiredRefreshToken,
                 error_codes::REFRESH_TOKEN_MISSING,
@@ -127,17 +127,19 @@ where
             .client
             .refresh(
                 local_account_id,
-                current.provider_account_id(),
+                stored_credentials.provider_account_id(),
                 refresh_token,
                 now_ms,
             )
             .await?;
-        let updated = current.apply_refresh(refreshed, now_ms).map_err(|_| {
-            TokenRefreshFailure::new(
-                TokenRefreshFailureKind::Transient,
-                "invalid_refresh_response",
-            )
-        })?;
+        let updated = stored_credentials
+            .apply_refresh(refreshed, now_ms)
+            .map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_refresh_response",
+                )
+            })?;
         {
             // The on-disk secret write is synchronous. Hold the slot read
             // guard while saving so a removed/re-added slot cannot receive

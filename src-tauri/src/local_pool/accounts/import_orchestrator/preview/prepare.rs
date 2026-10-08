@@ -25,7 +25,7 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
     }
     let mut preview = session.preview;
     let item_count = session.items.len();
-    let mut prepared_values = Vec::with_capacity(item_count);
+    let mut prepared_items = Vec::with_capacity(item_count);
     let mut prepared_identity_keys = HashSet::with_capacity(item_count);
     let mut credentials_changed = false;
     let now_ms = current_time_ms();
@@ -41,13 +41,13 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
             ("probe_quota", probe_quota.to_string()),
         ],
     );
-    for (index, (item, row)) in session
+    for (index, (import_item, row)) in session
         .items
         .into_iter()
         .zip(preview.rows.iter_mut().filter(|row| row.selectable))
         .enumerate()
     {
-        let item_hash = crate::diagnostics::hash_identifier(&item.item_id);
+        let item_hash = crate::diagnostics::hash_identifier(&import_item.item_id);
         crate::diagnostics::breadcrumb(
             "account-import",
             "prepare_item_started",
@@ -59,11 +59,12 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
                 ("auth_mode", row.auth_mode.as_str().to_string()),
             ],
         );
-        let original = parsed_item_value(&item, row.auth_mode);
+        let original_json = parsed_item_json(&import_item, row.auth_mode);
         if row.auth_mode == ImportAuthMode::ApiKey {
-            if let (Some(base_url), Some(api_key)) =
-                (item.base_url.as_deref(), item.secrets().api_key())
-            {
+            if let (Some(base_url), Some(api_key)) = (
+                import_item.base_url.as_deref(),
+                import_item.secrets().api_key(),
+            ) {
                 if find_existing_source(state, base_url, api_key)
                     .map_err(import_item_command_error)?
                     .is_some()
@@ -72,7 +73,7 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
                     row.status = ImportPreviewStatus::Existing;
                 }
             }
-            prepared_values.push(original);
+            prepared_items.push(original_json);
             crate::diagnostics::breadcrumb(
                 "account-import",
                 "prepare_item_completed",
@@ -96,8 +97,8 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
             item_hash: &item_hash,
             index,
             row,
-            item,
-            original,
+            import_item,
+            original_json,
             prepared_identity_keys: &mut prepared_identity_keys,
         })
         .await?
@@ -106,11 +107,11 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
                 credentials_changed: changed,
             } => credentials_changed |= changed,
             AccountPreviewStep::Prepared {
-                value,
+                prepared_json,
                 credentials_changed: changed,
             } => {
                 credentials_changed |= changed;
-                prepared_values.push(value);
+                prepared_items.push(prepared_json);
             }
         }
     }
@@ -118,8 +119,8 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
     // provider. In that case the prepared snapshot must retain only the
     // credentials that still have a selectable row; reusing the original
     // document would make the snapshot's item count disagree with the preview.
-    let content = (credentials_changed || prepared_values.len() != item_count)
-        .then(|| serde_json::to_string(&prepared_values))
+    let content = (credentials_changed || prepared_items.len() != item_count)
+        .then(|| serde_json::to_string(&prepared_items))
         .transpose()
         .map_err(|_| {
             LocalPoolError::new(

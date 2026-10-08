@@ -160,18 +160,19 @@ impl fmt::Debug for PreparedAccountAuthorization {
 
 impl PreparedAccountAuthorization {
     pub(in crate::local_pool::accounts) fn from_tokens(
-        value: PreparedAccountCredentials,
+        credentials: PreparedAccountCredentials,
     ) -> LocalResult<Self> {
-        let authorization = bearer_authorization(value.tokens.access_token()).map_err(|_| {
-            LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
-        })?;
+        let authorization =
+            bearer_authorization(credentials.tokens.access_token()).map_err(|_| {
+                LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
+            })?;
         Ok(Self {
             subscription_authorization: Some(authorization.clone()),
             authorization,
-            tokens: Some(value.tokens),
+            tokens: Some(credentials.tokens),
             agent_task_id: None,
-            provider_account_id: value.provider_account_id,
-            proxy: value.proxy,
+            provider_account_id: credentials.provider_account_id,
+            proxy: credentials.proxy,
         })
     }
 }

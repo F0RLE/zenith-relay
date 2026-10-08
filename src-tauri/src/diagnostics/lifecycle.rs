@@ -15,10 +15,10 @@ pub(crate) fn install_panic_hook() {
     if PANIC_HOOK_INSTALLED.set(()).is_err() {
         return;
     }
-    let previous = panic::take_hook();
+    let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         persist::write_panic_report(info);
-        previous(info);
+        previous_hook(info);
     }));
 }
 
@@ -32,13 +32,13 @@ pub(crate) fn initialize(root: &Path) {
     let debug_marker = layout_ready.then(|| persist::read_debug_marker(root));
     let debug_enabled = match debug_marker
         .as_ref()
-        .and_then(|result| result.as_ref().ok())
+        .and_then(|debug_marker_result| debug_marker_result.as_ref().ok())
     {
         Some(enabled) => *enabled,
         None => false,
     };
     DEBUG_ENABLED.store(debug_enabled, Ordering::Release);
-    if debug_marker.is_some_and(|result| result.is_err()) {
+    if debug_marker.is_some_and(|debug_marker_result| debug_marker_result.is_err()) {
         record_error(
             "desktop",
             Some("diagnostic_debug_marker_invalid"),
@@ -57,17 +57,17 @@ pub(crate) fn initialize(root: &Path) {
         .flatten();
     SESSION_ACTIVE.store(marker_state.is_some(), Ordering::Release);
     if marker_state == Some(true) {
-        let mut details = Vec::new();
+        let mut diagnostic_details = Vec::new();
         if let Some(stage) = previous_stage {
-            details.push(("previous_operation", stage.operation));
-            details.push(("previous_stage", stage.stage));
-            details.push(("previous_stage_at", stage.timestamp));
+            diagnostic_details.push(("previous_operation", stage.operation));
+            diagnostic_details.push(("previous_stage", stage.stage));
+            diagnostic_details.push(("previous_stage_at", stage.timestamp));
         }
         record_error(
             "desktop",
             Some("unclean_exit"),
             "previous Relay session ended before a clean shutdown",
-            &details,
+            &diagnostic_details,
         );
     }
     breadcrumb("desktop", "diagnostics_ready", &[]);

@@ -55,8 +55,8 @@ pub(super) fn codex_cli_file_name() -> &'static str {
 
 pub(super) fn newest_installed_codex_executable(bin_dir: &Path) -> Option<PathBuf> {
     let mut newest: Option<(SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(bin_dir).ok()?.flatten() {
-        let candidate = entry.path().join(codex_cli_file_name());
+    for directory_entry in fs::read_dir(bin_dir).ok()?.flatten() {
+        let candidate = directory_entry.path().join(codex_cli_file_name());
         let Ok(metadata) = fs::metadata(&candidate) else {
             continue;
         };
@@ -67,8 +67,9 @@ pub(super) fn newest_installed_codex_executable(bin_dir: &Path) -> Option<PathBu
             continue;
         };
         let replace = match &newest {
-            Some((current, current_path)) => {
-                modified > *current || (modified == *current && candidate > *current_path)
+            Some((latest_modified_at, latest_catalog_path)) => {
+                modified > *latest_modified_at
+                    || (modified == *latest_modified_at && candidate > *latest_catalog_path)
             }
             None => true,
         };
@@ -87,11 +88,13 @@ fn read_bundled_codex_catalog(executable: &OsString) -> Option<Value> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let output = command.output().ok()?;
-    if !output.status.success() || output.stdout.len() > MAX_BUNDLED_CODEX_CATALOG_BYTES {
+    let command_output = command.output().ok()?;
+    if !command_output.status.success()
+        || command_output.stdout.len() > MAX_BUNDLED_CODEX_CATALOG_BYTES
+    {
         return None;
     }
-    serde_json::from_slice(&output.stdout).ok()
+    serde_json::from_slice(&command_output.stdout).ok()
 }
 
 pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Value> {
@@ -100,9 +103,9 @@ pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Valu
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
-            let slug = entry.get("slug")?.as_str()?;
-            let has_ultra = entry
+        .filter_map(|catalog_entry| {
+            let slug = catalog_entry.get("slug")?.as_str()?;
+            let has_ultra = catalog_entry
                 .get("supported_reasoning_levels")
                 .and_then(Value::as_array)?
                 .iter()
@@ -115,7 +118,7 @@ pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Valu
                 "supported_reasoning_levels": [{"effort": "ultra"}]
             });
             for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
-                if let Some(value) = entry.get(field).and_then(Value::as_str) {
+                if let Some(value) = catalog_entry.get(field).and_then(Value::as_str) {
                     ultra[field] = json!(value);
                 }
             }
@@ -125,11 +128,11 @@ pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Valu
 }
 
 pub(super) fn add_installed_codex_ultra(
-    entry: &mut Value,
+    catalog_entry: &mut Value,
     model: &str,
     bundled: &HashMap<String, Value>,
 ) {
     if let Some(official) = bundled.get(&zenith_relay_core::model_id_key(model)) {
-        apply_codex_ultra_from_official_model(entry, official, model);
+        apply_codex_ultra_from_official_model(catalog_entry, official, model);
     }
 }

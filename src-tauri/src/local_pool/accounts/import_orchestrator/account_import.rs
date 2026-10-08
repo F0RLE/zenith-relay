@@ -33,7 +33,7 @@ pub(super) struct AccountImportOptions<'a> {
 pub(super) async fn import_account_item(
     state: &DesktopState,
     credential_store: &CredentialStore<NativeSecretBackend>,
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     context: &ImportRowContext,
     options: AccountImportOptions<'_>,
     account_check_endpoint: &url::Url,
@@ -44,17 +44,17 @@ pub(super) async fn import_account_item(
         probe_quota,
         configured_models,
     } = options;
-    ensure_account_import_item(&item)?;
-    let item_hash = crate::diagnostics::hash_identifier(&item.item_id);
+    ensure_account_import_item(&import_item)?;
+    let item_hash = crate::diagnostics::hash_identifier(&import_item.item_id);
     crate::diagnostics::breadcrumb(
         "account-import",
         "item_processing_started",
         &[("item", item_hash.clone())],
     );
     let issued_at_ms = current_time_ms();
-    let item_label = item.label.clone();
-    let imported_tags = item.tags.clone();
-    let item_priority = item.priority;
+    let item_label = import_item.label.clone();
+    let imported_tags = import_item.tags.clone();
+    let item_priority = import_item.priority;
     let settings = state
         .store()
         .map_err(|_| {
@@ -66,11 +66,11 @@ pub(super) async fn import_account_item(
         .gateway()
         .clone();
     let common_proxy = common_proxy_config(&settings).map_err(proxy_item_error)?;
-    let hinted_proxy = hinted_import_proxy(state, credential_store, &settings, &item)?;
+    let hinted_proxy = hinted_import_proxy(state, credential_store, &settings, &import_item)?;
     let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
     ensure_account_proxy(&settings, import_proxy).map_err(proxy_item_error)?;
     let material = build_import_credential_material(
-        item,
+        import_item,
         issued_at_ms,
         context.plan.as_deref(),
         context.subscription_active_until_ms,
@@ -133,7 +133,7 @@ pub(super) async fn import_account_item(
     };
     let priority = existing_account
         .as_ref()
-        .map(|value| value.priority)
+        .map(|existing_account| existing_account.priority)
         .or(item_priority);
     let mut account = records::new_account_record(
         &credentials,
@@ -151,7 +151,7 @@ pub(super) async fn import_account_item(
     account.discovered_models = discovered_models.or_else(|| {
         existing_account
             .as_ref()
-            .and_then(|value| value.discovered_models.clone())
+            .and_then(|existing_account| existing_account.discovered_models.clone())
     });
     merge_existing_account(&mut account, existing_account.as_ref());
     account.account.in_pool |= add_to_pool;

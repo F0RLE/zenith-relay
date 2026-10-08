@@ -64,7 +64,7 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_log_from_row(
         client_context_id,
         routing: routing_json
             .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+            .and_then(|routing_json| serde_json::from_str(routing_json).ok()),
         requested_model: row.get(8)?,
         resolved_model: row.get(9)?,
         requested_reasoning_effort: requested_reasoning_effort
@@ -82,14 +82,16 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_log_from_row(
         success: row.get(12)?,
         http_status: row.get(13)?,
         error_category: row.get(14)?,
-        error_origin: error_origin.as_deref().and_then(|value| value.parse().ok()),
+        error_origin: error_origin
+            .as_deref()
+            .and_then(|error_origin_text| error_origin_text.parse().ok()),
         upstream_error: row
             .get::<_, Option<String>>(33)?
             .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+            .and_then(|error_json| serde_json::from_str(error_json).ok()),
         tool_use: tool_use_json
             .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+            .and_then(|tool_use_json| serde_json::from_str(tool_use_json).ok()),
         latency_ms: rust_u64(latency_ms),
         ttft_ms: optional_u64(ttft_ms),
         generation_ms: optional_u64(generation_ms),
@@ -106,10 +108,10 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_log_from_row(
     })
 }
 
-fn normalize_wire_api(value: String) -> String {
-    WireApi::from_storage_value(&value)
+fn normalize_wire_api(stored_wire_api: String) -> String {
+    WireApi::from_storage_value(&stored_wire_api)
         .map(|wire_api| wire_api.as_str().to_string())
-        .unwrap_or(value)
+        .unwrap_or(stored_wire_api)
 }
 
 pub(in crate::local_pool::store::telemetry_db) use zenith_relay_core::usage::sql_count_u64 as rust_u64;

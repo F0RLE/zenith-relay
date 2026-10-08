@@ -35,14 +35,14 @@ impl MemorySecrets {
 }
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         let mut state = self.state();
         if state.fail_save {
             return Err(SecretBackendError);
         }
         state
             .values
-            .insert(secret_ref.to_string(), value.to_string());
+            .insert(secret_ref.to_string(), secret_value.to_string());
         Ok(())
     }
 
@@ -68,9 +68,9 @@ impl SecretBackend for MemorySecrets {
 struct VaultSecrets(Arc<crate::local_pool::store::vault::Vault>);
 
 impl SecretBackend for VaultSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         self.0
-            .save(secret_ref, value)
+            .save(secret_ref, secret_value)
             .map_err(|_| SecretBackendError)
     }
 

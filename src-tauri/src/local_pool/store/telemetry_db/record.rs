@@ -63,10 +63,10 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let previous = previous_usage_log(&transaction, &event.request_id)?;
-        let accepted = previous
+        let previous_usage = previous_usage_log(&transaction, &event.request_id)?;
+        let accepted = previous_usage
             .as_ref()
-            .is_none_or(|previous| i64::from(event.attempt) >= previous.attempt);
+            .is_none_or(|previous_usage| i64::from(event.attempt) >= previous_usage.attempt);
         let changed = accepted
             && transaction
                 .execute(
@@ -154,8 +154,11 @@ impl TelemetryDb {
             .map_err(db_error)?
             > 0;
         if changed {
-            if let Some(previous) = previous.as_ref().filter(|previous| previous.aggregated) {
-                apply_aggregate_delta(&transaction, &previous.aggregate, -1)?;
+            if let Some(previous_usage) = previous_usage
+                .as_ref()
+                .filter(|previous_usage| previous_usage.aggregated)
+            {
+                apply_aggregate_delta(&transaction, &previous_usage.aggregate, -1)?;
             }
             apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
         }
@@ -163,7 +166,8 @@ impl TelemetryDb {
         // conflict-update path. Only run retention after a new request row;
         // otherwise replacing a request whose old id is divisible by 256
         // would rescan and rewrite the usage database repeatedly.
-        let archived = previous.is_none() && changed && transaction.last_insert_rowid() % 256 == 0;
+        let archived =
+            previous_usage.is_none() && changed && transaction.last_insert_rowid() % 256 == 0;
         if archived {
             transaction
                 .execute_batch(ARCHIVE_USAGE_SQL)
@@ -173,9 +177,9 @@ impl TelemetryDb {
         if archived {
             self.clear_cached_usage_totals()?;
         } else if changed {
-            let previous_totals = previous
+            let previous_totals = previous_usage
                 .as_ref()
-                .map(|previous| usage_totals_from_sample(previous.totals));
+                .map(|previous_usage| usage_totals_from_sample(previous_usage.totals));
             self.update_cached_usage_totals(previous_totals, usage_totals_from_event(event))?;
         }
         drop(connection);
@@ -253,6 +257,6 @@ fn previous_usage_log(
         .map_err(db_error)
 }
 
-fn non_negative_i64(value: i64) -> u64 {
-    value.max(0) as u64
+fn non_negative_i64(signed_count: i64) -> u64 {
+    signed_count.max(0) as u64
 }

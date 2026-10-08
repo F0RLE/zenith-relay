@@ -117,16 +117,16 @@ impl CodexWakeClient {
         request: &WakeExecutionRequest,
     ) -> Result<WakeExecutionMetrics, WakeExecutionFailure> {
         validate_request(request)?;
-        let payload = WakePayload {
+        let wake_request = WakePayload {
             model: request.model_id.trim(),
             input: FIXED_WAKE_INPUT,
             stream: false,
             store: false,
             max_output_tokens: request.output_token_cap,
         };
-        let body = serde_json::to_vec(&payload)
+        let request_body = serde_json::to_vec(&wake_request)
             .map_err(|_| WakeExecutionFailure::invalid(WakeExecutionErrorCode::InvalidRequest))?;
-        if body.len() > MAX_REQUEST_BYTES {
+        if request_body.len() > MAX_REQUEST_BYTES {
             return Err(WakeExecutionFailure::invalid(
                 WakeExecutionErrorCode::RequestTooLarge,
             ));
@@ -146,7 +146,7 @@ impl CodexWakeClient {
                             .post(self.responses_endpoint.clone())
                             .header(AUTHORIZATION, self.authorization.clone())
                             .header(CONTENT_TYPE, "application/json")
-                            .body(body),
+                            .body(request_body),
                     ),
                     zenith_relay_core::scheduler::refresh::http::HttpClass::Ordinary,
                 )

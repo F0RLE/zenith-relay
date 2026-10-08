@@ -225,13 +225,13 @@ pub(in crate::local_pool::accounts) async fn mark_access_only_reauthentication(
     account_id: &str,
 ) -> LocalResult<()> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let current = credentials
+    let stored_credentials = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
     persist_manual_refresh_failure(
         state,
         account_id,
-        &current,
+        &stored_credentials,
         ReauthReason::AccessTokenExpired,
         "access_token_expired",
     )

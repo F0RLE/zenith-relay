@@ -56,7 +56,7 @@ impl UsageAggregate {
     pub(super) fn from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Self> {
         let candidate_kind: String = row.get(offset)?;
         let candidate_id: String = row.get(offset + 1)?;
-        let model: String = row.get(offset + 2)?;
+        let model_id: String = row.get(offset + 2)?;
         let input_tokens: Option<i64> = row.get(offset + 3)?;
         let cached_input_tokens: Option<i64> = row.get(offset + 4)?;
         let cache_write_input_tokens: Option<i64> = row.get(offset + 5)?;
@@ -67,13 +67,15 @@ impl UsageAggregate {
         Ok(Self::from_values(
             &candidate_kind,
             &candidate_id,
-            &model,
-            input_tokens.map(|value| value.max(0) as u64),
-            cached_input_tokens.map(|value| value.max(0) as u64),
-            cache_write_input_tokens.map(|value| value.max(0) as u64),
+            &model_id,
+            input_tokens.map(|input_token_count| input_token_count.max(0) as u64),
+            cached_input_tokens
+                .map(|cached_input_token_count| cached_input_token_count.max(0) as u64),
+            cache_write_input_tokens
+                .map(|cache_write_input_token_count| cache_write_input_token_count.max(0) as u64),
             cache_write_ttl.as_deref(),
-            output_tokens.map(|value| value.max(0) as u64),
-            total_tokens.map(|value| value.max(0) as u64),
+            output_tokens.map(|output_token_count| output_token_count.max(0) as u64),
+            total_tokens.map(|total_token_count| total_token_count.max(0) as u64),
             applied_service_tier.as_deref(),
         ))
     }

@@ -19,10 +19,14 @@ pub async fn set_local_tool_policy(
     input: zenith_relay_core::ToolPolicyUpdate,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let tool_policy_update = input;
     let _mutation = state.setup_guard().await;
     let invalid = |message| LocalPoolError::new(ErrorCode::InvalidState, message);
-    let policy = input.policy.normalized().map_err(invalid)?;
-    let expected = input.expected_policy.normalized().map_err(invalid)?;
+    let policy = tool_policy_update.policy.normalized().map_err(invalid)?;
+    let expected = tool_policy_update
+        .expected_policy
+        .normalized()
+        .map_err(invalid)?;
     let mut gateway = state.store()?.gateway().clone();
     if gateway.tool_policy != expected {
         return Err(LocalPoolError::new(
@@ -31,12 +35,12 @@ pub async fn set_local_tool_policy(
         )
         .into());
     }
-    let previous = gateway.clone();
+    let previous_gateway = gateway.clone();
     gateway.tool_policy = policy.clone();
     state.store()?.replace_gateway(gateway)?;
     if let Some(runtime) = state.gateway.runtime().await {
         if let Err(error) = runtime.set_tool_policy(policy) {
-            state.store()?.replace_gateway(previous)?;
+            state.store()?.replace_gateway(previous_gateway)?;
             return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
         }
     }
@@ -84,10 +88,11 @@ pub async fn set_local_common_proxy(
     input: SetCommonProxyInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let proxy_update = input;
     let _mutation = state.setup_guard().await;
-    let next_secret = input
+    let next_secret = proxy_update
         .proxy_url
-        .map(|value| zenith_relay_core::normalize_proxy_url(&value))
+        .map(|proxy_url| zenith_relay_core::normalize_proxy_url(&proxy_url))
         .transpose()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     let old_gateway = state.store()?.gateway().clone();
@@ -121,16 +126,17 @@ pub async fn set_local_account_proxy_required(
     input: SetAccountProxyPolicyInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let proxy_policy = input;
     let _mutation = state.setup_guard().await;
     let old_gateway = state.store()?.gateway().clone();
-    if old_gateway.account_proxy_required == input.required {
+    if old_gateway.account_proxy_required == proxy_policy.required {
         return state.snapshot().await.map_err(Into::into);
     }
     let affected_accounts = accounts_without_explicit_proxy(&state, true)?;
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
     let mut next_gateway = old_gateway.clone();
-    next_gateway.account_proxy_required = input.required;
+    next_gateway.account_proxy_required = proxy_policy.required;
     state.store()?.replace_gateway(next_gateway)?;
     restart_or_rollback(&state, || state.store()?.replace_gateway(old_gateway)).await?;
     state.snapshot().await.map_err(Into::into)
@@ -141,9 +147,10 @@ pub async fn set_local_codex_background_tasks(
     input: SetCodexBackgroundTasksInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let background_tasks = input;
     save_gateway_flag(
         state.inner(),
-        input.enabled,
+        background_tasks.enabled,
         |gateway| gateway.codex_background_tasks_enabled,
         |gateway, enabled| gateway.codex_background_tasks_enabled = enabled,
         GatewayRuntime::set_codex_background_tasks_enabled,
@@ -159,9 +166,10 @@ pub async fn set_local_chatgpt_retry_until_available(
     input: SetChatgptRetryUntilAvailableInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let retry_policy = input;
     save_gateway_flag(
         state.inner(),
-        input.enabled,
+        retry_policy.enabled,
         |gateway| gateway.chatgpt_retry_until_available,
         |gateway, enabled| gateway.chatgpt_retry_until_available = enabled,
         GatewayRuntime::set_route_recovery_enabled,
@@ -176,9 +184,10 @@ pub async fn set_local_block_degraded_routes(
     input: SetBlockDegradedRoutesInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let degraded_route_policy = input;
     save_gateway_flag(
         state.inner(),
-        input.enabled,
+        degraded_route_policy.enabled,
         |gateway| gateway.block_degraded_routes_enabled,
         |gateway, enabled| gateway.block_degraded_routes_enabled = enabled,
         GatewayRuntime::set_block_degraded_routes_enabled,
@@ -191,10 +200,11 @@ pub async fn set_local_codex_websockets(
     input: SetCodexWebsocketsInput,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let websocket_settings = input;
     let _mutation = state.setup_guard().await;
     let previous_gateway = state.store()?.gateway().clone();
     let snapshot = super::super::state::build_local_runtime_state(&state).await?;
-    let profile_websockets = input.enabled
+    let profile_websockets = websocket_settings.enabled
         && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
     let profile_dir = crate::platform::default_codex_home();
     let backup_root = state.profile_backup_root();
@@ -223,13 +233,13 @@ pub async fn set_local_codex_websockets(
         .transpose()?
         .flatten();
     let restore_profile = || -> Result<(), CommandError> {
-        let Some(previous) = previous_profile else {
+        let Some(previous_profile_snapshot) = previous_profile else {
             return Ok(());
         };
         crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
             &profile_dir,
             &backup_root,
-            previous,
+            previous_profile_snapshot,
             local_binding
                 .as_ref()
                 .map(|binding| binding.credential_id.as_str()),
@@ -239,13 +249,13 @@ pub async fn set_local_codex_websockets(
     };
     let previous_enabled = previous_gateway.codex_websockets_enabled;
     let mut gateway = previous_gateway.clone();
-    gateway.codex_websockets_enabled = input.enabled;
+    gateway.codex_websockets_enabled = websocket_settings.enabled;
     if let Err(error) = state.store()?.replace_gateway(gateway) {
         let _ = restore_profile();
         return Err(error.into());
     }
     if let Some(runtime) = state.gateway.runtime().await {
-        runtime.set_codex_websockets_enabled(input.enabled);
+        runtime.set_codex_websockets_enabled(websocket_settings.enabled);
     }
     match state.snapshot().await {
         Ok(snapshot) => Ok(snapshot),
@@ -296,6 +306,7 @@ pub async fn set_codex_profile_websockets(
     input: SetCodexWebsocketsInput,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
+    let websocket_settings = input;
     let _mutation = state.setup_guard().await;
     let Some((_, client)) = super::super::remote_server::active_client(&state)? else {
         return Err(
@@ -320,7 +331,7 @@ pub async fn set_codex_profile_websockets(
         &snapshot.sources,
         &snapshot.accounts,
     );
-    let enabled = input.enabled
+    let enabled = websocket_settings.enabled
         && zenith_relay_core::protocol::codex_catalog_supports_websockets(&snapshot.gateway.models);
     crate::local_pool::profiles::codex::set_local_gateway_websockets_with_previous(
         &crate::platform::default_codex_home(),
@@ -328,8 +339,8 @@ pub async fn set_codex_profile_websockets(
         enabled,
         Some(&credential.key_id),
     )
-    .and_then(|previous| {
-        previous.map(|_| ()).ok_or_else(|| {
+    .and_then(|previous_profile_snapshot| {
+        previous_profile_snapshot.map(|_| ()).ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::Conflict,
                 "the active profile changed during the update",
@@ -339,15 +350,15 @@ pub async fn set_codex_profile_websockets(
     .map_err(Into::into)
 }
 
-fn save_optional_proxy(value: Option<&str>) -> crate::local_pool::error::Result<()> {
-    match value {
-        Some(value) => secret_store::save(COMMON_PROXY_SECRET_REF, value),
+fn save_optional_proxy(proxy_url: Option<&str>) -> crate::local_pool::error::Result<()> {
+    match proxy_url {
+        Some(proxy_url) => secret_store::save(COMMON_PROXY_SECRET_REF, proxy_url),
         None => secret_store::delete(COMMON_PROXY_SECRET_REF),
     }
 }
 
-fn restore_common_proxy(value: Option<&str>) -> crate::local_pool::error::Result<()> {
-    save_optional_proxy(value)
+fn restore_common_proxy(proxy_url: Option<&str>) -> crate::local_pool::error::Result<()> {
+    save_optional_proxy(proxy_url)
 }
 
 /// A common proxy affects only inherited routes. Requiring an account proxy
@@ -364,9 +375,9 @@ pub(in crate::local_pool::commands) fn accounts_without_explicit_proxy(
         .collect::<Vec<_>>();
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let mut affected = Vec::new();
-    for id in account_ids {
+    for account_id in account_ids {
         let Some(credential) = credentials
-            .load(&id)
+            .load(&account_id)
             .map_err(credential_invalid_state_error)?
         else {
             continue;
@@ -374,7 +385,7 @@ pub(in crate::local_pool::commands) fn accounts_without_explicit_proxy(
         if credential.proxy_url().is_none()
             && (include_bypassed || !credential.bypass_common_proxy())
         {
-            affected.push(id);
+            affected.push(account_id);
         }
     }
     Ok(affected)

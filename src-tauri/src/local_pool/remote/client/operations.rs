@@ -109,14 +109,14 @@ impl RemoteClient {
         &self,
         rotation_id: &str,
     ) -> Result<(), RemoteClientError> {
-        let response = self
+        let mutation_result = self
             .mutate(
                 Method::POST,
                 &remote_object_path("profile/credential/rotations", rotation_id)?,
                 None,
             )
             .await?;
-        response
+        mutation_result
             .is_null()
             .then_some(())
             .ok_or(RemoteClientError::InvalidResponse)
@@ -126,14 +126,14 @@ impl RemoteClient {
         &self,
         rotation_id: &str,
     ) -> Result<(), RemoteClientError> {
-        let response = self
+        let mutation_result = self
             .mutate(
                 Method::DELETE,
                 &remote_object_path("profile/credential/rotations", rotation_id)?,
                 None,
             )
             .await?;
-        response
+        mutation_result
             .is_null()
             .then_some(())
             .ok_or(RemoteClientError::InvalidResponse)
@@ -226,51 +226,53 @@ impl RemoteClient {
         input: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, RemoteClientError> {
         let url = self.origin.endpoint(path)?;
-        let mut request = self.http.request(method, url).bearer_auth(&self.token);
+        let mut http_request = self.http.request(method, url).bearer_auth(&self.token);
         if let Some(input) = input {
-            request = request.json(input);
+            http_request = http_request.json(input);
         }
-        let response = request
+        let http_response = http_request
             .send()
             .await
             .map_err(|_| RemoteClientError::Transport)?;
-        if response.status().is_redirection() {
+        if http_response.status().is_redirection() {
             return Err(RemoteClientError::RedirectRejected);
         }
-        if !response.status().is_success() {
-            if path == "/routing/settings" && matches!(response.status().as_u16(), 400 | 409) {
-                return Err(pool_routing_error(response).await);
+        if !http_response.status().is_success() {
+            if path == "/routing/settings" && matches!(http_response.status().as_u16(), 400 | 409) {
+                return Err(pool_routing_error(http_response).await);
             }
-            return Err(RemoteClientError::HttpStatus(response.status().as_u16()));
+            return Err(RemoteClientError::HttpStatus(
+                http_response.status().as_u16(),
+            ));
         }
-        if response.status() == reqwest::StatusCode::NO_CONTENT {
+        if http_response.status() == reqwest::StatusCode::NO_CONTENT {
             return Ok(serde_json::Value::Null);
         }
-        decode_success_body(response).await
+        decode_success_body(http_response).await
     }
 }
 
-async fn pool_routing_error(mut response: reqwest::Response) -> RemoteClientError {
-    let fallback = RemoteClientError::HttpStatus(response.status().as_u16());
-    let mut bytes = Vec::new();
+async fn pool_routing_error(mut http_response: reqwest::Response) -> RemoteClientError {
+    let fallback = RemoteClientError::HttpStatus(http_response.status().as_u16());
+    let mut error_body = Vec::new();
     // Older servers return 400 for this conflict. Inspect only a bounded code
     // envelope; never propagate the server's message or raw body to diagnostics.
     loop {
-        let chunk = match response.chunk().await {
+        let chunk = match http_response.chunk().await {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(_) => return fallback,
         };
-        if bytes.len() + chunk.len() > 4096 {
+        if error_body.len() + chunk.len() > 4096 {
             return fallback;
         }
-        bytes.extend_from_slice(&chunk);
+        error_body.extend_from_slice(&chunk);
     }
-    let body: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(body) => body,
+    let error_json: serde_json::Value = match serde_json::from_slice(&error_body) {
+        Ok(error_json) => error_json,
         Err(_) => return fallback,
     };
-    if body
+    if error_json
         .pointer("/error/code")
         .and_then(serde_json::Value::as_str)
         == Some(zenith_relay_core::error_codes::POOL_ROUTING_CONFLICT)

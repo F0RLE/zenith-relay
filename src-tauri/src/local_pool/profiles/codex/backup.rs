@@ -4,9 +4,10 @@ mod profile;
 use super::{LocalPoolError, Result};
 use serde::Serialize;
 
-pub(super) fn serialize_pretty<T: Serialize + ?Sized>(value: &T) -> Result<String> {
-    let content = serde_json::to_string_pretty(value).map_err(LocalPoolError::invalid_state)?;
-    Ok(format!("{content}\n"))
+pub(super) fn serialize_pretty<T: Serialize + ?Sized>(serializable: &T) -> Result<String> {
+    let json_text =
+        serde_json::to_string_pretty(serializable).map_err(LocalPoolError::invalid_state)?;
+    Ok(format!("{json_text}\n"))
 }
 
 pub(super) use account::{

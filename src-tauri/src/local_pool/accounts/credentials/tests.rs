@@ -16,11 +16,11 @@ const PROXY: &str = "http://proxy-user:proxy-pass@proxy.example:8080/";
 struct MemorySecrets(Mutex<HashMap<String, String>>);
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         self.0
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         Ok(())
     }
 

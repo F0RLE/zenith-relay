@@ -49,7 +49,7 @@ pub struct TelemetryDb {
 struct CachedUsageEquivalents {
     usage_revision: u64,
     pricing_revision: String,
-    value: UsageEquivalents,
+    equivalents: UsageEquivalents,
 }
 
 #[derive(Clone)]
@@ -57,7 +57,7 @@ struct CachedQuotaEquivalents {
     usage_revision: u64,
     pricing_revision: String,
     windows: Vec<(String, u64, u64)>,
-    value: HashMap<String, ApiEquivalentSummary>,
+    equivalents_by_account: HashMap<String, ApiEquivalentSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,9 +150,9 @@ fn test_pricing_context(
     PricingContext::from_price_overrides(price_overrides, source_price_overrides)
 }
 
-fn valid_performance_name(name: &str) -> bool {
+fn valid_performance_name(metric_name: &str) -> bool {
     matches!(
-        name,
+        metric_name,
         "native_startup"
             | "vault"
             | "sqlite"

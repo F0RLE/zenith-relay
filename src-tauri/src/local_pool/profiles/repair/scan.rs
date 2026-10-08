@@ -36,15 +36,15 @@ pub(super) fn collect_rollouts(
     if depth > 8 {
         return Err("ChatGPT session directory is too deeply nested".to_string());
     }
-    for entry in fs::read_dir(directory).map_err(io_error)? {
-        let entry = entry.map_err(io_error)?;
-        let metadata = fs::symlink_metadata(entry.path()).map_err(io_error)?;
+    for directory_entry in fs::read_dir(directory).map_err(io_error)? {
+        let directory_entry = directory_entry.map_err(io_error)?;
+        let metadata = fs::symlink_metadata(directory_entry.path()).map_err(io_error)?;
         if metadata.file_type().is_symlink() {
             continue;
         }
         if metadata.is_dir() {
             collect_rollouts(
-                &entry.path(),
+                &directory_entry.path(),
                 root,
                 target,
                 depth + 1,
@@ -54,7 +54,12 @@ pub(super) fn collect_rollouts(
             )?;
             continue;
         }
-        if entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl") {
+        if directory_entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("jsonl")
+        {
             continue;
         }
         if seen.len() >= MAX_ROLLOUT_FILES {
@@ -63,7 +68,7 @@ pub(super) fn collect_rollouts(
         if metadata.len() > MAX_ROLLOUT_BYTES {
             return Err("ChatGPT rollout file is too large".to_string());
         }
-        let path = canonical_child(root, &entry.path())?;
+        let path = canonical_child(root, &directory_entry.path())?;
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -93,11 +98,11 @@ pub(super) fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot,
     }
     let mut hasher = Sha256::new();
     let metadata = read_session_metadata_from(BufReader::new(file), Some(&mut hasher))?;
-    let records = session_meta_replacements(&metadata, target).len();
+    let replacement_count = session_meta_replacements(&metadata, target).len();
     let mut session_ids = metadata
         .records
         .iter()
-        .filter_map(|record| session_meta_thread_id(&record.value))
+        .filter_map(|session_metadata| session_meta_thread_id(&session_metadata.session_record))
         .collect::<Vec<_>>();
     session_ids.sort();
     session_ids.dedup();
@@ -105,7 +110,7 @@ pub(super) fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot,
     Ok(RolloutSnapshot {
         path: path_string(path),
         hash: hex::encode(hasher.finalize()),
-        records,
+        records: replacement_count,
         session_ids,
         session_meta_count,
     })
@@ -182,22 +187,22 @@ pub(super) fn record_session_metadata(
     start: u64,
     end: u64,
 ) {
-    let Some((value, separator)) = session_meta_value(line) else {
+    let Some((session_record, separator)) = session_meta_value(line) else {
         return;
     };
-    let item = SessionMeta {
+    let session_metadata = SessionMeta {
         start,
         end,
         separator,
-        value,
+        session_record,
     };
-    metadata.records.push(item);
+    metadata.records.push(session_metadata);
 }
 
 #[cfg(test)]
 pub(super) fn rollout_provider(first_line: &[u8]) -> Option<Option<String>> {
     session_meta_value(first_line)
-        .map(|(value, _)| session_meta_provider(&value).map(str::to_string))
+        .map(|(session_record, _)| session_meta_provider(&session_record).map(str::to_string))
 }
 
 pub(super) fn session_meta_value(line: &[u8]) -> Option<(Value, Vec<u8>)> {
@@ -223,28 +228,36 @@ pub(super) fn session_meta_value(line: &[u8]) -> Option<(Value, Vec<u8>)> {
         #[serde(other)]
         Other,
     }
-    let record: RecordKind = serde_json::from_slice(line).ok()?;
-    match record.kind {
+    let record_kind: RecordKind = serde_json::from_slice(line).ok()?;
+    match record_kind.kind {
         Kind::SessionMeta => Some((serde_json::from_slice(line).ok()?, separator.to_vec())),
         Kind::Other => None,
     }
 }
 
-pub(super) fn session_meta_provider(value: &Value) -> Option<&str> {
-    value
+pub(super) fn session_meta_provider(session_record: &Value) -> Option<&str> {
+    session_record
         .get("payload")
-        .and_then(|payload| payload.get("model_provider"))
+        .and_then(|session_payload| session_payload.get("model_provider"))
         .and_then(Value::as_str)
 }
 
-pub(super) fn session_meta_thread_id(value: &Value) -> Option<String> {
-    value
+pub(super) fn session_meta_thread_id(session_record: &Value) -> Option<String> {
+    session_record
         .get("payload")
-        .and_then(|payload| payload.get("id").or_else(|| payload.get("session_id")))
-        .or_else(|| value.get("id").or_else(|| value.get("session_id")))
+        .and_then(|session_payload| {
+            session_payload
+                .get("id")
+                .or_else(|| session_payload.get("session_id"))
+        })
+        .or_else(|| {
+            session_record
+                .get("id")
+                .or_else(|| session_record.get("session_id"))
+        })
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|thread_id| !thread_id.is_empty())
         .map(str::to_string)
 }
 
@@ -264,7 +277,9 @@ pub(super) fn session_meta_replacements(
     metadata
         .records
         .iter()
-        .filter(|item| session_meta_provider(&item.value) != Some(target))
+        .filter(|session_metadata| {
+            session_meta_provider(&session_metadata.session_record) != Some(target)
+        })
         .cloned()
         .collect()
 }

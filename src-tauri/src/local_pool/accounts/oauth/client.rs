@@ -91,10 +91,10 @@ impl CodexOAuthClient {
         let redirect_uri = format!("http://localhost:{callback_port}{CALLBACK_PATH}");
         let code_verifier = random_urlsafe(64);
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
-        let state = random_urlsafe(32);
+        let oauth_state = random_urlsafe(32);
         let pending = OAuthPendingSession {
             redirect_uri,
-            state,
+            state: oauth_state,
             code_verifier,
             created_at_ms: now_ms,
         };
@@ -142,7 +142,7 @@ impl CodexOAuthClient {
             .await
             .map_err(|_| OAuthError::new(OAuthErrorCode::Transport, true))?;
         let status = response.status();
-        let body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
+        let token_response_body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
                 LimitedBodyError::Transport => OAuthError::new(OAuthErrorCode::Transport, true),
@@ -154,13 +154,13 @@ impl CodexOAuthClient {
         if !status.is_success() {
             return Err(OAuthError {
                 code: OAuthErrorCode::TokenEndpointRejected,
-                provider_code: token_refresh_provider_error_code(&body),
+                provider_code: token_refresh_provider_error_code(&token_response_body),
                 http_status: Some(status.as_u16()),
                 retryable: status.is_server_error() || status.as_u16() == 429,
             });
         }
 
-        parse_token_response(&body, now_ms)
+        parse_token_response(&token_response_body, now_ms)
     }
 
     pub async fn exchange_refresh_token(
@@ -191,7 +191,7 @@ impl CodexOAuthClient {
                 TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
             })?;
         let status = response.status();
-        let body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
+        let token_response_body = collect_limited(response, MAX_TOKEN_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
                 LimitedBodyError::Transport => {
@@ -204,7 +204,7 @@ impl CodexOAuthClient {
             })?;
         drop(permit);
         if !status.is_success() {
-            let code = token_refresh_provider_error_code(&body)
+            let code = token_refresh_provider_error_code(&token_response_body)
                 .unwrap_or_else(|| "token_refresh_failed".into());
             return Err(TokenRefreshFailure::new(
                 token_refresh_failure_kind(&code),
@@ -212,7 +212,7 @@ impl CodexOAuthClient {
             ));
         }
 
-        parse_token_response(&body, now_ms).map_err(|_| {
+        parse_token_response(&token_response_body, now_ms).map_err(|_| {
             TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
         })
     }

@@ -81,7 +81,7 @@ pub(in crate::local_pool::profiles::codex) fn fill_missing_account_config(
     document: &DocumentMut,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
-    let previous = match backup.projection_secret_ref.as_deref() {
+    let previous_config = match backup.projection_secret_ref.as_deref() {
         Some(secret_ref) => projection::config_before(secret_ref, secrets)?
             .as_deref()
             .map(parse_config)
@@ -89,29 +89,29 @@ pub(in crate::local_pool::profiles::codex) fn fill_missing_account_config(
         None if !document_has_provider(document) => Some(document.clone()),
         _ => None,
     };
-    let Some(previous) = previous else {
+    let Some(previous_config) = previous_config else {
         return Ok(());
     };
     if backup.previous_model_provider.is_none() {
-        backup.previous_model_provider = root_model_provider(&previous);
+        backup.previous_model_provider = root_model_provider(&previous_config);
     }
     if backup.previous_model_catalog_json.is_none() {
-        backup.previous_model_catalog_json = root_model_catalog_json(&previous);
+        backup.previous_model_catalog_json = root_model_catalog_json(&previous_config);
     }
     if backup.previous_model.is_none() {
-        backup.previous_model = root_model(&previous);
+        backup.previous_model = root_model(&previous_config);
     }
     if backup.previous_review_model.is_none() {
-        backup.previous_review_model = root_review_model(&previous);
+        backup.previous_review_model = root_review_model(&previous_config);
     }
     if backup.previous_chatgpt_base_url.is_none() {
-        backup.previous_chatgpt_base_url = root_chatgpt_base_url(&previous);
+        backup.previous_chatgpt_base_url = root_chatgpt_base_url(&previous_config);
     }
     if backup.previous_openai_base_url.is_none() {
-        backup.previous_openai_base_url = root_openai_base_url(&previous);
+        backup.previous_openai_base_url = root_openai_base_url(&previous_config);
     }
     if backup.previous_model_reasoning_effort.is_none() {
-        backup.previous_model_reasoning_effort = root_model_reasoning_effort(&previous);
+        backup.previous_model_reasoning_effort = root_model_reasoning_effort(&previous_config);
     }
     Ok(())
 }
@@ -173,12 +173,12 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_matches_snapshot(
     _path: &Path,
     expected_hash: &str,
 ) -> Result<bool> {
-    let Some(value) = auth_snapshot_json(snapshot) else {
+    let Some(auth_document) = auth_snapshot_json(snapshot) else {
         return Ok(false);
     };
     Ok(
-        auth_credential_kind(&value) == Some(ProfileCredentialKind::OAuthAccount)
-            && value
+        auth_credential_kind(&auth_document) == Some(ProfileCredentialKind::OAuthAccount)
+            && auth_document
                 .get("tokens")
                 .and_then(|tokens| tokens.get("access_token"))
                 .and_then(serde_json::Value::as_str)
@@ -195,14 +195,17 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_matches_tokens(
     let Some(content) = snapshot_text(snapshot, path)? else {
         return Ok(false);
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(auth_document) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(false);
     };
-    let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object) else {
+    let Some(tokens) = auth_document
+        .get("tokens")
+        .and_then(serde_json::Value::as_object)
+    else {
         return Ok(false);
     };
     Ok(
-        auth_credential_kind(&value) == Some(ProfileCredentialKind::OAuthAccount)
+        auth_credential_kind(&auth_document) == Some(ProfileCredentialKind::OAuthAccount)
             && tokens
                 .get("account_id")
                 .and_then(serde_json::Value::as_str)
@@ -259,27 +262,30 @@ pub(in crate::local_pool::profiles::codex) fn credential_kind_locked(
     let Some(content) = snapshot_text(&auth, &auth_path)? else {
         return Ok(None);
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(auth_document) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(None);
     };
-    Ok(auth_credential_kind(&value))
+    Ok(auth_credential_kind(&auth_document))
 }
 
 pub(in crate::local_pool::profiles::codex) fn auth_credential_kind(
-    value: &serde_json::Value,
+    auth_document: &serde_json::Value,
 ) -> Option<ProfileCredentialKind> {
-    match value.get("auth_mode").and_then(serde_json::Value::as_str) {
+    match auth_document
+        .get("auth_mode")
+        .and_then(serde_json::Value::as_str)
+    {
         Some("chatgpt") => Some(ProfileCredentialKind::OAuthAccount),
         Some("apikey") => Some(ProfileCredentialKind::ApiKey),
         Some(_) => None,
-        None if value
+        None if auth_document
             .get("OPENAI_API_KEY")
             .and_then(serde_json::Value::as_str)
             .is_some() =>
         {
             Some(ProfileCredentialKind::ApiKey)
         }
-        None if value
+        None if auth_document
             .get("tokens")
             .and_then(serde_json::Value::as_object)
             .is_some() =>

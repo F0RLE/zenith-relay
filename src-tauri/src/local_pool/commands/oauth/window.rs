@@ -154,7 +154,10 @@ fn sign_in_profile_directory(app: &AppHandle, profile: &str) -> Result<PathBuf, 
 }
 
 fn sign_in_profile(account_id: Option<&str>) -> String {
-    let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(account_id) = account_id
+        .map(str::trim)
+        .filter(|account_id_text| !account_id_text.is_empty())
+    else {
         return "new".to_string();
     };
     if (1..=80).contains(&account_id.len())

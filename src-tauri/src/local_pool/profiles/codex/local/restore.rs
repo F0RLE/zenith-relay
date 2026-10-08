@@ -155,14 +155,14 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
 /// the first rename. Treat that short write window as transient rather than
 /// turning it into `profile_restore_blocked`.
 fn read_stable_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    let mut previous = read_optional_bytes(path)?;
+    let mut previous_bytes = read_optional_bytes(path)?;
     for _ in 0..3 {
         thread::sleep(Duration::from_millis(20));
-        let current = read_optional_bytes(path)?;
-        if current == previous {
-            return Ok(current);
+        let candidate_bytes = read_optional_bytes(path)?;
+        if candidate_bytes == previous_bytes {
+            return Ok(candidate_bytes);
         }
-        previous = current;
+        previous_bytes = candidate_bytes;
     }
-    Ok(previous)
+    Ok(previous_bytes)
 }

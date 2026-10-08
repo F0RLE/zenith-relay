@@ -134,7 +134,7 @@ fn quota_models_usage_and_token_rotation_do_not_change_the_scope() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(applied.previous, account);
+    assert_eq!(applied.previous_account, account);
     assert_eq!(applied.account.account.label, "Renamed");
     assert_eq!(applied.account.weight, 9);
     assert_eq!(applied.account.account.token_generation, 2);

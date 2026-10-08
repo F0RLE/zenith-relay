@@ -26,8 +26,8 @@ pub fn effective_proxy_config(
     credentials: &StoredCodexCredentials,
 ) -> Result<Option<ProxyConfig>> {
     effective_proxy_url(settings, credentials)?
-        .map(|value| {
-            ProxyConfig::parse(&value).map_err(|_| {
+        .map(|proxy_url| {
+            ProxyConfig::parse(&proxy_url).map_err(|_| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
                     "stored account proxy URL is invalid",
@@ -41,25 +41,25 @@ pub fn common_proxy_url(settings: &GatewaySettings) -> Result<Option<String>> {
     if !settings.common_proxy_configured {
         return Ok(None);
     }
-    let value = secret_store::load(COMMON_PROXY_SECRET_REF)?.ok_or_else(|| {
+    let proxy_url = secret_store::load(COMMON_PROXY_SECRET_REF)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::SecretStoreUnavailable,
             "common account proxy is configured but its secret is unavailable",
         )
     })?;
-    ProxyConfig::parse(&value).map_err(|_| {
+    ProxyConfig::parse(&proxy_url).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             "stored common proxy URL is invalid",
         )
     })?;
-    Ok(Some(value))
+    Ok(Some(proxy_url))
 }
 
 pub fn common_proxy_config(settings: &GatewaySettings) -> Result<Option<ProxyConfig>> {
     common_proxy_url(settings)?
-        .map(|value| {
-            ProxyConfig::parse(&value).map_err(|_| {
+        .map(|proxy_url| {
+            ProxyConfig::parse(&proxy_url).map_err(|_| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
                     "stored common proxy URL is invalid",
@@ -89,7 +89,7 @@ pub fn proxy_status(
         ProxyRoute {
             has_account_proxy: account_proxy.is_some(),
             account_proxy_valid: account_proxy
-                .is_some_and(|value| ProxyConfig::parse(value).is_ok()),
+                .is_some_and(|proxy_url| ProxyConfig::parse(proxy_url).is_ok()),
             bypass_common_proxy: credentials.bypass_common_proxy(),
         },
         common_available,
@@ -138,7 +138,7 @@ pub fn common_proxy_available(settings: &GatewaySettings) -> bool {
         && secret_store::load(COMMON_PROXY_SECRET_REF)
             .ok()
             .flatten()
-            .is_some_and(|value| ProxyConfig::parse(&value).is_ok())
+            .is_some_and(|proxy_url| ProxyConfig::parse(&proxy_url).is_ok())
 }
 
 pub(super) fn choose_proxy_url(
@@ -147,8 +147,8 @@ pub(super) fn choose_proxy_url(
     common_configured: bool,
     load_common: impl FnOnce() -> Result<Option<String>>,
 ) -> Result<Option<String>> {
-    if let Some(value) = account_proxy {
-        return Ok(Some(value.to_string()));
+    if let Some(account_proxy_url) = account_proxy {
+        return Ok(Some(account_proxy_url.to_string()));
     }
     if bypass_common_proxy {
         return Ok(None);

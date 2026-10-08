@@ -29,7 +29,6 @@ pub(in crate::local_pool::accounts) fn prune_account_task_selectors(
 
 pub(super) fn restore_credential_local(
     credential_store: &CredentialStore<NativeSecretBackend>,
-    account_id: &str,
     old_credential: Option<&StoredCodexCredentials>,
     cause: &LocalPoolError,
 ) -> LocalResult<()> {
@@ -46,9 +45,6 @@ pub(super) fn restore_credential_local(
             ),
         )
     })?;
-    if old_credential.is_none() {
-        let _ = account_id;
-    }
     Ok(())
 }
 
@@ -56,7 +52,6 @@ pub(super) fn restore_credential_local(
 pub(in crate::local_pool::accounts) fn rollback_deleted_account_side_effects(
     state: &DesktopState,
     credential_store: &CredentialStore<NativeSecretBackend>,
-    account_id: &str,
     old_credential: Option<&StoredCodexCredentials>,
     previous_wake: zenith_relay_core::automations::WakeCoordinator,
     old_automations: AutomationRecords,
@@ -64,7 +59,7 @@ pub(in crate::local_pool::accounts) fn rollback_deleted_account_side_effects(
     previous_proxy_pool: Option<&ProxyPool>,
     cause: &LocalPoolError,
 ) -> LocalResult<()> {
-    restore_credential_local(credential_store, account_id, old_credential, cause)?;
+    restore_credential_local(credential_store, old_credential, cause)?;
     state.store()?.notify_refresh_changed();
     state
         .restore_wake(previous_wake, old_automations)

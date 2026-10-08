@@ -37,13 +37,13 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
         )
     })?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let current = credentials
+    let stored_credentials = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
     // Validate the identity needed to project refreshed credentials before any
     // local state changes. Previously this was checked after the secret,
     // authority, store, and runtime had already been updated.
-    let provider_account_id = current
+    let provider_account_id = stored_credentials
         .provider_account_id()
         .map(str::to_string)
         .ok_or_else(|| {
@@ -52,13 +52,15 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
                 "account credentials do not contain a provider account id",
             )
         })?;
-    let previous_tokens = current.to_token_set().map_err(credential_local_error)?;
-    let Some(refresh_token) = current.refresh_token() else {
+    let previous_tokens = stored_credentials
+        .to_token_set()
+        .map_err(credential_local_error)?;
+    let Some(refresh_token) = stored_credentials.refresh_token() else {
         drop(refresh_guard);
         persist_manual_refresh_failure(
             state,
             account_id,
-            &current,
+            &stored_credentials,
             ReauthReason::ExpiredRefreshToken,
             error_codes::REFRESH_TOKEN_MISSING,
         )
@@ -67,12 +69,12 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
             account_id: account_id.to_string(),
             status: CredentialRefreshStatus::RequiresReauth,
             code: error_codes::REFRESH_TOKEN_MISSING.to_string(),
-            expires_at_ms: current.expires_at_ms(),
-            generation: Some(current.generation()),
+            expires_at_ms: stored_credentials.expires_at_ms(),
+            generation: Some(stored_credentials.generation()),
         });
     };
     let settings = state.store()?.gateway().clone();
-    let proxy = effective_proxy_config(&settings, &current)
+    let proxy = effective_proxy_config(&settings, &stored_credentials)
         .map_err(|error| LocalPoolError::new(ErrorCode::GatewayUnavailable, error.message))?;
     let oauth = CodexOAuthClient::new_with_proxy(proxy.as_ref())
         .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "OAuth client is unavailable"))?;
@@ -83,19 +85,25 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
             let (status, reason) = classify_manual_refresh_failure(failure.kind);
             drop(refresh_guard);
             if let Some(reason) = reason {
-                persist_manual_refresh_failure(state, account_id, &current, reason, &failure.code)
-                    .await?;
+                persist_manual_refresh_failure(
+                    state,
+                    account_id,
+                    &stored_credentials,
+                    reason,
+                    &failure.code,
+                )
+                .await?;
             }
             return Ok(CredentialRefreshResult {
                 account_id: account_id.to_string(),
                 status,
                 code: failure.code,
-                expires_at_ms: current.expires_at_ms(),
-                generation: Some(current.generation()),
+                expires_at_ms: stored_credentials.expires_at_ms(),
+                generation: Some(stored_credentials.generation()),
             });
         }
     };
-    let updated = current
+    let updated = stored_credentials
         .apply_refresh(
             CredentialRefresh::from_oauth(refreshed).map_err(credential_local_error)?,
             now_ms,
@@ -136,7 +144,7 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
             state,
             &credentials,
             account_id,
-            &current,
+            &stored_credentials,
             &previous_tokens,
             &tokens,
             &old_accounts,
@@ -153,7 +161,7 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
             state,
             &credentials,
             account_id,
-            &current,
+            &stored_credentials,
             &previous_tokens,
             &tokens,
             &old_accounts,
@@ -267,27 +275,27 @@ pub(in crate::local_pool::accounts) fn restore_force_refreshed_account_record(
     attempted_tokens: &TokenSet,
     old_accounts: &[LocalAccountRecord],
 ) -> LocalResult<bool> {
-    let previous = old_accounts
+    let previous_account = old_accounts
         .iter()
         .find(|account| account.account.id == account_id)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    let (mut store, mut current) = super::load_stored_account(state, account_id)?;
+    let (mut store, mut stored_account) = super::load_stored_account(state, account_id)?;
     // Never restore an older snapshot over a fresh login/rotation. Other
     // account fields (quota, health, model discovery, and policies) are left
     // untouched so a concurrent monitor update also survives the rollback.
     if persisted_token_generation_is_newer(
-        current.account.token_generation,
-        current.account.token_updated_at_ms,
+        stored_account.account.token_generation,
+        stored_account.account.token_updated_at_ms,
         attempted_tokens,
-    ) || current.account.auth_state != AccountAuthState::Active
+    ) || stored_account.account.auth_state != AccountAuthState::Active
     {
         return Ok(false);
     }
-    current.account.auth_state = previous.account.auth_state;
-    current.account.token_generation = previous.account.token_generation;
-    current.account.token_updated_at_ms = previous.account.token_updated_at_ms;
-    current.account.last_error_code = previous.account.last_error_code.clone();
-    store.upsert_account(current)?;
+    stored_account.account.auth_state = previous_account.account.auth_state;
+    stored_account.account.token_generation = previous_account.account.token_generation;
+    stored_account.account.token_updated_at_ms = previous_account.account.token_updated_at_ms;
+    stored_account.account.last_error_code = previous_account.account.last_error_code.clone();
+    store.upsert_account(stored_account)?;
     Ok(true)
 }
 

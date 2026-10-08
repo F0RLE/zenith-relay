@@ -73,7 +73,7 @@ pub fn new_account_record(
         observed_at_ms: now_ms,
     });
     subscription.updated_at_ms = None;
-    let mut record = LocalAccountRecord {
+    let mut account_record = LocalAccountRecord {
         account: AccountRecord {
             id: credentials.local_account_id().to_string(),
             label,
@@ -112,8 +112,8 @@ pub fn new_account_record(
         client_auth_status: None,
         last_client_login_redirect_at_ms: None,
     };
-    record.normalize();
-    Ok(record)
+    account_record.normalize();
+    Ok(account_record)
 }
 
 pub fn identity_hash(
@@ -124,18 +124,18 @@ pub fn identity_hash(
     let account = provider_account_id.trim().to_ascii_lowercase();
     let user = provider_user_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|provider_user_id| !provider_user_id.is_empty())
         .map(str::to_ascii_lowercase);
     let email = email
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|email_address| !email_address.is_empty())
         .map(str::to_ascii_lowercase);
-    let value = match (email, user) {
+    let identity_material = match (email, user) {
         (Some(email), _) => format!("account:{account}\0email:{email}"),
         (None, Some(user)) => format!("account:{account}\0user:{user}"),
         (None, None) => format!("account:{account}"),
     };
-    hash(value.as_bytes())
+    hash(identity_material.as_bytes())
 }
 
 pub(in crate::local_pool) fn codex_credentials_match(
@@ -218,8 +218,8 @@ pub fn candidate_quota_with_stale_after(
     CandidateQuota::from_snapshot(quota, now_ms, stale_after_ms)
 }
 
-fn hash(value: &[u8]) -> String {
-    hex::encode(Sha256::digest(value))
+fn hash(secret_bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(secret_bytes))
 }
 
 #[cfg(test)]
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn account_record_contains_only_local_ids_and_hashes() {
-        let record = new_account_record(
+        let account_record = new_account_record(
             &credentials(),
             AccountAuthMode::OAuth,
             vec!["gpt-test".into()],
@@ -259,10 +259,10 @@ mod tests {
             1,
         )
         .unwrap();
-        let serialized = serde_json::to_string(&record).unwrap();
-        assert_eq!(record.account.id, "account_local");
-        assert_eq!(record.priority, 10);
-        assert_eq!(record.account.subscription.updated_at_ms, None);
+        let serialized = serde_json::to_string(&account_record).unwrap();
+        assert_eq!(account_record.account.id, "account_local");
+        assert_eq!(account_record.priority, 10);
+        assert_eq!(account_record.account.subscription.updated_at_ms, None);
         assert!(!serialized.contains("provider-account"));
         assert!(!serialized.contains("access-secret"));
         assert!(!serialized.contains("refresh-secret"));
@@ -271,14 +271,14 @@ mod tests {
 
     #[test]
     fn unavailable_account_can_be_saved_without_discovered_models() {
-        let mut record =
+        let mut account_record =
             new_account_record(&credentials(), AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
-        record.account.health = AccountHealthState::Unhealthy;
-        record.account.last_error_code = Some("models_unauthorized".into());
+        account_record.account.health = AccountHealthState::Unhealthy;
+        account_record.account.last_error_code = Some("models_unauthorized".into());
 
-        assert!(record.models.is_empty());
+        assert!(account_record.models.is_empty());
         assert_eq!(
-            candidate_health(&record.account),
+            candidate_health(&account_record.account),
             CandidateHealth::Unhealthy
         );
     }
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn auth_and_subscription_states_are_hard_filters() {
-        let mut record = new_account_record(
+        let mut account_record = new_account_record(
             &credentials(),
             AccountAuthMode::OAuth,
             vec!["gpt-test".into()],
@@ -301,18 +301,25 @@ mod tests {
             1,
         )
         .unwrap();
-        record.account.auth_state = AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant);
+        account_record.account.auth_state =
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant);
         assert_eq!(
-            candidate_health(&record.account),
+            candidate_health(&account_record.account),
             CandidateHealth::ReauthRequired
         );
-        record.account.auth_state = AccountAuthState::Active;
-        record.account.subscription.status = SubscriptionStatus::Forbidden;
-        assert_eq!(candidate_health(&record.account), CandidateHealth::Blocked);
-        record.account.subscription.status = SubscriptionStatus::Active;
-        record.account.auth_state = AccountAuthState::DegradedAccessOnly;
-        record.account.last_error_code = Some("upstream_unauthorized".into());
-        assert_eq!(candidate_health(&record.account), CandidateHealth::Healthy);
+        account_record.account.auth_state = AccountAuthState::Active;
+        account_record.account.subscription.status = SubscriptionStatus::Forbidden;
+        assert_eq!(
+            candidate_health(&account_record.account),
+            CandidateHealth::Blocked
+        );
+        account_record.account.subscription.status = SubscriptionStatus::Active;
+        account_record.account.auth_state = AccountAuthState::DegradedAccessOnly;
+        account_record.account.last_error_code = Some("upstream_unauthorized".into());
+        assert_eq!(
+            candidate_health(&account_record.account),
+            CandidateHealth::Healthy
+        );
     }
 
     #[test]

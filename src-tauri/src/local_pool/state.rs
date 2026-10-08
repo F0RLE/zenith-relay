@@ -232,10 +232,10 @@ impl DesktopState {
         context: Option<&str>,
     ) {
         let telemetry = self.telemetry.clone();
-        let name = name.to_string();
+        let operation_name = name.to_string();
         let context = context.map(str::to_owned);
         tauri::async_runtime::spawn_blocking(move || {
-            let _ = telemetry.record_performance(&name, duration_ms, context.as_deref());
+            let _ = telemetry.record_performance(&operation_name, duration_ms, context.as_deref());
         });
     }
 

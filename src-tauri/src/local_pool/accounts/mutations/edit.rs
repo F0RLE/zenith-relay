@@ -21,27 +21,28 @@ pub async fn update_local_account(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
+    let account_update = input;
     let _mutation = state.setup_guard().await;
-    let account_id = input.account_id.clone();
+    let account_id = account_update.account_id.clone();
     let mut account = state
         .store()?
         .account(&account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    let previous = account.clone();
-    apply_account_patch(&mut account, input)?;
+    let previous_account = account.clone();
+    apply_account_patch(&mut account, account_update)?;
     validate_account_record(&account)?;
-    let catalog_changed = account_catalog_visibility_changed(&previous, &account);
-    let model_refresh_account =
-        (!previous.account.in_pool && account.account.in_pool).then(|| account.account.id.clone());
+    let catalog_changed = account_catalog_visibility_changed(&previous_account, &account);
+    let model_refresh_account = (!previous_account.account.in_pool && account.account.in_pool)
+        .then(|| account.account.id.clone());
     let runtime = state.gateway.runtime().await;
-    let _dispatch_fences = if account_dispatch_permission_changed(&previous, &account) {
+    let _dispatch_fences = if account_dispatch_permission_changed(&previous_account, &account) {
         fence_runtime_candidates(runtime.as_deref(), std::slice::from_ref(&account_id), &[])
     } else {
         Vec::new()
     };
     state.store()?.upsert_account(account.clone())?;
-    let membership_changed = previous.account.in_pool != account.account.in_pool;
+    let membership_changed = previous_account.account.in_pool != account.account.in_pool;
     let updated_in_place = if apply_account_policy_if_running(&state, &account).await {
         !membership_changed
             || refresh_local_gateway_key_scope_if_running(&state)
@@ -51,7 +52,7 @@ pub async fn update_local_account(
         false
     };
     if !updated_in_place {
-        sync_account_or_rollback(&state, previous, account.clone()).await?;
+        sync_account_or_rollback(&state, previous_account, account.clone()).await?;
     }
     state.sync_account_quota_refresh(&account_id, current_time_ms())?;
     let snapshot = state.snapshot().await?;
@@ -66,17 +67,23 @@ pub async fn update_local_account(
 }
 
 fn account_catalog_visibility_changed(
-    previous: &LocalAccountRecord,
-    current: &LocalAccountRecord,
+    previous_account: &LocalAccountRecord,
+    updated_account: &LocalAccountRecord,
 ) -> bool {
-    pool_catalog_visibility_changed(previous.pool_access(), current.pool_access())
+    pool_catalog_visibility_changed(
+        previous_account.pool_access(),
+        updated_account.pool_access(),
+    )
 }
 
 fn account_dispatch_permission_changed(
-    previous: &LocalAccountRecord,
-    current: &LocalAccountRecord,
+    previous_account: &LocalAccountRecord,
+    updated_account: &LocalAccountRecord,
 ) -> bool {
-    pool_dispatch_permission_changed(previous.pool_access(), current.pool_access())
+    pool_dispatch_permission_changed(
+        previous_account.pool_access(),
+        updated_account.pool_access(),
+    )
 }
 
 #[tauri::command]
@@ -84,11 +91,12 @@ pub async fn set_local_account_proxy(
     input: SetAccountProxyInput,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
+    let proxy_update = input;
     let _mutation = state.setup_guard().await;
     crate::local_pool::commands::proxies::set_account_proxy_inner(
-        input.account_id,
-        input.proxy_url,
-        input.bypass_common_proxy,
+        proxy_update.account_id,
+        proxy_update.proxy_url,
+        proxy_update.bypass_common_proxy,
         &state,
     )
     .await?;
@@ -111,7 +119,7 @@ pub async fn set_local_account_enabled(
     if account.account.enabled == enabled {
         return state.snapshot().await.map_err(Into::into);
     }
-    let previous = account.clone();
+    let previous_account = account.clone();
     account.account.enabled = enabled;
     if enabled {
         validate_account_record(&account)?;
@@ -123,7 +131,7 @@ pub async fn set_local_account_enabled(
     state.store()?.upsert_account(account.clone())?;
     let updated_in_place = apply_account_policy_if_running(&state, &account).await;
     if !updated_in_place {
-        sync_account_or_rollback(&state, previous, account.clone()).await?;
+        sync_account_or_rollback(&state, previous_account, account.clone()).await?;
     }
     state.sync_account_quota_refresh(&account_id, current_time_ms())?;
     let snapshot = state.snapshot().await?;

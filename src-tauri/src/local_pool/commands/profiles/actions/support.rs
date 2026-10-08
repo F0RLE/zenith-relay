@@ -12,7 +12,7 @@ pub(super) async fn activate_account_profile(
     // expired credential must leave the current client session untouched.
     let prepared = prepare_account_credentials(state, account_id).await?;
     let stopped = stop_codex_and_sync_account_at(state, &profile_dir).await?;
-    let result: Result<ProfileActivation, CommandError> = async {
+    let activation_result: Result<ProfileActivation, CommandError> = async {
         let history_backup = if sync_history {
             synchronize_history_for_command(state, &profile_dir, CodexHistoryProvider::ChatGpt)?
         } else {
@@ -30,11 +30,12 @@ pub(super) async fn activate_account_profile(
         Ok(ProfileActivation { binding })
     }
     .await;
-    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
-    if result.is_ok() {
+    let restart_result =
+        restart_codex_after_failed_change(stopped, activation_result, launch_codex_with_profile);
+    if restart_result.is_ok() {
         set_runtime_pool_interface_reserve(state, None, 0).await;
     }
-    result
+    restart_result
 }
 
 pub(in crate::local_pool::commands::profiles) async fn set_runtime_pool_interface_reserve(
@@ -104,7 +105,7 @@ pub(in crate::local_pool::commands::profiles) fn append_remote_cleanup_error(
 
 pub(in crate::local_pool::commands::profiles) fn profile_rotation_commit_state(
     observed: Option<&RemoteProfileCredential>,
-    current: &RemoteProfileCredential,
+    active_credential: &RemoteProfileCredential,
     rotation: &ProfileKeyRotation,
 ) -> ProfileRotationCommitState {
     let Some(observed) = observed else {
@@ -115,9 +116,9 @@ pub(in crate::local_pool::commands::profiles) fn profile_rotation_commit_state(
         && observed.secret == rotation.secret
     {
         ProfileRotationCommitState::Committed
-    } else if observed.key_id == current.key_id
-        && observed.base_url == current.base_url
-        && observed.secret == current.secret
+    } else if observed.key_id == active_credential.key_id
+        && observed.base_url == active_credential.base_url
+        && observed.secret == active_credential.secret
     {
         ProfileRotationCommitState::NotCommitted
     } else {

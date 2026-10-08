@@ -29,22 +29,22 @@ pub(super) async fn reconcile(state: &DesktopState) -> Result<()> {
     let _mutation = state.setup_guard().await;
     let activity = super::active_members(state).await;
     let store = state.store()?;
-    let mut current = BTreeSet::new();
+    let mut active_fence_ids = BTreeSet::new();
     for account in store
         .accounts()
         .iter()
         .filter(|account| account.remote_location.is_none())
     {
         let (_, fence) = store.account_refresh_scope(&account.account.id)?;
-        current.insert(fence.identity());
+        active_fence_ids.insert(fence.identity());
         for kind in [RefreshKind::Auth, RefreshKind::Quota, RefreshKind::Models] {
             register(state, account, fence.clone(), kind, true, &activity)?;
         }
     }
-    super::sources::reconcile(state, &store, &activity, &mut current)?;
+    super::sources::reconcile(state, &store, &activity, &mut active_fence_ids)?;
     state
         .refresh
-        .retain(|identity, _| current.contains(identity));
+        .retain(|identity, _| active_fence_ids.contains(identity));
     Ok(())
 }
 
@@ -114,19 +114,19 @@ fn register(
             Box::pin(async move {
                 let Some(owner) = weak.upgrade() else {
                     return RefreshResult {
-                        value: Err(super::wait_error(RefreshWaitError::Stopped)),
+                        refresh_value: Err(super::wait_error(RefreshWaitError::Stopped)),
                         outcome: RefreshOutcome::NoProgress,
                     };
                 };
-                let state = DesktopState { owner };
-                let value = if job.kind == RefreshKind::Auth {
-                    prepare_authorization(&state, &fence)
+                let account_state = DesktopState { owner };
+                let refresh_read = if job.kind == RefreshKind::Auth {
+                    prepare_authorization(&account_state, &fence)
                         .await
                         .map(|prepared| RefreshRead::Authorization(Box::new(prepared)))
                 } else {
-                    execute(&state, &fence, &job).await
+                    execute(&account_state, &fence, &job).await
                 };
-                let outcome = match &value {
+                let outcome = match &refresh_read {
                     Ok(RefreshRead::Authorization(_)) => RefreshOutcome::Success,
                     Ok(RefreshRead::Quota(response))
                         if !matches!(response.quota, AccountQuotaOutcome::Failed { .. }) =>
@@ -135,9 +135,9 @@ fn register(
                     }
                     Ok(RefreshRead::Models { succeeded: true }) => RefreshOutcome::Success,
                     _ if job.kind == RefreshKind::Auth => RefreshOutcome::NoProgress,
-                    _ => RefreshOutcome::retry_after(state.refresh.now_ms(), None),
+                    _ => RefreshOutcome::retry_after(account_state.refresh.now_ms(), None),
                 };
-                if let Err(error) = &value {
+                if let Err(error) = &refresh_read {
                     crate::diagnostics::record_error(
                         "account-refresh",
                         Some("refresh_failed"),
@@ -148,7 +148,10 @@ fn register(
                         )],
                     );
                 }
-                RefreshResult { value, outcome }
+                RefreshResult {
+                    refresh_value: refresh_read,
+                    outcome,
+                }
             })
         })
         .map_err(super::wait_error)
@@ -159,7 +162,7 @@ pub(super) async fn prepare_authorization(
     fence: &AccountRefreshFence,
 ) -> Result<PreparedAccountAuthorization> {
     let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-    if scope.fence != *fence || scope.before.remote_location.is_some() {
+    if scope.fence != *fence || scope.initial_account.remote_location.is_some() {
         return Err(super::wait_error(RefreshWaitError::Stale));
     }
     let prepared = prepare_account_request_authorization(state, &fence.account_id).await?;
@@ -171,12 +174,12 @@ pub(in crate::local_pool) async fn request_authorization(
     state: &DesktopState,
     fence: &AccountRefreshFence,
 ) -> Result<PreparedAccountAuthorization> {
-    let result = state
+    let authorization_result = state
         .refresh
         .request(&fence.identity(), RefreshKind::Auth)
         .await
         .map_err(super::wait_error)?;
-    match result.as_ref() {
+    match authorization_result.as_ref() {
         Ok(RefreshRead::Authorization(prepared)) => Ok((**prepared).clone()),
         Ok(_) => Err(LocalPoolError::invalid_state(
             "unexpected authorization result",
@@ -211,42 +214,45 @@ pub(super) async fn execute(
 ) -> RefreshReadResult {
     let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
     if scope.fence != *fence
-        || scope.before.remote_location.is_some()
+        || scope.initial_account.remote_location.is_some()
         || (!job.manual
-            && (!super::automatic_eligible(&scope.before) || !state.background_session_active()))
+            && (!super::automatic_eligible(&scope.initial_account)
+                || !state.background_session_active()))
     {
         return Err(super::wait_error(RefreshWaitError::Stale));
     }
     state.refresh.set_active(
         &job.identity,
-        super::recently_used(scope.before.account.last_used_at_ms)
+        super::recently_used(scope.initial_account.account.last_used_at_ms)
             || super::active_members(state)
                 .await
                 .contains(&account_member_key(&fence.account_id)),
     );
-    let read = match job.kind {
+    let refresh_read = match job.kind {
         RefreshKind::Quota => {
-            let mut response = read_account_quota_once(state, &scope, job.manual).await?;
+            let mut quota_response = read_account_quota_once(state, &scope, job.manual).await?;
             {
                 let _mutation = state.setup_guard().await;
                 scope.validate(state)?;
-                super::automations::evaluate_updated_transitions(state, &response)?;
+                super::automations::evaluate_updated_transitions(state, &quota_response)?;
             }
             // Reset verification stays inside this job. Enqueuing the same key
             // here would wait on itself, and followers must not settle twice.
-            if super::automations::evaluate_weekly_exhaustions(state, &response, fence).await? {
+            if super::automations::evaluate_weekly_exhaustions(state, &quota_response, fence)
+                .await?
+            {
                 let next_scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
                 if next_scope.fence != *fence {
                     return Err(super::wait_error(RefreshWaitError::Stale));
                 }
-                response = read_account_quota_once(state, &next_scope, false).await?;
+                quota_response = read_account_quota_once(state, &next_scope, false).await?;
             }
-            if let Some(delay) = reset_due_delay(&response, current_time_ms()) {
+            if let Some(delay) = reset_due_delay(&quota_response, current_time_ms()) {
                 state
                     .refresh
                     .schedule_after(&job.identity, RefreshKind::Quota, delay);
             }
-            RefreshRead::Quota(Box::new(response))
+            RefreshRead::Quota(Box::new(quota_response))
         }
         RefreshKind::Models => RefreshRead::Models {
             succeeded: read_account_models_once(state, &scope).await?,
@@ -267,7 +273,7 @@ pub(super) async fn execute(
                 || activity.contains(&account_member_key(&fence.account_id)),
         );
     }
-    Ok(read)
+    Ok(refresh_read)
 }
 
 pub(in crate::local_pool) fn reset_due_delay(

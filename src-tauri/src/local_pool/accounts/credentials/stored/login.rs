@@ -12,21 +12,23 @@ impl StoredCodexCredentials {
         password: Option<String>,
         totp_secret: Option<String>,
     ) -> Self {
-        self.phone = phone.and_then(|value| normalize_login_phone(&value));
-        self.password = password.and_then(|value| normalize_login_password(&value));
-        self.totp_secret = totp_secret.and_then(|value| normalize_login_totp_secret(&value));
+        self.phone = phone.and_then(|phone_value| normalize_login_phone(&phone_value));
+        self.password =
+            password.and_then(|password_value| normalize_login_password(&password_value));
+        self.totp_secret = totp_secret
+            .and_then(|totp_secret_value| normalize_login_totp_secret(&totp_secret_value));
         self
     }
 
-    pub(crate) fn fill_missing_login_from(mut self, previous: &Self) -> Self {
+    pub(crate) fn fill_missing_login_from(mut self, previous_login: &Self) -> Self {
         if self.phone.is_none() {
-            self.phone = previous.phone.clone();
+            self.phone = previous_login.phone.clone();
         }
         if self.password.is_none() {
-            self.password = previous.password.clone();
+            self.password = previous_login.password.clone();
         }
         if self.totp_secret.is_none() {
-            self.totp_secret = previous.totp_secret.clone();
+            self.totp_secret = previous_login.totp_secret.clone();
         }
         self
     }
@@ -47,10 +49,10 @@ impl StoredCodexCredentials {
 }
 
 fn required_note(
-    value: &str,
+    note_text: &str,
     normalize: fn(&str) -> Option<String>,
 ) -> Result<Option<String>, CredentialError> {
-    let trimmed = value.trim();
+    let trimmed = note_text.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }

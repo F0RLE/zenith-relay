@@ -63,14 +63,15 @@ pub fn export_local_accounts(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<AccountExportResult> {
-    let account_ids = normalize_account_ids(input.account_ids)?;
+    let export_input = input;
+    let account_ids = normalize_account_ids(export_input.account_ids)?;
     let document = build_local_account_export_document(
         &account_ids,
-        input.format,
-        input.description.as_deref(),
+        export_input.format,
+        export_input.description.as_deref(),
         &state,
     )?;
-    finish_account_export(document, input.destination, &app)
+    finish_account_export(document, export_input.destination, &app)
 }
 
 pub(crate) fn build_local_account_export_document(
@@ -79,7 +80,7 @@ pub(crate) fn build_local_account_export_document(
     description: Option<&str>,
     state: &DesktopState,
 ) -> LocalResult<AccountExportDocument> {
-    let records = {
+    let account_records = {
         let store = state.store()?;
         account_ids
             .iter()
@@ -91,14 +92,14 @@ pub(crate) fn build_local_account_export_document(
             .collect::<LocalResult<Vec<_>>>()?
     };
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
-    let accounts = records
+    let accounts = account_records
         .iter()
-        .map(|record| {
+        .map(|account_record| {
             let credentials = credential_store
-                .require(&record.account.id)
+                .require(&account_record.account.id)
                 .map_err(credential_local_error)?;
             Ok(AccountExportCredential {
-                label: export_account_label(&record.account.label, &credentials),
+                label: export_account_label(&account_record.account.label, &credentials),
                 email: credentials.email().map(str::to_string),
                 phone: credentials.phone().map(str::to_string),
                 password: credentials.password().map(str::to_string),
@@ -109,7 +110,7 @@ pub(crate) fn build_local_account_export_document(
                 account_id: credentials.provider_account_id().map(str::to_string),
                 user_id: credentials.provider_user_id().map(str::to_string),
                 organization_id: credentials.organization_id().map(str::to_string),
-                plan_type: record
+                plan_type: account_record
                     .account
                     .subscription
                     .plan_type
@@ -117,11 +118,11 @@ pub(crate) fn build_local_account_export_document(
                     .or_else(|| credentials.plan_type().map(str::to_string)),
                 expires_at_ms: credentials.expires_at_ms(),
                 issued_at_ms: credentials.issued_at_ms(),
-                subscription_active_until_ms: record.account.subscription.active_until_ms,
-                created_at_ms: record.account.created_at_ms,
-                priority: record.priority,
-                enabled: record.account.enabled,
-                tags: record.account.tags.clone(),
+                subscription_active_until_ms: account_record.account.subscription.active_until_ms,
+                created_at_ms: account_record.account.created_at_ms,
+                priority: account_record.priority,
+                enabled: account_record.account.enabled,
+                tags: account_record.account.tags.clone(),
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;

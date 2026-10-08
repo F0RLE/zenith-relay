@@ -11,8 +11,16 @@ pub(super) fn preview_from_snapshot(
         target_provider: snapshot.target_provider.clone(),
         profile_count: snapshot.profile_roots.len(),
         rollout_file_count: snapshot.rollout_files.len(),
-        rollout_record_count: snapshot.rollout_files.iter().map(|item| item.records).sum(),
-        sqlite_row_count: snapshot.databases.iter().map(|item| item.rows).sum(),
+        rollout_record_count: snapshot
+            .rollout_files
+            .iter()
+            .map(|rollout_file| rollout_file.records)
+            .sum(),
+        sqlite_row_count: snapshot
+            .databases
+            .iter()
+            .map(|database_snapshot| database_snapshot.rows)
+            .sum(),
         codex_running,
         expires_at_ms: snapshot.expires_at_ms,
     }
@@ -58,9 +66,19 @@ pub(super) fn validate_snapshot_paths(snapshot: &RepairSnapshot) -> Result<(), S
     for path in snapshot
         .rollout_files
         .iter()
-        .map(|item| &item.path)
-        .chain(snapshot.history_rollouts.iter().map(|item| &item.path))
-        .chain(snapshot.databases.iter().map(|item| &item.path))
+        .map(|rollout_file| &rollout_file.path)
+        .chain(
+            snapshot
+                .history_rollouts
+                .iter()
+                .map(|history_rollout| &history_rollout.path),
+        )
+        .chain(
+            snapshot
+                .databases
+                .iter()
+                .map(|database_snapshot| &database_snapshot.path),
+        )
     {
         let canonical = portable_canonicalize(Path::new(path))?;
         if !roots.iter().any(|root| canonical.starts_with(root)) {

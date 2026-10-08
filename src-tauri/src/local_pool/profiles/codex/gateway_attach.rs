@@ -216,9 +216,9 @@ pub(super) fn set_local_gateway_websockets_with_backend(
         let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
             return Ok(None);
         };
-        if expected_credential_id.is_some_and(|id| {
+        if expected_credential_id.is_some_and(|credential_id| {
             backup.credential_kind() != ProfileCredentialKind::LocalGateway
-                || backup.managed_key_id != id
+                || backup.managed_key_id != credential_id
         }) {
             return Ok(None);
         }

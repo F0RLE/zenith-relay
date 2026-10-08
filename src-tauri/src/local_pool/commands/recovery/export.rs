@@ -27,7 +27,7 @@ pub(super) fn support_bundle(context: SupportContext) -> SupportBundle {
 
 pub(super) fn write_export(
     prefix: &str,
-    value: &impl Serialize,
+    export_document: &impl Serialize,
     app: &AppHandle,
 ) -> Result<Option<String>, CommandError> {
     let filename = format!(
@@ -46,7 +46,7 @@ pub(super) fn write_export(
     let path = path.into_path().map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
     })?;
-    let content = serde_json::to_string_pretty(value).map_err(|error| {
+    let content = serde_json::to_string_pretty(export_document).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             format!("failed to serialize export: {error}"),
@@ -95,7 +95,7 @@ pub(crate) fn write_account_export(
 pub(super) fn invalid_export_row(row: &UsageExportRow) -> bool {
     [&row.time, &row.connection]
         .into_iter()
-        .any(|value| invalid_text(value))
+        .any(|export_text| invalid_text(export_text))
         || [
             row.model.as_deref(),
             row.request_id.as_deref(),
@@ -110,9 +110,11 @@ pub(super) fn invalid_export_row(row: &UsageExportRow) -> bool {
         ]
         .into_iter()
         .flatten()
-        .any(|value| zenith_relay_core::normalize_reasoning_effort(value).is_none())
+        .any(|reasoning_effort| {
+            zenith_relay_core::normalize_reasoning_effort(reasoning_effort).is_none()
+        })
 }
 
-pub(super) fn invalid_text(value: &str) -> bool {
-    value.len() > MAX_EXPORT_TEXT || value.chars().any(char::is_control)
+pub(super) fn invalid_text(text: &str) -> bool {
+    text.len() > MAX_EXPORT_TEXT || text.chars().any(char::is_control)
 }

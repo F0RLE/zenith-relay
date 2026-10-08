@@ -29,16 +29,16 @@ impl ProxyPool {
             entries: persisted
                 .entries
                 .into_iter()
-                .map(|entry| {
-                    let mut assigned_account_ids = entry.assigned_account_ids;
-                    if let Some(account_id) = entry.assigned_account_id {
+                .map(|stored_proxy| {
+                    let mut assigned_account_ids = stored_proxy.assigned_account_ids;
+                    if let Some(account_id) = stored_proxy.assigned_account_id {
                         assigned_account_ids.push(account_id);
                     }
                     StoredProxy {
-                        id: entry.id,
-                        url: entry.url,
+                        id: stored_proxy.id,
+                        url: stored_proxy.url,
                         assigned_account_ids,
-                        created_at_ms: entry.created_at_ms,
+                        created_at_ms: stored_proxy.created_at_ms,
                     }
                 })
                 .collect(),
@@ -65,16 +65,16 @@ impl ProxyPool {
                 "stored proxy pool has unsupported metadata",
             ));
         }
-        let mut ids = HashSet::new();
+        let mut proxy_ids = HashSet::new();
         let mut urls = HashSet::new();
         let mut accounts = HashSet::new();
-        for entry in &self.entries {
-            let valid = !entry.id.is_empty()
-                && ids.insert(entry.id.as_str())
-                && zenith_relay_core::normalize_proxy_url(&entry.url)
-                    .is_ok_and(|url| url == entry.url)
-                && urls.insert(entry.url.as_str())
-                && entry.assigned_account_ids.iter().all(|account_id| {
+        for stored_proxy in &self.entries {
+            let valid = !stored_proxy.id.is_empty()
+                && proxy_ids.insert(stored_proxy.id.as_str())
+                && zenith_relay_core::normalize_proxy_url(&stored_proxy.url)
+                    .is_ok_and(|url| url == stored_proxy.url)
+                && urls.insert(stored_proxy.url.as_str())
+                && stored_proxy.assigned_account_ids.iter().all(|account_id| {
                     !account_id.is_empty() && accounts.insert(account_id.as_str())
                 });
             if !valid {

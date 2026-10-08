@@ -54,7 +54,7 @@ impl OAuthCompletionCheckpoint {
         let provider_account_id = claims
             .account_id()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|account_id| !account_id.is_empty())
             .ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
@@ -196,17 +196,17 @@ where
 }
 
 pub(super) fn decode_completion_checkpoint(
-    value: &str,
+    checkpoint_json: &str,
     expected_login_id: &str,
 ) -> LocalResult<Option<OAuthCompletionCheckpoint>> {
-    if !value.trim_start().starts_with('{') {
+    if !checkpoint_json.trim_start().starts_with('{') {
         return Ok(None);
     }
-    if value.len() > MAX_COMPLETION_CHECKPOINT_BYTES {
+    if checkpoint_json.len() > MAX_COMPLETION_CHECKPOINT_BYTES {
         return Err(invalid_completion_checkpoint());
     }
     let checkpoint: OAuthCompletionCheckpoint =
-        serde_json::from_str(value).map_err(|_| invalid_completion_checkpoint())?;
+        serde_json::from_str(checkpoint_json).map_err(|_| invalid_completion_checkpoint())?;
     checkpoint.validate(expected_login_id)?;
     Ok(Some(checkpoint))
 }

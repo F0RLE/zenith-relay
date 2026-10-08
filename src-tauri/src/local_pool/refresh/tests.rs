@@ -280,7 +280,7 @@ async fn in_flight_projection_follows_durable_identity_not_retired_jobs() {
                     started.send(()).unwrap();
                     release.notified().await;
                     RefreshResult {
-                        value: Err(LocalPoolError::invalid_state("synthetic read")),
+                        refresh_value: Err(LocalPoolError::invalid_state("synthetic read")),
                         outcome: RefreshOutcome::Success,
                     }
                 })

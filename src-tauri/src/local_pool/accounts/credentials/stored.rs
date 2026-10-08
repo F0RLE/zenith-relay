@@ -294,28 +294,28 @@ impl fmt::Debug for StoredCodexCredentials {
 }
 
 impl From<&StoredCodexCredentials> for CredentialWire {
-    fn from(value: &StoredCodexCredentials) -> Self {
+    fn from(credentials: &StoredCodexCredentials) -> Self {
         Self {
-            version: value.version,
-            local_account_id: value.local_account_id.clone(),
-            access_token: value.access_token.clone(),
-            refresh_token: value.refresh_token.clone(),
-            id_token: value.id_token.clone(),
-            expires_at_ms: value.expires_at_ms,
-            issued_at_ms: value.issued_at_ms,
-            generation: value.generation,
-            email: value.email.clone(),
-            phone: value.phone.clone(),
-            password: value.password.clone(),
-            totp_secret: value.totp_secret.clone(),
-            provider_account_id: value.provider_account_id.clone(),
-            provider_user_id: value.provider_user_id.clone(),
-            organization_id: value.organization_id.clone(),
-            plan_type: value.plan_type.clone(),
-            account_is_fedramp: value.account_is_fedramp,
-            proxy_url: value.proxy_url.clone(),
-            bypass_common_proxy: value.bypass_common_proxy,
-            agent_identity: value
+            version: credentials.version,
+            local_account_id: credentials.local_account_id.clone(),
+            access_token: credentials.access_token.clone(),
+            refresh_token: credentials.refresh_token.clone(),
+            id_token: credentials.id_token.clone(),
+            expires_at_ms: credentials.expires_at_ms,
+            issued_at_ms: credentials.issued_at_ms,
+            generation: credentials.generation,
+            email: credentials.email.clone(),
+            phone: credentials.phone.clone(),
+            password: credentials.password.clone(),
+            totp_secret: credentials.totp_secret.clone(),
+            provider_account_id: credentials.provider_account_id.clone(),
+            provider_user_id: credentials.provider_user_id.clone(),
+            organization_id: credentials.organization_id.clone(),
+            plan_type: credentials.plan_type.clone(),
+            account_is_fedramp: credentials.account_is_fedramp,
+            proxy_url: credentials.proxy_url.clone(),
+            bypass_common_proxy: credentials.bypass_common_proxy,
+            agent_identity: credentials
                 .agent_identity
                 .as_ref()
                 .map(|agent| AgentIdentityWire {
@@ -348,7 +348,7 @@ impl StoredCodexCredentials {
             ));
         }
         self.proxy_url = proxy_url
-            .map(|value| zenith_relay_core::normalize_proxy_url(&value))
+            .map(|proxy_url| zenith_relay_core::normalize_proxy_url(&proxy_url))
             .transpose()
             .map_err(|_| {
                 CredentialError::new(
@@ -401,9 +401,9 @@ impl StoredCodexCredentials {
             }
     }
 
-    pub fn snapshots_match(current: Option<&Self>, expected: Option<&Self>) -> bool {
-        match (current, expected) {
-            (Some(current), Some(expected)) => current.matches_snapshot(expected),
+    pub fn snapshots_match(stored: Option<&Self>, expected: Option<&Self>) -> bool {
+        match (stored, expected) {
+            (Some(stored), Some(expected)) => stored.matches_snapshot(expected),
             (None, None) => true,
             _ => false,
         }

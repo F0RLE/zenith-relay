@@ -161,15 +161,15 @@ pub(in crate::local_pool::commands::remote_server::ownership) async fn commit_lo
     };
     let affected_ids = old_accounts
         .iter()
-        .filter(|previous| {
+        .filter(|previous_account| {
             accounts
                 .iter()
-                .find(|account| account.account.id == previous.account.id)
+                .find(|account| account.account.id == previous_account.account.id)
                 .is_none_or(|account| {
-                    previous.remote_location != account.remote_location
-                        || previous.account.enabled != account.account.enabled
-                        || previous.account.in_pool != account.account.in_pool
-                        || previous.account.draining != account.account.draining
+                    previous_account.remote_location != account.remote_location
+                        || previous_account.account.enabled != account.account.enabled
+                        || previous_account.account.in_pool != account.account.in_pool
+                        || previous_account.account.draining != account.account.draining
                 })
         })
         .map(|account| account.account.id.clone())
@@ -271,11 +271,11 @@ pub(in crate::local_pool::commands::remote_server::ownership) fn move_remote_loc
 
 pub(in crate::local_pool::commands::remote_server::ownership) fn extend_unique(
     target: &mut Vec<String>,
-    values: impl IntoIterator<Item = String>,
+    account_ids: impl IntoIterator<Item = String>,
 ) {
-    for value in values {
-        if !target.contains(&value) {
-            target.push(value);
+    for account_id in account_ids {
+        if !target.contains(&account_id) {
+            target.push(account_id);
         }
     }
 }
@@ -341,7 +341,7 @@ pub(in crate::local_pool::commands::remote_server::ownership) fn ensure_local_ac
                 || binding
                     .bound_oauth_account_id
                     .as_ref()
-                    .is_some_and(|id| account_ids.contains(id)))
+                    .is_some_and(|account_id| account_ids.contains(account_id)))
     }) {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,

@@ -8,31 +8,32 @@ use zenith_relay_core::accounts::ParsedImportItem;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::WireApi;
 
-pub(crate) fn imported_source_base_url(item: &ParsedImportItem) -> ItemResult<String> {
-    if item.base_url_supplied && item.base_url.is_none() {
+pub(crate) fn imported_source_base_url(import_item: &ParsedImportItem) -> ItemResult<String> {
+    if import_item.base_url_supplied && import_item.base_url.is_none() {
         return Err(ImportItemError::new(
             error_codes::SOURCE_BASE_URL_INVALID,
             "source base URL is invalid",
         ));
     }
     canonical_source_base_url(
-        item.base_url
+        import_item
+            .base_url
             .as_deref()
             .unwrap_or(DEFAULT_OPENAI_SOURCE_URL),
     )
 }
 
 pub(crate) fn imported_source_wire_api(
-    item: &ParsedImportItem,
+    import_item: &ParsedImportItem,
     existing: Option<&ProviderSourceRecord>,
 ) -> ItemResult<WireApi> {
-    if item.protocol_supplied && item.protocol.is_none() {
+    if import_item.protocol_supplied && import_item.protocol.is_none() {
         return Err(ImportItemError::new(
             error_codes::SOURCE_PROTOCOL_INVALID,
             "source protocol is invalid",
         ));
     }
-    match item.protocol.as_deref() {
+    match import_item.protocol.as_deref() {
         Some("responses") => Ok(WireApi::Responses),
         Some("chat_completions") => Ok(WireApi::ChatCompletions),
         None => Ok(existing.map_or(WireApi::Responses, |source| source.wire_api)),
@@ -43,8 +44,8 @@ pub(crate) fn imported_source_wire_api(
     }
 }
 
-pub(crate) fn canonical_source_base_url(value: &str) -> ItemResult<String> {
-    let mut url = Url::parse(value.trim()).map_err(|_| {
+pub(crate) fn canonical_source_base_url(source_url: &str) -> ItemResult<String> {
+    let mut url = Url::parse(source_url.trim()).map_err(|_| {
         ImportItemError::new(
             error_codes::SOURCE_BASE_URL_INVALID,
             "source base URL is invalid",

@@ -44,10 +44,13 @@ pub(super) fn restore_import_credentials_if_current(
     previous_credentials: &Option<StoredCodexCredentials>,
     attempted_credentials: &StoredCodexCredentials,
 ) -> ItemResult<bool> {
-    let current = credential_store
+    let stored_credentials = credential_store
         .load(account_id)
         .map_err(credential_item_error)?;
-    if !StoredCodexCredentials::snapshots_match(current.as_ref(), Some(attempted_credentials)) {
+    if !StoredCodexCredentials::snapshots_match(
+        stored_credentials.as_ref(),
+        Some(attempted_credentials),
+    ) {
         return Ok(false);
     }
     match previous_credentials {
@@ -77,10 +80,9 @@ pub(super) fn restore_import_durable_state_if_current(
     if !StoredCodexCredentials::snapshots_match(
         current_credentials.as_ref(),
         Some(&commit.attempted_credentials),
-    ) || !current_account
-        .as_ref()
-        .is_some_and(|current| current.matches_rollback_snapshot(&commit.attempted_account))
-    {
+    ) || !current_account.as_ref().is_some_and(|stored_account| {
+        stored_account.matches_rollback_snapshot(&commit.attempted_account)
+    }) {
         return Ok(false);
     }
 
@@ -91,14 +93,14 @@ pub(super) fn restore_import_durable_state_if_current(
     .map_err(|_| ImportItemError::recovery("failed to restore previous account credentials"))?;
 
     let restore_record = match &commit.previous_account {
-        Some(previous) => {
-            let mut restored = previous.clone();
+        Some(previous_account) => {
+            let mut restored = previous_account.clone();
             // Retain a watchdog observation that arrived during the failed
             // import. It is unrelated to credential ownership.
-            if let Some(current) = current_account {
-                restored.client_auth_status = current.client_auth_status;
+            if let Some(account_snapshot) = current_account {
+                restored.client_auth_status = account_snapshot.client_auth_status;
                 restored.last_client_login_redirect_at_ms =
-                    current.last_client_login_redirect_at_ms;
+                    account_snapshot.last_client_login_redirect_at_ms;
             }
             store
                 .upsert_account(restored)
@@ -147,10 +149,13 @@ fn restore_attempted_import_credentials_if_current(
     previous_credentials: &Option<StoredCodexCredentials>,
     attempted_credentials: &StoredCodexCredentials,
 ) -> ItemResult<bool> {
-    let current = credential_store
+    let stored_credentials = credential_store
         .load(account_id)
         .map_err(credential_item_error)?;
-    if !StoredCodexCredentials::snapshots_match(current.as_ref(), previous_credentials.as_ref()) {
+    if !StoredCodexCredentials::snapshots_match(
+        stored_credentials.as_ref(),
+        previous_credentials.as_ref(),
+    ) {
         return Ok(false);
     }
     credential_store.save(attempted_credentials).map_err(|_| {
@@ -176,8 +181,10 @@ async fn restore_import_authority_if_current(
         .as_ref()
         .filter(|credentials| credentials.has_oauth())
     {
-        Some(previous) => {
-            let previous_tokens = previous.to_token_set().map_err(credential_item_error)?;
+        Some(previous_credentials) => {
+            let previous_tokens = previous_credentials
+                .to_token_set()
+                .map_err(credential_item_error)?;
             authority
                 .replace_if_current(
                     &commit.account_id,
@@ -263,12 +270,12 @@ pub(super) async fn reconcile_import_authority(
         .and_then(|credentials| credentials.to_token_set().ok())
         .is_some_and(|tokens| tokens == authoritative_tokens);
     if credential_matches_attempt {
-        let current = current_credentials.as_ref().ok_or_else(|| {
+        let stored_credentials = current_credentials.as_ref().ok_or_else(|| {
             ImportItemError::recovery(
                 "attempted account credential disappeared during reconciliation",
             )
         })?;
-        let updated = current
+        let updated = stored_credentials
             .with_token_set(&authoritative_tokens)
             .map_err(credential_item_error)?;
         credential_store
@@ -298,11 +305,11 @@ pub(super) async fn reconcile_import_authority(
 }
 
 fn import_token_state_matches(
-    current: &LocalAccountRecord,
+    stored_account: &LocalAccountRecord,
     attempted: &LocalAccountRecord,
 ) -> bool {
-    current.account.source_id == attempted.account.source_id
-        && current.account.token_generation == attempted.account.token_generation
-        && current.account.token_updated_at_ms == attempted.account.token_updated_at_ms
-        && current.account.auth_state == attempted.account.auth_state
+    stored_account.account.source_id == attempted.account.source_id
+        && stored_account.account.token_generation == attempted.account.token_generation
+        && stored_account.account.token_updated_at_ms == attempted.account.token_updated_at_ms
+        && stored_account.account.auth_state == attempted.account.auth_state
 }

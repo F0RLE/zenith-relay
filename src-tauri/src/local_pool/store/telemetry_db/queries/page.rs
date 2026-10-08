@@ -84,7 +84,7 @@ impl TelemetryDb {
                     && cached.windows == windows
             })
         {
-            return Ok(cached.value.clone());
+            return Ok(cached.equivalents_by_account.clone());
         }
         let aggregates = {
             let connection = self.lock_connection()?;
@@ -119,7 +119,7 @@ impl TelemetryDb {
                     usage_revision,
                     pricing_revision,
                     windows: windows.to_vec(),
-                    value: equivalents.clone(),
+                    equivalents_by_account: equivalents.clone(),
                 });
         }
         Ok(equivalents)
@@ -132,14 +132,15 @@ impl TelemetryDb {
     ) -> Result<LocalUsagePage> {
         let (page, page_size) = query.normalized_page();
         let connection = self.lock_connection()?;
-        let (where_sql, values) = usage_filter(query);
+        let (where_sql, query_parameters) = usage_filter(query);
         let use_all_time_rollups = is_unfiltered_all_time(query);
-        let mut totals = self.cached_usage_totals(&connection, query, &where_sql, &values)?;
+        let mut totals =
+            self.cached_usage_totals(&connection, query, &where_sql, &query_parameters)?;
         let mut models = if query.includes_models() {
             usage_groups(
                 &connection,
                 &where_sql,
-                &values,
+                &query_parameters,
                 "COALESCE(resolved_model, requested_model, '')",
             )?
         } else {
@@ -148,7 +149,7 @@ impl TelemetryDb {
         let (mut model_equivalents, pricing_sources) = usage_model_equivalents(
             &connection,
             &where_sql,
-            &values,
+            &query_parameters,
             resolver,
             use_all_time_rollups,
         )?;
@@ -173,13 +174,13 @@ impl TelemetryDb {
             usage_groups(
                 &connection,
                 &where_sql,
-                &values,
+                &query_parameters,
                 "COALESCE(account_id, source_id, '')",
             )?
         } else {
             Vec::new()
         };
-        let buckets = usage_buckets(&connection, &where_sql, &values, query, resolver)?;
+        let buckets = usage_buckets(&connection, &where_sql, &query_parameters, query, resolver)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
@@ -195,11 +196,14 @@ impl TelemetryDb {
                  FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
             );
             let mut statement = connection.prepare(&sql).map_err(db_error)?;
-            let mut page_values = values;
-            page_values.push(SqlValue::Integer(i64::from(page_size)));
-            page_values.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
+            let mut event_parameters = query_parameters;
+            event_parameters.push(SqlValue::Integer(i64::from(page_size)));
+            event_parameters.push(SqlValue::Integer(zenith_relay_core::usage::sql_u64(offset)));
             let events = statement
-                .query_map(params_from_iter(page_values.iter()), usage_log_from_row)
+                .query_map(
+                    params_from_iter(event_parameters.iter()),
+                    usage_log_from_row,
+                )
                 .map_err(db_error)?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(db_error)?;
@@ -214,14 +218,14 @@ impl TelemetryDb {
                 "source"
             };
             let candidate_id = event.account_id.as_deref().unwrap_or(&event.source_id);
-            let model = event
+            let model_id = event
                 .resolved_model
                 .as_deref()
                 .or(event.requested_model.as_deref());
             event.api_equivalent = resolver.estimate(
                 candidate_kind,
                 candidate_id,
-                model,
+                model_id,
                 zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
                     event.input_tokens,
                     event.cached_input_tokens,

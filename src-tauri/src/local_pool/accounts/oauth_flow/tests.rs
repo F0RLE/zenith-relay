@@ -18,8 +18,8 @@ static TEST_OAUTH_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 struct MemorySecrets(Arc<Mutex<BTreeMap<String, String>>>);
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
-        lock(&self.0).insert(secret_ref.to_string(), value.to_string());
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
+        lock(&self.0).insert(secret_ref.to_string(), secret_value.to_string());
         Ok(())
     }
 

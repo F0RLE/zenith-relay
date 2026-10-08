@@ -364,7 +364,6 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     rollback_deleted_account_side_effects(
         &state,
         &credentials,
-        &account_id,
         Some(&stored),
         previous_wake,
         old_automations,

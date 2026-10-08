@@ -46,14 +46,14 @@ impl LocalPoolStore {
         let revisions = self
             .refresh_revisions
             .with_gateway(&self.gateway, &gateway)?;
-        let mut values = vec![(STATE_GATEWAY, persistence::serialize_state(&gateway)?)];
+        let mut state_entries = vec![(STATE_GATEWAY, persistence::serialize_state(&gateway)?)];
         if revisions != self.refresh_revisions {
-            values.push((
+            state_entries.push((
                 STATE_REFRESH_REVISIONS,
                 persistence::serialize_state(&revisions)?,
             ));
         }
-        self.database.replace_state_json(&values)?;
+        self.database.replace_state_json(&state_entries)?;
         let refresh_changed = revisions != self.refresh_revisions;
         self.gateway = gateway;
         self.refresh_revisions = revisions;
@@ -137,9 +137,9 @@ impl LocalPoolStore {
     }
 
     pub fn set_gateway_enabled(&mut self, enabled: bool) -> Result<()> {
-        let mut next = self.gateway.clone();
-        next.enabled = enabled;
-        self.replace_gateway(next)
+        let mut updated_gateway = self.gateway.clone();
+        updated_gateway.enabled = enabled;
+        self.replace_gateway(updated_gateway)
     }
 
     pub fn reset_local_records(&mut self) -> Result<()> {

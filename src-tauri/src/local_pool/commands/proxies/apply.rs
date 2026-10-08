@@ -64,8 +64,8 @@ pub(super) async fn apply_choices(
                 "account not found",
             ));
         }
-        let old = credentials.require(&account_id).map_err(credential_error)?;
-        let (next_url, bypass_common_proxy) = match choice {
+        let previous_credentials = credentials.require(&account_id).map_err(credential_error)?;
+        let (next_proxy_url, bypass_common_proxy) = match choice {
             ProxyChoice::Inherited => {
                 pool.release(&account_id);
                 (None, false)
@@ -82,21 +82,22 @@ pub(super) async fn apply_choices(
                 }
             },
             ProxyChoice::Stored(proxy_id) => (Some(pool.assign_id(&proxy_id, &account_id)?), false),
-            ProxyChoice::Custom(value) => (
-                Some(pool.assign_url(&value, &account_id, current_time_ms())?),
+            ProxyChoice::Custom(proxy_url) => (
+                Some(pool.assign_url(&proxy_url, &account_id, current_time_ms())?),
                 false,
             ),
         };
-        let next = old
+        let updated_credentials = previous_credentials
             .clone()
-            .with_proxy_route(next_url, bypass_common_proxy)
+            .with_proxy_route(next_proxy_url, bypass_common_proxy)
             .map_err(credential_error)?;
-        if old.proxy_url() == next.proxy_url()
-            && old.bypass_common_proxy() == next.bypass_common_proxy()
+        if previous_credentials.proxy_url() == updated_credentials.proxy_url()
+            && previous_credentials.bypass_common_proxy()
+                == updated_credentials.bypass_common_proxy()
         {
             unchanged += 1;
         } else {
-            updates.push((old, next));
+            updates.push((previous_credentials, updated_credentials));
         }
     }
     if updates.is_empty() && pool == old_pool {
@@ -109,7 +110,7 @@ pub(super) async fn apply_choices(
     }
     let affected_accounts = updates
         .iter()
-        .map(|(_, next)| next.local_account_id().to_string())
+        .map(|(_, updated_credentials)| updated_credentials.local_account_id().to_string())
         .collect::<Vec<_>>();
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
@@ -132,8 +133,8 @@ pub(super) async fn apply_choices(
     })
     .await?;
     let now_ms = current_time_ms();
-    for (_, next) in &updates {
-        state.sync_account_quota_refresh(next.local_account_id(), now_ms)?;
+    for (_, updated_credentials) in &updates {
+        state.sync_account_quota_refresh(updated_credentials.local_account_id(), now_ms)?;
     }
     Ok(StoredProxyAssignmentResult {
         assigned: updates.len(),
@@ -183,25 +184,30 @@ fn restore_credentials(
     credentials: &CredentialStore<NativeSecretBackend>,
     updates: &[(StoredCodexCredentials, StoredCodexCredentials)],
 ) -> Result<()> {
-    for (old, _) in updates {
-        credentials.save(old).map_err(credential_error)?;
+    for (previous_credentials, _) in updates {
+        credentials
+            .save(previous_credentials)
+            .map_err(credential_error)?;
     }
     Ok(())
 }
 
-pub(super) fn normalize_ids(values: Vec<String>, allow_empty: bool) -> Result<Vec<String>> {
+pub(super) fn normalize_ids(proxy_urls: Vec<String>, allow_empty: bool) -> Result<Vec<String>> {
     let mut seen = HashSet::new();
-    let values = values
+    let normalized_proxy_urls = proxy_urls
         .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .map(|proxy_url| proxy_url.trim().to_string())
+        .filter(|proxy_url| !proxy_url.is_empty())
         .collect::<Vec<_>>();
-    if (!allow_empty && values.is_empty()) || values.iter().any(|value| !seen.insert(value.clone()))
+    if (!allow_empty && normalized_proxy_urls.is_empty())
+        || normalized_proxy_urls
+            .iter()
+            .any(|proxy_url| !seen.insert(proxy_url.clone()))
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "selection is empty or contains duplicates",
         ));
     }
-    Ok(values)
+    Ok(normalized_proxy_urls)
 }

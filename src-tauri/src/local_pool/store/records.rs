@@ -110,42 +110,44 @@ impl LocalPoolStore {
         let source_revisions = self
             .source_refresh_revisions
             .with_sources(&self.sources, &sources)?;
-        let mut values = Vec::with_capacity(6);
+        let mut state_entries = Vec::with_capacity(6);
         if source_revisions != self.source_refresh_revisions {
-            values.push((
+            state_entries.push((
                 STATE_SOURCE_REVISIONS,
                 persistence::serialize_state(&source_revisions)?,
             ));
         }
         if revisions != self.refresh_revisions {
-            values.push((
+            state_entries.push((
                 STATE_REFRESH_REVISIONS,
                 persistence::serialize_state(&revisions)?,
             ));
         }
         if changed.sources {
-            values.push((STATE_SOURCES, persistence::serialize_state(&sources)?));
+            state_entries.push((STATE_SOURCES, persistence::serialize_state(&sources)?));
         }
         if changed.accounts {
-            values.push((STATE_ACCOUNTS, persistence::serialize_state(&accounts)?));
+            state_entries.push((STATE_ACCOUNTS, persistence::serialize_state(&accounts)?));
         }
         if changed.keys {
-            values.push((STATE_KEYS, persistence::serialize_state(&keys)?));
+            state_entries.push((STATE_KEYS, persistence::serialize_state(&keys)?));
         }
         if changed.automations {
-            values.push((
+            state_entries.push((
                 STATE_AUTOMATIONS,
                 persistence::serialize_state(&automations)?,
             ));
         }
         if deleted_account_ids.is_empty() {
-            self.database.replace_state_json(&values)?;
+            self.database.replace_state_json(&state_entries)?;
         } else if deleted_account_ids.len() == 1 {
-            self.database
-                .replace_state_json_and_delete_account_data(&values, &deleted_account_ids[0])?;
+            self.database.replace_state_json_and_delete_account_data(
+                &state_entries,
+                &deleted_account_ids[0],
+            )?;
         } else {
             self.database
-                .replace_state_json_and_delete_accounts_data(&values, deleted_account_ids)?;
+                .replace_state_json_and_delete_accounts_data(&state_entries, deleted_account_ids)?;
         }
 
         let refresh_changed = self.refresh_registration_changed(&revisions, &accounts)

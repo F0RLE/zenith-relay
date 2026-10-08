@@ -20,11 +20,11 @@ pub(in crate::local_pool) async fn read_account_models_once(
     scope: &AccountRefreshScope,
 ) -> LocalResult<bool> {
     scope.validate(state)?;
-    let result = read_account_models(state, scope).await;
-    if let Err(error) = &result {
+    let models_result = read_account_models(state, scope).await;
+    if let Err(error) = &models_result {
         record_read_error(state, scope, RefreshReadKind::Models, error).await;
     }
-    result
+    models_result
 }
 
 async fn read_account_models(
@@ -89,17 +89,22 @@ async fn read_account_models(
         let mut store = state.store()?;
         apply_models_read(&mut store, scope, discovered_models)?
     };
-    sync_refreshed_account_or_rollback(state, applied.previous, applied.account, applied.value)
-        .await?;
+    sync_refreshed_account_or_rollback(
+        state,
+        applied.previous_account,
+        applied.account,
+        applied.refresh_result,
+    )
+    .await?;
     Ok(succeeded)
 }
 
 fn respect_models_retry_after(
     state: &DesktopState,
     scope: &AccountRefreshScope,
-    result: &std::result::Result<Vec<String>, ModelDiscoveryFailure>,
+    model_refresh_result: &std::result::Result<Vec<String>, ModelDiscoveryFailure>,
 ) {
-    if let Some(delay) = result
+    if let Some(delay) = model_refresh_result
         .as_ref()
         .err()
         .and_then(|failure| failure.retry_after_ms)

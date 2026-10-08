@@ -64,10 +64,10 @@ pub fn all() -> &'static [ApplicationDescriptor] {
     APPLICATIONS
 }
 
-pub fn get(id: ApplicationId) -> &'static ApplicationDescriptor {
+pub fn get(application_id: ApplicationId) -> &'static ApplicationDescriptor {
     APPLICATIONS
         .iter()
-        .find(|descriptor| descriptor.id == id)
+        .find(|descriptor| descriptor.id == application_id)
         .expect("every ApplicationId must be registered")
 }
 

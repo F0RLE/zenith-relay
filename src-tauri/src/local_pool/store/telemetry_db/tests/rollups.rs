@@ -455,10 +455,12 @@ fn usage_keeps_only_the_terminal_fallback_attempt() {
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = failed_fallback_test_event("req_fallback");
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.requested_reasoning_effort = Some("max".into());
     event.effective_reasoning_effort = Some("max".into());
     database.record(&event).unwrap();
@@ -504,10 +506,12 @@ fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
     ));
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = failed_fallback_test_event("req_failed");
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.upstream_error.as_mut().unwrap().message =
         Some("Capacity exhausted; Bearer synthetic-private".into());
     database.record(&event).unwrap();

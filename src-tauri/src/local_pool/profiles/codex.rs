@@ -147,8 +147,8 @@ const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
 /// Keep paths written into Codex config/backup metadata compatible with
 /// consumers that do not understand Win32 extended-path prefixes.
 pub(super) fn portable_path_string(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    super::portable_path_value(&value)
+    let path_text = path.to_string_lossy();
+    super::portable_path_value(&path_text)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -316,7 +316,7 @@ pub(crate) struct OAuthAttachOptions<'a> {
 }
 
 trait SecretBackend {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()>;
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()>;
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
     fn delete(&self, secret_ref: &str) -> Result<()>;
 }
@@ -324,8 +324,8 @@ trait SecretBackend {
 struct OsSecretBackend;
 
 impl SecretBackend for OsSecretBackend {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
-        secret_store::save(secret_ref, value)
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
+        secret_store::save(secret_ref, secret_value)
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {

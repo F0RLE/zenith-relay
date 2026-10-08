@@ -222,17 +222,17 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
     }
 }
 
-pub(super) fn find_command_on_path(name: &str) -> Option<PathBuf> {
+pub(super) fn find_command_on_path(command_name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH").or_else(|| env::var_os("Path"))?;
     let names = if cfg!(target_os = "windows") {
         vec![
-            name.to_string(),
-            format!("{name}.exe"),
-            format!("{name}.cmd"),
-            format!("{name}.bat"),
+            command_name.to_string(),
+            format!("{command_name}.exe"),
+            format!("{command_name}.cmd"),
+            format!("{command_name}.bat"),
         ]
     } else {
-        vec![name.to_string()]
+        vec![command_name.to_string()]
     };
     env::split_paths(&paths)
         .flat_map(|directory| names.iter().map(move |entry| directory.join(entry)))
@@ -256,7 +256,7 @@ fn launch_codex_desktop() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn windows_chatgpt_launch_targets() -> Vec<String> {
-    let output = windows_hidden_command("powershell.exe")
+    let command_result = windows_hidden_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -265,22 +265,24 @@ fn windows_chatgpt_launch_targets() -> Vec<String> {
         ])
         .output()
         .ok();
-    output
-        .filter(|output| output.status.success())
-        .map(|output| parse_windows_start_apps_output(&String::from_utf8_lossy(&output.stdout)))
+    command_result
+        .filter(|command_result| command_result.status.success())
+        .map(|command_result| {
+            parse_windows_start_apps_output(&String::from_utf8_lossy(&command_result.stdout))
+        })
         .unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn parse_windows_start_apps_output(output: &str) -> Vec<String> {
-    let mut targets = output
+pub(super) fn parse_windows_start_apps_output(command_output: &str) -> Vec<String> {
+    let mut targets = command_output
         .lines()
         .filter_map(|line| line.split_once('\t'))
-        .filter_map(|(name, app_id)| {
-            let name = name.trim();
+        .filter_map(|(display_name, app_id)| {
+            let display_name = display_name.trim();
             let app_id = app_id.trim();
-            let valid_name =
-                name.eq_ignore_ascii_case("ChatGPT") || name.eq_ignore_ascii_case("Codex");
+            let valid_name = display_name.eq_ignore_ascii_case("ChatGPT")
+                || display_name.eq_ignore_ascii_case("Codex");
             let valid_id = app_id.len() <= 256
                 && app_id.starts_with("OpenAI.")
                 && app_id.contains('!')
@@ -289,7 +291,7 @@ pub(super) fn parse_windows_start_apps_output(output: &str) -> Vec<String> {
                 });
             (valid_name && valid_id).then(|| {
                 (
-                    !name.eq_ignore_ascii_case("ChatGPT"),
+                    !display_name.eq_ignore_ascii_case("ChatGPT"),
                     format!(r"shell:AppsFolder\{app_id}"),
                 )
             })

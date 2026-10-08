@@ -55,14 +55,14 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     let runtime_sync_required = account.account.in_pool
         || previous_account
             .as_ref()
-            .is_some_and(|previous| previous.account.in_pool);
+            .is_some_and(|previous_account| previous_account.account.in_pool);
     let mut attempted_account = account;
     // A CDP login observation is presentation-only. It may legitimately arrive
     // while the import is committed and must not be erased by the account row.
-    if let Some(current) = previous_account.as_ref() {
-        attempted_account.client_auth_status = current.client_auth_status.clone();
+    if let Some(previous_account_snapshot) = previous_account.as_ref() {
+        attempted_account.client_auth_status = previous_account_snapshot.client_auth_status.clone();
         attempted_account.last_client_login_redirect_at_ms =
-            current.last_client_login_redirect_at_ms;
+            previous_account_snapshot.last_client_login_redirect_at_ms;
     }
     // Re-import may replace an existing login and executor. Close pending
     // final dispatches before the first credential write, not only when the

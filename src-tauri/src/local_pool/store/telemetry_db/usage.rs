@@ -34,11 +34,11 @@ const USAGE_PRICING_AGGREGATE_COLUMNS: &str =
 pub(super) fn usage_totals(
     connection: &Connection,
     where_sql: &str,
-    values: &[SqlValue],
+    query_parameters: &[SqlValue],
 ) -> Result<UsageTotals> {
     let sql = format!("SELECT {USAGE_TOTAL_COLUMNS} FROM request_logs{where_sql}");
     connection
-        .query_row(&sql, params_from_iter(values.iter()), |row| {
+        .query_row(&sql, params_from_iter(query_parameters.iter()), |row| {
             usage_totals_from_row(row, 0)
         })
         .map_err(db_error)
@@ -68,14 +68,14 @@ pub(super) fn account_pricing_aggregates(
         price_class = zenith_relay_core::usage::USAGE_PRICE_CLASS_SQL,
         context_band = zenith_relay_core::usage::USAGE_CONTEXT_BAND_SQL
     );
-    let values = [
+    let account_window_parameters = [
         SqlValue::Text(account_id.to_string()),
         SqlValue::Integer(sql_u64(from_ms)),
         SqlValue::Integer(sql_u64(to_ms)),
     ];
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
-        .query_map(params_from_iter(values.iter()), |row| {
+        .query_map(params_from_iter(account_window_parameters.iter()), |row| {
             Ok((row.get(0)?, usage_pricing_usage_from_row(row, 3)?))
         })
         .map_err(db_error)?;
@@ -86,7 +86,7 @@ pub(super) fn account_pricing_aggregates(
 pub(super) fn usage_groups(
     connection: &Connection,
     where_sql: &str,
-    values: &[SqlValue],
+    query_parameters: &[SqlValue],
     key_sql: &str,
 ) -> Result<Vec<UsageGroup>> {
     let sql = format!(
@@ -95,7 +95,7 @@ pub(super) fn usage_groups(
     );
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
-        .query_map(params_from_iter(values.iter()), |row| {
+        .query_map(params_from_iter(query_parameters.iter()), |row| {
             Ok(UsageGroup {
                 key: row.get(0)?,
                 label: None,
@@ -110,7 +110,7 @@ pub(super) fn usage_groups(
 pub(super) fn usage_model_equivalents(
     connection: &Connection,
     where_sql: &str,
-    values: &[SqlValue],
+    query_parameters: &[SqlValue],
     resolver: &CatalogPriceResolver<'_>,
     use_rollup: bool,
 ) -> Result<(HashMap<String, ApiEquivalentSummary>, Vec<PriceSource>)> {
@@ -151,19 +151,19 @@ pub(super) fn usage_model_equivalents(
     };
     let mut statement = connection.prepare(&sql).map_err(db_error)?;
     let rows = statement
-        .query_map(params_from_iter(values.iter()), |row| {
+        .query_map(params_from_iter(query_parameters.iter()), |row| {
             let kind = row.get::<_, String>(0)?;
             let candidate_id = row.get::<_, String>(1)?;
-            let model = row.get::<_, String>(2)?;
-            let model_ref = (!model.is_empty()).then_some(model.as_str());
+            let model_id = row.get::<_, String>(2)?;
+            let model_ref = (!model_id.is_empty()).then_some(model_id.as_str());
             let estimate = resolver.estimate(
                 &kind,
                 &candidate_id,
                 model_ref,
                 usage_pricing_usage_from_row(row, 5)?,
             );
-            let source = resolver.source(&kind, &candidate_id, model_ref);
-            Ok((model.clone(), estimate, source))
+            let price_source = resolver.source(&kind, &candidate_id, model_ref);
+            Ok((model_id, estimate, price_source))
         })
         .map_err(db_error)?;
     let rows = rows
@@ -175,7 +175,7 @@ pub(super) fn usage_model_equivalents(
 pub(super) fn usage_buckets(
     connection: &Connection,
     where_sql: &str,
-    values: &[SqlValue],
+    query_parameters: &[SqlValue],
     query: &UsageQuery,
     resolver: &CatalogPriceResolver<'_>,
 ) -> Result<Vec<UsageBucket>> {
@@ -191,7 +191,7 @@ pub(super) fn usage_buckets(
          FROM request_logs{where_sql} GROUP BY 1 ORDER BY 1"
     );
     let mut parameters = vec![start.clone(), start, bucket.clone(), bucket];
-    parameters.extend_from_slice(values);
+    parameters.extend_from_slice(query_parameters);
     let mut buckets = {
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
         let rows = statement
@@ -219,14 +219,14 @@ pub(super) fn usage_buckets(
         .query_map(params_from_iter(parameters.iter()), |row| {
             let kind = row.get::<_, String>(1)?;
             let candidate_id = row.get::<_, String>(2)?;
-            let model = row.get::<_, Option<String>>(3)?;
+            let model_id = row.get::<_, Option<String>>(3)?;
             let start_ms = rust_u64(row.get(0)?);
             Ok((
                 start_ms,
                 resolver.estimate(
                     &kind,
                     &candidate_id,
-                    model.as_deref(),
+                    model_id.as_deref(),
                     usage_pricing_usage_from_row(row, 6)?,
                 ),
             ))

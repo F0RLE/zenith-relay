@@ -13,15 +13,15 @@ use std::sync::atomic::Ordering;
 /// normal error response reaches the UI.
 pub(crate) fn breadcrumb(operation: &str, operation_stage: &str, details: &[(&str, String)]) {
     let diagnostic_state = persist::state();
-    let mut values = BTreeMap::new();
-    for (key, value) in details {
-        values.insert((*key).to_string(), safe_detail(value));
+    let mut diagnostic_details = BTreeMap::new();
+    for (detail_key, detail_value) in details {
+        diagnostic_details.insert((*detail_key).to_string(), safe_detail(detail_value));
     }
     let breadcrumb = Breadcrumb {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         operation: safe_text(operation, 120),
         stage: safe_text(operation_stage, 120),
-        details: values,
+        details: diagnostic_details,
     };
     if let Ok(mut current_breadcrumb) = diagnostic_state.breadcrumb.lock() {
         *current_breadcrumb = Some(breadcrumb.clone());
@@ -65,32 +65,39 @@ pub(crate) fn record_error(
     );
 }
 
-pub(crate) fn record_frontend_error(input: FrontendDiagnosticInput) {
-    let operation = input.operation.as_deref().unwrap_or("renderer");
-    let mut details = Vec::new();
-    if let Some(stack) = input.stack.as_deref() {
-        details.push(("stack", safe_text(stack, MAX_STACK_BYTES)));
+pub(crate) fn record_frontend_error(frontend_diagnostic: FrontendDiagnosticInput) {
+    let operation = frontend_diagnostic
+        .operation
+        .as_deref()
+        .unwrap_or("renderer");
+    let mut diagnostic_details = Vec::new();
+    if let Some(stack) = frontend_diagnostic.stack.as_deref() {
+        diagnostic_details.push(("stack", safe_text(stack, MAX_STACK_BYTES)));
     }
-    details.push(("source", safe_text(&input.source, 120)));
-    details.push(("fatal", input.fatal.to_string()));
-    breadcrumb(operation, "renderer_error", &details);
+    diagnostic_details.push(("source", safe_text(&frontend_diagnostic.source, 120)));
+    diagnostic_details.push(("fatal", frontend_diagnostic.fatal.to_string()));
+    breadcrumb(operation, "renderer_error", &diagnostic_details);
     persist::record_event(
         "errors",
-        if input.fatal { "fatal" } else { "error" },
+        if frontend_diagnostic.fatal {
+            "fatal"
+        } else {
+            "error"
+        },
         "frontend_error",
         Some(operation),
-        input.code.as_deref(),
-        &input.message,
-        &details,
+        frontend_diagnostic.code.as_deref(),
+        &frontend_diagnostic.message,
+        &diagnostic_details,
     );
 }
 
 /// Hash an identifier before it is placed in a diagnostic.  A stable short
 /// hash is enough to correlate repeated failures while keeping the identity
 /// itself out of the log directory.
-pub(crate) fn hash_identifier(value: &str) -> String {
+pub(crate) fn hash_identifier(identifier: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(value.as_bytes());
+    digest.update(identifier.as_bytes());
     let encoded = hex::encode(digest.finalize());
     format!("id_{}", &encoded[..12])
 }

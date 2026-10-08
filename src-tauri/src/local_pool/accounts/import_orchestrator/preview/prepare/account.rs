@@ -7,7 +7,7 @@ pub(super) enum AccountPreviewStep {
         credentials_changed: bool,
     },
     Prepared {
-        value: serde_json::Value,
+        prepared_json: serde_json::Value,
         credentials_changed: bool,
     },
 }
@@ -23,8 +23,8 @@ pub(super) struct AccountPreviewInput<'a> {
     pub(super) item_hash: &'a str,
     pub(super) index: usize,
     pub(super) row: &'a mut zenith_relay_core::accounts::ImportPreviewRow,
-    pub(super) item: zenith_relay_core::accounts::ParsedImportItem,
-    pub(super) original: serde_json::Value,
+    pub(super) import_item: zenith_relay_core::accounts::ParsedImportItem,
+    pub(super) original_json: serde_json::Value,
     pub(super) prepared_identity_keys: &'a mut HashSet<String>,
 }
 
@@ -42,13 +42,13 @@ pub(super) async fn prepare_account_preview_item(
         item_hash,
         index,
         row,
-        item,
-        original,
+        import_item,
+        original_json,
         prepared_identity_keys,
     } = input;
     let mut credentials_changed = false;
     let plan_hint = row.plan.clone();
-    let hinted_proxy = hinted_import_proxy(state, credentials, settings, &item)
+    let hinted_proxy = hinted_import_proxy(state, credentials, settings, &import_item)
         .map_err(import_item_command_error)?;
     let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
     if let Err(error) = ensure_account_proxy(settings, import_proxy) {
@@ -67,8 +67,8 @@ pub(super) async fn prepare_account_preview_item(
             credentials_changed,
         });
     }
-    credentials_changed |=
-        item.secrets().access_token().is_none() && item.secrets().refresh_token().is_some();
+    credentials_changed |= import_item.secrets().access_token().is_none()
+        && import_item.secrets().refresh_token().is_some();
     crate::diagnostics::breadcrumb(
         "account-import",
         "identity_lookup_started",
@@ -79,7 +79,7 @@ pub(super) async fn prepare_account_preview_item(
         ],
     );
     let material = match build_import_credential_material(
-        item,
+        import_item,
         now_ms,
         plan_hint.as_deref(),
         row.subscription_expires_at
@@ -197,7 +197,7 @@ pub(super) async fn prepare_account_preview_item(
         )
         .await?;
     }
-    let value = parsed_item_value_from_material(original, &material);
+    let prepared_json = parsed_item_json_with_material(original_json, &material);
     crate::diagnostics::breadcrumb(
         "account-import",
         "prepare_item_completed",
@@ -208,7 +208,7 @@ pub(super) async fn prepare_account_preview_item(
         ],
     );
     Ok(AccountPreviewStep::Prepared {
-        value,
+        prepared_json,
         credentials_changed,
     })
 }
@@ -273,7 +273,7 @@ async fn probe_account_preview_quota(
     )
     .await
     {
-        Ok(Ok(data)) => match data.quota.normalize(&Default::default()) {
+        Ok(Ok(quota_data)) => match quota_data.quota.normalize(&Default::default()) {
             Ok((_, subscription)) => {
                 row.quota_status = ImportQuotaStatus::Success;
                 row.error = None;

@@ -7,8 +7,8 @@ pub(in crate::local_pool::profiles::codex) fn external_model_catalog(
     document: &DocumentMut,
     backup: &ProfileBackup,
 ) -> Option<String> {
-    let current = root_model_catalog_json(document);
-    if current.as_deref().map(portable_path_value)
+    let active_catalog_path = root_model_catalog_json(document);
+    if active_catalog_path.as_deref().map(portable_path_value)
         == backup
             .managed_model_catalog_path
             .as_deref()
@@ -16,7 +16,7 @@ pub(in crate::local_pool::profiles::codex) fn external_model_catalog(
     {
         backup.previous_model_catalog_json.clone()
     } else {
-        current
+        active_catalog_path
     }
 }
 
@@ -84,8 +84,8 @@ fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> b
             provider
                 .get("name")
                 .and_then(Item::as_str)
-                .is_some_and(|name| {
-                    managed_provider_name_matches(name, &backup.managed_provider_id)
+                .is_some_and(|provider_name| {
+                    managed_provider_name_matches(provider_name, &backup.managed_provider_id)
                 })
                 && provider
                     .get("base_url")
@@ -109,11 +109,11 @@ fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> b
         })
 }
 
-fn managed_provider_name_matches(name: &str, provider_id: &str) -> bool {
+fn managed_provider_name_matches(provider_name: &str, provider_id: &str) -> bool {
     if provider_id == READY_API_PROVIDER_ID {
-        name == READY_API_PROVIDER_NAME || name == LEGACY_READY_API_PROVIDER_NAME
+        provider_name == READY_API_PROVIDER_NAME || provider_name == LEGACY_READY_API_PROVIDER_NAME
     } else {
-        name == "Zenith Relay Local"
+        provider_name == "Zenith Relay Local"
     }
 }
 

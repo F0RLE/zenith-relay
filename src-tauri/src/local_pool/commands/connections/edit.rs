@@ -7,10 +7,10 @@ pub async fn create_local_source(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
     let _mutation = state.setup_guard().await;
-    let id = format!("source_{}", Uuid::new_v4().simple());
-    let secret_ref = format!("source:{id}");
+    let source_id = format!("source_{}", Uuid::new_v4().simple());
+    let secret_ref = format!("source:{source_id}");
     let mut runtime_source = ProviderSource {
-        id: id.clone(),
+        id: source_id.clone(),
         name: input.name.trim().to_string(),
         base_url: input.base_url.trim().to_string(),
         api_key: input.api_key.trim().to_string(),
@@ -75,8 +75,8 @@ pub async fn create_local_source(
         &mut protocol_config,
         &mut detected_model_prices,
     );
-    let mut record = ProviderSourceRecord {
-        id,
+    let mut created_source = ProviderSourceRecord {
+        id: source_id,
         name: runtime_source.name,
         enabled: true,
         in_pool: false,
@@ -101,24 +101,24 @@ pub async fn create_local_source(
         last_test_status: Some(last_test_status.into()),
         last_error,
     };
-    record.normalize();
-    record
+    created_source.normalize();
+    created_source
         .validate_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let (old_sources, old_keys) = current_records(&state)?;
     secret_store::save(&secret_ref, &runtime_source.api_key)?;
-    if let Err(error) = state.store()?.upsert_source(record.clone()) {
+    if let Err(error) = state.store()?.upsert_source(created_source.clone()) {
         cleanup_created_secret(&secret_ref, &error)?;
         return Err(error.into());
     }
     if let Err(error) = sync_records_or_rollback(&state, old_sources, old_keys).await {
-        let source_was_rolled_back = state.store()?.source(&record.id).is_none();
+        let source_was_rolled_back = state.store()?.source(&created_source.id).is_none();
         if source_was_rolled_back {
             cleanup_created_secret(&secret_ref, &error)?;
         }
         return Err(error.into());
     }
-    Ok(record)
+    Ok(created_source)
 }
 
 #[tauri::command]
@@ -129,37 +129,39 @@ pub async fn update_local_source(
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
     let source_priorities = input.source_priorities.clone();
-    let current = state
+    let existing_source = state
         .store()?
         .source(&input.source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     let detected_model_prices =
-        detected_prices_for_upstream(&current, &input.base_url, &input.wire_api);
-    let mut protocol_config = current.protocol_config.clone();
-    if input.base_url.trim() != current.base_url {
+        detected_prices_for_upstream(&existing_source, &input.base_url, &input.wire_api);
+    let mut protocol_config = existing_source.protocol_config.clone();
+    if input.base_url.trim() != existing_source.base_url {
         protocol_config.invalidate(&input.base_url);
     }
     let mut updated = ProviderSourceRecord {
-        id: current.id.clone(),
+        id: existing_source.id.clone(),
         name: input.name,
-        enabled: current.enabled,
-        in_pool: current.in_pool,
+        enabled: existing_source.enabled,
+        in_pool: existing_source.in_pool,
         draining: input.draining,
         base_url: input.base_url,
-        secret_ref: current.secret_ref.clone(),
+        secret_ref: existing_source.secret_ref.clone(),
         pricing_provider: normalize_pricing_identity(
             input
                 .pricing_provider
-                .or_else(|| current.pricing_provider.clone()),
+                .or_else(|| existing_source.pricing_provider.clone()),
         )?,
         official_provider_family: normalize_pricing_identity(
             input
                 .official_provider_family
-                .or_else(|| current.official_provider_family.clone()),
+                .or_else(|| existing_source.official_provider_family.clone()),
         )?,
         wire_api: input.wire_api,
-        protocol_bindings: input.protocol_bindings.unwrap_or(current.protocol_bindings),
+        protocol_bindings: input
+            .protocol_bindings
+            .unwrap_or(existing_source.protocol_bindings),
         protocol_config,
         models: input.models,
         allowed_models: input.allowed_models,
@@ -169,12 +171,12 @@ pub async fn update_local_source(
         recovery_delay_seconds: input.recovery_delay_seconds,
         model_price_overrides: input
             .model_price_overrides
-            .unwrap_or(current.model_price_overrides),
+            .unwrap_or(existing_source.model_price_overrides),
         detected_model_prices,
-        last_used_at: current.last_used_at,
-        last_test_at: current.last_test_at,
-        last_test_status: current.last_test_status,
-        last_error: current.last_error,
+        last_used_at: existing_source.last_used_at,
+        last_test_at: existing_source.last_test_at,
+        last_test_status: existing_source.last_test_status,
+        last_error: existing_source.last_error,
     };
     if let Some(in_pool) = input.in_pool {
         updated.in_pool = in_pool;
@@ -186,11 +188,11 @@ pub async fn update_local_source(
     validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
     let mut next_sources = old_sources.clone();
-    let target = next_sources
+    let source_to_update = next_sources
         .iter_mut()
         .find(|source| source.id == updated.id)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    *target = updated;
+    *source_to_update = updated;
     apply_source_priorities(&mut next_sources, &source_priorities)?;
     let catalog_changed = source_catalog_visibility_changed(&old_sources, &next_sources);
     let changed_source_ids = old_sources
@@ -240,31 +242,32 @@ pub async fn set_local_source_enabled(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let mut source = state
+    let mut source_record = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    if source.enabled == enabled {
+    if source_record.enabled == enabled {
         return state.snapshot().await.map_err(Into::into);
     }
     if enabled {
-        validate_source_record(&state, &source)?;
+        validate_source_record(&state, &source_record)?;
     }
     let (old_sources, old_keys) = current_records(&state)?;
-    source.enabled = enabled;
-    let catalog_changed = source.in_pool;
+    source_record.enabled = enabled;
+    let catalog_changed = source_record.in_pool;
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences =
         fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
-    state.store()?.upsert_source(source.clone())?;
-    let updated_in_place = if apply_source_policy_if_running(&state, &old_sources, &source).await {
-        refresh_local_gateway_key_scope_if_running(&state)
-            .await
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    state.store()?.upsert_source(source_record.clone())?;
+    let updated_in_place =
+        if apply_source_policy_if_running(&state, &old_sources, &source_record).await {
+            refresh_local_gateway_key_scope_if_running(&state)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
     finish_source_hot_update(
         &state,
         app,
@@ -283,12 +286,12 @@ pub async fn delete_local_source(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let source = state
+    let source_record = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    let old_secret = secret_store::load(&source.secret_ref)?;
+    let old_secret = secret_store::load(&source_record.secret_ref)?;
     let (old_sources, old_keys) = current_records(&state)?;
     let sources = old_sources
         .iter()
@@ -301,9 +304,9 @@ pub async fn delete_local_source(
     state.store()?.replace_records(sources, old_keys.clone())?;
     sync_records_or_rollback(&state, old_sources.clone(), old_keys.clone()).await?;
 
-    if let Err(cleanup) = secret_store::delete(&source.secret_ref) {
+    if let Err(cleanup) = secret_store::delete(&source_record.secret_ref) {
         if let Some(secret) = old_secret {
-            secret_store::save(&source.secret_ref, &secret).map_err(|restore| {
+            secret_store::save(&source_record.secret_ref, &secret).map_err(|restore| {
                 LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
                     format!("{cleanup}; failed to restore source secret: {restore}"),
@@ -340,39 +343,41 @@ pub async fn rotate_local_source_key(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let source = state
+    let source_record = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     let api_key = api_key.trim().to_string();
     ProviderSource {
-        id: source.id.clone(),
-        name: source.name.clone(),
-        base_url: source.base_url.clone(),
+        id: source_record.id.clone(),
+        name: source_record.name.clone(),
+        base_url: source_record.base_url.clone(),
         api_key: api_key.clone(),
-        wire_api: source.wire_api,
-        models: source.models.clone(),
+        wire_api: source_record.wire_api,
+        models: source_record.models.clone(),
     }
     .validate()
     .map_err(core_error)?;
-    ensure_not_gateway_self_source(&state, &source.base_url)?;
-    let old_secret = secret_store::load(&source.secret_ref)?
+    ensure_not_gateway_self_source(&state, &source_record.base_url)?;
+    let old_secret = secret_store::load(&source_record.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    let mut invalidated = source.clone();
-    invalidated.protocol_config.invalidate(&source.base_url);
+    let mut invalidated = source_record.clone();
+    invalidated
+        .protocol_config
+        .invalidate(&source_record.base_url);
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences =
         fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
     state.store()?.invalidate_source_refresh(&source_id)?;
-    secret_store::save(&source.secret_ref, &api_key)?;
+    secret_store::save(&source_record.secret_ref, &api_key)?;
     if let Err(error) = state.store()?.upsert_source(invalidated) {
-        secret_store::save(&source.secret_ref, &old_secret)?;
+        secret_store::save(&source_record.secret_ref, &old_secret)?;
         return Err(error.into());
     }
     super::super::runtime::restart_or_rollback(&state, || {
-        secret_store::save(&source.secret_ref, &old_secret)?;
-        state.store()?.upsert_source(source)
+        secret_store::save(&source_record.secret_ref, &old_secret)?;
+        state.store()?.upsert_source(source_record)
     })
     .await?;
     state.snapshot().await.map_err(Into::into)

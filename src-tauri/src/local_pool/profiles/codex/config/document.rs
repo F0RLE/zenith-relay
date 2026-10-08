@@ -31,11 +31,11 @@ fn repair_windows_basic_strings(content: &str) -> String {
     let mut cursor = 0;
     while cursor < bytes.len() {
         if bytes[cursor] != b'"' {
-            let next = content[cursor..]
+            let segment_end = content[cursor..]
                 .find('"')
                 .map_or(bytes.len(), |offset| cursor + offset);
-            repaired.push_str(&content[cursor..next]);
-            cursor = next;
+            repaired.push_str(&content[cursor..segment_end]);
+            cursor = segment_end;
             continue;
         }
         let start = cursor;
@@ -59,25 +59,25 @@ fn repair_windows_basic_strings(content: &str) -> String {
             repaired.push_str(&content[start..]);
             break;
         }
-        let value = &content[cursor..end];
+        let quoted_value = &content[cursor..end];
         repaired.push('"');
-        if value.contains(":\\") {
+        if quoted_value.contains(":\\") {
             let mut index = 0;
-            while index < value.len() {
-                let byte = value.as_bytes()[index];
+            while index < quoted_value.len() {
+                let byte = quoted_value.as_bytes()[index];
                 if byte != b'\\' {
-                    let next = value[index..]
+                    let unescaped_segment_end = quoted_value[index..]
                         .find('\\')
-                        .map_or(value.len(), |offset| index + offset);
-                    repaired.push_str(&value[index..next]);
-                    index = next;
+                        .map_or(quoted_value.len(), |offset| index + offset);
+                    repaired.push_str(&quoted_value[index..unescaped_segment_end]);
+                    index = unescaped_segment_end;
                     continue;
                 }
                 let run_start = index;
-                while index < value.len() && value.as_bytes()[index] == b'\\' {
+                while index < quoted_value.len() && quoted_value.as_bytes()[index] == b'\\' {
                     index += 1;
                 }
-                let run = &value[run_start..index];
+                let run = &quoted_value[run_start..index];
                 if run.len() == 1 {
                     repaired.push_str("\\\\");
                 } else {
@@ -85,7 +85,7 @@ fn repair_windows_basic_strings(content: &str) -> String {
                 }
             }
         } else {
-            repaired.push_str(value);
+            repaired.push_str(quoted_value);
         }
         repaired.push('"');
         cursor = end + 1;
@@ -234,10 +234,10 @@ pub(in crate::local_pool::profiles::codex) fn document_has_provider(
     root_uses_relay_provider || profile_uses_relay_provider || defines_relay_provider
 }
 
-pub(in crate::local_pool::profiles::codex) fn key_hash(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))
+pub(in crate::local_pool::profiles::codex) fn key_hash(key_text: &str) -> String {
+    hex::encode(Sha256::digest(key_text.as_bytes()))
 }
 
-pub(in crate::local_pool::profiles::codex) fn bytes_hash(value: &[u8]) -> String {
-    hex::encode(Sha256::digest(value))
+pub(in crate::local_pool::profiles::codex) fn bytes_hash(content_bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(content_bytes))
 }

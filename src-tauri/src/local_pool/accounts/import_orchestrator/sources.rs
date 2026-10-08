@@ -22,22 +22,22 @@ use zenith_relay_core::{discover_source_models_and_protocol_bindings, ProviderSo
 
 pub(crate) async fn import_source_item(
     state: &DesktopState,
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     add_to_pool: bool,
     discover_models: bool,
     configured_models: &[String],
 ) -> ItemResult<ProviderSourceRecord> {
     crate::diagnostics::breadcrumb("source-import", "item_started", &[]);
-    let api_key = item
+    let api_key = import_item
         .secrets()
         .api_key()
         .map(str::to_string)
         .ok_or_else(|| {
             ImportItemError::new(error_codes::API_KEY_MISSING, "source API key is missing")
         })?;
-    let base_url = imported_source_base_url(&item)?;
+    let base_url = imported_source_base_url(&import_item)?;
     let existing = find_existing_source(state, &base_url, &api_key)?;
-    let wire_api = imported_source_wire_api(&item, existing.as_ref())?;
+    let wire_api = imported_source_wire_api(&import_item, existing.as_ref())?;
     let source_id = existing
         .as_ref()
         .map(|source| source.id.clone())
@@ -59,7 +59,7 @@ pub(crate) async fn import_source_item(
         name: existing
             .as_ref()
             .map(|source| source.name.clone())
-            .unwrap_or_else(|| item.label.trim().to_string()),
+            .unwrap_or_else(|| import_item.label.trim().to_string()),
         base_url: base_url.clone(),
         api_key: api_key.clone(),
         wire_api,
@@ -109,8 +109,8 @@ pub(crate) async fn import_source_item(
             "models are required when discovery is disabled",
         ));
     };
-    let mut record = imported_source_record(
-        &item,
+    let mut imported_source = imported_source_record(
+        &import_item,
         runtime_source,
         secret_ref,
         existing.as_ref(),
@@ -119,14 +119,14 @@ pub(crate) async fn import_source_item(
         detected_model_prices,
         discover_models.then(|| Utc::now().to_rfc3339()),
     );
-    record.in_pool |= add_to_pool;
-    record.validate_protocol_bindings().map_err(|_| {
+    imported_source.in_pool |= add_to_pool;
+    imported_source.validate_protocol_bindings().map_err(|_| {
         ImportItemError::new(
             error_codes::SOURCE_PROTOCOL_INVALID,
             "imported source protocol binding is invalid",
         )
     })?;
-    persist_imported_source(state, &record, &api_key, existing.as_ref()).await?;
+    persist_imported_source(state, &imported_source, &api_key, existing.as_ref()).await?;
     crate::diagnostics::breadcrumb("source-import", "item_completed", &[]);
-    Ok(record)
+    Ok(imported_source)
 }

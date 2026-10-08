@@ -147,7 +147,10 @@ fn oauth_proxy_url(
 }
 
 fn normalized_proxy_id(proxy_id: Option<&str>) -> Result<Option<String>, LocalPoolError> {
-    let Some(proxy_id) = proxy_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(proxy_id) = proxy_id
+        .map(str::trim)
+        .filter(|proxy_id_text| !proxy_id_text.is_empty())
+    else {
         return Ok(None);
     };
     if !is_proxy_id(proxy_id) {
@@ -198,8 +201,8 @@ fn sign_in_flow_proxy_url(
 
 fn parsed_proxy(proxy_url: Option<&str>) -> Result<Option<ProxyConfig>, LocalPoolError> {
     proxy_url
-        .map(|value| {
-            ProxyConfig::parse(value).map_err(|_| {
+        .map(|proxy_url_text| {
+            ProxyConfig::parse(proxy_url_text).map_err(|_| {
                 LocalPoolError::new(
                     crate::local_pool::error::ErrorCode::InvalidState,
                     "stored proxy URL is invalid",

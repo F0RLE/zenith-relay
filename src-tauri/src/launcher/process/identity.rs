@@ -76,29 +76,29 @@ pub(in crate::launcher) fn running_target_pids(targets: &[u32]) -> Vec<u32> {
 }
 
 pub(crate) fn is_codex_process(process: &sysinfo::Process) -> bool {
-    let name = process.name().to_string_lossy();
+    let process_name = process.name().to_string_lossy();
     let executable = process.exe();
     let command = process
         .cmd()
         .iter()
-        .map(|value| value.to_string_lossy())
+        .map(|command_argument| command_argument.to_string_lossy())
         .collect::<Vec<_>>();
-    is_codex_process_identity(&name, executable, &command)
+    is_codex_process_identity(&process_name, executable, &command)
 }
 
 pub(super) fn is_opencode_process(process: &sysinfo::Process) -> bool {
-    let name = process.name().to_string_lossy();
+    let process_name = process.name().to_string_lossy();
     let executable = process.exe();
     let command = process
         .cmd()
         .iter()
-        .map(|value| value.to_string_lossy())
+        .map(|command_argument| command_argument.to_string_lossy())
         .collect::<Vec<_>>();
-    is_opencode_process_identity(&name, executable, &command)
+    is_opencode_process_identity(&process_name, executable, &command)
 }
 
 pub(in crate::launcher) fn is_opencode_process_identity(
-    name: &str,
+    process_name: &str,
     executable: Option<&Path>,
     command: &[impl AsRef<str>],
 ) -> bool {
@@ -108,7 +108,7 @@ pub(in crate::launcher) fn is_opencode_process_identity(
         // the same executable; those helpers are not the app itself.
         if command
             .iter()
-            .any(|value| value.as_ref().starts_with("--type="))
+            .any(|command_argument| command_argument.as_ref().starts_with("--type="))
         {
             return false;
         }
@@ -119,7 +119,7 @@ pub(in crate::launcher) fn is_opencode_process_identity(
             "OpenCode Beta.exe",
         ]
         .iter()
-        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        .any(|candidate| process_name.eq_ignore_ascii_case(candidate))
             && executable
                 .is_some_and(super::super::opencode_desktop::is_windows_opencode_desktop_path)
     }
@@ -128,23 +128,23 @@ pub(in crate::launcher) fn is_opencode_process_identity(
     {
         !command
             .iter()
-            .any(|value| value.as_ref().starts_with("--type="))
+            .any(|command_argument| command_argument.as_ref().starts_with("--type="))
             && executable.is_some_and(|path| {
                 if cfg!(target_os = "macos") {
-                    name.eq_ignore_ascii_case("OpenCode")
+                    process_name.eq_ignore_ascii_case("OpenCode")
                         && super::super::opencode_desktop::is_macos_opencode_desktop_path(path)
                 } else {
                     super::super::opencode_desktop::is_linux_opencode_desktop_path(path)
                         && ["opencode", "opencode-desktop", "ai.opencode.desktop"]
                             .iter()
-                            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+                            .any(|candidate| process_name.eq_ignore_ascii_case(candidate))
                 }
             })
     }
 }
 
 pub(in crate::launcher) fn is_codex_process_identity(
-    name: &str,
+    process_name: &str,
     executable: Option<&Path>,
     command: &[impl AsRef<str>],
 ) -> bool {
@@ -152,12 +152,12 @@ pub(in crate::launcher) fn is_codex_process_identity(
     {
         let helper = command
             .iter()
-            .any(|value| value.as_ref().starts_with("--type="));
+            .any(|command_argument| command_argument.as_ref().starts_with("--type="));
         if helper {
             return false;
         }
         let path = executable
-            .map(|value| value.to_string_lossy().to_ascii_lowercase())
+            .map(|executable_path| executable_path.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         // Keep this exclusion explicit. Relay may launch or own a process
         // tree that contains a compatible executable name in the future, but
@@ -165,7 +165,7 @@ pub(in crate::launcher) fn is_codex_process_identity(
         if path.ends_with("\\zenith relay.exe") {
             return false;
         }
-        if name.eq_ignore_ascii_case("ChatGPT.exe") {
+        if process_name.eq_ignore_ascii_case("ChatGPT.exe") {
             return path.contains("openai.codex_")
                 || path.contains("openai.chatgpt_")
                 || path.contains("\\chatgpt\\")
@@ -176,8 +176,8 @@ pub(in crate::launcher) fn is_codex_process_identity(
         let packaged_desktop = path.contains("\\windowsapps\\openai.")
             || path.contains("\\program files\\chatgpt\\")
             || path.contains("\\program files\\codex\\");
-        (name.eq_ignore_ascii_case("OpenAI.Codex.exe")
-            || (name.eq_ignore_ascii_case("Codex.exe") && packaged_desktop))
+        (process_name.eq_ignore_ascii_case("OpenAI.Codex.exe")
+            || (process_name.eq_ignore_ascii_case("Codex.exe") && packaged_desktop))
             && !path.contains("\\resources\\codex.exe")
     }
 
@@ -186,11 +186,11 @@ pub(in crate::launcher) fn is_codex_process_identity(
         cfg!(target_os = "macos")
             && !command
                 .iter()
-                .any(|value| value.as_ref().starts_with("--type="))
+                .any(|command_argument| command_argument.as_ref().starts_with("--type="))
             && executable.is_some_and(|path| {
-                (name.eq_ignore_ascii_case("ChatGPT")
+                (process_name.eq_ignore_ascii_case("ChatGPT")
                     && is_macos_app_executable(path, "chatgpt", "chatgpt"))
-                    || (name.eq_ignore_ascii_case("Codex")
+                    || (process_name.eq_ignore_ascii_case("Codex")
                         && is_macos_app_executable(path, "codex", "codex"))
             })
     }

@@ -34,7 +34,6 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
     assert!(!_dispatch_fences.is_empty());
 
     let deleted = PreparedAccountDelete {
-        account_id: "synthetic-account".into(),
         old_credential: None,
         previous_wake: state.wake_snapshot().unwrap(),
         old_automations: state.store().unwrap().automations().clone(),

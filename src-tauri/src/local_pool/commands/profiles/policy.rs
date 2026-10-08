@@ -15,7 +15,7 @@ pub(super) fn gateway_oauth_binding_request(
 ) -> LocalResult<GatewayOAuthBindingRequest<'_>> {
     let requested_account_id = requested_account_id
         .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .filter(|account_id| !account_id.is_empty());
     if disabled && requested_account_id.is_some() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,

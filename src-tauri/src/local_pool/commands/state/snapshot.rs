@@ -109,7 +109,7 @@ pub(crate) async fn build_local_runtime_state(
             .accounts
             .values()
             .chain(equivalents.sources.values())
-            .map(|value| value.unpriced_tokens)
+            .map(|equivalent_usage| equivalent_usage.unpriced_tokens)
             .sum(),
     );
     let response = RuntimeStateSnapshot {

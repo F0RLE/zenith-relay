@@ -62,7 +62,7 @@ pub(super) async fn fetch_codex_model_catalog(
         )
         .into());
     }
-    let body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
+    let catalog_response_body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
         .await
         .map_err(|error| {
             LocalPoolError::new(
@@ -73,12 +73,13 @@ pub(super) async fn fetch_codex_model_catalog(
                 },
             )
         })?;
-    let catalog: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "pool returned an invalid model catalog",
-        )
-    })?;
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&catalog_response_body).map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "pool returned an invalid model catalog",
+            )
+        })?;
     if catalog
         .get("models")
         .and_then(serde_json::Value::as_array)
@@ -218,11 +219,11 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     if let Err(error) =
         codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog, Some(&binding))
     {
-        if let Some(previous) = previous_transport {
+        if let Some(previous_transport_config) = previous_transport {
             codex::set_local_gateway_websockets_with_previous(
                 &profile_dir,
                 &backup_root,
-                previous,
+                previous_transport_config,
                 Some(&binding.credential_id),
             )?;
         }
@@ -305,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn opencode_failure_does_not_prevent_codex_catalog_refresh() {
         let refreshed = Cell::new(false);
-        let result = refresh_client_catalogs(
+        let catalog_refresh_result = refresh_client_catalogs(
             async {
                 Err(LocalPoolError::new(
                     ErrorCode::InvalidState,
@@ -319,6 +320,9 @@ mod tests {
         )
         .await;
         assert!(refreshed.get());
-        assert!(matches!(result.unwrap_err().code, ErrorCode::InvalidState));
+        assert!(matches!(
+            catalog_refresh_result.unwrap_err().code,
+            ErrorCode::InvalidState
+        ));
     }
 }

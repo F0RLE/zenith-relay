@@ -79,9 +79,9 @@ pub(super) async fn request_account_quota_metadata(
 pub(super) fn respect_quota_retry_after(
     state: &DesktopState,
     scope: &AccountRefreshScope,
-    result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
+    refresh_result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
 ) {
-    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = result {
+    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = refresh_result {
         if let Some(delay) = failure.retry_after_ms() {
             state
                 .refresh

@@ -25,7 +25,7 @@ pub(super) fn get_state() -> UiState {
         codex_running: is_codex_running(),
         has_saved_api_key: load_saved_app_key()
             .or_else(load_api_key_for_launch)
-            .is_some_and(|value| !value.trim().is_empty()),
+            .is_some_and(|saved_key| !saved_key.trim().is_empty()),
     }
 }
 
@@ -42,53 +42,53 @@ pub(super) fn get_system_locale() -> Option<String> {
 #[tauri::command]
 pub(super) async fn get_saved_key_models() -> Result<Vec<String>, String> {
     let api_key = stored_api_key()?;
-    let client = reqwest::Client::builder()
+    let models_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|_| "Models request could not be initialized.".to_string())?;
-    let response = api_get(&client, "/models", &api_key).await?;
-    if !response.status().is_success() {
-        return Err(api_error_message(response, "Models request failed.").await);
+    let models_response = api_get(&models_client, "/models", &api_key).await?;
+    if !models_response.status().is_success() {
+        return Err(api_error_message(models_response, "Models request failed.").await);
     }
-    if response
+    if models_response
         .content_length()
         .is_some_and(|length| length > MAX_MODELS_RESPONSE_BYTES as u64)
     {
         return Err("Models response is too large.".to_string());
     }
-    let mut response = response;
-    let mut body = Vec::new();
-    while let Some(chunk) = response
+    let mut response_stream = models_response;
+    let mut response_body = Vec::new();
+    while let Some(chunk) = response_stream
         .chunk()
         .await
         .map_err(|_| "Models response could not be read.".to_string())?
     {
-        if body.len().saturating_add(chunk.len()) > MAX_MODELS_RESPONSE_BYTES {
+        if response_body.len().saturating_add(chunk.len()) > MAX_MODELS_RESPONSE_BYTES {
             return Err("Models response is too large.".to_string());
         }
-        body.extend_from_slice(&chunk);
+        response_body.extend_from_slice(&chunk);
     }
-    parse_model_ids(&body)
+    parse_model_ids(&response_body)
 }
 
-pub(super) fn parse_model_ids(body: &[u8]) -> Result<Vec<String>, String> {
-    let response: ModelsResponse =
-        serde_json::from_slice(body).map_err(|_| "Models response is invalid.".to_string())?;
+pub(super) fn parse_model_ids(response_body: &[u8]) -> Result<Vec<String>, String> {
+    let models_response: ModelsResponse = serde_json::from_slice(response_body)
+        .map_err(|_| "Models response is invalid.".to_string())?;
     let mut seen = HashSet::new();
-    let models = response
+    let models = models_response
         .data
         .into_iter()
         .map(|model| model.id)
-        .filter(|id| {
-            !id.is_empty()
-                && id.len() <= 256
-                && !id.chars().any(char::is_control)
-                && !id.chars().any(char::is_whitespace)
+        .filter(|model_id| {
+            !model_id.is_empty()
+                && model_id.len() <= 256
+                && !model_id.chars().any(char::is_control)
+                && !model_id.chars().any(char::is_whitespace)
         })
         .take(2_048)
-        .filter(|id| seen.insert(zenith_relay_core::model_id_key(id)))
+        .filter(|model_id| seen.insert(zenith_relay_core::model_id_key(model_id)))
         .collect::<Vec<_>>();
     if models.is_empty() {
         Err("Models response contains no usable models.".to_string())
@@ -113,10 +113,10 @@ pub(super) async fn save_key(
     let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
         .await
         .map_err(|error| error.message)?;
-    let result = activate_ready_api_with_history(&api_key, true, &state);
-    let result = finish_ready_api_profile_change(stopped, result);
+    let profile_change_result = activate_ready_api_with_history(&api_key, true, &state);
+    let profile_message = finish_ready_api_profile_change(stopped, profile_change_result);
     let _ = app.emit("zenith-state-changed", ());
-    result
+    profile_message
 }
 
 #[tauri::command]
@@ -131,10 +131,10 @@ pub(super) async fn activate_ready_api_profile(
     let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
         .await
         .map_err(|error| error.message)?;
-    let result = activate_ready_api_with_history(&api_key, false, &state);
-    let result = finish_ready_api_profile_change(stopped, result);
+    let profile_change_result = activate_ready_api_with_history(&api_key, false, &state);
+    let profile_message = finish_ready_api_profile_change(stopped, profile_change_result);
     let _ = app.emit("zenith-state-changed", ());
-    result
+    profile_message
 }
 
 #[tauri::command]
@@ -149,10 +149,10 @@ pub(super) async fn deactivate_ready_api_profile(
     let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
         .await
         .map_err(|error| error.message)?;
-    let result = deactivate_ready_api_with_history(&api_key, false, &state);
-    let result = finish_ready_api_profile_change(stopped, result);
+    let profile_change_result = deactivate_ready_api_with_history(&api_key, false, &state);
+    let profile_message = finish_ready_api_profile_change(stopped, profile_change_result);
     let _ = app.emit("zenith-state-changed", ());
-    result
+    profile_message
 }
 
 #[tauri::command]
@@ -186,21 +186,21 @@ pub(super) async fn reset_key(
     } else {
         false
     };
-    let result = match api_key {
+    let profile_change_result = match api_key {
         Some(api_key) => deactivate_ready_api_with_history(&api_key, true, &state),
         None => reset_provider(&state.ready_api_backup_root()),
     };
-    let result = finish_ready_api_profile_change(stopped, result);
+    let profile_message = finish_ready_api_profile_change(stopped, profile_change_result);
     let _ = app.emit("zenith-state-changed", ());
-    result
+    profile_message
 }
 
 pub(super) fn finish_ready_api_profile_change(
     stopped: bool,
-    result: Result<(), String>,
+    profile_change_result: Result<(), String>,
 ) -> Result<String, String> {
     let restart = stopped.then(launch_codex_with_profile).transpose();
-    match (result, restart) {
+    match (profile_change_result, restart) {
         (Ok(()), Ok(_)) => Ok("ChatGPT profile updated.".to_string()),
         (Err(error), Ok(_)) => Err(error),
         (Ok(()), Err(restart_error)) => Err(format!(
@@ -223,7 +223,7 @@ pub(super) fn activate_ready_api_with_history(
         local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
     )?;
     enable_provider_explicit(api_key, &state.ready_api_backup_root())?;
-    let result = (|| {
+    let profile_change_result = (|| {
         if save_key {
             save_app_key(api_key)?;
         }
@@ -239,7 +239,7 @@ pub(super) fn activate_ready_api_with_history(
         local_pool::commands::profiles::discard_codex_history_backup(state, backup.as_deref());
         Ok(())
     })();
-    result.map_err(|error| {
+    profile_change_result.map_err(|error| {
         profile_change_with_rollback(error, deactivate_provider(&state.ready_api_backup_root()))
     })
 }
