@@ -71,6 +71,9 @@ fn missing_account_does_not_block_other_usage_updates_or_count_as_a_write_failur
             .save(
                 &account.secret_ref,
                 &serde_json::to_string(&AccountCredential {
+                    oauth_client_kind: Default::default(),
+                    chatgpt_user_id: None,
+                    basis_points_headers: None,
                     access_token: "test-token".to_string(),
                     refresh_token: None,
                     id_token: None,

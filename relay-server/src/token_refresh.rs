@@ -13,12 +13,12 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code, AgentIdentityCredential,
+    OAuthClientKind,
 };
 use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
 use zenith_relay_core::ProxyConfig;
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
-const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 
 pub(crate) struct ServerTokenPersistence {

@@ -37,7 +37,6 @@ struct AccountSnapshotInputs<'a> {
     equivalents: &'a HashMap<String, ApiEquivalentSummary>,
     pricing_catalog: &'a PricingCatalog,
     pricing_context: &'a PricingContext,
-    basis_points_enabled: bool,
 }
 
 pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
@@ -83,6 +82,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         running,
         &routing_order,
         &equivalents,
+        &model_metadata,
         &mut warnings,
     )?;
     let mut account_summaries = accounts::account_summaries(
@@ -93,7 +93,6 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             equivalents: &equivalents,
             pricing_catalog: &pricing_catalog,
             pricing_context: &pricing_context,
-            basis_points_enabled: routing_policy.basis_points_enabled,
         },
         &mut warnings,
     )?;
@@ -163,7 +162,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         },
         gateway: GatewaySummary {
             tool_policy: routing_policy.tool_policy.unwrap_or_default(),
-            basis_points_enabled: routing_policy.basis_points_enabled,
+            basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 routing_policy.pool_routing.as_ref(),
                 &source_summaries,
@@ -229,6 +228,7 @@ fn source_summaries(
     running: bool,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &HashMap<String, ApiEquivalentSummary>,
+    model_metadata: &zenith_relay_core::model_metadata::ModelMetadataCatalog,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<SourceSummary>, String> {
     records
@@ -253,6 +253,7 @@ fn source_summaries(
                     .get(&identity_hint(&source_record.id))
                     .copied()
                     .unwrap_or_default(),
+                model_metadata,
             );
             summary.refresh_revision = Some(fence.revision());
             summary.refresh_state = SourceRefreshState {

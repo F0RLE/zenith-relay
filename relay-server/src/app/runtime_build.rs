@@ -57,13 +57,12 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     }
 
     let sources = build_sources(state, source_records)?;
-    let basis_points_enabled = routing_policy.basis_points_enabled;
     let AccountRuntimeBuild {
         accounts,
         direct_refresh_accounts,
         refresh_clients,
         agent_identities,
-    } = build_accounts(state, account_records, basis_points_enabled).await?;
+    } = build_accounts(state, account_records).await?;
     if !has_active_candidate(&sources, &accounts) {
         return state.replace_runtime(None);
     }
@@ -208,7 +207,6 @@ fn build_sources(
 async fn build_accounts(
     state: &Arc<AppState>,
     account_records: Vec<ServerAccountRecord>,
-    basis_points_enabled: bool,
 ) -> Result<AccountRuntimeBuild, String> {
     let mut build = AccountRuntimeBuild {
         accounts: Vec::new(),
@@ -240,10 +238,16 @@ async fn build_accounts(
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            if proxy.is_some() {
+            if proxy.is_some()
+                || credential.oauth_client_kind
+                    == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
+            {
                 build.refresh_clients.insert(
                     account_record.id.clone(),
-                    CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
+                    CodexRefreshClient::new_with_proxy_for_kind(
+                        credential.oauth_client_kind,
+                        proxy.as_ref(),
+                    )?,
                 );
             } else {
                 build
@@ -255,7 +259,6 @@ async fn build_accounts(
             account_record,
             &credential,
             proxy,
-            basis_points_enabled,
             QUOTA_STALE_AFTER_MS,
         ));
     }

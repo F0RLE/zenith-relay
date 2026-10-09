@@ -152,13 +152,14 @@ impl AppState {
             account_provider_families.insert(identity_hint(&account.id), family.clone());
             account_provider_families.insert(account.id, family);
         }
+        let reference_catalog = self.model_metadata_catalog();
         let mut source_metadata = BTreeMap::new();
         let mut source_evidence = BTreeMap::new();
         for source in sources {
             let metadata = SourcePricingMetadata {
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
-                cache_write_models: source.models_with_cache_write_pricing(),
+                cache_write_models: source.models_with_cache_write_pricing(&reference_catalog),
             };
             let key = identity_hint(&source.id);
             source_metadata.insert(key.clone(), metadata.clone());
@@ -233,6 +234,9 @@ mod tests {
     #[test]
     fn account_credential_keeps_oauth_as_agent_identity_fallback() {
         let credential = AccountCredential {
+            oauth_client_kind: Default::default(),
+            chatgpt_user_id: None,
+            basis_points_headers: None,
             access_token: "oauth-access".into(),
             refresh_token: Some("oauth-refresh".into()),
             id_token: None,

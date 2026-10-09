@@ -1,13 +1,13 @@
-use super::super::{account_summary, store_error, ManagementError};
+use super::super::{account_summary, store_error, validation_error, vault_error, ManagementError};
 use super::preview::AccountImportPreview;
 use crate::jobs;
-use crate::state::{now_ms, AppState, ServerAccountRecord};
+use crate::state::{now_ms, AccountCredential, AppState, ServerAccountRecord};
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use zenith_relay_core::accounts::AccountHealthState;
+use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
 use zenith_relay_core::error_codes;
 use zenith_relay_core::protocol::{valid_generated_id, AccountSummary};
 use zenith_relay_core::quota::{Subscription, SubscriptionInput};
@@ -88,12 +88,91 @@ pub(super) async fn confirm_one_account_import(
     let configuration = state.configuration_lock.lock().await;
     let build = state.lock_runtime_rebuild().await;
     let credential = state.account_credential_lock.lock().await;
-    let existing_account = state
+    let current_pending = state
         .store
-        .accounts()
+        .pending_import(session_id)
         .map_err(store_error)?
-        .into_iter()
-        .find(|account_record| account_record.id == preview.account_id);
+        .filter(|current| current.secret_ref == pending.secret_ref)
+        .ok_or_else(|| {
+            ManagementError::not_found(error_codes::IMPORT_NOT_FOUND, "import session not found")
+        })?;
+    if now_ms().saturating_sub(current_pending.created_at_ms) > 30 * 60 * 1_000 {
+        let _ = state.store.delete_pending_import(session_id);
+        let _ = state.vault.delete(&current_pending.secret_ref);
+        return Err(ManagementError::validation(
+            error_codes::IMPORT_EXPIRED,
+            "import session expired",
+        ));
+    }
+    let pending_secret = state
+        .vault
+        .load(&current_pending.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| validation_error("prepared account credential is unavailable"))?;
+    let mut pending_credential: AccountCredential = serde_json::from_str(&pending_secret)
+        .map_err(|_| validation_error("prepared account credential is invalid"))?;
+    pending_credential
+        .validate_oauth_client()
+        .map_err(validation_error)?;
+    let mut existing_account = None;
+    for account_record in state.store.accounts().map_err(store_error)? {
+        let Some(existing_secret) = state
+            .vault
+            .load(&account_record.secret_ref)
+            .map_err(vault_error)?
+        else {
+            if account_record.id == preview.account_id {
+                return Err(validation_error(
+                    "existing account credential is unavailable",
+                ));
+            }
+            continue;
+        };
+        let existing_credential: AccountCredential = serde_json::from_str(&existing_secret)
+            .map_err(|_| validation_error("existing account credential is invalid"))?;
+        let same_connection = pending_credential.matches_connection(
+            existing_credential.oauth_client_kind,
+            &existing_credential.chatgpt_account_id,
+            existing_credential.principal_user_id().as_deref(),
+        );
+        if account_record.id != preview.account_id {
+            if same_connection {
+                return Err(validation_error(
+                    "account OAuth connection was imported after preview; prepare a new preview",
+                ));
+            }
+            continue;
+        }
+        if !same_connection {
+            return Err(validation_error(
+                "account OAuth connection changed after import preview",
+            ));
+        }
+        // Read omitted session material at commit time so a background token
+        // refresh or header update cannot be replaced by a stale preview copy.
+        if pending_credential.refresh_token.is_none() {
+            pending_credential.refresh_token = existing_credential.refresh_token;
+        }
+        if pending_credential.basis_points_headers.is_none() {
+            pending_credential.basis_points_headers = existing_credential.basis_points_headers;
+        }
+        pending_credential.proxy_url = existing_credential.proxy_url;
+        pending_credential.generation = existing_credential.generation.saturating_add(1);
+        existing_account = Some(account_record);
+    }
+    if preview.duplicate_account_id.is_some() && existing_account.is_none() {
+        return Err(validation_error(
+            "account was removed after import preview; prepare a new preview",
+        ));
+    }
+    let prepared_secret = serde_json::to_string(&pending_credential)
+        .map_err(|_| validation_error("prepared account credential could not be saved"))?;
+    let auth_state =
+        if pending_credential.is_agent_identity() || pending_credential.refresh_token.is_some() {
+            AccountAuthState::Active
+        } else {
+            AccountAuthState::DegradedAccessOnly
+        };
     let mut subscription =
         if preview.plan_type.is_some() || preview.subscription_active_until_ms.is_some() {
             Subscription::normalize(SubscriptionInput {
@@ -134,7 +213,7 @@ pub(super) async fn confirm_one_account_import(
             .as_ref()
             .and_then(|existing_record| existing_record.provider_family.clone())
             .or_else(|| Some("openai".to_string())),
-        auth_state: preview.auth_state,
+        auth_state,
         health: AccountHealthState::Healthy,
         models: existing_account
             .as_ref()
@@ -190,10 +269,23 @@ pub(super) async fn confirm_one_account_import(
     let _dispatch_fence = previous_runtime
         .as_ref()
         .and_then(|runtime| runtime.fence_candidate_dispatch(&account_record.id));
-    let created = state
+    state
+        .vault
+        .save(&current_pending.secret_ref, &prepared_secret)
+        .map_err(vault_error)?;
+    let created = match state
         .store
         .save_account_and_consume_pending_import(&account_record, session_id)
-        .map_err(store_error)?;
+    {
+        Ok(created) => created,
+        Err(error) => {
+            state
+                .vault
+                .save(&current_pending.secret_ref, &pending_secret)
+                .map_err(vault_error)?;
+            return Err(store_error(error));
+        }
+    };
     state.token_authority.remove(&account_record.id);
     if let Some(runtime) = previous_runtime.as_ref() {
         runtime.remove_candidate(&account_record.id);

@@ -103,8 +103,13 @@ fn snapshot_preserves_persisted_model_policy_and_missing_secret_warning() {
         vec!["account_secret_missing:account-missing"]
     );
 
-    let model = snapshot.gateway.models.first().unwrap();
-    assert_eq!(model.id, "gpt-5.4");
+    assert_eq!(snapshot.gateway.models[0].id, "gpt-account-test");
+    let model = snapshot
+        .gateway
+        .models
+        .iter()
+        .find(|model| model.id == "gpt-5.4")
+        .unwrap();
     assert!(!model.enabled);
     assert!(model.custom_price);
     assert_eq!(model.input_micro_usd_per_million, Some(1_000));
@@ -292,6 +297,9 @@ async fn account_snapshot_tracks_cooldown_recovery_and_missing_candidate() {
     let state = snapshot_test_state(&root);
     let account = snapshot_test_account("snapshot-account", "gpt-test");
     let credential = AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,
@@ -497,6 +505,9 @@ fn free_accounts_route_like_other_pool_accounts() {
         bypass_common_proxy: false,
     };
     let credential = AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "access".into(),
         refresh_token: None,
         id_token: None,
@@ -516,7 +527,6 @@ fn free_accounts_route_like_other_pool_accounts() {
             record.clone(),
             &credential,
             None,
-            false,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         )
         .enabled
@@ -543,7 +553,6 @@ fn free_accounts_route_like_other_pool_accounts() {
             exhausted,
             &credential,
             None,
-            false,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         )
         .enabled,
@@ -552,9 +561,9 @@ fn free_accounts_route_like_other_pool_accounts() {
     let summary = account_summary(
         &record,
         AccountSummaryInputs {
+            oauth_client_kind: Default::default(),
             secret_available: true,
             basis_points_available: true,
-            basis_points_enabled: false,
             proxy_mode: ProxyMode::Direct,
             proxy_available: true,
             api_equivalent: ApiEquivalentSummary::default(),

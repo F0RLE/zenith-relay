@@ -57,10 +57,12 @@ fn usage_keeps_one_terminal_row_per_request() {
         upstream_error: None,
         quota_snapshot: None,
     };
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.upstream_error.as_mut().unwrap().message =
         Some("Capacity exhausted; Bearer synthetic-private".into());
     store.record_usage(&event, 1_000).unwrap();

@@ -71,7 +71,7 @@ fn routing_policy_is_validated_and_persists() {
         PresetRoutingPolicy {
             tool_policy: Some(Default::default()),
             pool_routing: Some(Default::default()),
-            basis_points_enabled: true,
+            basis_points_enabled: false,
             max_retry_candidates: 5,
             default_service_tier: DefaultServiceTier::Fast,
             image_base_model: Some("gpt-5.4-mini".into()),

@@ -32,7 +32,6 @@ pub(super) fn runtime_account(
     account_record: ServerAccountRecord,
     credential: &crate::state::AccountCredential,
     proxy: Option<ProxyConfig>,
-    basis_points_enabled: bool,
     quota_stale_after_ms: u64,
 ) -> RuntimeChatGptAccount {
     let operational = account_operational_state(AccountOperationalInput::from_source(
@@ -44,13 +43,15 @@ pub(super) fn runtime_account(
     ));
     let models = account_record.effective_models().to_vec();
     RuntimeChatGptAccount {
+        oauth_client_kind: credential.oauth_client_kind,
         id: account_record.id,
         source_id: account_record.source_id,
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
+        chatgpt_user_id: credential.chatgpt_user_id.clone(),
+        basis_points_headers: credential.basis_points_headers.clone(),
         responses_url: credential.responses_url.clone(),
-        basis_points_enabled: basis_points_enabled
-            && credential.has_oauth()
-            && !credential.is_agent_identity(),
+        basis_points_enabled: credential.oauth_client_kind
+            == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,
         models,
         enabled: account_candidate_enabled(
             account_record.enabled,

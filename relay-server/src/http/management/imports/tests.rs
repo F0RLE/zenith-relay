@@ -26,6 +26,9 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
     }))
     .unwrap();
     let credential = |access_token: &str, generation| AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: access_token.into(),
         refresh_token: None,
         id_token: None,
@@ -63,6 +66,7 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
     let new_ref = "account:synthetic:new";
     let preview = AccountImportPreview {
         session_id: session_id.clone(),
+        oauth_client_kind: Default::default(),
         account_id: existing_account.id.clone(),
         duplicate_account_id: Some(existing_account.id.clone()),
         label: existing_account.label.clone(),
@@ -154,7 +158,8 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
         .tokens(&existing_account.id)
         .await
         .unwrap();
-    assert_eq!(current.generation(), 0);
+    // A replacement login fences refreshes from the previous generation.
+    assert_eq!(current.generation(), 8);
     assert_eq!(current.access_token(), "new-access");
 
     let active_build = state.lock_runtime_rebuild().await;

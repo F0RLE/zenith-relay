@@ -18,7 +18,7 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::error_codes;
 
 use zenith_relay_core::protocol::valid_generated_id;
-use zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms;
+use zenith_relay_core::providers::chatgpt::{parse_subscription_timestamp_ms, OAuthClientKind};
 
 const MAX_SYNCHRONOUS_IMPORT_PROBES: usize = 5;
 
@@ -56,6 +56,8 @@ struct BatchImportRow {
     label: String,
     identity: String,
     auth_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth_client_kind: Option<OAuthClientKind>,
     source_name: String,
     quota_status: String,
     status: String,
@@ -115,6 +117,7 @@ pub async fn preview_account_batch_import(
                         label: preview.label,
                         identity: preview.identity_hint,
                         auth_mode: preview_row.auth_mode.as_str().to_string(),
+                        oauth_client_kind: Some(preview.oauth_client_kind),
                         source_name: preview_row.source_name.clone(),
                         quota_status: import_quota_status_name(preview_row.quota_status)
                             .to_string(),
@@ -196,6 +199,9 @@ fn parsed_account_import_input(
     let secrets = import_item.secrets();
     Ok(AccountImportInput {
         label: import_item.label.clone(),
+        oauth_client_kind: secrets.oauth_client_kind().unwrap_or_default(),
+        chatgpt_user_id: import_item.chatgpt_user_id.clone(),
+        basis_points_headers: secrets.basis_points_headers().cloned(),
         access_token: secrets.access_token().unwrap_or_default().to_string(),
         agent_private_key: secrets.agent_private_key().map(str::to_string),
         agent_runtime_id: secrets.agent_runtime_id().map(str::to_string),
@@ -227,6 +233,7 @@ fn batch_preview_row(row: ImportPreviewRow) -> BatchImportRow {
         label: row.label,
         identity: row.identity,
         auth_mode: row.auth_mode.as_str().to_string(),
+        oauth_client_kind: row.oauth_client_kind,
         source_name: row.source_name,
         quota_status: import_quota_status_name(row.quota_status).to_string(),
         status: import_preview_status_name(row.status).to_string(),
@@ -255,6 +262,7 @@ fn invalid_shared_batch_row(
         label,
         identity,
         auth_mode: "unknown".to_string(),
+        oauth_client_kind: None,
         source_name,
         quota_status: "skipped".to_string(),
         status: "invalid".to_string(),

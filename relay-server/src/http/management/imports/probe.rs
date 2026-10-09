@@ -43,6 +43,42 @@ pub(super) fn imported_account_id_hints(
     Ok(hints)
 }
 
+pub(super) fn imported_user_id(
+    explicit_user_id: Option<&str>,
+    id_token: Option<&str>,
+    access_token: &str,
+) -> Result<Option<String>, ManagementError> {
+    let mut hints = Vec::new();
+    if let Some(user_id) = explicit_user_id {
+        hints.push(clean_identifier(user_id, "user id")?);
+    }
+    for token in [id_token, Some(access_token)].into_iter().flatten() {
+        let Some(claims) =
+            zenith_relay_core::accounts::decode_unverified_jwt_payload::<Value>(token)
+        else {
+            continue;
+        };
+        let Some(auth) = claims.get("https://api.openai.com/auth") else {
+            continue;
+        };
+        for field in ["chatgpt_user_id", "user_id"] {
+            if let Some(user_id) = auth.get(field).and_then(Value::as_str) {
+                let user_id = clean_identifier(user_id, "user id")?;
+                if !hints.contains(&user_id) {
+                    hints.push(user_id);
+                }
+            }
+        }
+    }
+    if hints.len() > 1 {
+        return Err(ManagementError::validation(
+            error_codes::ACCOUNT_IDENTITY_CLAIM_CONFLICT,
+            "imported user identity claims do not agree",
+        ));
+    }
+    Ok(hints.pop())
+}
+
 pub(super) async fn authenticate_import_account(
     state: &AppState,
     access_token: &str,

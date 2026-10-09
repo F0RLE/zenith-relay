@@ -5,7 +5,8 @@ use super::super::{
 use super::confirm::cleanup_expired_imports;
 use super::probe::{
     authenticate_import_account, clean_identifier, contains_sensitive, imported_account_id_hints,
-    nonempty, redact_import_label, safe_plan_type, validate_account_responses_url,
+    imported_user_id, nonempty, redact_import_label, safe_plan_type,
+    validate_account_responses_url,
 };
 
 use crate::state::{identity_hint, now_ms, AccountCredential, AppState};
@@ -17,11 +18,18 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zenith_relay_core::accounts::AccountAuthState;
 use zenith_relay_core::error_codes;
+use zenith_relay_core::providers::chatgpt::{BasisPointsCapturedHeaders, OAuthClientKind};
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountImportInput {
     pub(super) label: String,
+    #[serde(default)]
+    pub(super) oauth_client_kind: OAuthClientKind,
+    #[serde(default)]
+    pub(super) chatgpt_user_id: Option<String>,
+    #[serde(default)]
+    pub(super) basis_points_headers: Option<BasisPointsCapturedHeaders>,
     #[serde(default)]
     pub(super) access_token: String,
     #[serde(default)]
@@ -54,6 +62,8 @@ pub struct AccountImportInput {
 #[serde(rename_all = "camelCase")]
 pub struct AccountImportPreview {
     pub(super) session_id: String,
+    #[serde(default)]
+    pub(super) oauth_client_kind: OAuthClientKind,
     pub(super) account_id: String,
     pub(super) duplicate_account_id: Option<String>,
     pub(super) label: String,
@@ -85,9 +95,27 @@ pub(super) async fn prepare_account_import(
     input: AccountImportInput,
     batch_session_id: Option<&str>,
 ) -> Result<AccountImportPreview, ManagementError> {
+    let token_client = OAuthClientKind::from_token_hints(
+        input.id_token.as_deref(),
+        Some(input.access_token.as_str()),
+    )
+    .map_err(validation_error)?;
+    if token_client.is_some_and(|kind| kind != input.oauth_client_kind) {
+        return Err(validation_error(
+            "imported tokens do not match the selected OAuth client",
+        ));
+    }
     let has_agent_identity = input.agent_private_key.is_some()
         || input.agent_runtime_id.is_some()
         || input.agent_task_id.is_some();
+    if input.oauth_client_kind == OAuthClientKind::ExcelBps && has_agent_identity {
+        return Err(validation_error("Excel OAuth cannot use Agent Identity"));
+    }
+    if let Some(headers) = input.basis_points_headers.as_ref() {
+        headers
+            .validate()
+            .map_err(|_| validation_error("imported Basis Points headers are invalid"))?;
+    }
     if has_agent_identity {
         let private_key = input.agent_private_key.clone().unwrap_or_default();
         let runtime_id = input.agent_runtime_id.clone().unwrap_or_default();
@@ -122,6 +150,11 @@ pub(super) async fn prepare_account_import(
     }
     let account_id_hints = imported_account_id_hints(
         input.chatgpt_account_id.as_deref(),
+        input.id_token.as_deref(),
+        &input.access_token,
+    )?;
+    let chatgpt_user_id = imported_user_id(
+        input.chatgpt_user_id.as_deref(),
         input.id_token.as_deref(),
         &input.access_token,
     )?;
@@ -162,12 +195,37 @@ pub(super) async fn prepare_account_import(
     let chatgpt_account_id = clean_identifier(&chatgpt_account_id, "account id")?;
     let responses_url = validate_account_responses_url(input.responses_url.as_deref())?;
     let identity_hint = identity_hint(&chatgpt_account_id);
-    let duplicate_account = state
-        .store
-        .accounts()
-        .map_err(store_error)?
-        .into_iter()
-        .find(|account_record| account_record.identity_hint == identity_hint);
+    let mut duplicate_account = None;
+    let mut existing_credential = None;
+    for account_record in state.store.accounts().map_err(store_error)? {
+        let Some(credential_json) = state
+            .vault
+            .load(&account_record.secret_ref)
+            .map_err(vault_error)?
+        else {
+            continue;
+        };
+        let credential: AccountCredential =
+            serde_json::from_str(&credential_json).map_err(|_| {
+                ManagementError::internal(
+                    error_codes::ACCOUNT_SECRET_INVALID,
+                    "account secret is invalid",
+                )
+            })?;
+        if credential.matches_connection(
+            input.oauth_client_kind,
+            &chatgpt_account_id,
+            chatgpt_user_id.as_deref(),
+        ) {
+            if duplicate_account.is_some() {
+                return Err(validation_error(
+                    "multiple stored accounts have the same OAuth connection",
+                ));
+            }
+            duplicate_account = Some(account_record);
+            existing_credential = Some(credential);
+        }
+    }
     let duplicate_account_id = duplicate_account
         .as_ref()
         .map(|account_record| account_record.id.clone());
@@ -176,45 +234,26 @@ pub(super) async fn prepare_account_import(
         .unwrap_or_else(|| format!("account_{}", uuid::Uuid::new_v4().simple()));
     let session_id = format!("import_{}", uuid::Uuid::new_v4().simple());
     let secret_ref = format!("account:{account_id}:{}", uuid::Uuid::new_v4().simple());
-    let existing_credential = match duplicate_account.as_ref() {
-        Some(account_record) => match state
-            .vault
-            .load(&account_record.secret_ref)
-            .map_err(vault_error)?
-        {
-            Some(credential_json) => Some(
-                serde_json::from_str::<AccountCredential>(&credential_json).map_err(|_| {
-                    ManagementError::internal(
-                        error_codes::ACCOUNT_SECRET_INVALID,
-                        "account secret is invalid",
-                    )
-                })?,
-            ),
-            None => None,
-        },
-        None => None,
-    };
-    let proxy_url = existing_credential
-        .as_ref()
-        .and_then(|credential| credential.proxy_url.clone());
     let credential = AccountCredential {
+        oauth_client_kind: input.oauth_client_kind,
+        chatgpt_user_id,
+        basis_points_headers: input.basis_points_headers,
         access_token: input.access_token,
-        refresh_token: nonempty(input.refresh_token).or_else(|| {
-            existing_credential
-                .as_ref()
-                .and_then(|credential| credential.refresh_token.clone())
-        }),
+        refresh_token: nonempty(input.refresh_token),
         id_token: nonempty(input.id_token),
         expires_at_ms: input.expires_at_ms,
         issued_at_ms: now_ms(),
         generation: 0,
         chatgpt_account_id,
         responses_url,
-        proxy_url,
+        proxy_url: None,
         agent_private_key: input.agent_private_key,
         agent_runtime_id: input.agent_runtime_id,
         agent_task_id: input.agent_task_id,
     };
+    credential
+        .validate_oauth_client()
+        .map_err(validation_error)?;
     if credential.is_agent_identity() {
         credential.agent_identity().map_err(validation_error)?;
     }
@@ -226,13 +265,19 @@ pub(super) async fn prepare_account_import(
             "account credential has no authorization method",
         ));
     }
-    let auth_state = if credential.is_agent_identity() || credential.refresh_token.is_some() {
+    let auth_state = if credential.is_agent_identity()
+        || credential.refresh_token.is_some()
+        || existing_credential
+            .as_ref()
+            .is_some_and(|credential| credential.refresh_token.is_some())
+    {
         AccountAuthState::Active
     } else {
         AccountAuthState::DegradedAccessOnly
     };
     let preview = AccountImportPreview {
         session_id: session_id.clone(),
+        oauth_client_kind: credential.oauth_client_kind,
         account_id,
         duplicate_account_id,
         label,

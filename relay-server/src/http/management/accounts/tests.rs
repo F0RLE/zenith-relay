@@ -45,6 +45,9 @@ fn test_account(id: &str) -> ServerAccountRecord {
 
 fn test_credential() -> AccountCredential {
     AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,
@@ -58,6 +61,24 @@ fn test_credential() -> AccountCredential {
         agent_runtime_id: None,
         agent_task_id: None,
     }
+}
+
+#[test]
+fn stored_credentials_reject_mismatched_issuing_client_before_use() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+    let mut credential = test_credential();
+    let payload = serde_json::json!({"client_id": OAuthClientKind::ExcelBps.client_id()});
+    credential.access_token = format!(
+        "synthetic.{}.synthetic",
+        URL_SAFE_NO_PAD.encode(payload.to_string()),
+    );
+    assert!(credential.tokens().is_err());
+    assert!(credential.agent_identity().is_err());
+    credential.oauth_client_kind = OAuthClientKind::ExcelBps;
+    assert!(credential.tokens().is_ok());
+    credential.agent_runtime_id = Some("synthetic-agent".into());
+    assert!(credential.tokens().is_err());
 }
 
 #[tokio::test]

@@ -10,7 +10,9 @@ info:
     production routing/business logic. Management snapshots, usage, source
     statistics, and diagnostics are redacted; raw credentials, cookies,
     authorization headers, prompts, and provider response bodies never appear
-    in those management responses. The /v1 data plane may carry the user's
+    in those management responses. Explicit account export is a separate
+    credential-bearing operation whose response uses Cache-Control no-store.
+    The /v1 data plane may carry the user's
     request and provider response as required by the selected API contract.
     Relay does not reject JSON generation, image upload, or image edit for size.
     The provider can still reject the payload. JSON generation and account
@@ -20,6 +22,155 @@ info:
 servers:
   - url: https://relay.example.com
 paths:
+  /accounts:
+    get:
+      operationId: listAccounts
+      security: [{ managementToken: [] }]
+      responses:
+        "200":
+          description: Redacted saved account inventory. Codex and Excel OAuth connections are separate entries.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AccountSummary" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/export:
+    post:
+      operationId: exportAccounts
+      security: [{ managementToken: [] }]
+      description: >
+        Explicit credential export. The content string contains sign-in material
+        and must not be logged or included in support bundles. Excel credentials
+        support only Zenith and Sub2API formats; both preserve the issuing OAuth
+        client. Other management reads remain redacted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountExportRequest" }
+      responses:
+        "200":
+          description: Credential-bearing export document.
+          headers:
+            Cache-Control: { schema: { type: string }, description: "no-store, max-age=0" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountExportDocument" }
+        "400": { description: Invalid selection, export options, or format for the selected OAuth clients. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Selected account not found. }
+  /accounts/import/preview:
+    post:
+      operationId: previewAccountImport
+      security: [{ managementToken: [] }]
+      description: >
+        Prepare one credential import in the encrypted vault. The response is
+        redacted. A duplicate requires the same issuing OAuth client, ChatGPT
+        account and principal. Known token-client hints must match oauthClientKind.
+        The pending session expires after 30 minutes and is not a pool member.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountImportInput" }
+      responses:
+        "201":
+          description: Redacted pending import.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountImportPreview" }
+        "400": { description: Invalid or conflicting credential identity or OAuth client. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/import/confirm:
+    post:
+      operationId: confirmAccountImport
+      security: [{ managementToken: [] }]
+      description: >
+        Consume a pending single-account session. Revalidates its expiry and
+        duplicate identity under the credential lock. A changed target or a
+        connection imported after preview requires a new preview. Replacement
+        retains current account settings and omitted session material.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountImportConfirmInput" }
+      responses:
+        "200":
+          description: Saved redacted account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountSummary" }
+        "400": { description: Expired session or changed connection; prepare a new preview. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Pending import session not found. }
+  /accounts/import/batch/preview:
+    post:
+      operationId: previewAccountBatchImport
+      security: [{ managementToken: [] }]
+      description: >
+        Parse pasted content or file documents, including Zenith and Sub2API
+        exports. Preview rows contain redacted identity hints and independent
+        validation results. No credentials appear in the response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content: { type: [string, "null"], description: Pasted credential document; cannot be combined with documents. }
+                documents: { type: array, default: [], items: { type: string }, description: Credential documents; cannot be combined with nonblank content. }
+      responses:
+        "201":
+          description: Redacted batch preview with individually prepared rows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BatchImportSession" }
+        "400": { description: Invalid or conflicting documents. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/import/batch/confirm:
+    post:
+      operationId: confirmAccountBatchImport
+      security: [{ managementToken: [] }]
+      description: >
+        Consume selected prepared rows, validating each as a single import.
+        Each result succeeds or fails independently. Duplicate selected IDs
+        are processed once. Synchronous metadata refresh runs only for a
+        selection of at most five rows.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/AccountImportConfirmInput" }
+                - type: object
+                  required: [selectedItemIds]
+                  properties:
+                    selectedItemIds: { type: array, minItems: 1, maxItems: 1024, items: { type: string } }
+      responses:
+        "200":
+          description: Redacted result for every processed row.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, results]
+                properties:
+                  sessionId: { type: string }
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [itemId, status, created]
+                      properties:
+                        itemId: { type: string }
+                        status: { type: string, enum: [succeeded, failed] }
+                        accountId: { type: string }
+                        created: { type: boolean }
+                        error: { $ref: "#/components/schemas/BatchImportIssue" }
+        "400": { description: Invalid batch session or selection. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /gateway/tool-policy:
     post:
       operationId: setToolPolicy
@@ -232,7 +383,8 @@ paths:
             include raw credentials, cookies, authorization headers, prompts,
             response bodies, or provider session material.
             Failed events may include upstreamError with the original httpStatus,
-            code, errorType, and a bounded redacted message; redacted and truncated
+            code, errorType, an optional requestId for supported request ID formats,
+            and a bounded redacted message; redacted and truncated
             flags describe omissions. Missing details in older records are not
             reconstructed. Successful events omit upstreamError.
             toolUse may include policyMode, policyOutcome, policyFallback,
@@ -380,6 +532,178 @@ components:
         application/json:
           schema: { type: object }
   schemas:
+    OAuthClientKind:
+      type: string
+      enum: [codex, excel_bps]
+      default: codex
+      description: Issuing OAuth client. Missing legacy values mean Codex; excel is accepted as an input alias for excel_bps.
+    AccountAuthState:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [unknown, active, degraded_access_only, refreshing, error, requires_reauth] }
+        reason: { type: string, enum: [invalid_grant, reused_refresh_token, expired_refresh_token, invalidated_refresh_token, access_token_expired] }
+    BasisPointsCapturedHeaders:
+      type: object
+      required: [entries]
+      description: >
+        Validated allowlisted client headers, stored with credentials. Authorization,
+        account-binding and protocol headers are excluded. At most 64 normalized
+        entries, 32 KiB per value and 64 KiB of header data in total.
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            required: [name, values]
+            properties:
+              name: { type: string }
+              values: { type: array, items: { type: string } }
+    AccountSummary:
+      type: object
+      description: Redacted inventory and runtime projection; additional saved settings and aggregates may be present.
+      required: [id, label, identityHint, oauthClientKind, enabled, inPool, draining, authState, health, models, allowedModels, excludedModels, priority, weight, basisPointsAvailable, basisPointsEnabled]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        identityHint: { type: string, description: Redacted provider account hint. }
+        creditBalanceKey: { type: string, description: Hashed provider credit ledger identity shared across OAuth clients. }
+        oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+        basisPointsAvailable: { type: boolean, description: Available only for an Excel / Basis Points OAuth connection. }
+        basisPointsEnabled: { type: boolean, description: True only for an eligible Excel / Basis Points connection; ordinary ChatGPT connections remain native. }
+        enabled: { type: boolean }
+        inPool: { type: boolean }
+        draining: { type: boolean }
+        operationalStatus: { type: string, enum: [rotation, quotaWait, unavailable, disabled] }
+        authState: { $ref: "#/components/schemas/AccountAuthState" }
+        health: { type: string }
+        models: { type: array, items: { type: string } }
+        allowedModels: { type: array, items: { type: string } }
+        excludedModels: { type: array, items: { type: string } }
+        priority: { type: integer }
+        weight: { type: integer, minimum: 1 }
+        refreshState: { $ref: "#/components/schemas/AccountRefreshState" }
+        secretAvailable: { type: boolean }
+        lastErrorCode: { type: [string, "null"] }
+    AccountImportInput:
+      type: object
+      required: [label]
+      description: >
+        Credential-bearing request. Excel needs its own OAuth access token and
+        cannot use Agent Identity. Agent Identity needs agentPrivateKey and
+        agentRuntimeId together; other imports require a nonempty accessToken.
+      properties:
+        label: { type: string }
+        oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+        chatgptUserId: { type: [string, "null"] }
+        basisPointsHeaders: { oneOf: [{ $ref: "#/components/schemas/BasisPointsCapturedHeaders" }, { type: "null" }] }
+        accessToken: { type: string, default: "", writeOnly: true }
+        refreshToken: { type: [string, "null"], writeOnly: true }
+        idToken: { type: [string, "null"], writeOnly: true }
+        agentPrivateKey: { type: [string, "null"], writeOnly: true }
+        agentRuntimeId: { type: [string, "null"], writeOnly: true }
+        agentTaskId: { type: [string, "null"], writeOnly: true }
+        expiresAtMs: { type: [integer, "null"], minimum: 0 }
+        planType: { type: [string, "null"] }
+        subscriptionActiveUntilMs: { type: [integer, "null"], minimum: 0 }
+        chatgptAccountId: { type: [string, "null"] }
+        responsesUrl: { type: [string, "null"], format: uri }
+        models: { type: array, default: [], items: { type: string } }
+        allowedModels: { type: array, default: [], items: { type: string } }
+        excludedModels: { type: array, default: [], items: { type: string } }
+        priority: { type: integer, default: 0, minimum: -2147483648, maximum: 2147483647 }
+        weight: { type: integer, default: 1, minimum: 1, maximum: 4294967295 }
+    AccountImportPreview:
+      type: object
+      required: [sessionId, oauthClientKind, accountId, duplicateAccountId, label, identityHint, models, authState, expiresAtMs, planType, subscriptionActiveUntilMs, allowedModels, excludedModels, priority, weight]
+      properties:
+        sessionId: { type: string }
+        oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+        accountId: { type: string }
+        duplicateAccountId: { type: [string, "null"] }
+        label: { type: string }
+        identityHint: { type: string }
+        models: { type: array, items: { type: string } }
+        authState: { $ref: "#/components/schemas/AccountAuthState" }
+        expiresAtMs: { type: [integer, "null"], minimum: 0 }
+        planType: { type: [string, "null"] }
+        subscriptionActiveUntilMs: { type: [integer, "null"], minimum: 0 }
+        allowedModels: { type: array, items: { type: string } }
+        excludedModels: { type: array, items: { type: string } }
+        priority: { type: integer }
+        weight: { type: integer, minimum: 1 }
+        batchSessionId: { type: string }
+    AccountImportConfirmInput:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId: { type: string }
+        addToPool: { type: boolean, default: false, description: Add to pool; replacement keeps existing membership. }
+        probeMetadata: { type: boolean, default: false }
+    BatchImportIssue:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string, description: Redacted validation error. }
+    BatchImportWarning:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+        count: { type: integer, minimum: 0 }
+    BatchImportSession:
+      type: object
+      required: [sessionId, prepared, preview]
+      properties:
+        sessionId: { type: string }
+        prepared: { type: boolean }
+        preview:
+          type: object
+          required: [format, rows, warnings]
+          properties:
+            format: { type: string }
+            description: { type: string }
+            warnings: { type: array, items: { $ref: "#/components/schemas/BatchImportWarning" } }
+            rows:
+              type: array
+              items:
+                type: object
+                required: [itemId, label, identity, authMode, sourceName, quotaStatus, status, plan, defaultSelected, selectable, existing, warnings, error]
+                properties:
+                  itemId: { type: string }
+                  label: { type: string }
+                  identity: { type: string }
+                  authMode: { type: string }
+                  oauthClientKind: { $ref: "#/components/schemas/OAuthClientKind" }
+                  sourceName: { type: string }
+                  quotaStatus: { type: string }
+                  status: { type: string }
+                  plan: { type: [string, "null"] }
+                  defaultSelected: { type: boolean }
+                  selectable: { type: boolean }
+                  existing: { type: boolean }
+                  warnings: { type: array, items: { $ref: "#/components/schemas/BatchImportWarning" } }
+                  error: { oneOf: [{ $ref: "#/components/schemas/BatchImportIssue" }, { type: "null" }] }
+    AccountExportFormat:
+      type: string
+      enum: [zenith, cpa, sub2api, cockpit, 9router, codex, axon_hub, codex_manager]
+    AccountExportRequest:
+      type: object
+      additionalProperties: false
+      required: [accountIds, format]
+      properties:
+        accountIds: { type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: { type: string } }
+        format: { $ref: "#/components/schemas/AccountExportFormat" }
+        description: { type: [string, "null"], maxLength: 2000, description: Optional description for Zenith format only. }
+    AccountExportDocument:
+      type: object
+      required: [format, accountCount, fileName, content]
+      properties:
+        format: { $ref: "#/components/schemas/AccountExportFormat" }
+        accountCount: { type: integer, minimum: 1, maximum: 256 }
+        fileName: { type: string }
+        content: { type: string, description: Credential-bearing file contents. }
     WireApi:
       type: string
       enum: [responses, chat_completions, messages, gemini]
@@ -561,7 +885,7 @@ components:
       properties:
         provider:
           type: string
-          enum: [zenith, openrouter, sub2api, new_api, billing, deepseek, siliconflow, unsupported]
+          enum: [zenith, openrouter, sub2api, new_api, billing, deepseek, siliconflow, moonshot, unsupported]
         balanceMicroUsd: { type: [integer, "null"] }
         spentMicroUsd: { type: [integer, "null"] }
         requests: { type: [integer, "null"], minimum: 0 }

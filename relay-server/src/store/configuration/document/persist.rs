@@ -114,10 +114,7 @@ pub(super) fn write_configuration(
             to_json(&settings.routing.tool_policy.clone().unwrap_or_default())
                 .map_err(ConfigurationReplaceError::Store)?,
         ),
-        (
-            "basis_points_enabled",
-            settings.routing.basis_points_enabled.to_string(),
-        ),
+        ("basis_points_enabled", false.to_string()),
         ("default_service_tier", default_service_tier.to_string()),
         (
             "image_base_model",
@@ -239,8 +236,6 @@ pub(super) fn routing_policy_from_connection(
     let image_base_model =
         normalize_image_base_model(metadata_from(connection, "image_base_model")?)
             .map_err(|error| error.to_string())?;
-    let basis_points_enabled = metadata_from(connection, "basis_points_enabled")?
-        .is_some_and(|basis_points_flag| basis_points_flag == "true");
     validate_routing_policy(max_retry_candidates)?;
     Ok(PresetRoutingPolicy {
         tool_policy: Some(
@@ -255,7 +250,7 @@ pub(super) fn routing_policy_from_connection(
                 .map_err(str::to_string)?,
         ),
         pool_routing,
-        basis_points_enabled,
+        basis_points_enabled: false,
         max_retry_candidates,
         default_service_tier,
         image_base_model,

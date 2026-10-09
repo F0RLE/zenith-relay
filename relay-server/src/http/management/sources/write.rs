@@ -230,7 +230,7 @@ pub async fn update_source(
         match apply_source_policies_if_running(&state, previous_sources, updated_sources) {
             Ok(applied) => applied,
             Err(error) => {
-                let recovery = build.rollback_and_rebuild(&state, restore()).await;
+                let recovery = build.rollback_and_rebuild(&state, restore).await;
                 return match recovery {
                     Ok(()) => Err(runtime_error(error)),
                     Err(recovery) => Err(runtime_error(format!("{error}; {recovery}"))),
@@ -242,7 +242,7 @@ pub async fn update_source(
     };
     if !runtime_applied {
         build
-            .rebuild_or_rollback(&state, restore())
+            .rebuild_or_rollback(&state, restore)
             .await
             .map_err(runtime_error)?;
     }

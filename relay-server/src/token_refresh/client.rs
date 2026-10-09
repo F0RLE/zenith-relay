@@ -2,10 +2,18 @@ use super::*;
 
 pub(crate) struct CodexRefreshClient {
     http: reqwest::Client,
+    kind: OAuthClientKind,
 }
 
 impl CodexRefreshClient {
     pub(crate) fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, String> {
+        Self::new_with_proxy_for_kind(OAuthClientKind::Codex, proxy)
+    }
+
+    pub(crate) fn new_with_proxy_for_kind(
+        kind: OAuthClientKind,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, String> {
         let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(20))
@@ -16,7 +24,7 @@ impl CodexRefreshClient {
         }
         .build()
         .map_err(|error| error.to_string())?;
-        Ok(Self { http })
+        Ok(Self { http, kind })
     }
 }
 
@@ -68,18 +76,20 @@ impl TokenRefreshAdapter for CodexRefreshClient {
                     error_codes::INVALID_REFRESH_TOKEN,
                 ));
             }
+            let payload = serde_json::json!({
+                "client_id": self.kind.client_id(),
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            });
+            let request = match self.kind {
+                OAuthClientKind::Codex => self.http.post(CODEX_TOKEN_ENDPOINT).json(&payload),
+                OAuthClientKind::ExcelBps => self
+                    .http
+                    .post(format!("{CODEX_TOKEN_ENDPOINT}?unified=true"))
+                    .form(&payload),
+            };
             let (response, permit) = management_http_gate()
-                .send(
-                    &self.http,
-                    self.http
-                        .post(CODEX_TOKEN_ENDPOINT)
-                        .json(&serde_json::json!({
-                            "client_id": CODEX_CLIENT_ID,
-                            "grant_type": "refresh_token",
-                            "refresh_token": refresh_token,
-                        })),
-                    HttpClass::Auth,
-                )
+                .send(&self.http, request, HttpClass::Auth)
                 .await
                 .map_err(|_| {
                     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
@@ -94,6 +104,14 @@ impl TokenRefreshAdapter for CodexRefreshClient {
                 return Err(TokenRefreshFailure::new(failure_kind, &code));
             }
             let token_response: TokenResponse = serde_json::from_slice(&token_response_bytes)
+                .map_err(|_| {
+                    TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
+                })?;
+            self.kind
+                .validate_token_hints(
+                    token_response.id_token.as_deref(),
+                    Some(&token_response.access_token),
+                )
                 .map_err(|_| {
                     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
                 })?;

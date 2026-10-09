@@ -54,10 +54,7 @@ impl Store {
         for (metadata_key, metadata_value) in [
             ("tool_policy", tool_policy),
             ("pool_routing", pool_routing),
-            (
-                "basis_points_enabled",
-                policy.basis_points_enabled.to_string(),
-            ),
+            ("basis_points_enabled", false.to_string()),
             (
                 "max_retry_candidates",
                 policy.max_retry_candidates.to_string(),

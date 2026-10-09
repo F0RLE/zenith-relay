@@ -114,7 +114,10 @@ impl AppState {
             )
             .map_err(|error| error.to_string())?;
         let proxy = account_proxy_config(self, &account_record, &credential)?;
-        let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
+        let refresh = CodexRefreshClient::new_with_proxy_for_kind(
+            credential.oauth_client_kind,
+            proxy.as_ref(),
+        )?;
         let persistence = ServerTokenPersistence::for_account(self.clone(), &account_record);
         drop(configuration);
         let tokens = self

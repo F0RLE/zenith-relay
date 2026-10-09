@@ -43,6 +43,8 @@ pub(super) async fn export_accounts(
         let account_record = find_account(&state, account_id)?;
         let credential = load_account_credential(&state, &account_record.secret_ref)?;
         accounts.push(AccountExportCredential {
+            oauth_client_kind: credential.oauth_client_kind,
+            basis_points_headers: credential.basis_points_headers,
             label: account_record.label,
             email: None,
             phone: None,
@@ -52,7 +54,7 @@ pub(super) async fn export_accounts(
             refresh_token: credential.refresh_token,
             id_token: credential.id_token,
             account_id: Some(credential.chatgpt_account_id),
-            user_id: None,
+            user_id: credential.chatgpt_user_id,
             organization_id: None,
             plan_type: account_record.subscription.plan_type.clone(),
             expires_at_ms: credential.expires_at_ms,
@@ -70,11 +72,18 @@ pub(super) async fn export_accounts(
         now_ms(),
         input.description.as_deref(),
     )
-    .map_err(|_| {
-        ManagementError::internal(
-            error_codes::ACCOUNT_EXPORT_FAILED,
-            "account export could not be created",
-        )
+    .map_err(|error| {
+        if matches!(error, zenith_relay_core::Error::Validation(_)) {
+            ManagementError::validation(
+                error_codes::ACCOUNT_EXPORT_FAILED,
+                "selected credentials or export options do not support this account export",
+            )
+        } else {
+            ManagementError::internal(
+                error_codes::ACCOUNT_EXPORT_FAILED,
+                "account export could not be created",
+            )
+        }
     })?;
     Ok(no_store_json(document))
 }

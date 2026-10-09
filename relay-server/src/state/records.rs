@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenSet},
-    providers::chatgpt::AgentIdentityCredential,
+    model_metadata::ModelMetadataCatalog,
+    providers::chatgpt::{AgentIdentityCredential, BasisPointsCapturedHeaders, OAuthClientKind},
     quota::{QuotaSnapshot, Subscription},
     ApiModelPriceOverride, SourceProtocolBinding, SourceProtocolConfig, SourceProtocolResolution,
     WireApi,
@@ -69,9 +70,16 @@ impl SourceRecord {
         SourceProtocolResolution::resolved_supports_any(self)
     }
 
-    pub fn models_with_cache_write_pricing(&self) -> std::collections::BTreeSet<String> {
+    pub fn models_with_cache_write_pricing(
+        &self,
+        reference_catalog: &ModelMetadataCatalog,
+    ) -> std::collections::BTreeSet<String> {
         zenith_relay_core::cache_write_model_ids(
-            self.effective_protocol_bindings().unwrap_or_default(),
+            SourceProtocolResolution::resolved_protocol_bindings_with_catalog(
+                self,
+                Some(reference_catalog),
+            )
+            .unwrap_or_default(),
         )
     }
 }
@@ -141,6 +149,12 @@ pub struct GatewayKeyRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AccountCredential {
     #[serde(default)]
+    pub oauth_client_kind: OAuthClientKind,
+    #[serde(default)]
+    pub chatgpt_user_id: Option<String>,
+    #[serde(default)]
+    pub basis_points_headers: Option<BasisPointsCapturedHeaders>,
+    #[serde(default)]
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
@@ -160,7 +174,58 @@ pub struct AccountCredential {
 }
 
 impl AccountCredential {
+    pub fn matches_connection(
+        &self,
+        kind: OAuthClientKind,
+        account_id: &str,
+        user_id: Option<&str>,
+    ) -> bool {
+        self.oauth_client_kind == kind
+            && self.chatgpt_account_id == account_id
+            && self.principal_user_id().as_deref() == user_id
+    }
+
+    pub fn principal_user_id(&self) -> Option<String> {
+        self.chatgpt_user_id.clone().or_else(|| {
+            [self.id_token.as_deref(), Some(self.access_token.as_str())]
+                .into_iter()
+                .flatten()
+                .find_map(|token| {
+                    let claims = zenith_relay_core::accounts::decode_unverified_jwt_payload::<
+                        serde_json::Value,
+                    >(token)?;
+                    let auth = claims.get("https://api.openai.com/auth")?;
+                    auth.get("chatgpt_user_id")
+                        .or_else(|| auth.get("user_id"))?
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|user_id| !user_id.is_empty())
+                        .map(str::to_string)
+                })
+        })
+    }
+
+    pub fn validate_oauth_client(&self) -> Result<(), String> {
+        self.oauth_client_kind
+            .validate_token_hints(self.id_token.as_deref(), Some(&self.access_token))
+            .map_err(str::to_owned)?;
+        if self.oauth_client_kind == OAuthClientKind::ExcelBps
+            && (self.is_agent_identity() || !self.has_oauth())
+        {
+            return Err(
+                "Excel OAuth requires its own access token and cannot use Agent Identity".into(),
+            );
+        }
+        if let Some(headers) = self.basis_points_headers.as_ref() {
+            headers
+                .validate()
+                .map_err(|_| "stored Basis Points headers are invalid".to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn agent_identity(&self) -> Result<Option<AgentIdentityCredential>, String> {
+        self.validate_oauth_client()?;
         match (
             self.agent_private_key.as_ref(),
             self.agent_runtime_id.as_ref(),
@@ -206,6 +271,7 @@ impl AccountCredential {
     }
 
     pub fn tokens(&self) -> Result<TokenSet, String> {
+        self.validate_oauth_client()?;
         TokenSet::new(
             self.access_token.clone(),
             self.refresh_token.clone(),

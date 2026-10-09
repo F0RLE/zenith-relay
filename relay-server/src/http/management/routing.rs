@@ -31,8 +31,8 @@ pub struct RoutingPolicyInput {
     default_service_tier: Option<DefaultServiceTier>,
     #[serde(default)]
     image_base_model: Option<Option<String>>,
-    #[serde(default)]
-    basis_points_enabled: Option<bool>,
+    #[serde(default, rename = "basisPointsEnabled")]
+    _legacy_basis_points_enabled: Option<serde::de::IgnoredAny>,
     #[serde(default, rename = "subscriptionPlanOrder")]
     _legacy_subscription_plan_order: Option<serde::de::IgnoredAny>,
 }
@@ -68,9 +68,6 @@ pub async fn set_routing_policy(
     let image_base_model = input
         .image_base_model
         .unwrap_or(previous_policy.image_base_model.clone());
-    let basis_points_enabled = input
-        .basis_points_enabled
-        .unwrap_or(previous_policy.basis_points_enabled);
     let policy = PresetRoutingPolicy {
         tool_policy: previous_policy.tool_policy.clone(),
         // An unrelated scalar edit must not persist a newly reconciled,
@@ -78,7 +75,7 @@ pub async fn set_routing_policy(
         pool_routing: input
             .pool_routing
             .or_else(|| previous_policy.pool_routing.clone()),
-        basis_points_enabled,
+        basis_points_enabled: false,
         max_retry_candidates: input.max_retry_candidates,
         default_service_tier,
         image_base_model,
@@ -103,7 +100,6 @@ pub async fn set_routing_policy(
                 .map_err(store_error)?;
             return Err(runtime_error(error.to_string()));
         }
-        runtime.set_basis_points_enabled(policy.basis_points_enabled);
         runtime.set_default_service_tier(policy.default_service_tier);
     }
     state.snapshot().map(Json).map_err(store_error)

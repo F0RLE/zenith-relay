@@ -36,7 +36,10 @@ pub(super) fn account_summaries(
                 serde_json::from_str::<AccountCredential>(credential_json).ok()
             });
             let basis_points_available = credential.as_ref().is_some_and(|account_credential| {
-                account_credential.has_oauth() && !account_credential.is_agent_identity()
+                account_credential.has_oauth()
+                    && !account_credential.is_agent_identity()
+                    && account_credential.oauth_client_kind
+                        == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
             });
             let (proxy_mode, proxy_available) = credential
                 .as_ref()
@@ -55,9 +58,12 @@ pub(super) fn account_summaries(
             let mut summary = account_summary(
                 account_record,
                 AccountSummaryInputs {
+                    oauth_client_kind: credential
+                        .as_ref()
+                        .map(|credential| credential.oauth_client_kind)
+                        .unwrap_or_default(),
                     secret_available,
                     basis_points_available,
-                    basis_points_enabled: inputs.basis_points_enabled,
                     proxy_mode,
                     proxy_available,
                     api_equivalent: inputs
@@ -83,6 +89,14 @@ pub(super) fn account_summaries(
                     account_record.quota.updated_at_ms.is_some(),
                 ),
             };
+            summary.credit_balance_key = credential
+                .as_ref()
+                .and_then(|credential| {
+                    zenith_relay_core::providers::chatgpt::credit_balance_key(
+                        &credential.chatgpt_account_id,
+                    )
+                })
+                .map(hex::encode);
             Ok(summary)
         })
         .collect()

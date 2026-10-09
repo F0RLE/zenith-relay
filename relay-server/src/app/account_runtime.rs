@@ -6,6 +6,7 @@ use reqwest::{header::HeaderValue, redirect::Policy};
 use std::{sync::Arc, time::Duration};
 use zenith_relay_core::{
     accounts::{TokenPersistenceAdapter, TokenSet},
+    model_metadata::ModelMetadataCatalog,
     protocol::{
         account_operational_state, AccountOperationalInput, AccountSummary, ProxyMode,
         QuotaWindowUsage, SourceSummary,
@@ -192,6 +193,7 @@ pub(super) fn source_summary(
     secret_available: bool,
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
+    reference_catalog: &ModelMetadataCatalog,
 ) -> SourceSummary {
     SourceSummary::from_stored_source(
         source_record,
@@ -200,13 +202,14 @@ pub(super) fn source_summary(
         api_equivalent,
         source_record.last_error_code.clone(),
         None,
+        Some(reference_catalog),
     )
 }
 
 pub(super) struct AccountSummaryInputs {
+    pub(super) oauth_client_kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub(super) secret_available: bool,
     pub(super) basis_points_available: bool,
-    pub(super) basis_points_enabled: bool,
     pub(super) proxy_mode: ProxyMode,
     pub(super) proxy_available: bool,
     pub(super) api_equivalent: ApiEquivalentSummary,
@@ -219,9 +222,9 @@ pub(super) fn account_summary(
     inputs: AccountSummaryInputs,
 ) -> AccountSummary {
     let AccountSummaryInputs {
+        oauth_client_kind,
         secret_available,
         basis_points_available,
-        basis_points_enabled,
         proxy_mode,
         proxy_available,
         api_equivalent,
@@ -236,12 +239,16 @@ pub(super) fn account_summary(
         quota_stale_after_ms,
     ));
     AccountSummary {
+        credit_balance_key: None,
         id: account_record.id.clone(),
         label: account_record.label.clone(),
         identity_hint: account_record.identity_hint.clone(),
         provider_family: account_record.provider_family.clone(),
+        oauth_client_kind,
         basis_points_available,
-        basis_points_enabled: basis_points_available && basis_points_enabled,
+        basis_points_enabled: basis_points_available
+            && oauth_client_kind
+                == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,
         enabled: account_record.enabled,
         in_pool: account_record.in_pool,
         draining: account_record.draining,
