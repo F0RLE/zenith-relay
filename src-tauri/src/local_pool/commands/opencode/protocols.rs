@@ -40,14 +40,18 @@ fn supports(model: &ModelSummary, protocol: WireApi) -> bool {
         .any(|route| route.client_wire_api == protocol)
 }
 
+/// The client protocol reaches the provider without a bridge.
+fn native(model: &ModelSummary, protocol: WireApi) -> bool {
+    model
+        .protocol_routes
+        .iter()
+        .any(|route| route.client_wire_api == protocol && route.upstream_wire_api == protocol)
+}
+
 pub(super) fn preferred(model: &ModelSummary) -> WireApi {
     WireApi::ALL
         .into_iter()
-        .find(|protocol| {
-            model.protocol_routes.iter().any(|route| {
-                route.client_wire_api == *protocol && route.upstream_wire_api == *protocol
-            })
-        })
+        .find(|protocol| native(model, *protocol))
         .or_else(|| {
             WireApi::ALL
                 .into_iter()

@@ -23,7 +23,9 @@ use uuid::Uuid;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::AccountAuthMode,
-    providers::chatgpt::{AgentIdentityCredential, CodexModelsClient, CodexQuotaClient},
+    providers::chatgpt::{
+        AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, OAuthClientKind,
+    },
     quota::QuotaRefreshFailure,
     ProxyConfig,
 };
@@ -101,14 +103,14 @@ async fn prepare_oauth_completion(
                 "OAuth target account is managed by a remote server",
             ));
         }
-        let stored_provider_id = credential_store
+        let target_credentials = credential_store
             .load(target_account_id)
-            .map_err(credential_error)?
-            .and_then(|credentials| credentials.provider_account_id().map(str::to_string));
-        if stored_provider_id
-            .as_deref()
-            .is_some_and(|provider_id| provider_id != checkpoint.provider_account_id)
-        {
+            .map_err(credential_error)?;
+        let same_connection = target_credentials.as_ref().map_or_else(
+            || target.account.identity.identity_hash == checkpoint.identity_hash(),
+            |credentials| checkpoint.matches_connection(credentials),
+        );
+        if !same_connection {
             return Err(LocalPoolError::new(
                 ErrorCode::Conflict,
                 "OAuth account does not match the selected local account",
@@ -239,7 +241,9 @@ async fn register_agent_identity_if_missing(
     access_token: &str,
     account_is_fedramp: bool,
 ) -> StoredCodexCredentials {
-    if credentials.agent_identity().is_some() {
+    if credentials.oauth_client_kind() != OAuthClientKind::Codex
+        || credentials.agent_identity().is_some()
+    {
         return credentials;
     }
     let builder = reqwest::Client::builder()
@@ -383,8 +387,7 @@ async fn commit_oauth_completion(
         .map_err(credential_error)?;
     if commit_previous_credentials
         .as_ref()
-        .and_then(StoredCodexCredentials::provider_account_id)
-        .is_some_and(|provider_id| provider_id != checkpoint.provider_account_id)
+        .is_some_and(|credentials| !checkpoint.matches_connection(credentials))
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -392,6 +395,16 @@ async fn commit_oauth_completion(
         ));
     }
     let commit_previous_account = state.store()?.account(&local_account_id).cloned();
+    if commit_previous_credentials.is_none()
+        && commit_previous_account.as_ref().is_some_and(|account| {
+            account.account.identity.identity_hash != checkpoint.identity_hash()
+        })
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth account identity changed while completing sign-in",
+        ));
+    }
     if had_existing && commit_previous_account.is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -402,13 +415,15 @@ async fn commit_oauth_completion(
         commit_previous_account.as_ref(),
         commit_previous_credentials.as_ref(),
     );
-    let template = commit_previous_credentials.as_ref().unwrap_or(&credentials);
-    let committed_credentials = inherit_session_material(
+    let mut committed_credentials = inherit_session_material(
         checkpoint
             .to_credentials(&local_account_id, generation)
             .map_err(credential_error)?,
-        template,
+        &credentials,
     )?;
+    if let Some(previous) = commit_previous_credentials.as_ref() {
+        committed_credentials = inherit_session_material(committed_credentials, previous)?;
+    }
     let committed_credentials =
         with_sign_in_proxy(committed_credentials, sign_in_proxy_url.as_deref())?;
     if let Some(previous_account_snapshot) = commit_previous_account.as_ref() {
@@ -582,17 +597,29 @@ fn inherit_session_material(
     mut credentials: StoredCodexCredentials,
     template: &StoredCodexCredentials,
 ) -> LocalResult<StoredCodexCredentials> {
+    if credentials.oauth_client_kind() != template.oauth_client_kind() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth client does not match the existing account",
+        ));
+    }
     // Login notes belong to the local account, not to the OAuth token. Keep
     // them when a re-authentication replaces the token snapshot; otherwise
     // completing sign-in silently leaves only the provider email behind.
     credentials = credentials.fill_missing_login_from(template);
-    if let Some(proxy_url) = template.proxy_url() {
-        credentials = credentials
-            .with_proxy_url(Some(proxy_url.to_string()))
-            .map_err(credential_error)?;
-    }
+    credentials = credentials
+        .with_proxy_route(
+            template.proxy_url().map(str::to_string),
+            template.bypass_common_proxy(),
+        )
+        .map_err(credential_error)?;
     if let Some(agent_identity) = template.agent_identity() {
         credentials = credentials.with_agent_identity(agent_identity.clone());
+    }
+    if let Some(headers) = template.basis_points_headers() {
+        credentials = credentials
+            .with_basis_points_headers(Some(headers.clone()))
+            .map_err(credential_error)?;
     }
     Ok(credentials)
 }

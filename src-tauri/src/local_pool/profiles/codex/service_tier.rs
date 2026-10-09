@@ -21,7 +21,7 @@ pub fn sync_default_service_tier(
                     .ok_or_else(|| {
                         LocalPoolError::new(
                             ErrorCode::InvalidState,
-                            "Codex desktop settings must be a table",
+                            "ChatGPT desktop settings must be a table",
                         )
                     })?
                     .remove(DESKTOP_DEFAULT_SERVICE_TIER_KEY);
@@ -35,7 +35,7 @@ pub fn sync_default_service_tier(
             let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
-                    "Codex desktop settings must be a table",
+                    "ChatGPT desktop settings must be a table",
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("priority");
@@ -48,7 +48,7 @@ pub fn sync_default_service_tier(
             let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
-                    "Codex desktop settings must be a table",
+                    "ChatGPT desktop settings must be a table",
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("ultrafast");
@@ -62,7 +62,7 @@ pub fn sync_default_service_tier(
         Some(content) => serde_json::from_str::<Value>(content).map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                format!("Codex global state is not valid JSON: {error}"),
+                format!("ChatGPT global state is not valid JSON: {error}"),
             )
         })?,
         None => Value::Object(Default::default()),
@@ -70,7 +70,7 @@ pub fn sync_default_service_tier(
     let global_state = global_state_document.as_object_mut().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex global state must be a JSON object",
+            "ChatGPT global state must be a JSON object",
         )
     })?;
     let persisted_atom_state = global_state
@@ -90,7 +90,7 @@ pub fn sync_default_service_tier(
     let next_state = serde_json::to_string(global_state).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::Io,
-            format!("Codex global state could not be serialized: {error}"),
+            format!("ChatGPT global state could not be serialized: {error}"),
         )
     })?;
 

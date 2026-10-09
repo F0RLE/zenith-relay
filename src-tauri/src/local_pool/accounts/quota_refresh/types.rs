@@ -129,6 +129,8 @@ pub struct AccountQuotaRefreshResponse {
 }
 
 pub(crate) struct PreparedAccountCredentials {
+    pub(in crate::local_pool::accounts) oauth_client_kind:
+        zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub(in crate::local_pool::accounts) tokens: TokenSet,
     pub(in crate::local_pool::accounts) provider_account_id: String,
     pub(in crate::local_pool::accounts) proxy: Option<ProxyConfig>,
@@ -178,6 +180,10 @@ impl PreparedAccountAuthorization {
 }
 
 impl PreparedAccountCredentials {
+    pub(crate) fn supports_native_codex(&self) -> bool {
+        self.oauth_client_kind == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+    }
+
     pub(crate) fn tokens(&self) -> &TokenSet {
         &self.tokens
     }

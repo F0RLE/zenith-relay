@@ -17,8 +17,8 @@ use zenith_relay_core::{
 };
 
 const PROVIDER_ID: &str = "zenith-relay";
-// OpenCode uses the official OpenAI AI SDK so requests use Relay's Responses
-// contract, which preserves tool calls across adapters.
+// The Responses group uses the official OpenAI AI SDK. Models whose provider
+// speaks another protocol natively are placed in that protocol's group.
 const PROVIDER_NPM: &str = "@ai-sdk/openai";
 
 mod config;

@@ -168,6 +168,14 @@ pub(super) fn api_key_page_url(provider: &str) -> Option<&'static str> {
         "zenith" => Some(top_up::BOT_URL),
         "openai" => Some(OPENAI_API_KEYS_URL),
         "openrouter" => Some(OPENROUTER_API_KEYS_URL),
+        "anthropic" => Some("https://platform.claude.com/settings/keys"),
+        "gemini" => Some("https://aistudio.google.com/app/apikey"),
+        "deepseek" => Some("https://platform.deepseek.com/api_keys"),
+        "groq" => Some("https://console.groq.com/keys"),
+        "mistral" => Some("https://console.mistral.ai/"),
+        "moonshot" => Some("https://platform.kimi.ai/console/api-keys"),
+        "kimi" => Some("https://www.kimi.com/code/console"),
+        "minimax" => Some("https://platform.minimax.io/console/access"),
         _ => None,
     }
 }

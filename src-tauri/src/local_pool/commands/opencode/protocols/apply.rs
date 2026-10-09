@@ -11,9 +11,19 @@ pub(in crate::local_pool::commands::opencode) fn apply(
         .iter()
         .filter(|model| model.enabled && !model.protocol_routes.is_empty())
     {
-        // Keep the old provider/model identifier whenever its route still works.
-        let previous_protocol =
-            existing_protocol(config, &model.id, |protocol| supports(model, protocol));
+        // Keep the old provider/model identifier while it is still a usable
+        // route, but never let a converted route pin a model that has a native
+        // one: the group's own protocol keeps provider semantics and billing.
+        let has_native = WireApi::ALL
+            .into_iter()
+            .any(|protocol| native(model, protocol));
+        let previous_protocol = existing_protocol(config, &model.id, |protocol| {
+            if has_native {
+                native(model, protocol)
+            } else {
+                supports(model, protocol)
+            }
+        });
         groups
             .entry(previous_protocol.unwrap_or_else(|| preferred(model)))
             .or_default()

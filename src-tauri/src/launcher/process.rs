@@ -213,12 +213,12 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
                 return Ok(());
             }
         }
-        Err("ChatGPT/Codex desktop was not found. Install the desktop app; the terminal CLI cannot be opened from Relay without a terminal".to_string())
+        Err("ChatGPT desktop was not found. Install the desktop app; the terminal CLI cannot be opened from Relay without a terminal".to_string())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Err("Codex desktop launch is unavailable on this platform. Open a supported desktop app manually; Relay will not start the terminal CLI in the background".to_string())
+        Err("ChatGPT desktop launch is unavailable on this platform. Open a supported desktop app manually; Relay will not start the terminal CLI in the background".to_string())
     }
 }
 

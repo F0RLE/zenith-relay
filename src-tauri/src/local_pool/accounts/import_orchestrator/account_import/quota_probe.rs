@@ -33,6 +33,10 @@ pub(in crate::local_pool::accounts::import_orchestrator) fn hinted_import_proxy(
         provider_account_id,
         import_item.chatgpt_user_id.as_deref(),
         import_item.email(),
+        import_item
+            .secrets()
+            .oauth_client_kind()
+            .unwrap_or_default(),
     )?
     else {
         return Ok(None);

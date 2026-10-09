@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     net::IpAddr,
     time::{Duration, Instant},
@@ -10,7 +10,7 @@ const CHECK_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const MAX_RESPONSE_BYTES: usize = 4_096;
 static CHECK_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyCheckResult {
     pub proxy_id: String,
@@ -18,7 +18,7 @@ pub struct ProxyCheckResult {
     pub elapsed_ms: u64,
     pub ip: Option<IpAddr>,
     pub country_code: Option<String>,
-    pub error_code: Option<&'static str>,
+    pub error_code: Option<String>,
 }
 
 pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) -> ProxyCheckResult {
@@ -30,7 +30,7 @@ pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) ->
     let check_result = proxy_check_request(proxy, CHECK_URL, Duration::from_secs(12)).await;
     let (ip, country_code, error_code) = match check_result {
         Ok((ip, country)) => (Some(ip), country, None),
-        Err(code) => (None, None, Some(code)),
+        Err(code) => (None, None, Some(code.to_owned())),
     };
     ProxyCheckResult {
         proxy_id,

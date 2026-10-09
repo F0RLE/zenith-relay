@@ -12,13 +12,13 @@ pub(super) struct AuthorizationCodeRequest<'a> {
     pub(super) grant_type: &'static str,
     pub(super) code: &'a str,
     pub(super) redirect_uri: &'a str,
-    pub(super) client_id: &'static str,
+    pub(super) client_id: &'a str,
     pub(super) code_verifier: &'a str,
 }
 
 #[derive(Serialize)]
 pub(super) struct RefreshTokenRequest<'a> {
-    pub(super) client_id: &'static str,
+    pub(super) client_id: &'a str,
     pub(super) grant_type: &'static str,
     pub(super) refresh_token: &'a str,
 }

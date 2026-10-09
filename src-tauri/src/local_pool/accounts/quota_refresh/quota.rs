@@ -101,7 +101,8 @@ pub(in crate::local_pool::accounts) async fn prepare_account_credentials_with_re
             )
         })?;
     let oauth = Arc::new(
-        CodexOAuthClient::new_with_proxy(proxy.as_ref()).map_err(LocalPoolError::invalid_state)?,
+        CodexOAuthClient::new_with_proxy_for_kind(stored.oauth_client_kind(), proxy.as_ref())
+            .map_err(LocalPoolError::invalid_state)?,
     );
     let refresh = StoredRefreshAdapter::new(
         state.transient_root(),
@@ -160,20 +161,14 @@ pub(in crate::local_pool::accounts) async fn prepare_account_credentials_with_re
         })?;
     let proxy = effective_proxy_config(&gateway, &current_credentials)
         .map_err(|error| LocalPoolError::new(ErrorCode::GatewayUnavailable, error.message))?;
-    codex::sync_account_bindings(
-        &state.profile_backup_root(),
-        account_id,
-        &prepared.tokens,
-        &provider_account_id,
-    )?;
-    codex::sync_local_gateway_binding(
-        &crate::platform::default_codex_home(),
-        &state.profile_backup_root(),
+    super::credentials::sync_account_profile_bindings(
+        state,
         account_id,
         &prepared.tokens,
         &provider_account_id,
     )?;
     Ok(PreparedAccountCredentials {
+        oauth_client_kind: current_credentials.oauth_client_kind(),
         tokens: prepared.tokens,
         provider_account_id,
         proxy,

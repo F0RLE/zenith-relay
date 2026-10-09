@@ -114,7 +114,7 @@ pub(super) fn local_configuration_preset(
             accounts,
             routing: PresetRoutingPolicy {
                 tool_policy: Some(gateway.tool_policy),
-                basis_points_enabled: gateway.basis_points_enabled,
+                basis_points_enabled: false,
                 max_retry_candidates: gateway.max_retry_candidates,
                 pool_routing: gateway.pool_routing,
                 default_service_tier: gateway.default_service_tier,
@@ -286,7 +286,7 @@ pub async fn apply_local_configuration_preset(
     if let Some(policy) = &settings.routing.tool_policy {
         gateway.tool_policy = policy.clone();
     }
-    gateway.basis_points_enabled = settings.routing.basis_points_enabled;
+    gateway.basis_points_enabled = false;
     gateway.pool_routing = settings.routing.pool_routing.clone();
     gateway.default_service_tier = settings.routing.default_service_tier;
     gateway.image_base_model = settings.routing.image_base_model.clone();

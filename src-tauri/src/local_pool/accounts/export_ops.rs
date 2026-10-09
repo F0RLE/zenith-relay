@@ -99,6 +99,8 @@ pub(crate) fn build_local_account_export_document(
                 .require(&account_record.account.id)
                 .map_err(credential_local_error)?;
             Ok(AccountExportCredential {
+                oauth_client_kind: credentials.oauth_client_kind(),
+                basis_points_headers: credentials.basis_points_headers().cloned(),
                 label: export_account_label(&account_record.account.label, &credentials),
                 email: credentials.email().map(str::to_string),
                 phone: credentials.phone().map(str::to_string),

@@ -116,6 +116,14 @@ pub(super) fn reattach_account_profiles(
             format!("{}; account profile credentials are missing", cause.message),
         )
     })?;
+    if credentials.oauth_client_kind()
+        != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "Excel OAuth credentials cannot restore a native ChatGPT profile",
+        ));
+    }
     let tokens = credentials.to_token_set().map_err(|_| {
         LocalPoolError::new(ErrorCode::RecoveryRequired, "account tokens are invalid")
     })?;

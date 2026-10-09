@@ -329,13 +329,15 @@ async fn admit_runtime_account(
     let models = account.effective_models().to_vec();
     Ok(Some(AdmittedRuntimeAccount {
         account: RuntimeChatGptAccount {
+            oauth_client_kind: secret.oauth_client_kind(),
             id: account_id,
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
+            chatgpt_user_id: secret.provider_user_id().map(str::to_string),
             responses_url: CODEX_RESPONSES_URL.to_string(),
-            basis_points_enabled: settings.basis_points_enabled
-                && secret.has_oauth()
-                && !secret.is_agent_identity(),
+            basis_points_enabled: secret.oauth_client_kind()
+                == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,
+            basis_points_headers: secret.basis_points_headers().cloned(),
             models,
             enabled: candidate_enabled,
             draining: account.account.draining,

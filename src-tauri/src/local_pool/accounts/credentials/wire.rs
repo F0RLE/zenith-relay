@@ -1,5 +1,7 @@
 use super::error::{CredentialError, CredentialErrorCode};
+use crate::local_pool::accounts::oauth::OAuthClientKind;
 use serde::{Deserialize, Serialize};
+use zenith_relay_core::providers::chatgpt::BasisPointsCapturedHeaders;
 
 pub(super) const CREDENTIAL_VERSION: u32 = 1;
 pub(super) const MAX_SECRET_JSON_BYTES: usize = 256 * 1024;
@@ -12,6 +14,8 @@ pub(super) const MAX_PLAN_BYTES: usize = 64;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct CredentialWire {
     pub(super) version: u32,
+    #[serde(default)]
+    pub(super) oauth_client_kind: OAuthClientKind,
     pub(super) local_account_id: String,
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
@@ -37,6 +41,8 @@ pub(super) struct CredentialWire {
     pub(super) bypass_common_proxy: bool,
     #[serde(default)]
     pub(super) agent_identity: Option<AgentIdentityWire>,
+    #[serde(default)]
+    pub(super) basis_points_headers: Option<BasisPointsCapturedHeaders>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

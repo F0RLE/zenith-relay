@@ -65,6 +65,7 @@ impl CodexRefreshClient for RefreshOnce {
         provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
+        _kind: super::super::oauth::OAuthClientKind,
     ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -262,6 +263,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
             _provider_account_id: Option<&'a str>,
             _refresh_token: &'a str,
             now_ms: u64,
+            _kind: super::super::oauth::OAuthClientKind,
         ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
         {
             Box::pin(async move {

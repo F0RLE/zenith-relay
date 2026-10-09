@@ -55,6 +55,7 @@ fn authorization_url_validation_allows_generated_url_only() {
         redirect_uri: oauth.pending().redirect_uri().to_string(),
         expires_at_ms: oauth.pending().expires_at_ms(),
         status: OAuthFlowStatus::Pending,
+        client_kind: crate::local_pool::accounts::oauth::OAuthClientKind::Codex,
         target_account_id: None,
     };
     assert!(validated_authorization_url(&valid).is_ok());
@@ -97,6 +98,7 @@ fn exchanged_token_checkpoint_is_recoverable_and_fully_redacted() {
     let checkpoint = OAuthCompletionCheckpoint {
         version: COMPLETION_CHECKPOINT_VERSION,
         login_id: login_id.clone(),
+        client_kind: crate::local_pool::accounts::oauth::OAuthClientKind::Codex,
         access_token: "checkpoint-access-secret".into(),
         refresh_token: Some("checkpoint-refresh-secret".into()),
         id_token: Some("checkpoint-id-secret".into()),

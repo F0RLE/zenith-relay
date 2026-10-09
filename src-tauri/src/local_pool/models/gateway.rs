@@ -19,10 +19,8 @@ pub enum BindScope {
 pub struct GatewaySettings {
     #[serde(default)]
     pub tool_policy: zenith_relay_core::ToolPolicy,
-    /// Use the explicitly labelled Excel/Basis Points route for compatible
-    /// OAuth accounts. The physical account candidate and its quota remain
-    /// shared with native Responses traffic.
-    #[serde(default)]
+    /// Legacy preference, ignored. The OAuth client determines the transport.
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub basis_points_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,

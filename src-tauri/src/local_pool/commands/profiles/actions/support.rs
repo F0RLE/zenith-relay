@@ -11,6 +11,13 @@ pub(super) async fn activate_account_profile(
     // Validate and refresh the account before stopping ChatGPT. A bad or
     // expired credential must leave the current client session untouched.
     let prepared = prepare_account_credentials(state, account_id).await?;
+    if !prepared.supports_native_codex() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "Excel OAuth accounts can only be used through the Relay pool",
+        )
+        .into());
+    }
     let stopped = stop_codex_and_sync_account_at(state, &profile_dir).await?;
     let activation_result: Result<ProfileActivation, CommandError> = async {
         let history_backup = if sync_history {

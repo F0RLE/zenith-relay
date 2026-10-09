@@ -39,13 +39,19 @@ pub(crate) async fn build_local_runtime_state(
     let snapshot_at_ms = unix_time_ms();
     let catalog = state.pricing_catalog();
     let model_metadata = state.model_metadata_catalog();
-    let pricing = super::super::pricing_context(&inputs.gateway, &inputs.sources, &inputs.accounts);
+    let pricing = super::super::pricing_context(
+        &inputs.gateway,
+        &inputs.sources,
+        &inputs.accounts,
+        &model_metadata,
+    );
     let equivalents = state
         .telemetry
         .api_equivalents_with_pricing(&catalog, &pricing)?;
     let quota_window_usages =
         project_quota_window_usages(&inputs.accounts, &state.telemetry, &catalog, &pricing)?;
-    let mut source_summaries = project_source_summaries(&inputs, &routing_order, &equivalents)?;
+    let mut source_summaries =
+        project_source_summaries(&inputs, &routing_order, &equivalents, &model_metadata)?;
     let mut account_summaries = project_account_summaries(
         state,
         &inputs,
@@ -127,7 +133,7 @@ pub(crate) async fn build_local_runtime_state(
         },
         gateway: GatewaySummary {
             tool_policy: inputs.gateway.tool_policy.clone(),
-            basis_points_enabled: inputs.gateway.basis_points_enabled,
+            basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 inputs.gateway.pool_routing.as_ref(),
                 &source_summaries,

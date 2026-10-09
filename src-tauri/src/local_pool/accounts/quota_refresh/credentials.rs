@@ -76,8 +76,11 @@ pub(in crate::local_pool::accounts) async fn force_refresh_account_credentials(
     let settings = state.store()?.gateway().clone();
     let proxy = effective_proxy_config(&settings, &stored_credentials)
         .map_err(|error| LocalPoolError::new(ErrorCode::GatewayUnavailable, error.message))?;
-    let oauth = CodexOAuthClient::new_with_proxy(proxy.as_ref())
-        .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "OAuth client is unavailable"))?;
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(
+        stored_credentials.oauth_client_kind(),
+        proxy.as_ref(),
+    )
+    .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "OAuth client is unavailable"))?;
     let now_ms = current_time_ms();
     let refreshed = match oauth.exchange_refresh_token(refresh_token, now_ms).await {
         Ok(tokens) => tokens,
@@ -217,6 +220,12 @@ pub(crate) fn sync_account_profile_bindings(
     tokens: &TokenSet,
     provider_account_id: &str,
 ) -> LocalResult<()> {
+    let stored = CredentialStore::from_backend(NativeSecretBackend)
+        .require(account_id)
+        .map_err(credential_local_error)?;
+    if stored.oauth_client_kind() != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex {
+        return Ok(());
+    }
     codex::sync_account_bindings(
         &state.profile_backup_root(),
         account_id,

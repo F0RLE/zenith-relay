@@ -87,7 +87,7 @@ pub(super) async fn fetch_codex_model_catalog(
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "pool has no Codex-compatible models",
+            "pool has no ChatGPT-compatible models",
         )
         .into());
     }

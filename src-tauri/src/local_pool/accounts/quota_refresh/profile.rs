@@ -32,6 +32,9 @@ pub(crate) async fn sync_managed_account_profile(
     let stored = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
+    if stored.oauth_client_kind() != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex {
+        return Ok(false);
+    }
     let provider_account_id = stored
         .provider_account_id()
         .map(str::to_string)

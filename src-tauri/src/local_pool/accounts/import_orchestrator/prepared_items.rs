@@ -68,6 +68,12 @@ pub(super) fn parsed_item_json(
     insert_optional_string(&mut item_json, "refresh_token", secrets.refresh_token());
     insert_optional_string(&mut item_json, "id_token", secrets.id_token());
     insert_optional_string(&mut item_json, "api_key", secrets.api_key());
+    if let Some(kind) = secrets.oauth_client_kind() {
+        insert_optional_string(&mut item_json, "client_id", Some(kind.client_id()));
+    }
+    if let Some(headers) = secrets.basis_points_headers() {
+        item_json.insert("basis_points_headers".into(), serde_json::json!(headers));
+    }
     insert_optional_string(
         &mut item_json,
         "agent_private_key",
@@ -108,6 +114,14 @@ fn apply_material(
     );
     insert_optional_string(item_json, "email", material.email.as_deref());
     insert_optional_string(item_json, "access_token", Some(&material.access_token));
+    insert_optional_string(
+        item_json,
+        "client_id",
+        Some(material.oauth_client_kind.client_id()),
+    );
+    if let Some(headers) = material.basis_points_headers.as_ref() {
+        item_json.insert("basis_points_headers".into(), serde_json::json!(headers));
+    }
     if let Some(agent) = material.agent_identity.as_ref() {
         insert_optional_string(item_json, "agent_private_key", Some(agent.private_key()));
         insert_optional_string(item_json, "agent_runtime_id", Some(agent.runtime_id()));

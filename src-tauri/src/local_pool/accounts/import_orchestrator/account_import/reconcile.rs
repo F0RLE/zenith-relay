@@ -43,6 +43,7 @@ pub(super) fn reconcile_imported_credentials(
         provider_account_id,
         material.provider_user_id.as_deref(),
         material.email.as_deref(),
+        material.oauth_client_kind,
     )?;
     let local_account_id = existing_account
         .as_ref()
@@ -51,6 +52,14 @@ pub(super) fn reconcile_imported_credentials(
     let old_credential = credential_store
         .load(&local_account_id)
         .map_err(credential_item_error)?;
+    if old_credential
+        .as_ref()
+        .is_some_and(|stored| stored.oauth_client_kind() != material.oauth_client_kind)
+    {
+        return Err(ImportItemError::recovery(
+            "import cannot replace credentials from a different OAuth client",
+        ));
+    }
     let preserved_refresh_token = material.refresh_token.is_none()
         && old_credential
             .as_ref()

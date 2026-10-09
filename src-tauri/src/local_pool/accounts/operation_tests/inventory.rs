@@ -593,6 +593,7 @@ fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
 #[test]
 fn prepared_credentials_debug_output_is_redacted() {
     let prepared = PreparedAccountCredentials {
+        oauth_client_kind: Default::default(),
         tokens: TokenSet::new(
             "access-private",
             Some("refresh-private".into()),

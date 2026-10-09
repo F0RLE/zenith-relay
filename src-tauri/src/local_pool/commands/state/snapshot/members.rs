@@ -64,6 +64,7 @@ pub(super) fn project_source_summaries(
     inputs: &SnapshotInputs,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &UsageEquivalents,
+    reference_catalog: &zenith_relay_core::model_metadata::ModelMetadataCatalog,
 ) -> Result<Vec<SourceSummary>, LocalPoolError> {
     inputs
         .sources
@@ -90,6 +91,7 @@ pub(super) fn project_source_summaries(
                     .get(&source_record.id)
                     .copied()
                     .unwrap_or_default(),
+                reference_catalog,
             )?;
             summary.provider_stats = summary
                 .secret_available

@@ -20,6 +20,27 @@ fn usage_survives_database_reopen() {
             in_flight_before: 0,
             dispatches_before: 3,
             endpoint_kind: None,
+            cache_context: Some(
+                serde_json::from_value(serde_json::json!({
+                    "baseline": "completed_request", "scope": "client_session",
+                    "clientChanges": ["tools"], "upstreamChanges": ["tools", "reasoning"],
+                    "relayChanges": ["reasoning"], "candidateChanged": false,
+                    "previousCompletedAgeMs": 12_000,
+                    "clientHistory": {
+                        "comparison": "appended", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 2, "firstChangedItemKind": null
+                    },
+                    "upstreamHistory": {
+                        "comparison": "appended", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 2, "firstChangedItemKind": null
+                    },
+                    "relayHistory": {
+                        "comparison": "unchanged", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 3, "firstChangedItemKind": null
+                    }
+                }))
+                .unwrap(),
+            ),
         }),
         requested_model: Some("gpt-5.4".into()),
         resolved_model: Some("gpt-5.4".into()),
@@ -68,6 +89,7 @@ fn usage_survives_database_reopen() {
     let logs = database.list(10).unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].tool_use.as_ref(), Some(&event.tool_use));
+    assert_eq!(logs[0].routing, event.routing);
     assert!(logs[0].created_at.ends_with('Z'));
     assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
     assert_eq!(
@@ -94,6 +116,7 @@ fn usage_survives_database_reopen() {
         Some(SelectionReason::QuotaHeadroom)
     );
     let page = database.usage_page(&UsageQuery::default()).unwrap();
+    assert_eq!(page.events[0].routing, event.routing);
     // The event carries a measured value and the totals are that same value
     // merged once, so the relation holds regardless of catalog prices.
     assert!(page.events[0].api_equivalent.micro_usd > 0);

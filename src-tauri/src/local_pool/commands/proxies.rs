@@ -66,11 +66,20 @@ pub async fn check_local_stored_proxy(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<crate::local_pool::accounts::proxy::check::ProxyCheckResult, CommandError>
 {
-    let proxy = {
+    let proxy_id = proxy_id.trim().to_owned();
+    let (proxy, expected_url) = {
         let _mutation = state.setup_guard().await;
-        ProxyPool::load()?.config(proxy_id.trim())?
+        let pool = ProxyPool::load()?;
+        (pool.config(&proxy_id)?, pool.stored_url(&proxy_id)?)
     };
-    Ok(crate::local_pool::accounts::proxy::check::check(proxy_id, &proxy, current_time_ms()).await)
+    let result =
+        crate::local_pool::accounts::proxy::check::check(proxy_id, &proxy, current_time_ms()).await;
+    let _mutation = state.setup_guard().await;
+    let mut pool = ProxyPool::load()?;
+    if pool.record_check(&expected_url, result.clone()) {
+        pool.save()?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]

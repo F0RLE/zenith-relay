@@ -69,6 +69,8 @@ pub(crate) struct SourceRefreshSnapshot {
 /// stays in the credential cache and is not copied into each UI refresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AccountCredentialFacts {
+    pub credit_balance_key: Option<[u8; 32]>,
+    pub oauth_client_kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub has_oauth: bool,
     pub agent_identity: bool,
     pub has_provider_account_id: bool,
@@ -81,6 +83,10 @@ impl AccountCredentialFacts {
     pub(crate) fn from_stored(credentials: &StoredCodexCredentials) -> Self {
         let proxy_url = credentials.proxy_url();
         Self {
+            credit_balance_key: credentials
+                .provider_account_id()
+                .and_then(zenith_relay_core::providers::chatgpt::credit_balance_key),
+            oauth_client_kind: credentials.oauth_client_kind(),
             has_oauth: credentials.has_oauth(),
             agent_identity: credentials.is_agent_identity(),
             has_provider_account_id: credentials.provider_account_id().is_some(),
@@ -93,7 +99,10 @@ impl AccountCredentialFacts {
     }
 
     pub(crate) fn basis_points_available(self) -> bool {
-        self.has_oauth && !self.agent_identity
+        self.has_oauth
+            && !self.agent_identity
+            && self.oauth_client_kind
+                == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
     }
 
     pub(crate) fn proxy_route(self) -> ProxyRoute {

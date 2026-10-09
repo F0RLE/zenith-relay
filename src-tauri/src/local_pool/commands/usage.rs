@@ -24,7 +24,8 @@ pub fn get_local_usage_page(
         )
     };
     let catalog = state.pricing_catalog();
-    let context = pricing_context(&gateway, &sources, &accounts);
+    let reference_catalog = state.model_metadata_catalog();
+    let context = pricing_context(&gateway, &sources, &accounts, &reference_catalog);
     let mut page = state
         .telemetry
         .usage_page_with_pricing(

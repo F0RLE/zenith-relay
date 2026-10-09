@@ -1,7 +1,7 @@
 use super::super::oauth::OAuthPendingSession;
 use super::{
-    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot, AUTHORIZATION_ENDPOINT,
-    CALLBACK_PATH, SNAPSHOT_VERSION,
+    OAuthFlowError, OAuthFlowErrorCode, OAuthFlowStatus, PendingSnapshot, CALLBACK_PATH,
+    SNAPSHOT_VERSION,
 };
 use std::fs;
 use std::io;
@@ -85,51 +85,15 @@ pub(super) fn validate_snapshot(
             OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived
         )
         || snapshot.pending.created_at_ms() == 0
-        || callback_port(&snapshot.pending).is_err()
+        || (snapshot.pending.client_kind().is_local_callback()
+            && callback_port(&snapshot.pending).is_err())
     {
         return Err(recovery_required().for_login(expected_login_id));
     }
-    let authorization_url = Url::parse(&snapshot.authorization_url)
+    snapshot
+        .pending
+        .validate_authorization_url(&snapshot.authorization_url)
         .map_err(|_| recovery_required().for_login(expected_login_id))?;
-    let authorization_endpoint = Url::parse(AUTHORIZATION_ENDPOINT)
-        .map_err(|_| recovery_required().for_login(expected_login_id))?;
-    if authorization_url.scheme() != authorization_endpoint.scheme()
-        || authorization_url.host_str() != authorization_endpoint.host_str()
-        || authorization_url.port().is_some()
-        || authorization_url.path() != authorization_endpoint.path()
-        || url_has_userinfo(&authorization_url)
-        || authorization_url.fragment().is_some()
-    {
-        return Err(recovery_required().for_login(expected_login_id));
-    }
-    let mut redirect_uri_count = 0;
-    for (key, value) in authorization_url.query_pairs() {
-        if [
-            "code",
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "token",
-            "client_secret",
-            "authorization",
-            "password",
-            "api_key",
-        ]
-        .iter()
-        .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
-        {
-            return Err(recovery_required().for_login(expected_login_id));
-        }
-        if key == "redirect_uri" {
-            redirect_uri_count += 1;
-            if value != snapshot.pending.redirect_uri() {
-                return Err(recovery_required().for_login(expected_login_id));
-            }
-        }
-    }
-    if redirect_uri_count != 1 {
-        return Err(recovery_required().for_login(expected_login_id));
-    }
     if snapshot
         .sign_in_proxy_id
         .as_deref()
@@ -222,6 +186,7 @@ pub(super) fn callback_port(pending: &OAuthPendingSession) -> Result<u16, OAuthF
         || redirect.path() != CALLBACK_PATH
         || redirect.query().is_some()
         || redirect.fragment().is_some()
+        || url_has_userinfo(&redirect)
     {
         return Err(recovery_required());
     }

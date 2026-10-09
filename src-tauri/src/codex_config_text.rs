@@ -25,7 +25,7 @@ pub(super) fn config_selects_zenith_provider(config_text: &str) -> bool {
 fn parse_document(config_text: &str) -> Result<DocumentMut, String> {
     config_text
         .parse()
-        .map_err(|_| "Codex config is not valid TOML; no changes were applied".to_string())
+        .map_err(|_| "ChatGPT config is not valid TOML; no changes were applied".to_string())
 }
 
 pub(super) fn is_zenith_customer_key(key: &str) -> bool {

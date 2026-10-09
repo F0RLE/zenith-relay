@@ -1,3 +1,4 @@
+use super::check::ProxyCheckResult;
 use super::{PROXY_POOL_SECRET_REF, PROXY_POOL_VERSION};
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,8 @@ struct StoredProxy {
     url: String,
     assigned_account_ids: Vec<String>,
     created_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check: Option<ProxyCheckResult>,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +43,8 @@ struct PersistedStoredProxy {
     #[serde(default)]
     assigned_account_id: Option<String>,
     created_at_ms: u64,
+    #[serde(default)]
+    last_check: Option<ProxyCheckResult>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -51,6 +56,7 @@ pub struct ProxyPoolEntrySummary {
     pub country_code: Option<String>,
     pub region: Option<String>,
     pub created_at_ms: u64,
+    pub last_check: Option<ProxyCheckResult>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -72,6 +78,24 @@ impl Default for ProxyPool {
 }
 
 impl ProxyPool {
+    /// A deleted/replaced proxy or an older completion cannot overwrite a newer check.
+    pub(crate) fn record_check(&mut self, expected_url: &str, result: ProxyCheckResult) -> bool {
+        let Some(stored_proxy) = self.entries.iter_mut().find(|stored_proxy| {
+            stored_proxy.id == result.proxy_id && stored_proxy.url == expected_url
+        }) else {
+            return false;
+        };
+        if stored_proxy
+            .last_check
+            .as_ref()
+            .is_some_and(|previous| previous.checked_at_ms >= result.checked_at_ms)
+        {
+            return false;
+        }
+        stored_proxy.last_check = Some(result);
+        true
+    }
+
     pub(crate) fn assigned_account_ids(&self, proxy_id: &str) -> Result<Vec<String>> {
         self.entries
             .iter()
@@ -111,6 +135,7 @@ impl ProxyPool {
                     country_code,
                     region,
                     created_at_ms: stored_proxy.created_at_ms,
+                    last_check: stored_proxy.last_check.clone(),
                 }
             })
             .collect::<Vec<_>>();

@@ -39,6 +39,7 @@ impl ProxyPool {
                         url: stored_proxy.url,
                         assigned_account_ids,
                         created_at_ms: stored_proxy.created_at_ms,
+                        last_check: stored_proxy.last_check,
                     }
                 })
                 .collect(),

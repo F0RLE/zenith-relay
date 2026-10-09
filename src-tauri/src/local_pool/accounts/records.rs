@@ -34,7 +34,8 @@ pub fn new_account_record(
             "ChatGPT credentials do not contain an account id",
         )
     })?;
-    let identity_hash = identity_hash(
+    let identity_hash = credential_identity_hash(
+        credentials.oauth_client_kind(),
         provider_account_id,
         credentials.provider_user_id(),
         credentials.email(),
@@ -138,6 +139,15 @@ pub fn identity_hash(
     hash(identity_material.as_bytes())
 }
 
+pub fn credential_identity_hash(
+    kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
+    provider_account_id: &str,
+    provider_user_id: Option<&str>,
+    email: Option<&str>,
+) -> String {
+    kind.scope_identity_key(&identity_hash(provider_account_id, provider_user_id, email))
+}
+
 pub(in crate::local_pool) fn codex_credentials_match(
     credentials: &CredentialStore<NativeSecretBackend>,
     account: &LocalAccountRecord,
@@ -149,7 +159,8 @@ pub(in crate::local_pool) fn codex_credentials_match(
     let Some(provider_account_id) = stored.provider_account_id() else {
         return Ok(false);
     };
-    Ok(identity_hash(
+    Ok(credential_identity_hash(
+        stored.oauth_client_kind(),
         provider_account_id,
         stored.provider_user_id(),
         stored.email(),

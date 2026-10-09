@@ -4,6 +4,7 @@ use crate::local_pool::{
     state::AccountCredentialFacts,
 };
 use zenith_relay_core::error_codes;
+use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::protocol::ProxyMode;
 use zenith_relay_core::protocol::{
     account_operational_state, AccountOperationalInput, AccountSummary, QuotaWindowUsage,
@@ -19,6 +20,7 @@ pub(super) fn local_source_summary(
     secret_available: bool,
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
+    reference_catalog: &ModelMetadataCatalog,
 ) -> crate::local_pool::error::Result<SourceSummary> {
     Ok(SourceSummary::from_stored_source(
         source_record,
@@ -27,6 +29,7 @@ pub(super) fn local_source_summary(
         api_equivalent,
         source_record.last_error.clone(),
         refresh_revision,
+        Some(reference_catalog),
     ))
 }
 
@@ -70,6 +73,12 @@ pub(super) fn local_account_summary(
         quota_stale_after_ms,
     ));
     Ok(AccountSummary {
+        credit_balance_key: credentials
+            .and_then(|facts| facts.credit_balance_key)
+            .map(hex::encode),
+        oauth_client_kind: credentials
+            .map(|facts| facts.oauth_client_kind)
+            .unwrap_or_default(),
         id: account_record.account.id.clone(),
         label: account_record.account.label.clone(),
         identity_hint: account_record
@@ -82,8 +91,8 @@ pub(super) fn local_account_summary(
         provider_family: account_record.provider_family.clone(),
         basis_points_available: credentials
             .is_some_and(AccountCredentialFacts::basis_points_available),
-        basis_points_enabled: settings.basis_points_enabled
-            && credentials.is_some_and(AccountCredentialFacts::basis_points_available),
+        basis_points_enabled: credentials
+            .is_some_and(AccountCredentialFacts::basis_points_available),
         enabled: account_record.account.enabled,
         in_pool: account_record.account.in_pool,
         draining: account_record.account.draining,

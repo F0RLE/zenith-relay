@@ -146,6 +146,7 @@ pub(super) async fn prepare_account_preview_item(
         provider_account_id,
         material.provider_user_id.as_deref(),
         material.email.as_deref(),
+        material.oauth_client_kind,
     );
     if !prepared_identity_keys.insert(provider_identity) {
         reject_preview_item(
@@ -164,6 +165,7 @@ pub(super) async fn prepare_account_preview_item(
         });
     }
     row.identity = masked_account_identity(provider_account_id);
+    row.oauth_client_kind = Some(material.oauth_client_kind);
     row.plan = material.plan_type.clone().or_else(|| row.plan.clone());
     row.expires_at = material.expires_at_ms.and_then(timestamp_from_ms);
     row.subscription_expires_at = material
@@ -176,6 +178,7 @@ pub(super) async fn prepare_account_preview_item(
         provider_account_id,
         material.provider_user_id.as_deref(),
         material.email.as_deref(),
+        material.oauth_client_kind,
     )
     .map_err(import_item_command_error)?;
     if existing_account.is_some() {

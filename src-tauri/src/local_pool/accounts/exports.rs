@@ -120,6 +120,8 @@ mod tests {
 
     fn fixture() -> AccountExportCredential {
         AccountExportCredential {
+            oauth_client_kind: Default::default(),
+            basis_points_headers: None,
             label: "Synthetic account".into(),
             email: Some("synthetic@example.test".into()),
             phone: None,

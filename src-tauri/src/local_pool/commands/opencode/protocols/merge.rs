@@ -156,6 +156,36 @@ pub(super) fn merge_groups(
         .ok_or_else(|| {
             LocalPoolError::invalid_state("OpenCode provider configuration must be an object")
         })?;
+    // A model can move between managed providers when its native group changes.
+    // Keep edits only when the old provider is unambiguous. This prevents a
+    // same-named model in two groups from leaking settings across providers.
+    let mut saved_models: BTreeMap<String, Vec<(&str, Value)>> = BTreeMap::new();
+    for (_, id, _) in GROUPS {
+        if let Some(models) = providers
+            .get(id)
+            .and_then(|provider| provider.get("models"))
+            .and_then(Value::as_object)
+        {
+            for (model_id, model_config) in models {
+                saved_models
+                    .entry(model_id.clone())
+                    .or_default()
+                    .push((id, model_config.clone()));
+            }
+        }
+    }
+    let mut generated_model_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for generated_provider in &groups {
+        if let Some(models) = generated_provider.get("models").and_then(Value::as_object) {
+            for model_id in models.keys() {
+                *generated_model_counts.entry(model_id.clone()).or_default() += 1;
+            }
+        }
+    }
+    let selected_provider = selected
+        .split_once('/')
+        .map(|(provider, _)| provider.to_owned());
+    let selected_model = selected.split_once('/').map(|(_, model)| model.to_owned());
     let mut selections = Vec::new();
     for ((_, id, _), generated_provider) in GROUPS.into_iter().zip(groups) {
         let models = generated_provider["models"].as_object().unwrap();
@@ -163,10 +193,57 @@ pub(super) fn merge_groups(
         if models.is_empty() && id != PROVIDER_ID && !providers.contains_key(id) {
             continue;
         }
+        let mut previous = providers
+            .get(id)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut previous_models = previous
+            .get("models")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for model_id in models.keys() {
+            let saved = saved_models.get(model_id).and_then(|candidates| {
+                if generated_model_counts.get(model_id) != Some(&1) {
+                    return None;
+                }
+                if selected_model.as_deref() == Some(model_id.as_str()) {
+                    selected_provider.as_deref().and_then(|provider| {
+                        candidates
+                            .iter()
+                            .find(|(candidate_provider, _)| *candidate_provider == provider)
+                            .map(|(_, config)| config)
+                    })
+                } else if candidates.len() == 1 {
+                    candidates.first().map(|(_, config)| config)
+                } else {
+                    None
+                }
+            });
+            if let Some(saved) = saved {
+                previous_models
+                    .entry(model_id.clone())
+                    .or_insert_with(|| saved.clone());
+            }
+        }
+        previous.insert("models".into(), Value::Object(previous_models));
         providers.insert(
             id.into(),
-            merge_provider(providers.get(id), generated_provider),
+            merge_provider(Some(&Value::Object(previous)), generated_provider),
         );
+    }
+    let mut selected = selected;
+    if !selections.contains(&selected) && managed_model(&selected) {
+        let moved = selected.split_once('/').and_then(|(_, model_id)| {
+            selections
+                .iter()
+                .find(|candidate| candidate.split_once('/').map(|(_, id)| id) == Some(model_id))
+        });
+        if let Some(moved) = moved {
+            selected = moved.clone();
+            config.insert("model".into(), selected.clone().into());
+        }
     }
     if !selections.contains(&selected)
         && (select_connection || managed_model(&selected) || !selected.contains('/'))

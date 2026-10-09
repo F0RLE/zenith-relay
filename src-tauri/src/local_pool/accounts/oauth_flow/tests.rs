@@ -1,4 +1,5 @@
 use super::super::import_session::SecretBackendError;
+use super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS;
 use super::callback::MAX_REQUEST_HEADER_BYTES;
 use super::callback::{callback_language, callback_success_html, CallbackLanguage};
 use super::snapshot::validate_snapshot;
@@ -276,34 +277,34 @@ fn persisted_authorization_url_is_strictly_validated() {
         OAuthFlowErrorCode::RecoveryRequired
     );
 
-    let redirect_uri = snapshot.pending.redirect_uri();
-    let mut wrong_host = Url::parse("https://attacker.invalid/oauth/authorize").unwrap();
-    wrong_host
-        .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri);
-    let mut credentials = Url::parse("https://user:pass@auth.openai.com/oauth/authorize").unwrap();
-    credentials
-        .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri);
-    let mut fragment = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
-    fragment
-        .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri);
+    let authorization = Url::parse(&snapshot.authorization_url).unwrap();
+    let mut wrong_host = authorization.clone();
+    wrong_host.set_host(Some("attacker.invalid")).unwrap();
+    let mut credentials = authorization.clone();
+    credentials.set_username("user").unwrap();
+    credentials.set_password(Some("pass")).unwrap();
+    let mut fragment = authorization.clone();
     fragment.set_fragment(Some("callback"));
-    let mut sensitive = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
+    let mut sensitive = authorization.clone();
     sensitive
         .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri)
         .append_pair("access_token", "secret");
-    let mut wrong_redirect = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
-    wrong_redirect
-        .query_pairs_mut()
-        .append_pair("redirect_uri", "http://localhost:9999/auth/callback");
-    let mut duplicate_redirect = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
+    let mut wrong_redirect = authorization.clone();
+    wrong_redirect.set_query(None);
+    for (key, value) in authorization.query_pairs() {
+        wrong_redirect.query_pairs_mut().append_pair(
+            &key,
+            if key == "redirect_uri" {
+                "http://localhost:9999/auth/callback"
+            } else {
+                &value
+            },
+        );
+    }
+    let mut duplicate_redirect = authorization;
     duplicate_redirect
         .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("redirect_uri", redirect_uri);
+        .append_pair("redirect_uri", snapshot.pending.redirect_uri());
 
     for authorization_url in [
         wrong_host,

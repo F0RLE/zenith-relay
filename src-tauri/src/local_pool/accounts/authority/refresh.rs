@@ -1,7 +1,7 @@
 use super::super::{
     credentials::{CredentialRefresh, CredentialStore},
     import_session::SecretBackend,
-    oauth::CodexOAuthClient,
+    oauth::{CodexOAuthClient, OAuthClientKind},
 };
 use super::lock::{lock_refresh_failure, ProcessAccountLocks, ProcessLockConfig, ProcessLockError};
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
@@ -18,6 +18,7 @@ pub trait CodexRefreshClient: Send + Sync {
         provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
+        kind: OAuthClientKind,
     ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>;
 }
 
@@ -28,10 +29,14 @@ impl CodexRefreshClient for CodexOAuthClient {
         _provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
+        kind: OAuthClientKind,
     ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
     {
         Box::pin(async move {
-            let tokens = self.exchange_refresh_token(refresh_token, now_ms).await?;
+            let tokens = self
+                .for_kind(kind)
+                .exchange_refresh_token(refresh_token, now_ms)
+                .await?;
             CredentialRefresh::from_oauth(tokens).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,
@@ -130,6 +135,7 @@ where
                 stored_credentials.provider_account_id(),
                 refresh_token,
                 now_ms,
+                stored_credentials.oauth_client_kind(),
             )
             .await?;
         let updated = stored_credentials

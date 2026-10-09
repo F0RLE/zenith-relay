@@ -176,7 +176,7 @@ fn newer_subscription_and_health_win_while_quota_and_inventory_can_update() {
 fn models_and_quota_modify_only_their_own_observations() {
     with_store(|store, scope| {
         let models = apply_models_read(store, scope, Ok(vec!["gpt-new".into()])).unwrap();
-        assert!(models.value);
+        assert!(models.refresh_result);
         assert_eq!(
             models.account.account.quota,
             scope.initial_account.account.quota
@@ -191,7 +191,7 @@ fn models_and_quota_modify_only_their_own_observations() {
         .unwrap();
         assert_eq!(quota.account.effective_models(), ["gpt-new"]);
         let failed = apply_models_read(store, scope, models_failure()).unwrap();
-        assert!(!failed.value);
+        assert!(!failed.refresh_result);
         assert_eq!(failed.account.effective_models(), ["gpt-new"]);
         assert_eq!(failed.account.account.quota, quota.account.account.quota);
     });

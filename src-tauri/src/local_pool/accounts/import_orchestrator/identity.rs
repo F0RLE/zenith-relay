@@ -46,13 +46,16 @@ pub(in crate::local_pool::accounts) fn provider_identity_key(
     provider_account_id: &str,
     provider_user_id: Option<&str>,
     email: Option<&str>,
+    kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
 ) -> String {
-    zenith_relay_core::accounts::chatgpt_token_identity_key(
-        Some(provider_account_id),
-        nonempty(provider_user_id),
-        nonempty(email),
+    kind.scope_identity_key(
+        &zenith_relay_core::accounts::chatgpt_token_identity_key(
+            Some(provider_account_id),
+            nonempty(provider_user_id),
+            nonempty(email),
+        )
+        .expect("provider account id produces an import identity"),
     )
-    .expect("provider account id produces an import identity")
 }
 
 fn nonempty(optional_text: Option<&str>) -> Option<&str> {
