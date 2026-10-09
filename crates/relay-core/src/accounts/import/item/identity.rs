@@ -17,6 +17,7 @@ pub(super) struct ImportIdentityInput<'a> {
     pub(super) chatgpt_user_id: Option<&'a str>,
     pub(super) email: Option<&'a str>,
     pub(super) base_url: Option<&'a str>,
+    pub(super) oauth_client_kind: OAuthClientKind,
 }
 
 pub(super) struct ImportIdentity {
@@ -42,6 +43,7 @@ pub(super) fn stable_import_identity(
         chatgpt_user_id,
         email,
         base_url,
+        oauth_client_kind,
     } = input;
     let identity_seed = if use_api_key {
         account_id
@@ -100,7 +102,18 @@ pub(super) fn stable_import_identity(
                 auth_mode.as_str()
             )
         });
-    let item_id = format!("import_{}", &sha256_hex(&item_seed, None, None)[..16]);
+    let identity_key = if use_api_key {
+        identity_key
+    } else {
+        oauth_client_kind.scope_identity_key(&identity_key)
+    };
+    let item_key = sha256_hex(&item_seed, None, None);
+    let item_key = if use_api_key {
+        item_key
+    } else {
+        oauth_client_kind.scope_identity_key(&item_key)
+    };
+    let item_id = format!("import_{}", &item_key[..16]);
     Ok(ImportIdentity {
         identity_key,
         item_id,

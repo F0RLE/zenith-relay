@@ -31,7 +31,6 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) request_body: Vec<u8>,
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
     pub(super) tool_use: &'a ToolUseDiagnostics,
-    pub(super) source_model: &'a str,
     pub(super) request_id: &'a str,
     pub(super) requested_model: &'a str,
     pub(super) forwarded_headers: &'a HeaderMap,
@@ -61,7 +60,6 @@ pub(super) async fn dispatch_request_attempt(
         request_body,
         reasoning_effort,
         tool_use,
-        source_model,
         request_id,
         requested_model,
         forwarded_headers,
@@ -140,6 +138,10 @@ pub(super) async fn dispatch_request_attempt(
         .headers(upstream_headers);
     if upstream_stream {
         upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
+    } else if basis_points_route {
+        // Basis Points mirrors the native client contract and expects an
+        // explicit JSON response preference for buffered requests.
+        upstream_request = upstream_request.header(ACCEPT, "application/json");
     }
     if account_route && !basis_points_route {
         if let Some(responses_lite_header) = route_responses_lite.as_ref() {
@@ -151,12 +153,19 @@ pub(super) async fn dispatch_request_attempt(
         .send_authorized_request(
             &route.candidate_id,
             upstream_request.body(request_body),
-            (!basis_points_route)
-                .then(|| codex_client_version(forwarded_headers))
-                .flatten(),
-            turn_scope.as_ref(),
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: (!basis_points_route)
+                    .then(|| codex_client_version(forwarded_headers))
+                    .flatten(),
+                identity_policy: if basis_points_route {
+                    AuthorizationIdentityPolicy::PreserveUpstream
+                } else {
+                    AuthorizationIdentityPolicy::RelayCodex
+                },
+                turn_scope: turn_scope.as_ref(),
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await;
     // Includes internal auth replay; repair and recovery cannot refund a
@@ -202,7 +211,7 @@ pub(super) async fn dispatch_request_attempt(
                 ));
             }
             let failure_state =
-                settle_attempt_failure(runtime, lease, source_model, &failure, &HeaderMap::new());
+                settle_route_failure(runtime, lease, &route, &failure, &HeaderMap::new());
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             *last_failure = Some(failure);
@@ -221,9 +230,9 @@ pub(super) async fn dispatch_request_attempt(
     }))
 }
 
-/// Keep client identity at the local gateway boundary. Source credentials and
-/// protocol headers are added by the selected source route; Codex/OpenAI
-/// headers must not be copied to an unrelated Messages or Gemini provider.
+/// Forward client metadata only within the selected protocol. Source
+/// credentials are added by the selected route; Codex/OpenAI headers must not
+/// be copied to an unrelated Messages or Gemini provider.
 /// Account routes retain their existing forwarded-header behavior.
 fn upstream_headers_for_route(
     is_account_route: bool,
@@ -254,15 +263,13 @@ fn upstream_headers_for_route(
     if is_account_route {
         client_headers.clone()
     } else {
-        // Native Messages callers may provide valid Anthropic beta/session
-        // metadata. Filter again at the source boundary so a future caller
-        // cannot accidentally pass Codex/OpenAI headers through this path.
-        // Other native source protocols do not need client identity headers
-        // to authenticate or dispatch.
+        // Filter again at the source boundary. Native Responses and Messages
+        // keep their own client metadata without forwarding credentials or
+        // synthesizing a session for an API source.
         match provider_protocol {
             crate::UpstreamProtocol::Messages => forwarded_messages_headers(client_headers),
-            crate::UpstreamProtocol::Responses
-            | crate::UpstreamProtocol::ChatCompletions
+            crate::UpstreamProtocol::Responses => forwarded_responses_headers(client_headers),
+            crate::UpstreamProtocol::ChatCompletions
             | crate::UpstreamProtocol::GeminiGenerateContent => HeaderMap::new(),
         }
     }

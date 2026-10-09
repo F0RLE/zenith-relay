@@ -4,6 +4,7 @@ pub(super) fn build_sources(
     sources: Vec<RuntimeSource>,
     registry: &mut ModelRegistry,
     scheduler: &mut PoolScheduler,
+    reference_catalog: Option<&crate::model_metadata::ModelMetadataCatalog>,
 ) -> Result<SourceRuntimeParts> {
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
@@ -23,11 +24,12 @@ pub(super) fn build_sources(
         if executors.contains_key(&source.source.id) {
             return Err(Error::Validation("source ids must be unique".to_string()));
         }
-        let bindings = source.protocol_config.resolve(
+        let bindings = source.protocol_config.resolve_with_catalog(
             &source.source.base_url,
             &source.source.models,
             &source.protocol_bindings,
             source.source.wire_api,
+            reference_catalog,
         )?;
         let source_id = source.source.id.clone();
         let connector = SourceConnector::new(&source.source, &bindings)?;

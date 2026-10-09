@@ -1,4 +1,5 @@
 use super::{OperationalStatus, RefreshStatus};
+use crate::model_metadata::ModelMetadataCatalog;
 use crate::{
     ApiEquivalentSummary, ApiModelPriceOverride, SourceProtocolBinding, SourceProtocolConfig,
     SourceProtocolResolution, WireApi,
@@ -90,7 +91,34 @@ impl SourceSummary {
     /// Persisted legacy bindings do not restrict the automatic client surface.
     /// Relay selects a native upstream when available and otherwise adapts.
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
-        SourceProtocolResolution::resolved_models(self, Some(wire_api)).unwrap_or_default()
+        self.routed_models(Some(wire_api))
+    }
+
+    /// Bindings the owner resolved with its reference catalog when it built
+    /// this summary. A summary without them (older payloads, tests) resolves
+    /// from its own fields, so every projection reads one decision.
+    pub(crate) fn routed_bindings(&self) -> Vec<SourceProtocolBinding> {
+        match &self.resolved_protocol_bindings {
+            Some(bindings) => bindings.clone(),
+            None => SourceProtocolResolution::resolved_protocol_bindings(self).unwrap_or_default(),
+        }
+    }
+
+    fn routed_models(&self, client: Option<WireApi>) -> Vec<String> {
+        let routed = self
+            .routed_bindings()
+            .into_iter()
+            .filter(|binding| client.is_none_or(|client| binding.wire_api == client))
+            .flat_map(|binding| binding.model_ids)
+            .map(|model| crate::model_id_key(&model))
+            .collect::<BTreeSet<_>>();
+        crate::normalize_model_ids(
+            self.models
+                .iter()
+                .filter(|model| routed.contains(&crate::model_id_key(model)))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
@@ -101,7 +129,7 @@ impl SourceSummary {
     /// Native Gemini and Chat Completions sources must remain visible even
     /// though the desktop profile itself normally speaks Responses.
     pub fn models_for_any_wire_api(&self) -> Vec<String> {
-        SourceProtocolResolution::resolved_models(self, None).unwrap_or_default()
+        self.routed_models(None)
     }
 
     pub fn supports_any_wire_api(&self) -> bool {
@@ -113,14 +141,14 @@ impl SourceSummary {
     /// those routes, even when the same model is also exposed by Responses or
     /// another generic API route.
     pub fn models_with_cache_write_pricing(&self) -> BTreeSet<String> {
-        crate::cache_write_model_ids(
-            SourceProtocolResolution::resolved_protocol_bindings(self).unwrap_or_default(),
-        )
+        crate::cache_write_model_ids(self.routed_bindings())
     }
 
     /// Builds the shared summary fields from a stored source record.
     /// `last_error_code` and `refresh_revision` stay with the caller because
     /// the desktop and server records do not use the same column names.
+    /// `reference_catalog` supplies each model's native protocol group, so the
+    /// summary and the runtime resolve the same upstream protocol.
     pub fn from_stored_source(
         source_record: &impl SourceSummaryRecord,
         secret_available: bool,
@@ -128,6 +156,7 @@ impl SourceSummary {
         api_equivalent: ApiEquivalentSummary,
         last_error_code: Option<String>,
         refresh_revision: Option<u64>,
+        reference_catalog: Option<&ModelMetadataCatalog>,
     ) -> Self {
         Self {
             id: source_record.summary_id().to_string(),
@@ -156,7 +185,7 @@ impl SourceSummary {
             protocol_bindings: source_record.stored_protocol_bindings().to_vec(),
             resolved_protocol_bindings: Some(
                 source_record
-                    .resolved_protocol_bindings()
+                    .resolved_protocol_bindings_with_catalog(reference_catalog)
                     .unwrap_or_default(),
             ),
             models: source_record.protocol_models().to_vec(),

@@ -225,6 +225,9 @@ impl GatewayRuntime {
             self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
             return;
         }
+        if event.is_basis_points_transport_failure() {
+            return;
+        }
 
         let category = event.error_category.as_deref().unwrap_or_default();
         let model_id = if category == error_codes::IMAGE_GENERATION_NOT_ENABLED {

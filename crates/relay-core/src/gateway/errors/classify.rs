@@ -32,10 +32,11 @@ pub(in crate::gateway) fn classify_upstream_error_value(
 ) -> UpstreamErrorClassification {
     if zenith_gateway_invalid_request_value(error_payload) {
         return UpstreamErrorClassification {
-            // This gateway envelope hides the actual cause, including route
-            // and model access failures. It does not prove invalid client input.
-            category: error_codes::UPSTREAM_CANDIDATE_REJECTED,
-            message: upstream_failure_message(error_codes::UPSTREAM_CANDIDATE_REJECTED),
+            // The legacy gateway envelope does not prove a route failure or
+            // a repairable continuation. Return the rejection without cooling
+            // the candidate or replaying the same request on another route.
+            category: error_codes::UPSTREAM_INVALID_REQUEST,
+            message: upstream_failure_message(error_codes::UPSTREAM_INVALID_REQUEST),
         };
     }
     classify_upstream_error_text(status, &upstream_error_text(error_payload))

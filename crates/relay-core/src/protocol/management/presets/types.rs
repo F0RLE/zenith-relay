@@ -208,9 +208,8 @@ pub struct PresetRoutingPolicy {
     pub tool_policy: Option<crate::ToolPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
-    /// Use the explicitly labelled Excel/Basis Points route for compatible
-    /// OAuth accounts. This is a route preference, not a second pool member.
-    #[serde(default)]
+    /// Legacy storage field, ignored and omitted from portable presets.
+    #[serde(skip_serializing)]
     pub basis_points_enabled: bool,
     pub max_retry_candidates: u8,
     pub default_service_tier: DefaultServiceTier,

@@ -45,6 +45,16 @@ pub(super) fn build_account_export(
     exported_at_ms: u64,
     exported_at: &str,
 ) -> Result<Value> {
+    if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps
+        && !matches!(
+            format,
+            AccountExportFormat::Zenith | AccountExportFormat::Sub2api
+        )
+    {
+        return Err(super::build::validation(
+            "Excel/Basis Points credentials require a Zenith or Sub2API export",
+        ));
+    }
     let context = AccountExportContext::new(account, exported_at_ms, exported_at)?;
     let mut export_payload = match format {
         AccountExportFormat::Zenith => build_zenith_export(&context),
@@ -56,6 +66,22 @@ pub(super) fn build_account_export(
         AccountExportFormat::AxonHub => build_axon_hub_export(&context),
         AccountExportFormat::CodexManager => build_codex_manager_export(&context),
     };
+    if format != AccountExportFormat::Codex {
+        let metadata = if format == AccountExportFormat::Sub2api {
+            export_payload.get_mut("credentials")
+        } else {
+            Some(&mut export_payload)
+        };
+        if let Some(metadata) = metadata.and_then(Value::as_object_mut) {
+            metadata.insert(
+                "client_id".into(),
+                account.oauth_client_kind.client_id().into(),
+            );
+            if let Some(headers) = account.basis_points_headers.as_ref() {
+                metadata.insert("basis_points_headers".into(), serde_json::json!(headers));
+            }
+        }
+    }
     attach_login_notes(&mut export_payload, account);
     Ok(if format == AccountExportFormat::Codex {
         export_payload

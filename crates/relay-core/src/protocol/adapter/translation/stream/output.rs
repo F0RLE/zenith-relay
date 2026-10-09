@@ -103,11 +103,22 @@ impl TranslationStream {
                         json!({"type":"message","id":format!("msg_{}_{output_index}",self.decoded_response.id),"role":"assistant","status":"in_progress","content":[]})
                     }
                     Block::ToolCall { id, name, .. } => {
-                        if self.translation_request.custom_tools.contains(name) {
-                            json!({"type":"custom_tool_call","id":super::super::super::contracts::custom_tool_item_id(id),"call_id":id,"name":name,"input":"","status":"in_progress"})
+                        let target = self.translation_request.client_tools.get(name);
+                        let client_name =
+                            target.map_or(name.as_str(), |target| target.name.as_str());
+                        let mut item = if target
+                            .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
+                        {
+                            json!({"type":"custom_tool_call","id":super::super::super::contracts::custom_tool_item_id(id),"call_id":id,"name":client_name,"input":"","status":"in_progress"})
                         } else {
-                            json!({"type":"function_call","id":format!("fc_{}_{output_index}",self.decoded_response.id),"call_id":id,"name":name,"arguments":"","status":"in_progress"})
+                            json!({"type":"function_call","id":format!("fc_{}_{output_index}",self.decoded_response.id),"call_id":id,"name":client_name,"arguments":"","status":"in_progress"})
+                        };
+                        if let Some(namespace) =
+                            target.and_then(|target| target.namespace.as_deref())
+                        {
+                            item["namespace"] = namespace.into();
                         }
+                        item
                     }
                     Block::Reasoning(_) => {
                         json!({"type":"reasoning","id":format!("rs_{}_{output_index}",self.decoded_response.id),"summary":[]})
@@ -185,7 +196,12 @@ impl TranslationStream {
         }
         if self.translation_request.client == WireApi::Responses {
             if let Block::ToolCall { name, .. } = &self.decoded_response.blocks[output_index] {
-                if self.translation_request.custom_tools.contains(name) {
+                if self
+                    .translation_request
+                    .client_tools
+                    .get(name)
+                    .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
+                {
                     return;
                 }
             }

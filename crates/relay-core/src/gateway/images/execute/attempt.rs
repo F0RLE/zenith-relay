@@ -10,7 +10,9 @@ use super::super::{ImageEndpoint, PreparedImageRequest};
 use super::response::handle_collected_image;
 use super::ImageAttemptStep;
 use crate::error_codes;
-use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorRoute};
+use crate::runtime::{
+    AccountTransport, AuthenticatedKey, AuthorizationIdentityPolicy, CandidateLease, ExecutorRoute,
+};
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -94,10 +96,19 @@ pub(super) async fn run_selected_attempt(
         .send_authorized_request(
             &route.candidate_id,
             upstream,
-            None,
-            None,
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: None,
+                identity_policy: if account_route
+                    && route.account_transport == AccountTransport::ExcelBasisPoints
+                {
+                    AuthorizationIdentityPolicy::PreserveUpstream
+                } else {
+                    AuthorizationIdentityPolicy::RelayCodex
+                },
+                turn_scope: None,
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await;
     let attempt = u16::from(budget.dispatches());

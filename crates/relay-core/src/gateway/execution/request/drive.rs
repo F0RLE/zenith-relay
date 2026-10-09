@@ -181,7 +181,6 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         request_body,
         reasoning_effort: &reasoning_effort,
         tool_use: &tool_use,
-        source_model: &source_model,
         request_id: &request_id,
         requested_model: &requested_model,
         forwarded_headers,

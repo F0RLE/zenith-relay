@@ -129,6 +129,7 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
         return;
     }
     let observed_at_ms = now_ms();
+    runtime.finish_cache_context(&mut event, observed_at_ms);
     runtime.apply_usage_event(&event, observed_at_ms);
     if event.quota_snapshot.is_none() {
         event.quota_snapshot = event.candidate_id.as_deref().and_then(|candidate_id| {

@@ -142,7 +142,8 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
             )
         }
         Err(bootstrap_failure) => {
-            let zenith_gateway_invalid_request = bootstrap_failure.zenith_gateway_invalid_request;
+            let invalid_function_call_output_call_id =
+                bootstrap_failure.invalid_function_call_output_call_id;
             let missing_tool_output = bootstrap_failure
                 .preserved
                 .as_ref()
@@ -198,7 +199,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 && adapter_is_passthrough
                 && has_previous_response_id
                 && !*native_replay_attempted
-                && ((contains_tool_call_output(&request) && zenith_gateway_invalid_request)
+                && ((contains_tool_call_output(&request) && invalid_function_call_output_call_id)
                     || (response_affinity_hit
                         && failure.category == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND))
             {
@@ -269,10 +270,11 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 );
             }
             let failure_state =
-                settle_attempt_failure(runtime, &lease, &source_model, &failure, response_headers);
+                settle_route_failure(runtime, &lease, &route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             if failure_category_is_request_terminal(failure.category)
+                || route_forbids_fallback(&route, failure.status, failure.category)
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return OpenedStream::Respond(attempt_error_response(

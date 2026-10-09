@@ -1,4 +1,5 @@
 use super::normalize_account_export_description;
+use crate::providers::chatgpt::{BasisPointsCapturedHeaders, OAuthClientKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 #[cfg(test)]
@@ -172,6 +173,8 @@ pub struct ImportPreviewRow {
     pub label: String,
     pub identity: String,
     pub auth_mode: ImportAuthMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_kind: Option<OAuthClientKind>,
     pub source_name: String,
     pub quota_status: ImportQuotaStatus,
     pub status: ImportPreviewStatus,
@@ -226,6 +229,8 @@ pub struct ImportSecretMaterial {
     agent_private_key: Option<RedactedValue>,
     agent_runtime_id: Option<RedactedValue>,
     agent_task_id: Option<RedactedValue>,
+    basis_points_headers: Option<BasisPointsCapturedHeaders>,
+    oauth_client_kind: Option<OAuthClientKind>,
 }
 
 impl ImportSecretMaterial {
@@ -256,6 +261,14 @@ impl ImportSecretMaterial {
     pub fn agent_task_id(&self) -> Option<&str> {
         self.agent_task_id.as_ref().map(RedactedValue::expose)
     }
+
+    pub fn basis_points_headers(&self) -> Option<&BasisPointsCapturedHeaders> {
+        self.basis_points_headers.as_ref()
+    }
+
+    pub fn oauth_client_kind(&self) -> Option<OAuthClientKind> {
+        self.oauth_client_kind
+    }
 }
 
 impl fmt::Debug for ImportSecretMaterial {
@@ -284,6 +297,11 @@ impl fmt::Debug for ImportSecretMaterial {
                 "agent_task_id",
                 &self.agent_task_id.as_ref().map(|_| "[redacted]"),
             )
+            .field(
+                "basis_points_headers",
+                &self.basis_points_headers.as_ref().map(|_| "[redacted]"),
+            )
+            .field("oauth_client_kind", &self.oauth_client_kind)
             .finish()
     }
 }

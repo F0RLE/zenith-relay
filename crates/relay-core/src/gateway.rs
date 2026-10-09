@@ -13,7 +13,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub(crate) use crate::unix_time_ms as now_ms;
-pub(crate) use errors::failure_category_affects_account_state;
+pub(crate) use errors::{basis_points_transport_rejected, failure_category_affects_account_state};
 
 mod auth;
 mod catalog;

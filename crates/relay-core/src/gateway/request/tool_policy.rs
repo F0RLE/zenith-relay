@@ -16,6 +16,7 @@ pub(in crate::gateway) struct RequestToolPolicy {
     policy: crate::ToolPolicy,
     configured_mode: crate::ToolPolicyMode,
     pub(in crate::gateway) diagnostics: ToolUseDiagnostics,
+    cache_context: Option<crate::runtime::cache_context::CacheContextObservation>,
 }
 
 impl RequestToolPolicy {
@@ -28,6 +29,33 @@ impl RequestToolPolicy {
             configured_mode: policy.mode,
             policy,
             diagnostics: tool_use_diagnostics(request),
+            cache_context: None,
+        }
+    }
+
+    pub(in crate::gateway) fn capture_cache_context(
+        &mut self,
+        runtime: &GatewayRuntime,
+        request: &Value,
+        key_id: &str,
+        request_id: &str,
+        client_context: Option<&str>,
+    ) {
+        // Keep the original capture on WS -> HTTP fallback and route repairs.
+        if self.cache_context.is_none() {
+            self.cache_context =
+                Some(runtime.begin_cache_context(request, key_id, request_id, client_context));
+        }
+    }
+
+    pub(in crate::gateway) fn observe_cache_context(
+        &self,
+        runtime: &GatewayRuntime,
+        route: &mut crate::runtime::ExecutorRoute,
+        upstream: &Value,
+    ) {
+        if let Some(observation) = self.cache_context.as_ref() {
+            runtime.observe_cache_context(observation, route, upstream);
         }
     }
 

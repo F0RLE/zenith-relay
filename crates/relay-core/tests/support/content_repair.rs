@@ -115,7 +115,7 @@ async fn invalid_foreign_reasoning_repair_stays_on_the_account_in_manual_rotatio
 }
 
 #[tokio::test]
-async fn invalid_foreign_compaction_retries_without_the_rejected_items() {
+async fn invalid_foreign_compaction_preserves_history_without_retrying() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -155,24 +155,17 @@ async fn invalid_foreign_compaction_retries_without_the_rejected_items() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["input"][0]["encrypted_content"], "invalid");
     assert_eq!(requests[0].body["input"][1]["encrypted_content"], "invalid");
     assert_eq!(requests[0].body["input"].as_array().unwrap().len(), 4);
-    let retry_input = requests[1].body["input"].as_array().unwrap();
-    assert_eq!(retry_input.len(), 2);
-    assert_eq!(retry_input[0]["id"], "cmp_plain");
-    assert_eq!(retry_input[1]["role"], "user");
-    assert!(retry_input
-        .iter()
-        .all(|item| item.get("encrypted_content").is_none()));
 }
 
 #[tokio::test]
-async fn invalid_foreign_compaction_repair_stays_on_the_account_in_manual_rotation() {
+async fn invalid_foreign_compaction_does_not_retry_or_rotate_in_manual_order() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
         Reply::Json(
             StatusCode::BAD_REQUEST,
@@ -232,8 +225,8 @@ async fn invalid_foreign_compaction_repair_stays_on_the_account_in_manual_rotati
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
     assert!(other_state.requests.lock().unwrap().is_empty());
 }
 

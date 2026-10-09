@@ -3,7 +3,7 @@ use super::request::codex_client_version;
 use super::streaming::{parse_sse_event, NativeReplayCapture, TerminalOutcome};
 use crate::error_codes;
 use crate::protocol::{ensure_compaction_trigger, sse_event_end};
-use crate::runtime::{CodexTurnStateScope, ExecutorRoute};
+use crate::runtime::{AuthorizationIdentityPolicy, CodexTurnStateScope, ExecutorRoute};
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
 use axum::http::{
@@ -201,10 +201,13 @@ pub(super) async fn execute(
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "text/event-stream")
                 .body(request_body),
-            codex_client_version(headers),
-            scope,
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: codex_client_version(headers),
+                identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                turn_scope: scope,
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await
         .map_err(|error| Box::new((AttemptFailure::authorized_request(error), HeaderMap::new())))?;

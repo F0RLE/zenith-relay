@@ -1,6 +1,7 @@
 use super::super::super::errors::{
-    apply_failure_state, retryable_failure, settle_classified_failure,
-    settle_image_capability_failure, settle_status_failure, AttemptFailure, TRANSIENT_COOLDOWN_MS,
+    apply_failure_state, retryable_route_failure, route_forbids_fallback,
+    settle_classified_failure, settle_image_capability_failure, settle_status_failure,
+    AttemptFailure, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{
@@ -38,7 +39,9 @@ pub(super) fn handle_collected_image(
         let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
         super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
-        if retryable_failure(status, failure.category, false) || capability_failure {
+        if (retryable_route_failure(route, status, failure.category, false) || capability_failure)
+            && !route_forbids_fallback(route, status, failure.category)
+        {
             let failure_state = if capability_failure {
                 settle_image_capability_failure(
                     runtime,
@@ -110,7 +113,10 @@ pub(super) fn handle_collected_image(
         endpoint.stream_prefix(),
     ) {
         Ok(translated) => translated,
-        Err(failure) if failure.retryable => {
+        Err(failure)
+            if failure.retryable
+                && retryable_route_failure(route, failure.status, failure.category, false) =>
+        {
             if matches!(
                 failure.category,
                 error_codes::STREAM_INCOMPLETE

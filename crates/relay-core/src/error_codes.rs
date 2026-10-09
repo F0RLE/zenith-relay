@@ -180,6 +180,7 @@ error_codes! {
     MODELS_RESPONSE_TOO_LARGE => ("models_response_too_large", "models_response_too_large", None),
     MODELS_SECRET_STORE => ("models_secret_store", "models_secret_store", None),
     MODELS_STORAGE => ("models_storage", "models_storage", None),
+    MODELS_TIMEOUT => ("models_timeout", "models_timeout", None),
     MODELS_TRANSPORT => ("models_transport", "models_transport", None),
     MODELS_UNAUTHORIZED => ("models_unauthorized", "models_unauthorized", None),
     MODELS_UPSTREAM => ("models_upstream", "models_upstream", None),

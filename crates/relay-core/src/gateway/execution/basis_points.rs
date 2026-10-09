@@ -31,7 +31,7 @@ pub(super) fn is_transport_tool(tool_name: &str) -> bool {
     tool_name == TRANSPORT_TOOL || tool_name == TRANSPORT_TOOL_ALIAS
 }
 /// Function arguments and the outer `run_officejs` arguments are two JSON
-/// layers. The adapter's v0.2.8 instructions say this explicitly so a function
+/// layers. The adapter's v0.2.10 instructions say this explicitly so a function
 /// `apply_patch` is not taught as raw custom text.
 pub(super) const FUNCTION_RELAY_ENCODING: &str = concat!(
     "For function tools, first JSON-serialize the complete arguments object, then use that JSON text as the outer code string and serialize the outer arguments object. ",

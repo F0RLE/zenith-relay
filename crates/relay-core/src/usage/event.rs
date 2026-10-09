@@ -167,12 +167,25 @@ impl UsageEvent {
     }
 
     pub fn affects_account_state(&self) -> bool {
-        if self.account_id.is_none() || self.success {
+        if self.account_id.is_none() || self.success || self.is_basis_points_transport_failure() {
             return false;
         }
         self.error_category
             .as_deref()
             .is_none_or(crate::gateway::failure_category_affects_account_state)
+    }
+
+    pub(crate) fn is_basis_points_transport_failure(&self) -> bool {
+        !self.success
+            && crate::gateway::basis_points_transport_rejected(
+                self.http_status,
+                self.error_category.as_deref(),
+            )
+            && self
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.endpoint_kind.as_deref())
+                == Some("excel_basis_points")
     }
 }
 

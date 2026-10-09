@@ -202,7 +202,7 @@ async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_acco
 }
 
 #[tokio::test]
-async fn streaming_gateway_rejection_tries_the_fallback_before_output() {
+async fn streaming_generic_gateway_rejection_does_not_try_fallback() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -232,20 +232,20 @@ async fn streaming_gateway_rejection_tries_the_fallback_before_output() {
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response.text().await.unwrap();
-    assert!(body.contains("resp_fallback"), "body={body}");
-    assert!(!body.contains("bad_request"), "body={body}");
+    assert!(body.contains("Zenith AI request is invalid"), "body={body}");
+    assert!(!body.contains("resp_fallback"), "body={body}");
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].error_category.as_deref(),
-        Some("upstream_candidate_rejected")
+        Some("upstream_invalid_request")
     );
-    assert!(events[1].success);
+    assert!(events[0].cooldown_scope.is_none());
 }
 
 #[tokio::test]

@@ -209,7 +209,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefres
     let subscription_response_body = collect_response_body(response, MAX_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
-            ResponseBodyError::Transport => {
+            ResponseBodyError::Timeout | ResponseBodyError::Transport => {
                 super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true)
             }
             ResponseBodyError::TooLarge => {

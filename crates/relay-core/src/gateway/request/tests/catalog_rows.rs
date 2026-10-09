@@ -387,11 +387,11 @@ fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
     assert_eq!(
         display_names,
         [
-            "GLM 5.2",
-            "Grok 4.5",
-            "Gemini 3.6 Flash",
-            "Claude Opus 4.8",
             "5.4",
+            "Claude Opus 4.8",
+            "Gemini 3.6 Flash",
+            "Grok 4.5",
+            "GLM 5.2",
         ]
     );
     assert!(models.iter().all(codex_catalog_entry_is_compatible));

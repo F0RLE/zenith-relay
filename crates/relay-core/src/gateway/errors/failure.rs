@@ -4,8 +4,6 @@ use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, Healt
 
 mod response;
 
-#[cfg(test)]
-pub(super) use response::responses_call_id_is_missing;
 pub(super) use response::responses_call_id_is_missing_text;
 pub(crate) use response::{
     previous_response_not_found, previous_response_not_found_value,
@@ -13,11 +11,15 @@ pub(crate) use response::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
+    responses_function_call_output_has_invalid_call_id_value,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    zenith_gateway_invalid_request, zenith_gateway_invalid_request_value,
+    zenith_gateway_invalid_request_value,
 };
+
+#[cfg(test)]
+pub(super) use response::{responses_call_id_is_missing, zenith_gateway_invalid_request};
 
 impl AttemptFailure {
     /// Explicit provider rejections and connection failures have different

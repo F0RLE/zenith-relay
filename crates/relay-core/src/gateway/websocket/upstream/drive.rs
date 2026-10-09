@@ -130,7 +130,7 @@ pub(super) async fn drive_selected_candidate(
             return Ok(DrivenConnect::Continue(request));
         }
     };
-    let request_payload = request.payload_for(&route)?;
+    let request_payload = request.observed_payload_for(runtime, &mut route)?;
     let mut prepared = prepared;
     let upgrade = match upgrade_with_authorization_refresh(
         runtime,

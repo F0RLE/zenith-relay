@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 mod upstream;
 
@@ -217,9 +217,16 @@ pub(super) fn encode(
     protocol: WireApi,
     response: &Response,
     model: &str,
-    custom_tools: &BTreeSet<String>,
+    client_tools: &BTreeMap<String, ClientToolTarget>,
 ) -> AdapterResult<Value> {
-    let usage = usage_value(protocol, &response.usage);
+    let mut usage = usage_value(protocol, &response.usage);
+    if protocol == WireApi::Responses {
+        // A Responses client needs input, output and total together or none.
+        usage = match usage {
+            Value::Object(counters) => super::super::responses_usage::complete(counters, None),
+            other => other,
+        };
+    }
     let mut content = Vec::new();
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -227,17 +234,26 @@ pub(super) fn encode(
     for (index, block) in response.blocks.iter().enumerate() {
         match (protocol, block) {
             (WireApi::Responses, Block::Text(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]})),
-            (WireApi::Responses, Block::ToolCall { id, name, arguments }) if custom_tools.contains(name) => {
-                content.push(json!({
-                    "type": "custom_tool_call",
-                    "id": super::super::contracts::custom_tool_item_id(id),
-                    "call_id": id,
-                    "name": name,
-                    "input": custom_tool_input(arguments)?,
-                    "status": "completed"
-                }));
+            (WireApi::Responses, Block::ToolCall { id, name, arguments }) => {
+                let target = client_tools.get(name);
+                let client_name = target.map_or(name.as_str(), |target| target.name.as_str());
+                let mut item = if target.is_some_and(|target| target.kind == ResponsesToolKind::Custom) {
+                    json!({
+                        "type": "custom_tool_call",
+                        "id": super::super::contracts::custom_tool_item_id(id),
+                        "call_id": id,
+                        "name": client_name,
+                        "input": custom_tool_input(arguments)?,
+                        "status": "completed"
+                    })
+                } else {
+                    json!({"type":"function_call","id":format!("fc_{}_{index}",response.id),"call_id":id,"name":client_name,"arguments":arguments,"status":"completed"})
+                };
+                if let Some(namespace) = target.and_then(|target| target.namespace.as_deref()) {
+                    item["namespace"] = namespace.into();
+                }
+                content.push(item);
             }
-            (WireApi::Responses, Block::ToolCall { id, name, arguments }) => content.push(json!({"type":"function_call","id":format!("fc_{}_{index}",response.id),"call_id":id,"name":name,"arguments":arguments,"status":"completed"})),
             (WireApi::Responses, Block::Reasoning(reasoning)) => content.push(json!({"type":"reasoning","id":format!("rs_{}_{index}",response.id),"summary":[{"type":"summary_text","text":reasoning}]})),
             (WireApi::ChatCompletions, Block::Text(text_value)) => text.push_str(text_value),
             (WireApi::ChatCompletions, Block::Reasoning(reasoning_value)) => {

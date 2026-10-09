@@ -13,6 +13,8 @@ pub struct UpstreamErrorDetails {
     pub http_status: Option<u16>,
     pub code: Option<String>,
     pub error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub message: Option<String>,
     pub redacted: bool,
     pub truncated: bool,
@@ -61,9 +63,16 @@ impl UpstreamErrorDetails {
         .find(|candidate| {
             candidate.is_string()
                 || candidate.as_object().is_some_and(|error_fields| {
-                    ["message", "detail", "code", "type"]
-                        .iter()
-                        .any(|key| error_fields.contains_key(*key))
+                    [
+                        "message",
+                        "detail",
+                        "code",
+                        "type",
+                        "request_id",
+                        "requestId",
+                    ]
+                    .iter()
+                    .any(|key| error_fields.contains_key(*key))
                 })
         });
         if let Some(envelope) = envelope {
@@ -81,8 +90,16 @@ impl UpstreamErrorDetails {
                 .or_else(|| envelope.get("status"))
                 .and_then(Value::as_str);
             details.error_type = error_type.and_then(safe_identifier);
+            let request_id = envelope
+                .get("request_id")
+                .or_else(|| envelope.get("requestId"))
+                .or_else(|| error_payload.get("request_id"))
+                .or_else(|| error_payload.get("requestId"))
+                .and_then(Value::as_str);
+            details.request_id = request_id.and_then(safe_request_id);
             details.redacted |= code.is_some() && details.code.is_none()
-                || error_type.is_some() && details.error_type.is_none();
+                || error_type.is_some() && details.error_type.is_none()
+                || request_id.is_some() && details.request_id.is_none();
             if let Some(message) = envelope.as_str().or_else(|| {
                 envelope
                     .get("message")
@@ -100,6 +117,7 @@ impl UpstreamErrorDetails {
             http_status: http_status.filter(|status| (100..600).contains(status)),
             code: None,
             error_type: None,
+            request_id: None,
             message: None,
             redacted: false,
             truncated: false,
@@ -110,9 +128,11 @@ impl UpstreamErrorDetails {
         let mut details = Self::empty(self.http_status);
         details.code = self.code.as_deref().and_then(safe_identifier);
         details.error_type = self.error_type.as_deref().and_then(safe_identifier);
+        details.request_id = self.request_id.as_deref().and_then(safe_request_id);
         details.redacted = self.redacted
             || self.code.is_some() && details.code.is_none()
-            || self.error_type.is_some() && details.error_type.is_none();
+            || self.error_type.is_some() && details.error_type.is_none()
+            || self.request_id.is_some() && details.request_id.is_none();
         details.truncated = self.truncated;
         if let Some(message) = &self.message {
             details.set_message(message);
@@ -152,6 +172,19 @@ fn safe_identifier(identifier_text: &str) -> Option<String> {
     let (_, redacted, truncated) = sanitize_message(identifier_text);
     (!redacted && !truncated && !normalized.starts_with("eyj"))
         .then(|| identifier_text.trim().to_string())
+}
+
+fn safe_request_id(request_id: &str) -> Option<String> {
+    let request_id = request_id.trim();
+    let suffix = request_id
+        .strip_prefix("gwreq_")
+        .or_else(|| request_id.strip_prefix("req_"))?;
+    (request_id.len() <= 128
+        && suffix.len() >= 8
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    .then(|| request_id.to_string())
 }
 
 fn sanitize_message(raw_message: &str) -> (String, bool, bool) {

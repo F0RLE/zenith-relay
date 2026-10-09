@@ -209,13 +209,25 @@ impl CodexQuotaClient {
                 HttpClass::Ordinary,
             )
             .await
-            .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true))?;
+            .map_err(|error| {
+                QuotaRefreshFailure::new(
+                    if error.is_timeout() {
+                        error_codes::QUOTA_TIMEOUT
+                    } else {
+                        error_codes::QUOTA_TRANSPORT
+                    },
+                    true,
+                )
+            })?;
         let status = response.status();
         let retry_after_ms =
             crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
         let usage_response_body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
+                ResponseBodyError::Timeout => {
+                    QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true)
+                }
                 ResponseBodyError::Transport => {
                     QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true)
                 }

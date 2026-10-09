@@ -108,8 +108,7 @@ pub(super) fn repair_collected_rejection(
         && (previous_response_requires_websocket(&bytes)
             || (status == StatusCode::BAD_REQUEST
                 && contains_tool_call_output(request)
-                && (responses_function_call_output_has_invalid_call_id(&bytes)
-                    || zenith_gateway_invalid_request(&bytes))))
+                && responses_function_call_output_has_invalid_call_id(&bytes)))
     {
         match replay_native_tool_continuation(
             runtime,
@@ -193,8 +192,8 @@ pub(super) fn repair_collected_rejection(
         return AfterRepair::Step(FailureStep::Continue);
     }
     // Keep encrypted context intact for the first attempt. After a ChatGPT
-    // account explicitly rejects it, remove ciphertext-bearing Responses
-    // history and permit one pre-output retry; visible summaries remain.
+    // account explicitly rejects it, remove encrypted reasoning and permit one
+    // pre-output retry; visible summaries remain. Compaction blocks this repair.
     if client_wire_api == WireApi::Responses
         && route.account_id.is_some()
         && super::super::super::repair_once(

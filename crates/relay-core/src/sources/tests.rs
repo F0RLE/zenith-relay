@@ -451,6 +451,22 @@ fn base_url_normalization_removes_copied_terminal_api_endpoints() {
             "https://api.example.test/v1/chat/completions",
             "https://api.example.test/v1/",
         ),
+        (
+            "https://api.kimi.ai/coding",
+            "https://api.kimi.ai/coding/v1/",
+        ),
+        (
+            "https://api.kimi.com/coding/v1/messages",
+            "https://api.kimi.com/coding/v1/",
+        ),
+        (
+            "https://api.minimax.io/anthropic",
+            "https://api.minimax.io/anthropic/v1/",
+        ),
+        (
+            "https://api.kimi.ai.example.test/coding",
+            "https://api.kimi.ai.example.test/coding/",
+        ),
     ] {
         assert_eq!(normalized_base_url(input).unwrap().as_str(), expected);
     }

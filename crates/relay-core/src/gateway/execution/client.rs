@@ -30,6 +30,10 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) transport: UsageTransport,
 }
 
+/// Internal compact-to-Responses dispatch is not an ordinary conversation turn.
+#[derive(Clone, Copy)]
+pub(in crate::gateway) struct RoutedCompactionRequest;
+
 pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
     http_request: Request<Body>,
@@ -84,7 +88,7 @@ async fn execute_client_request_inner(
             Ok(request_object) => Value::Object(request_object),
             Err(error_response) => return *error_response,
         };
-    let tool_policy = parts
+    let mut tool_policy = parts
         .extensions
         .get::<super::super::request::RequestToolPolicy>()
         .cloned()
@@ -167,6 +171,19 @@ async fn execute_client_request_inner(
             return blocked_background_response(client_wire_api, stream, &request_id, kind);
         }
     }
+    let client_context_id = client_context_fingerprint(&headers);
+    if client_wire_api == WireApi::Responses
+        && background_kind.is_none()
+        && parts.extensions.get::<RoutedCompactionRequest>().is_none()
+    {
+        tool_policy.capture_cache_context(
+            &runtime,
+            &request_json,
+            &key.id,
+            &request_id,
+            client_context_id.as_deref(),
+        );
+    }
     let continuation = if client_wire_api == WireApi::Responses {
         match prepare_response_continuation(&runtime, &key.id, &mut request_json, now_ms(), None) {
             Ok(continuation) => Some(continuation),
@@ -211,7 +228,6 @@ async fn execute_client_request_inner(
     let responses_lite = (client_wire_api == WireApi::Responses)
         .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
         .flatten();
-    let client_context_id = client_context_fingerprint(&headers);
     let forwarded_headers = match client_wire_api {
         WireApi::Messages => forwarded_messages_headers(&headers),
         WireApi::Responses | WireApi::ChatCompletions => {

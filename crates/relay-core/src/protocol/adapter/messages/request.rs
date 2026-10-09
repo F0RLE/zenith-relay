@@ -1,9 +1,9 @@
 //! Responses requests translated into Anthropic Messages bodies.
 
 use super::{
-    bridged_namespace_tool_name, prepare_bridge_state, request_tool_catalog, AdapterError,
-    AdapterResult, ClientToolTarget, MessagesBridgeRequest, MessagesBridgeState,
-    MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
+    prepare_bridge_state, request_tool_catalog, AdapterError, AdapterResult, ClientToolTarget,
+    MessagesBridgeRequest, MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
+    TranslatedTools,
 };
 use crate::CacheWriteTtl;
 use serde_json::{json, Map, Value};
@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 /// JSON-schema functions retain their object input. Direct custom tools are
 /// represented as a function with one raw-text field and are translated back
 /// to the exact Responses custom-call shape before the client sees them.
-/// Provider-hosted tools require a native route and are rejected before sending.
+/// Hosted tools are omitted; forcing one is rejected before sending.
 pub fn prepare_responses_to_messages(
     request: &Value,
     model: &str,

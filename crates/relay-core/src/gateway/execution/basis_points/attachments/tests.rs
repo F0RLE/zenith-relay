@@ -186,6 +186,7 @@ fn attachment_cache_reuses_the_file_id_without_storing_bytes() {
     let key = attachment_key(
         "https://bps.openai.com/attachments",
         "account",
+        &[0; 32],
         "image/png",
         b"png-bytes",
     );

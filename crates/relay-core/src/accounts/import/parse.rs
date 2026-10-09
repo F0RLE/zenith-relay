@@ -191,6 +191,7 @@ fn invalid_row(
         label: format!("Item {}", ordinal + 1),
         identity: "unknown".to_string(),
         auth_mode: ImportAuthMode::Unknown,
+        oauth_client_kind: None,
         source_name: format_name(format).to_string(),
         quota_status: ImportQuotaStatus::Skipped,
         status: ImportPreviewStatus::Invalid,

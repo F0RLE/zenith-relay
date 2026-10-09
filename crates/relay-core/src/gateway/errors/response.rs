@@ -118,6 +118,7 @@ pub(crate) fn api_error_with_parameter(
 }
 
 pub(crate) fn prefix_error_value(error_payload: &mut Value, origin: ErrorOrigin) -> bool {
+    let request_id = crate::usage::UpstreamErrorDetails::from_value(None, error_payload).request_id;
     let message_field = if error_payload
         .pointer("/response/error/message")
         .and_then(Value::as_str)
@@ -179,7 +180,10 @@ pub(crate) fn prefix_error_value(error_payload: &mut Value, origin: ErrorOrigin)
         let Some(original_message) = message_value.as_str() else {
             return false;
         };
-        let prefixed_message = origin.prefix_message(original_message);
+        let prefixed_message = origin.prefix_message(&message_with_request_id(
+            original_message,
+            request_id.as_deref(),
+        ));
         if prefixed_message == original_message {
             return false;
         }
@@ -187,6 +191,17 @@ pub(crate) fn prefix_error_value(error_payload: &mut Value, origin: ErrorOrigin)
         return true;
     }
     false
+}
+
+/// Some clients show only `message` and ignore structured error metadata.
+/// The caller supplies an ID validated by `UpstreamErrorDetails`.
+pub(super) fn message_with_request_id(message: &str, request_id: Option<&str>) -> String {
+    match request_id {
+        Some(request_id) if !message.contains(request_id) => {
+            format!("{} Request ID: {request_id}", message.trim_end())
+        }
+        _ => message.to_string(),
+    }
 }
 
 fn looks_like_error_code(candidate_code: &str) -> bool {

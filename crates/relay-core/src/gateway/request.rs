@@ -36,7 +36,7 @@ pub(super) use codex_models::models;
 pub(super) use headers::{
     apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_codex_headers,
-    forwarded_messages_headers, is_managed_codex_client,
+    forwarded_messages_headers, forwarded_responses_headers, is_managed_codex_client,
 };
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use super::now_ms;
 use crate::error_codes;
-use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError};
+use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError, ExecutorRoute};
 use crate::scheduler::{CooldownReason, CooldownRequest};
 use crate::{GatewayRuntime, UsageEvent};
 use axum::body::Body;
@@ -23,7 +23,8 @@ use classify::{normalized_error_text, text_has_any, upstream_error_text};
 pub(super) use cooldown::{
     apply_failure_state, current_failure_state, failure_cooldown, rate_limit_body_hint,
     rate_limit_body_hint_value, settle_attempt_failure, settle_classified_failure,
-    settle_image_capability_failure, settle_status_failure, CooldownInput, RateLimitBodyHint,
+    settle_image_capability_failure, settle_route_failure, settle_status_failure, CooldownInput,
+    RateLimitBodyHint,
 };
 
 pub(crate) use failure::failure_category_affects_account_state;
@@ -34,15 +35,15 @@ pub(super) use failure::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
+    responses_function_call_output_has_invalid_call_id_value,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    retryable_failure, retryable_status, zenith_gateway_invalid_request,
-    zenith_gateway_invalid_request_value,
+    retryable_failure, retryable_status,
 };
 
 #[cfg(test)]
-use failure::responses_call_id_is_missing;
+use failure::{responses_call_id_is_missing, zenith_gateway_invalid_request};
 
 pub(super) use response::{
     api_error, api_error_code, api_error_type, api_error_with_origin,
@@ -74,6 +75,59 @@ pub(super) fn retryable_recovery_wait(
                 | error_codes::UPSTREAM_INVALID_REQUEST
                 | error_codes::UPSTREAM_CANDIDATE_REJECTED
         )
+}
+
+/// Basis Points must return an upstream `403` as-is. A policy or entitlement
+/// rejection is not evidence that another OAuth account can safely replay the
+/// generation, and switching accounts would hide the provider's decision.
+pub(super) fn route_forbids_fallback(
+    route: &ExecutorRoute,
+    status: StatusCode,
+    category: &str,
+) -> bool {
+    route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints
+        && (status == StatusCode::FORBIDDEN || category == error_codes::UPSTREAM_MODEL_UNAVAILABLE)
+}
+
+pub(crate) fn basis_points_transport_rejected(status: u16, category: Option<&str>) -> bool {
+    // An explicit credential or account failure applies to the connection,
+    // even when Basis Points returns it as an access or rate-limit refusal.
+    if matches!(
+        category,
+        Some(
+            error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                | error_codes::UPSTREAM_REFRESH_TOKEN_REUSED
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+        )
+    ) {
+        return false;
+    }
+    matches!(status, 403 | 429) || category == Some(error_codes::UPSTREAM_MODEL_UNAVAILABLE)
+}
+
+pub(super) fn retryable_route_failure(
+    route: &ExecutorRoute,
+    status: StatusCode,
+    category: &'static str,
+    has_previous_response_id: bool,
+) -> bool {
+    if route_forbids_fallback(route, status, category) {
+        return false;
+    }
+    retryable_failure(status, category, has_previous_response_id)
+}
+
+pub(super) fn retryable_route_status(
+    route: &ExecutorRoute,
+    status: StatusCode,
+    has_previous_response_id: bool,
+) -> bool {
+    if route_forbids_fallback(route, status, "") {
+        return false;
+    }
+    retryable_status(status, has_previous_response_id)
 }
 
 pub(super) fn admission_failure(
@@ -158,7 +212,10 @@ fn preserved_error_details(
         code: details
             .code
             .unwrap_or_else(|| api_error_code(failure.category).to_string()),
-        message: details.message?,
+        message: response::message_with_request_id(
+            &details.message?,
+            details.request_id.as_deref(),
+        ),
         error_type: details.error_type,
     })
 }

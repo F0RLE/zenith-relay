@@ -104,7 +104,6 @@ pub(super) fn prepare_account_attempt(
         selected_service_tier,
         crate::WireApi::Responses,
     );
-    runtime.use_native_responses_when_speed_requested(&mut route);
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
     if basis_points_route {
         if let Some(step) = reject_account_basis_points(

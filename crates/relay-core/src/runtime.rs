@@ -39,7 +39,9 @@ mod admission;
 mod attempt;
 mod authentication;
 mod authorization;
+pub(crate) use authorization::AuthorizationDispatch;
 mod build;
+pub(crate) mod cache_context;
 mod candidates;
 mod clients;
 mod codex_metadata;
@@ -131,6 +133,7 @@ pub struct GatewayRuntime {
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
+    cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,
     control: RuntimeControl,
     max_retry_candidates: std::sync::atomic::AtomicUsize,
@@ -187,13 +190,15 @@ impl AuthenticatedKey {
 }
 
 struct ChatGptAccountExecutor {
+    oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
     id: String,
     source_id: String,
     chatgpt_account_id: String,
+    chatgpt_user_id: Option<String>,
+    basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
     basis_points_url: Url,
-    basis_points_enabled: AtomicBool,
     model_inventory: RwLock<AccountModelInventory>,
     image_bridge_revision: Arc<AtomicU64>,
     token_authority: Arc<TokenAuthority>,
@@ -239,6 +244,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) route_capability: Option<crate::ModelEndpointCapability>,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
+    pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
 }
 
 #[derive(Clone, Debug)]
@@ -351,6 +357,22 @@ impl GatewayRuntime {
         )
     }
 
+    /// Returns a non-secret fingerprint for the OAuth credential currently
+    /// installed in an account slot. Basis Points attachment IDs belong to a
+    /// credential session, so they must not survive an access-token rotation.
+    pub(crate) async fn basis_points_credential_fingerprint(
+        &self,
+        candidate_id: &str,
+    ) -> Option<[u8; 32]> {
+        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let tokens = account.token_authority.tokens(candidate_id).await?;
+        let mut digest = Sha256::new();
+        digest.update(b"zenith-relay-basis-points-attachment-v1");
+        digest.update(tokens.generation().to_be_bytes());
+        digest.update(tokens.access_token().as_bytes());
+        Some(digest.finalize().into())
+    }
+
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
         crate::poison::mutex(&self.scheduler)
     }
@@ -360,6 +382,12 @@ impl GatewayRuntime {
 pub(crate) enum AccountTransport {
     NativeResponses,
     ExcelBasisPoints,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorizationIdentityPolicy {
+    RelayCodex,
+    PreserveUpstream,
 }
 
 impl ChatGptAccountExecutor {

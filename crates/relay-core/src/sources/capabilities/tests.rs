@@ -118,9 +118,7 @@ fn endpoint_metadata_and_gemini_methods_are_scoped_declarations() {
         )
         .unwrap();
     assert_eq!(routes.len(), 4);
-    assert!(routes
-        .iter()
-        .all(|route| route.model_ids == ["test", "embed"]));
+    assert!(routes.iter().all(|route| route.model_ids == ["test"]));
 }
 
 #[test]
@@ -413,4 +411,222 @@ fn direct_gemini_service_uses_generate_content_for_every_client_contract() {
     assert!(routes.iter().all(|route| {
         route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Gemini
     }));
+}
+
+fn reference_catalog() -> crate::model_metadata::ModelMetadataCatalog {
+    crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+        r#"{
+            "openai/gpt-test": {"name": "GPT Test", "family": "gpt"},
+            "anthropic/claude-test": {"name": "Claude Test", "family": "claude"},
+            "google/gemini-test": {"name": "Gemini Test", "family": "gemini"},
+            "deepseek/deepseek-test": {"name": "DeepSeek Test", "family": "deepseek"}
+        }"#,
+    )
+    .unwrap()
+}
+
+fn upstreams(routes: &[SourceProtocolBinding], model: &str) -> BTreeSet<WireApi> {
+    routes
+        .iter()
+        .filter(|route| route.model_ids.iter().any(|id| id == model))
+        .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
+        .collect()
+}
+
+#[test]
+fn reseller_host_sends_each_model_its_group_native_protocol() {
+    let url = "https://reseller.example.test/v1";
+    let models = ["gpt-test", "claude-test", "gemini-test", "deepseek-test"]
+        .map(String::from)
+        .to_vec();
+    let routes = SourceProtocolConfig::automatic(url)
+        .resolve_with_catalog(
+            url,
+            &models,
+            &[],
+            WireApi::ChatCompletions,
+            Some(&reference_catalog()),
+        )
+        .unwrap();
+    for (model, native) in [
+        ("gpt-test", WireApi::Responses),
+        ("claude-test", WireApi::Messages),
+        ("gemini-test", WireApi::Gemini),
+        ("deepseek-test", WireApi::ChatCompletions),
+    ] {
+        // One physical upstream for every harness, every client protocol served.
+        assert_eq!(
+            upstreams(&routes, model),
+            BTreeSet::from([native]),
+            "{model}"
+        );
+        let clients = routes
+            .iter()
+            .filter(|route| route.model_ids.iter().any(|id| id == model))
+            .map(|route| route.wire_api)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(clients.len(), WireApi::ALL.len(), "{model}");
+    }
+}
+
+#[test]
+fn without_a_reference_catalog_the_previous_resolution_is_unchanged() {
+    let url = "https://reseller.example.test/v1";
+    let models = vec!["claude-test".to_string()];
+    let config = SourceProtocolConfig::automatic(url);
+    let plain = config
+        .resolve(url, &models, &[], WireApi::ChatCompletions)
+        .unwrap();
+    let with_none = config
+        .resolve_with_catalog(url, &models, &[], WireApi::ChatCompletions, None)
+        .unwrap();
+    assert_eq!(plain, with_none);
+    assert_eq!(
+        upstreams(&plain, "claude-test"),
+        BTreeSet::from([WireApi::ChatCompletions])
+    );
+}
+
+#[test]
+fn explicit_endpoint_url_outranks_the_group_native_protocol() {
+    let url = "https://reseller.example.test/v1/chat/completions";
+    let models = vec!["claude-test".to_string()];
+    let routes = SourceProtocolConfig::automatic(url)
+        .resolve_with_catalog(
+            url,
+            &models,
+            &[],
+            WireApi::Responses,
+            Some(&reference_catalog()),
+        )
+        .unwrap();
+    assert_eq!(
+        upstreams(&routes, "claude-test"),
+        BTreeSet::from([WireApi::ChatCompletions])
+    );
+}
+
+#[test]
+fn unsupported_native_protocol_falls_through_instead_of_failing_the_route() {
+    let url = "https://reseller.example.test/v1";
+    let models = vec!["claude-test".to_string()];
+    let mut config = SourceProtocolConfig::automatic(url);
+    config.capabilities.push(ModelEndpointCapability {
+        model_id: "claude-test".into(),
+        upstream_wire_api: WireApi::Messages,
+        status: CapabilityStatus::Unsupported,
+        origin: CapabilityOrigin::Catalog,
+        checked_at_ms: 1,
+        features: BTreeMap::new(),
+        reasoning_efforts: Vec::new(),
+    });
+    let routes = config
+        .resolve_with_catalog(
+            url,
+            &models,
+            &[],
+            WireApi::ChatCompletions,
+            Some(&reference_catalog()),
+        )
+        .unwrap();
+    assert_eq!(
+        upstreams(&routes, "claude-test"),
+        BTreeSet::from([WireApi::ChatCompletions])
+    );
+}
+
+#[test]
+fn catch_all_chat_guess_yields_to_declared_source_evidence() {
+    let url = "https://reseller.example.test/v1";
+    let catalog = crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+        r#"{"deepseek/deepseek-test": {"name": "DeepSeek Test", "family": "deepseek"}}"#,
+    )
+    .unwrap();
+    let models = vec!["deepseek-test".to_string()];
+    let mut config = SourceProtocolConfig::automatic(url);
+    config.capabilities.push(ModelEndpointCapability {
+        model_id: "deepseek-test".into(),
+        upstream_wire_api: WireApi::Messages,
+        status: CapabilityStatus::Declared,
+        origin: CapabilityOrigin::Catalog,
+        checked_at_ms: 1,
+        features: BTreeMap::new(),
+        reasoning_efforts: Vec::new(),
+    });
+    let routes = config
+        .resolve_with_catalog(url, &models, &[], WireApi::Responses, Some(&catalog))
+        .unwrap();
+    assert_eq!(
+        upstreams(&routes, "deepseek-test"),
+        BTreeSet::from([WireApi::Messages])
+    );
+}
+
+#[test]
+fn rejected_legacy_protocol_does_not_override_an_available_fallback() {
+    let url = "https://reseller.example.test/v1";
+    let models = vec!["claude-test".to_string()];
+    let config = SourceProtocolConfig {
+        capabilities: vec![ModelEndpointCapability {
+            model_id: models[0].clone(),
+            upstream_wire_api: WireApi::Messages,
+            status: CapabilityStatus::Unsupported,
+            origin: CapabilityOrigin::Catalog,
+            checked_at_ms: 1,
+            features: BTreeMap::new(),
+            reasoning_efforts: Vec::new(),
+        }],
+        ..SourceProtocolConfig::automatic(url)
+    };
+    let legacy = vec![SourceProtocolBinding {
+        wire_api: WireApi::Messages,
+        adapter: SourceAdapter::Native,
+        reasoning_mode: MessagesReasoningMode::Disabled,
+        cache_write_ttl: CacheWriteTtl::Provider,
+        model_ids: models.clone(),
+    }];
+    let routes = config
+        .resolve_with_catalog(
+            url,
+            &models,
+            &legacy,
+            WireApi::ChatCompletions,
+            Some(&reference_catalog()),
+        )
+        .unwrap();
+    assert_eq!(
+        upstreams(&routes, "claude-test"),
+        BTreeSet::from([WireApi::ChatCompletions])
+    );
+}
+
+#[test]
+fn rejected_endpoints_are_not_recreated_by_hints_or_fallback() {
+    let url = "https://api.anthropic.com/v1/messages";
+    let models = vec!["claude-test".to_string()];
+    let config = SourceProtocolConfig {
+        capabilities: WireApi::ALL
+            .into_iter()
+            .map(|upstream_wire_api| ModelEndpointCapability {
+                model_id: models[0].clone(),
+                upstream_wire_api,
+                status: CapabilityStatus::Unsupported,
+                origin: CapabilityOrigin::Catalog,
+                checked_at_ms: 1,
+                features: BTreeMap::new(),
+                reasoning_efforts: Vec::new(),
+            })
+            .collect(),
+        ..SourceProtocolConfig::automatic(url)
+    };
+    let routes = config
+        .resolve_with_catalog(
+            url,
+            &models,
+            &[],
+            WireApi::Responses,
+            Some(&reference_catalog()),
+        )
+        .unwrap();
+    assert!(routes.is_empty());
 }

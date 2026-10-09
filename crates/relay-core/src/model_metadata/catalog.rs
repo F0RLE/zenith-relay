@@ -164,6 +164,53 @@ impl ModelMetadataCatalog {
             .and_then(|model_id| self.entries.get(model_id))
     }
 
+    /// The protocol native to the model's own group, independent of the host
+    /// or reseller serving it: OpenAI models use Responses, Anthropic models
+    /// use Messages, Google models use the Gemini endpoint, and every other
+    /// model uses OpenAI-compatible Chat Completions.
+    ///
+    /// The group comes from the validated reference record: the canonical
+    /// model ID's namespace first, then a first-party namespace, then the
+    /// family. A hosting namespace alone never decides it. Unknown or
+    /// ambiguous models return `None` so callers keep their other evidence.
+    pub fn native_protocol_for(&self, model: &str) -> Option<crate::WireApi> {
+        let metadata = self.resolve(model)?;
+        let canonical_namespace = metadata
+            .canonical_model_id
+            .as_deref()
+            .and_then(|canonical| canonical.split_once('/'))
+            .map(|(namespace, _)| namespace.to_ascii_lowercase());
+        let first_party_namespace = metadata.provider.to_ascii_lowercase();
+        let group = canonical_namespace
+            .filter(|namespace| !namespace.is_empty())
+            .or_else(|| {
+                matches!(
+                    first_party_namespace.as_str(),
+                    "openai" | "anthropic" | "google"
+                )
+                .then_some(first_party_namespace)
+            });
+        let family = metadata
+            .family
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        // Every model outside the three first-party groups falls to the
+        // family, and then to Chat Completions. This last arm is the single
+        // place that defines "all other models".
+        Some(match group.as_deref() {
+            Some("openai") => crate::WireApi::Responses,
+            Some("anthropic") => crate::WireApi::Messages,
+            Some("google") => crate::WireApi::Gemini,
+            _ if family.starts_with("gpt") && !family.starts_with("gpt-oss") => {
+                crate::WireApi::Responses
+            }
+            _ if family.starts_with("claude") => crate::WireApi::Messages,
+            _ if family.starts_with("gemini") => crate::WireApi::Gemini,
+            _ => crate::WireApi::ChatCompletions,
+        })
+    }
+
     pub fn reasoning_effort_levels(&self, model: &str) -> Option<Vec<String>> {
         self.resolve(model)
             .map(|metadata| metadata.capabilities.reasoning_effort_levels.clone())
@@ -202,48 +249,7 @@ impl ModelMetadataCatalog {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let source_model_ids = crate::normalize_model_ids(models);
-        let available_model_ids = source_model_ids
-            .iter()
-            .map(|model_id| order::normalize(model_id))
-            .collect::<BTreeSet<_>>();
-        let catalog_order = self.order_model_ids(source_model_ids);
-        if !saved_order
-            .iter()
-            .any(|model_id| available_model_ids.contains(&order::normalize(model_id)))
-        {
-            return catalog_order;
-        }
-
-        let catalog_positions = catalog_order
-            .iter()
-            .enumerate()
-            .map(|(position, model_id)| (order::normalize(model_id), position))
-            .collect::<BTreeMap<_, _>>();
-        let mut saved_model_ids = BTreeSet::new();
-        let mut ordered_model_ids = Vec::with_capacity(catalog_order.len());
-
-        for saved_model_id in saved_order {
-            let normalized_model_id = order::normalize(saved_model_id);
-            if saved_model_ids.insert(normalized_model_id.clone()) {
-                if let Some(position) = catalog_positions.get(&normalized_model_id) {
-                    ordered_model_ids.push(catalog_order[*position].clone());
-                }
-            }
-        }
-        for model_id in catalog_order {
-            let normalized_model_id = order::normalize(&model_id);
-            if saved_model_ids.contains(&normalized_model_id) {
-                continue;
-            }
-            let position = catalog_positions[&normalized_model_id];
-            let insertion_index = ordered_model_ids
-                .iter()
-                .position(|existing| catalog_positions[&order::normalize(existing)] > position)
-                .unwrap_or(ordered_model_ids.len());
-            ordered_model_ids.insert(insertion_index, model_id);
-        }
-        ordered_model_ids
+        crate::merge_model_display_order(self.order_model_ids(models), saved_order)
     }
 }
 

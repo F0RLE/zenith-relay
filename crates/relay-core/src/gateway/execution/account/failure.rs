@@ -5,8 +5,8 @@ use super::super::super::continuation::{
 use super::super::super::errors::{
     api_error, apply_failure_state, is_deactivated_workspace, preserved_upstream_error,
     previous_response_not_found, prompt_cache_write_rejected, recoverable_response_affinity_miss,
-    recoverable_response_model_switch, retryable_failure, settle_attempt_failure, AttemptFailure,
-    PreservedUpstreamError,
+    recoverable_response_model_switch, retryable_route_failure, route_forbids_fallback,
+    settle_route_failure, AttemptFailure, PreservedUpstreamError,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{emit_usage, proxy_error_response, usage_event, UsageAttempt};
@@ -333,31 +333,19 @@ fn settle_account_failure(
             *last_failure_origin = selected_error_origin;
             return AccountStatusFailure::Continue;
         }
-        settle_attempt_failure(
-            runtime,
-            lease,
-            &route.source_model,
-            &failure,
-            response_headers,
-        );
+        settle_route_failure(runtime, lease, route, &failure, response_headers);
         return AccountStatusFailure::Respond(api_error(
             StatusCode::CONFLICT,
             RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
             RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
         ));
     }
-    let rejection_state = settle_attempt_failure(
-        runtime,
-        lease,
-        &route.source_model,
-        &failure,
-        response_headers,
-    );
+    let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
     if classified.cache_write_rejected {
         runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
     }
-    if classified.cache_write_rejected
-        || retryable_failure(status, failure.category, has_previous_response_id)
+    if (classified.cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
+        || retryable_route_failure(route, status, failure.category, has_previous_response_id)
     {
         if response_affinity_hit && !*requires_affinity_owner {
             *response_affinity_key = None;

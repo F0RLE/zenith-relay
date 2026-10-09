@@ -47,6 +47,16 @@ pub(crate) fn settle_attempt_failure(
     current_failure_state(runtime, lease.candidate_id(), model)
 }
 
+pub(crate) fn settle_route_failure(
+    runtime: &GatewayRuntime,
+    lease: &crate::runtime::CandidateLease,
+    route: &ExecutorRoute,
+    failure: &AttemptFailure,
+    headers: &reqwest::header::HeaderMap,
+) -> FailureState {
+    settle_attempt_failure(runtime, lease, &route.source_model, failure, headers)
+}
+
 /// Compute a provider-scoped block without mutating admission state. The
 /// caller must install it in the same critical section as lease settlement.
 pub(crate) struct CooldownInput<'a> {

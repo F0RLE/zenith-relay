@@ -279,6 +279,23 @@ pub(super) fn deepseek_stats(stats_payload: &Value) -> StatsResult<Stats> {
     complete(stats)
 }
 
+pub(super) fn moonshot_stats(stats_payload: &Value, currency: Currency) -> StatsResult<Stats> {
+    let response_data = stats_payload
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or(Status::InvalidResponse)?;
+    if stats_payload.get("code").and_then(Value::as_i64) != Some(0)
+        || stats_payload.get("status").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(Status::InvalidResponse);
+    }
+    let balance =
+        amount(response_data.get("available_balance"), 1_000_000).ok_or(Status::InvalidResponse)?;
+    let mut stats = Stats::empty(Provider::Moonshot, Status::Available);
+    stats.amount(currency, Some(balance), None);
+    Ok(stats)
+}
+
 fn stats_data(stats_payload: &Value) -> &Value {
     stats_payload
         .get("data")

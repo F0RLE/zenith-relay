@@ -101,6 +101,16 @@ fn collect_pool_models(
 ) -> BTreeMap<String, PoolModel> {
     let mut models = BTreeMap::<String, PoolModel>::new();
     let mut upstream_order = 0usize;
+    // Match ModelRegistry: native accounts supply the first order for shared
+    // IDs. API sources append models not already present in those inventories.
+    for account in accounts.iter().filter(|account| account.in_pool) {
+        add_member_models(
+            &mut models,
+            &crate::scheduler::account_member_key(&account.id),
+            &account.models,
+            &mut upstream_order,
+        );
+    }
     for source in sources.iter().filter(|source| source.in_pool) {
         let pool_models = crate::normalize_model_ids(
             source.models.iter().chain(
@@ -117,15 +127,6 @@ fn collect_pool_models(
             &mut upstream_order,
         );
     }
-    for account in accounts.iter().filter(|account| account.in_pool) {
-        add_member_models(
-            &mut models,
-            &crate::scheduler::account_member_key(&account.id),
-            &account.models,
-            &mut upstream_order,
-        );
-    }
-
     models
 }
 

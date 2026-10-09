@@ -230,6 +230,8 @@ fn request_rejects_duplicates_and_unsafe_account_ids() {
 
 fn fixture() -> AccountExportCredential {
     AccountExportCredential {
+        oauth_client_kind: Default::default(),
+        basis_points_headers: None,
         label: "Synthetic Plus".into(),
         email: Some("person@example.test".into()),
         phone: None,

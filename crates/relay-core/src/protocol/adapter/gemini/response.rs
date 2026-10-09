@@ -171,7 +171,18 @@ fn responses_usage(usage_metadata: Option<&Value>) -> Value {
             json!({"reasoning_tokens": reasoning_tokens}),
         );
     }
-    Value::Object(usage_object)
+    // Gemini counts thought tokens outside `candidatesTokenCount`; the total is
+    // taken from `totalTokenCount` when reported, else prompt plus both.
+    let counter = |field: &str| {
+        usage_metadata
+            .and_then(|u| u.get(field))
+            .and_then(Value::as_u64)
+    };
+    let derived_total = counter("promptTokenCount")
+        .zip(counter("candidatesTokenCount"))
+        .and_then(|(input, output)| input.checked_add(output))
+        .and_then(|total| total.checked_add(counter("thoughtsTokenCount").unwrap_or_default()));
+    super::super::responses_usage::complete(usage_object, derived_total)
 }
 
 fn first_candidate(upstream: &Value) -> AdapterResult<&Value> {

@@ -5,8 +5,8 @@ mod compatibility;
 mod request;
 
 pub(super) use account::{execute_account_endpoint, AccountExecution};
-pub(super) use client::RoutedRequestIdentity;
 pub(super) use client::{execute_client_request, execute_gemini_client_request};
+pub(super) use client::{RoutedCompactionRequest, RoutedRequestIdentity};
 
 use super::errors::{
     api_error_with_origin, api_error_with_origin_and_category, cooldown_error, AttemptFailure,

@@ -3,6 +3,7 @@ mod connector;
 mod discovery;
 mod observations;
 mod probe;
+mod services;
 pub use observations::SourceRead;
 mod stats;
 

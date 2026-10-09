@@ -105,7 +105,14 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
     );
     apply_model_display_order_with_catalog(&mut models, &[], &metadata);
     assert_eq!(models.len(), 5);
-    let future = models.iter().find(|model| model.id == "future").unwrap();
+    let future = models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case("future"))
+        .unwrap();
+    assert_eq!(
+        future.id, "FUTURE",
+        "native account inventory owns shared IDs"
+    );
     assert_eq!(future.member_count, 2);
     assert!(!future.enabled);
     assert_eq!(future.catalog_name.as_deref(), Some("Future Model"));
@@ -119,7 +126,10 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
         .iter()
         .all(|model| model.protocol_routes.is_empty() && !model.codex_visible));
     assert!(
-        models.iter().position(|m| m.id == "future") < models.iter().position(|m| m.id == "older")
+        models
+            .iter()
+            .position(|m| m.id.eq_ignore_ascii_case("future"))
+            < models.iter().position(|m| m.id == "older")
     );
     assert!(models
         .iter()

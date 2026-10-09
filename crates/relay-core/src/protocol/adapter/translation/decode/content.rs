@@ -9,7 +9,7 @@ mod request;
 mod tools;
 
 pub(super) use request::{choice, common, output_format};
-pub(super) use tools::tools;
+pub(super) use tools::{responses_tools, tools};
 
 pub(super) fn role(message_part: &Value) -> AdapterResult<Role> {
     match message_part.get("role").and_then(Value::as_str) {

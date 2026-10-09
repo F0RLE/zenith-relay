@@ -6,9 +6,10 @@
 //! Image bytes, file IDs and credentials stay out of errors and logs.
 
 use super::super::super::errors::AttemptFailure;
+use crate::runtime::AuthorizationIdentityPolicy;
 use crate::GatewayRuntime;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -68,6 +69,10 @@ pub(in crate::gateway::execution) async fn attach_input_images(
         return Ok(request_body);
     }
     let endpoint = attachment_url(responses_url).map_err(|_| upload_failed())?;
+    let credential_fingerprint = runtime
+        .basis_points_credential_fingerprint(candidate_id)
+        .await
+        .unwrap_or_default();
     for job in &jobs {
         if let ImageJob::File(file_id) = &job.job {
             set_image_part(
@@ -82,7 +87,13 @@ pub(in crate::gateway::execution) async fn attach_input_images(
         let ImageJob::Upload(image) = job.job else {
             continue;
         };
-        let key = attachment_key(&endpoint, candidate_id, image.media_type, &image.bytes);
+        let key = attachment_key(
+            &endpoint,
+            candidate_id,
+            &credential_fingerprint,
+            image.media_type,
+            &image.bytes,
+        );
         let file_id = if let Some(file_id) = cached_file_id(&key) {
             file_id
         } else {
@@ -309,9 +320,20 @@ async fn upload_image(
         .request_client(candidate_id)
         .post(endpoint)
         .headers(headers)
+        .header(ACCEPT, "application/json")
         .body(multipart_bytes);
     let upstream = runtime
-        .send_authorized_request(candidate_id, upload_request, None, None, None, None)
+        .send_authorized_request(
+            candidate_id,
+            upload_request,
+            crate::runtime::AuthorizationDispatch {
+                client_version: None,
+                identity_policy: AuthorizationIdentityPolicy::PreserveUpstream,
+                turn_scope: None,
+                budget: None,
+                lease: None,
+            },
+        )
         .await
         .map_err(|error| match error {
             crate::runtime::AuthorizedRequestError::Transport(error) => {
@@ -321,9 +343,19 @@ async fn upload_image(
         })?;
     let status = upstream.response.status();
     if !status.is_success() {
-        return Err(AttachmentFailure::Retry(AttemptFailure::status_with_body(
-            status, None,
-        )));
+        let failure = AttemptFailure::status_with_body(status, None);
+        let no_fallback = matches!(
+            status,
+            StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN
+                | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                | StatusCode::TOO_MANY_REQUESTS
+        );
+        return Err(if no_fallback {
+            AttachmentFailure::Reject(failure)
+        } else {
+            AttachmentFailure::Retry(failure)
+        });
     }
     let upload_response_body = read_capped(upstream.response, MAX_UPLOAD_RESPONSE_BYTES).await?;
     let upload_response: Value =
@@ -390,6 +422,7 @@ fn multipart_boundary(image_bytes: &[u8]) -> String {
 fn attachment_key(
     endpoint: &str,
     candidate_id: &str,
+    credential_fingerprint: &[u8; 32],
     media_type: &str,
     image_bytes: &[u8],
 ) -> [u8; 32] {
@@ -397,6 +430,8 @@ fn attachment_key(
     digest.update(endpoint.as_bytes());
     digest.update([0]);
     digest.update(candidate_id.as_bytes());
+    digest.update([0]);
+    digest.update(credential_fingerprint);
     digest.update([0]);
     digest.update(media_type.as_bytes());
     digest.update([0]);

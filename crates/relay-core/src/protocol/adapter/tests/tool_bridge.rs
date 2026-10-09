@@ -509,8 +509,8 @@ fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
     assert_eq!(error.code(), "adapter_tool_unsupported");
 }
 #[test]
-fn messages_bridge_rejects_mixed_hosted_and_client_tools_before_sending_the_request() {
-    let error = prepare_responses_to_messages(
+fn messages_bridge_drops_hosted_tools_and_keeps_client_tools() {
+    let request = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
             "input": "inspect",
@@ -519,7 +519,9 @@ fn messages_bridge_rejects_mixed_hosted_and_client_tools_before_sending_the_requ
                 {
                     "type": "function",
                     "name": "run_command",
-                    "parameters": {"type": "object"}
+                    "parameters": {"type": "object"},
+                    "defer_loading": true,
+                    "allowed_callers": ["direct"]
                 }
             ]
         }),
@@ -528,6 +530,46 @@ fn messages_bridge_rejects_mixed_hosted_and_client_tools_before_sending_the_requ
         MessagesReasoningMode::Disabled,
         None,
     )
-    .unwrap_err();
-    assert_eq!(error.code(), "adapter_tool_unsupported");
+    .unwrap();
+    let tools = request.upstream_body()["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "run_command");
+    assert!(tools[0].get("defer_loading").is_none());
+    assert!(tools[0].get("allowed_callers").is_none());
+}
+#[test]
+fn messages_bridge_flattens_namespace_tools_from_codex_catalogs() {
+    let request = prepare_responses_to_messages(
+        &json!({
+            "model": "claude-test",
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "mcp__synthetic",
+                    "description": "Synthetic server",
+                    "tools": [{
+                        "type": "function",
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "parameters": {"type": "object"}
+                    }]
+                }]
+            }, {"type": "message", "role": "user", "content": "go"}],
+            "tools": [{"type": "web_search"}]
+        }),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap();
+    let tools = request.upstream_body()["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    let name = tools[0]["name"].as_str().unwrap();
+    assert!(name.starts_with("relay_ns_"));
+    assert!(tools[0]["description"]
+        .as_str()
+        .unwrap()
+        .starts_with("Namespace `mcp__synthetic` tool `lookup`."));
 }

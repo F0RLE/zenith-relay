@@ -7,17 +7,22 @@
 use crate::gateway::request::responses_item_has_ciphertext;
 use serde_json::{Map, Value};
 
-/// Remove encrypted reasoning and compaction items after a ChatGPT account
-/// rejects Responses history.
+/// Remove rejected encrypted reasoning after a ChatGPT account rejects
+/// Responses history.
 ///
 /// The ciphertext's owner cannot be determined locally. Keep it on the first
 /// attempt, then use this cleanup only after an explicit upstream rejection.
 /// Visible summaries survive without their ciphertext-bound item IDs; items
 /// with no visible summary are removed. Ordinary messages and tool history stay.
+/// A compaction checkpoint can be the only copy of earlier context: when one is
+/// encrypted, refuse the repair without changing any of the request history.
 pub(in crate::gateway::execution) fn drop_rejected_encrypted_context(request: &mut Value) -> bool {
     let Some(input_items) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return false;
     };
+    if input_items.iter().any(is_encrypted_compaction) {
+        return false;
+    }
     let mut changed = false;
     input_items.retain_mut(|history_item| {
         if !is_encrypted_history_item(history_item) {
@@ -37,6 +42,18 @@ pub(in crate::gateway::execution) fn drop_rejected_encrypted_context(request: &m
     changed
 }
 
+fn is_encrypted_compaction(history_item: &Value) -> bool {
+    responses_item_has_ciphertext(history_item.get("encrypted_content"))
+        && (history_item
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(crate::protocol::is_compaction_checkpoint_type)
+            || history_item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("cmp_")))
+}
+
 fn is_encrypted_history_item(history_item: &Value) -> bool {
     let Some(item_object) = history_item.as_object() else {
         return false;
@@ -48,13 +65,11 @@ fn is_encrypted_history_item(history_item: &Value) -> bool {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("");
-    matches!(kind, "reasoning" | "compaction" | "compaction_summary")
+    kind == "reasoning"
         || item_object
             .get("id")
             .and_then(Value::as_str)
-            .is_some_and(|response_item_id| {
-                response_item_id.starts_with("rs_") || response_item_id.starts_with("cmp_")
-            })
+            .is_some_and(|response_item_id| response_item_id.starts_with("rs_"))
 }
 
 fn visible_item_without_ciphertext(item_object: &Map<String, Value>) -> Option<Value> {

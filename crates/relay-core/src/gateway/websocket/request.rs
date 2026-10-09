@@ -61,10 +61,24 @@ impl ClientRequest {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
         let (filtered_request, _) = self.filtered_value_for(route)?;
         serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn observed_payload_for(
+        &self,
+        runtime: &GatewayRuntime,
+        route: &mut ExecutorRoute,
+    ) -> Result<String, GatewayFailure> {
+        let (filtered_request, _) = self.filtered_value_for(route)?;
+        let payload = serde_json::to_string(&filtered_request)
+            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
+        self.tool_policy
+            .observe_cache_context(runtime, route, &filtered_request);
+        Ok(payload)
     }
 
     fn filtered_value_for(

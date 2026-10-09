@@ -1,5 +1,6 @@
 use super::MAX_IDLE_CONNECTIONS_PER_HOST;
 use crate::protocol::ClientWireApi;
+use crate::providers::chatgpt::BasisPointsCapturedHeaders;
 use crate::sources::{is_http_endpoint, is_loopback_url, url_has_userinfo};
 use crate::{
     Error, ModelRules, ProxyConfig, Result, RuntimeCandidate, RuntimeCandidatePolicy, WireApi,
@@ -49,23 +50,17 @@ pub(in crate::runtime) fn runtime_now_ms() -> u64 {
     crate::unix_time_ms()
 }
 
-pub(in crate::runtime) fn basis_points_headers(account_id: &str) -> HeaderMap {
+pub(in crate::runtime) fn basis_points_headers(
+    account_id: &str,
+    account_user_id: Option<&str>,
+    captured_headers: Option<&BasisPointsCapturedHeaders>,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Ok(account_header_value) = HeaderValue::from_str(account_id) {
-        let mut account_header_value = account_header_value;
-        account_header_value.set_sensitive(true);
-        headers.insert(
-            HeaderName::from_static("x-openai-account-id"),
-            account_header_value.clone(),
-        );
-        headers.insert(
-            HeaderName::from_static("chatgpt-account-id"),
-            account_header_value,
-        );
+    if let Some(captured_headers) = captured_headers {
+        captured_headers.apply(&mut headers);
     }
     for (header_name, header_value) in [
         ("x-basispoints-auth-mode", "chatgpt"),
-        ("origin", "https://bps.openai.com"),
         (
             "x-openai-internal-basispoints-client-agent-profile",
             "excel",
@@ -81,36 +76,45 @@ pub(in crate::runtime) fn basis_points_headers(account_id: &str) -> HeaderMap {
         ("x-openai-internal-basispoints-client-runtime", "desktop"),
         ("x-openai-internal-basispoints-office-host", "Excel"),
         ("x-openai-internal-basispoints-office-platform", "PC"),
-        ("x-openai-internal-basispoints-browser-name", "Chrome"),
-        (
-            "x-openai-internal-basispoints-browser-ua-brands",
-            "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-        ),
-        (
-            "x-openai-internal-basispoints-browser-ua-mobile",
-            "?0",
-        ),
-        (
-            "x-openai-internal-basispoints-browser-ua-platform",
-            "\"Windows\"",
-        ),
         ("x-stainless-arch", "unknown"),
         ("x-stainless-lang", "js"),
         ("x-stainless-os", "Unknown"),
-        ("x-stainless-package-version", "7.25.0"),
+        ("x-stainless-package-version", "6.31.0"),
         ("x-stainless-retry-count", "0"),
         ("x-stainless-runtime", "browser:chrome"),
-        ("x-stainless-runtime-version", "154.0.0"),
-        (
-            "user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
-        ),
     ] {
+        if !headers.contains_key(header_name) {
+            headers.insert(
+                HeaderName::from_static(header_name),
+                HeaderValue::from_static(header_value),
+            );
+        }
+    }
+    if let Ok(account_header_value) = HeaderValue::from_str(account_id) {
+        let mut account_header_value = account_header_value;
+        account_header_value.set_sensitive(true);
         headers.insert(
-            HeaderName::from_static(header_name),
-            HeaderValue::from_static(header_value),
+            HeaderName::from_static("x-openai-account-id"),
+            account_header_value.clone(),
+        );
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            account_header_value,
         );
     }
+    if let Some(account_user_id) = account_user_id {
+        if let Ok(mut account_user_header_value) = HeaderValue::from_str(account_user_id) {
+            account_user_header_value.set_sensitive(true);
+            headers.insert(
+                HeaderName::from_static("x-openai-account-user-id"),
+                account_user_header_value,
+            );
+        }
+    }
+    headers.insert(
+        HeaderName::from_static("origin"),
+        HeaderValue::from_static("https://bps.openai.com"),
+    );
     headers.insert(
         HeaderName::from_static("accept-encoding"),
         HeaderValue::from_static("identity"),

@@ -51,11 +51,10 @@ fn relay_speed_policy_overrides_missing_empty_and_conflicting_account_fields() {
 }
 
 #[test]
-fn basis_points_account_still_publishes_model_speed_tiers() {
+fn native_account_publishes_model_speed_tiers() {
     let models = ["gpt-future"];
     let runtime =
         native_catalog_test_runtime_with_accounts(None, None, &["basis-account"], &models);
-    runtime.set_basis_points_enabled(true);
     let key = runtime.authenticate_secret("secret").unwrap();
     let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
     let manifest = json!({

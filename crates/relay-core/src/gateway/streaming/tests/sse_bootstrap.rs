@@ -37,7 +37,7 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
 }
 
 #[test]
-fn generic_gateway_rejection_sse_keeps_candidate_category_and_provider_details() {
+fn generic_gateway_rejection_sse_keeps_request_category_and_provider_details() {
     let terminal = parse_sse_event(
         br#"event: error
 data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}
@@ -45,8 +45,8 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
 "#,
     );
 
-    assert_eq!(terminal.error_category, Some("upstream_candidate_rejected"));
-    assert_eq!(terminal.error_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(terminal.error_category, Some("upstream_invalid_request"));
+    assert_eq!(terminal.error_status, Some(StatusCode::BAD_REQUEST));
     let upstream = terminal.upstream_error.unwrap();
     assert_eq!(upstream.code.as_deref(), Some("invalid_request"));
     assert_eq!(

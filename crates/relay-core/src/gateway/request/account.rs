@@ -1,6 +1,8 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
-use super::super::execution::{execute_account_endpoint, execute_client_request, AccountExecution};
+use super::super::execution::{
+    execute_account_endpoint, execute_client_request, AccountExecution, RoutedCompactionRequest,
+};
 use super::super::request_body::read_json_object;
 use super::normalization::{
     normalize_compact_account_request, responses_lite_parallel_tool_calls_valid,
@@ -120,6 +122,9 @@ async fn execute_routed_compaction(
         .body(Body::from(request_bytes))
         .expect("routed compaction request");
     *http_request.headers_mut() = headers;
+    http_request
+        .extensions_mut()
+        .insert(RoutedCompactionRequest);
     let upstream_response =
         execute_client_request(runtime, http_request, crate::WireApi::Responses).await;
     routed_compaction_response(upstream_response).await

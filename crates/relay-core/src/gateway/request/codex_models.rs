@@ -8,7 +8,7 @@ use crate::catalog::{
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
-use crate::runtime::AuthenticatedKey;
+use crate::runtime::{AuthenticatedKey, AuthorizationIdentityPolicy};
 use crate::{
     codex_model_is_picker_eligible_for, is_valid_model_id, routed_codex_catalog_entry,
     GatewayRuntime, WireApi,
@@ -191,10 +191,13 @@ async fn fetch_codex_account_manifest(
             .send_authorized_request(
                 candidate_id,
                 request,
-                Some(client_version.as_str()),
-                None,
-                None,
-                None,
+                crate::runtime::AuthorizationDispatch {
+                    client_version: Some(client_version.as_str()),
+                    identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                    turn_scope: None,
+                    budget: None,
+                    lease: None,
+                },
             )
             .await
         else {

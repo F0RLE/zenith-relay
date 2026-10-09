@@ -1,4 +1,5 @@
 mod api_equivalent;
+mod cache_context;
 mod event;
 mod reasoning;
 mod tools;
@@ -17,6 +18,10 @@ pub use api_equivalent::{
     PRICED_AGGREGATE_INPUT_TOKENS, PRICED_AGGREGATE_OUTPUT_SAMPLES, PRICED_AGGREGATE_OUTPUT_TOKENS,
     PRICED_AGGREGATE_TOTAL_SAMPLES, PRICED_AGGREGATE_TOTAL_TOKENS,
     PRICED_AGGREGATE_UNKNOWN_CACHE_WRITE_TOKENS, USAGE_CONTEXT_BAND_SQL, USAGE_PRICE_CLASS_SQL,
+};
+pub use cache_context::{
+    CacheContextBaseline, CacheContextDiagnostics, CacheContextScope, CacheContextSection,
+    CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind,
 };
 pub use event::{ErrorOrigin, UsageEvent, UsageTransport};
 pub use reasoning::normalize_reasoning_effort;

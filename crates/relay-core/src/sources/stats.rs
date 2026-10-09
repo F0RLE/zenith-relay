@@ -3,6 +3,7 @@ mod formats;
 mod tests;
 mod transport;
 
+use super::services::Service;
 use crate::scheduler::refresh::http::ManagementHttpScope;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -25,6 +26,7 @@ pub enum SourceStatsProvider {
     Deepseek,
     #[serde(rename = "siliconflow")]
     SiliconFlow,
+    Moonshot,
     Unsupported,
 }
 
@@ -214,6 +216,16 @@ async fn fetch_stats(
             Ok(key_stats)
         }
         P::Deepseek => formats::deepseek_stats(&client.get("user/balance", true, true).await?),
+        P::Moonshot => {
+            let currency = match client.host() {
+                Some("api.moonshot.cn") => SourceStatsCurrency::Cny,
+                _ => SourceStatsCurrency::Usd,
+            };
+            formats::moonshot_stats(
+                &client.get("/v1/users/me/balance", false, true).await?,
+                currency,
+            )
+        }
         // SiliconFlow retired /user/info on 2026-08-14 and has not announced
         // a replacement account endpoint. Do not send a key to a dead API.
         P::SiliconFlow => Err(SourceStatsStatus::Unsupported),
@@ -223,10 +235,9 @@ async fn fetch_stats(
 
 async fn autodetect(client: &StatsClient) -> StatsResult<SourceProviderStats> {
     use SourceStatsStatus as S;
-    if matches!(
-        client.host(),
-        Some("api.openai.com" | "api.anthropic.com" | "generativelanguage.googleapis.com")
-    ) {
+    // Official APIs need a verified stats adapter. Custom compatible services
+    // retain autodetection; do not probe unrelated billing APIs on known hosts.
+    if client.host().and_then(Service::from_host).is_some() {
         return Err(S::Unsupported);
     }
     let mut failure = S::Unsupported;
@@ -301,11 +312,12 @@ pub(super) fn source_stats_provider(base_url: &str) -> SourceStatsProvider {
     let Ok(url) = Url::parse(base_url) else {
         return SourceStatsProvider::Unsupported;
     };
-    match url.host_str().map(str::to_ascii_lowercase).as_deref() {
-        Some("api.zenithmarket.dev") => SourceStatsProvider::Zenith,
-        Some("openrouter.ai") => SourceStatsProvider::OpenRouter,
-        Some("api.deepseek.com") => SourceStatsProvider::Deepseek,
-        Some("api.siliconflow.cn" | "api.siliconflow.com") => SourceStatsProvider::SiliconFlow,
+    match url.host_str().and_then(Service::from_host) {
+        Some(Service::Zenith) => SourceStatsProvider::Zenith,
+        Some(Service::OpenRouter) => SourceStatsProvider::OpenRouter,
+        Some(Service::Deepseek) => SourceStatsProvider::Deepseek,
+        Some(Service::SiliconFlow) => SourceStatsProvider::SiliconFlow,
+        Some(Service::Moonshot) => SourceStatsProvider::Moonshot,
         _ => SourceStatsProvider::Unsupported,
     }
 }

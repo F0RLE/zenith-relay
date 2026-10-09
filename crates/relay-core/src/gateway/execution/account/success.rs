@@ -106,10 +106,10 @@ pub(super) fn complete_account_response(
             event.success = false;
             event.http_status = failure.status.as_u16();
             event.error_category = Some(failure.category.to_string());
-            let failure_state = super::super::super::errors::settle_attempt_failure(
+            let failure_state = super::super::super::errors::settle_route_failure(
                 runtime,
                 lease,
-                &route.source_model,
+                route,
                 &failure,
                 response_headers,
             );

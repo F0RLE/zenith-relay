@@ -135,6 +135,9 @@ pub(crate) fn normalized_base_url(base_url_text: &str) -> Result<Url> {
         let path = format!("{}/", url.path());
         url.set_path(&path);
     }
+    if let Some(service) = url.host_str().and_then(super::services::Service::from_host) {
+        service.normalize_api_root(&mut url);
+    }
     Ok(url)
 }
 

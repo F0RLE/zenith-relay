@@ -157,6 +157,7 @@ impl StreamExecution {
         let completion_native_template = request;
         let completion_local_key = local_key_id.clone();
         let completion_settlement = completion::StreamCompletionSettlement {
+            _cache_context_observation: route.cache_context_observation.clone(),
             upstream_usage,
             lease,
             runtime: completion_runtime,

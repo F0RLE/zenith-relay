@@ -167,7 +167,7 @@ async fn native_responses_does_not_replay_tool_continuation_after_generic_bad_re
 }
 
 #[tokio::test]
-async fn native_responses_replays_tool_continuation_after_zenith_gateway_invalid_request() {
+async fn native_responses_keeps_tool_history_after_generic_gateway_rejection() {
     let (upstream, state) = spawn_native_replay_upstream_with_rejection(
         NativeReplayRejection::ZenithGatewayInvalidRequest,
     )
@@ -208,28 +208,25 @@ async fn native_responses_replays_tool_continuation_after_zenith_gateway_invalid
         .send()
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::BAD_REQUEST);
 
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[1]["previous_response_id"], "resp_native_tool");
-    assert!(bodies[2].get("previous_response_id").is_none());
-    assert_eq!(bodies[2]["input"][1]["type"], "function_call");
-    assert_eq!(bodies[2]["input"][2]["type"], "function_call_output");
+    assert_eq!(bodies[1]["input"][0]["type"], "function_call_output");
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert!(!events[1].success);
     assert_eq!(
         events[1].error_category.as_deref(),
-        Some("upstream_candidate_rejected")
+        Some("upstream_invalid_request")
     );
-    assert!(events[2].success);
 }
 
 #[tokio::test]
-async fn native_responses_stream_replays_tool_continuation_after_zenith_gateway_invalid_request() {
+async fn native_responses_stream_keeps_tool_history_after_generic_gateway_rejection() {
     let (upstream, state) = spawn_native_replay_upstream_with_rejection(
         NativeReplayRejection::ZenithGatewayInvalidRequestStream,
     )
@@ -271,29 +268,26 @@ async fn native_responses_stream_replays_tool_continuation_after_zenith_gateway_
         .send()
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::BAD_REQUEST);
     let second = second.text().await.unwrap();
-    assert!(second.contains("Tool result received"));
-    assert!(second.contains("response.completed"));
+    assert!(second.contains("Zenith AI request is invalid"));
+    assert!(!second.contains("response.completed"));
     assert!(!second.contains("resp_rejected"));
 
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[1]["previous_response_id"], "resp_native_tool");
-    assert!(bodies[2].get("previous_response_id").is_none());
-    assert_eq!(bodies[2]["stream"], true);
-    assert_eq!(bodies[2]["input"][1]["type"], "function_call");
-    assert_eq!(bodies[2]["input"][2]["type"], "function_call_output");
+    assert_eq!(bodies[1]["stream"], true);
+    assert_eq!(bodies[1]["input"][0]["type"], "function_call_output");
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert!(!events[1].success);
     assert_eq!(
         events[1].error_category.as_deref(),
-        Some("upstream_candidate_rejected")
+        Some("upstream_invalid_request")
     );
-    assert!(events[2].success);
 }
 
 #[tokio::test]

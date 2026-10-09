@@ -16,6 +16,32 @@ pub(in crate::protocol::adapter) fn bridged_namespace_tool_name(
     format!("relay_ns_{}", hex::encode(&digest[..12]))
 }
 
+/// Keep namespace context in a flat upstream tool's description.
+pub(in crate::protocol::adapter) fn bridged_tool_description(
+    tool: &Map<String, Value>,
+    namespace: Option<&str>,
+    namespace_description: Option<&str>,
+    tool_name: &str,
+) -> Option<String> {
+    let tool_description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|description| !description.is_empty());
+    let Some(namespace) = namespace else {
+        return tool_description.map(str::to_owned);
+    };
+    let mut description = format!("Namespace `{namespace}` tool `{tool_name}`.");
+    for text in [namespace_description, tool_description]
+        .into_iter()
+        .flatten()
+    {
+        description.push(' ');
+        description.push_str(text);
+    }
+    Some(description)
+}
+
 /// Collects the complete client-side tool catalog for one Responses request.
 /// Codex can place tools loaded during a turn in `input.additional_tools`;
 /// bridges need to combine those with the root catalog before they translate
@@ -78,6 +104,33 @@ pub(in crate::protocol::adapter) struct ClientToolTarget {
     pub(in crate::protocol::adapter) kind: ResponsesToolKind,
     pub(in crate::protocol::adapter) name: String,
     pub(in crate::protocol::adapter) namespace: Option<String>,
+}
+
+impl ClientToolTarget {
+    pub(in crate::protocol::adapter) fn from_definition(
+        tool: &Map<String, Value>,
+        namespace: Option<&str>,
+    ) -> AdapterResult<Self> {
+        let kind = ResponsesToolKind::from_definition(tool)?;
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(AdapterError::unsupported_tool)?;
+        Ok(Self {
+            kind,
+            name: name.to_owned(),
+            namespace: namespace.map(str::to_owned),
+        })
+    }
+
+    pub(in crate::protocol::adapter) fn upstream_name(&self) -> String {
+        self.namespace
+            .as_deref()
+            .map(|namespace| bridged_namespace_tool_name(namespace, &self.name))
+            .unwrap_or_else(|| self.name.clone())
+    }
 }
 
 impl ResponsesToolKind {

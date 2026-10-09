@@ -131,7 +131,13 @@ impl CodexModelsClient {
                 HttpClass::Ordinary,
             )
             .await
-            .map_err(|_| ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport))?;
+            .map_err(|error| {
+                ModelDiscoveryFailure::retryable(if error.is_timeout() {
+                    ModelDiscoveryFailureCode::Timeout
+                } else {
+                    ModelDiscoveryFailureCode::Transport
+                })
+            })?;
         let status = response.status();
         let retry_after_ms =
             crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
@@ -140,6 +146,9 @@ impl CodexModelsClient {
             .map_err(|error| match error {
                 Error::UpstreamBodyTooLarge => {
                     ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
+                }
+                Error::Upstream(error) if error.is_timeout() => {
+                    ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Timeout)
                 }
                 _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
             })

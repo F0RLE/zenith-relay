@@ -44,7 +44,7 @@ impl super::ClientRequest {
         }
         let mut request_body: Value = serde_json::from_slice(request_bytes)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
-        let tool_policy = RequestToolPolicy::new(runtime, &request_body);
+        let mut tool_policy = RequestToolPolicy::new(runtime, &request_body);
         let request_object = request_body
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
@@ -83,6 +83,16 @@ impl super::ClientRequest {
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
             runtime.mark_request_origin(&request_id, kind);
+        }
+        let client_context_id = client_context_fingerprint(headers);
+        if background_kind.is_none() {
+            tool_policy.capture_cache_context(
+                runtime,
+                &request_body,
+                &key.id,
+                &request_id,
+                client_context_id.as_deref(),
+            );
         }
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
@@ -138,7 +148,6 @@ impl super::ClientRequest {
             connection_affinity_key,
         )
         .map_err(|()| GatewayFailure::continuation_unavailable())?;
-        let client_context_id = client_context_fingerprint(headers);
         let prompt_affinity_key = runtime.prompt_affinity_key(
             &key.id,
             &resolved_model,

@@ -20,7 +20,7 @@ fn is_client_auth_header(header_name: &str) -> bool {
     ) || header_name.ends_with("-api-key")
 }
 
-const FORWARDED_CODEX_HEADERS: &[&str] = &[
+const FORWARDED_RESPONSES_HEADERS: &[&str] = &[
     "openai-beta",
     "originator",
     "session-id",
@@ -30,7 +30,6 @@ const FORWARDED_CODEX_HEADERS: &[&str] = &[
     "tracestate",
     "user-agent",
     "version",
-    "x-claude-code-session-id",
     "x-client-request-id",
     "x-codex-beta-features",
     "x-codex-installation-id",
@@ -132,34 +131,41 @@ pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
         })
 }
 
-pub(in crate::gateway) fn forwarded_codex_headers(
-    client_headers: &HeaderMap,
-    fallback_session_id: &str,
-) -> HeaderMap {
+pub(in crate::gateway) fn forwarded_responses_headers(client_headers: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for &header_name in FORWARDED_CODEX_HEADERS {
+    for &header_name in FORWARDED_RESPONSES_HEADERS {
         if let Some(header_value) = client_headers.get(header_name) {
             headers.insert(HeaderName::from_static(header_name), header_value.clone());
         }
     }
-    if !headers.contains_key(CLAUDE_CODE_SESSION_HEADER) {
-        let session_id = [
-            "x-codex-session-id",
-            "session_id",
-            "x-session-id",
-            "session-id",
-            "thread-id",
-        ]
-        .iter()
-        .find_map(|header_name| client_headers.get(*header_name))
+    headers
+}
+
+pub(in crate::gateway) fn forwarded_codex_headers(
+    client_headers: &HeaderMap,
+    fallback_session_id: &str,
+) -> HeaderMap {
+    let mut headers = forwarded_responses_headers(client_headers);
+    let session_id = client_headers
+        .get(CLAUDE_CODE_SESSION_HEADER)
+        .or_else(|| {
+            [
+                "x-codex-session-id",
+                "session_id",
+                "x-session-id",
+                "session-id",
+                "thread-id",
+            ]
+            .iter()
+            .find_map(|header_name| client_headers.get(*header_name))
+        })
         .cloned()
         .or_else(|| HeaderValue::from_str(fallback_session_id).ok());
-        if let Some(session_id) = session_id {
-            headers.insert(
-                HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
-                session_id,
-            );
-        }
+    if let Some(session_id) = session_id {
+        headers.insert(
+            HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
+            session_id,
+        );
     }
     headers
 }

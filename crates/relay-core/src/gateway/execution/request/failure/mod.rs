@@ -133,18 +133,11 @@ pub(super) async fn handle_upstream_failure(
     );
     let bytes = match crate::transport::collect(upstream).await {
         Ok(bytes) => bytes,
-        Err(_) if retryable_status(status, has_previous_response_id) => {
+        Err(_) if retryable_route_status(route, status, has_previous_response_id) => {
             let failure = AttemptFailure::status_with_body(status, None);
             event.error_category = Some(failure.category.to_string());
-            let failure_state = settle_status_failure(
-                runtime,
-                lease,
-                source_model,
-                status,
-                failure.category,
-                response_headers,
-                None,
-            );
+            let failure_state =
+                settle_route_failure(runtime, lease, route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             *last_failure = Some(failure);

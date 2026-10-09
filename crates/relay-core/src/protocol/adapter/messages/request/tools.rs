@@ -1,8 +1,8 @@
 //! Responses tool definitions translated into Anthropic tool blocks.
 
 use super::{
-    bridged_namespace_tool_name, AdapterError, AdapterResult, ClientToolTarget,
-    MessagesBridgeState, ResponsesToolKind, TranslatedTools,
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, ResponsesToolKind,
+    TranslatedTools,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,7 +56,8 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
                     // Messages source advertise them under a fake contract.
                 }
             }
-            _ => return Err(AdapterError::unsupported_tool()),
+            // Hosted tools have no Messages equivalent; leave them out.
+            _ => {}
         }
     }
     Ok(TranslatedTools {
@@ -72,23 +73,15 @@ fn translate_client_tool(
     namespace: Option<&str>,
     namespace_description: Option<&str>,
 ) -> AdapterResult<()> {
-    let kind = ResponsesToolKind::from_definition(tool)?;
-    let tool_name = tool
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|tool_name| !tool_name.is_empty())
-        .ok_or_else(AdapterError::unsupported_tool)?;
-    let upstream_name = namespace
-        .map(|namespace| bridged_namespace_tool_name(namespace, tool_name))
-        .unwrap_or_else(|| tool_name.to_string());
+    let target = ClientToolTarget::from_definition(tool, namespace)?;
+    let upstream_name = target.upstream_name();
     if client_tools.contains_key(&upstream_name) {
         return Err(AdapterError::unsupported_tool());
     }
 
     let mut translated =
         Map::from_iter([("name".to_string(), Value::String(upstream_name.clone()))]);
-    match kind {
+    match target.kind {
         ResponsesToolKind::Function => {
             let mut schema = tool
                 .get("parameters")
@@ -117,47 +110,18 @@ fn translate_client_tool(
             }
         }
         ResponsesToolKind::Custom => {
-            if tool
-                .get("defer_loading")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || tool
-                    .get("allowed_callers")
-                    .is_some_and(|callers| !callers.is_null())
-            {
-                return Err(AdapterError::unsupported_tool());
-            }
             translated.insert("input_schema".to_string(), custom_tool_input_schema(tool)?);
         }
     }
-    let tool_description = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|description_text| !description_text.is_empty());
-    if let Some(namespace) = namespace {
-        let mut description = format!("Codex namespace `{namespace}` tool `{tool_name}`.");
-        if let Some(namespace_description) = namespace_description {
-            description.push_str(&format!(" {namespace_description}"));
-        }
-        if let Some(tool_description) = tool_description {
-            description.push_str(&format!(" {tool_description}"));
-        }
+    if let Some(description) = super::super::super::contracts::bridged_tool_description(
+        tool,
+        namespace,
+        namespace_description,
+        &target.name,
+    ) {
         translated.insert("description".to_string(), Value::String(description));
-    } else if let Some(description) = tool_description {
-        translated.insert(
-            "description".to_string(),
-            Value::String(description.to_string()),
-        );
     }
-    client_tools.insert(
-        upstream_name,
-        ClientToolTarget {
-            kind,
-            name: tool_name.to_string(),
-            namespace: namespace.map(str::to_string),
-        },
-    );
+    client_tools.insert(upstream_name, target);
     upstream.push(Value::Object(translated));
     Ok(())
 }

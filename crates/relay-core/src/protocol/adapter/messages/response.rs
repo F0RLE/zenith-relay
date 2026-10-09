@@ -325,7 +325,21 @@ pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Va
                 Value::String(cache_write_ttl.to_string()),
             );
     }
-    Value::Object(usage_details)
+    // Anthropic never reports a total and counts cache reads and writes outside
+    // `input_tokens`; the gateway counts them as input, so the total does too.
+    let counter = |field: &str| {
+        usage
+            .and_then(|usage| usage.get(field))
+            .and_then(Value::as_u64)
+    };
+    let derived_total = counter("input_tokens")
+        .zip(counter("output_tokens"))
+        .and_then(|(input, output)| input.checked_add(output))
+        .and_then(|total| total.checked_add(counter("cache_read_input_tokens").unwrap_or_default()))
+        .and_then(|total| {
+            total.checked_add(counter("cache_creation_input_tokens").unwrap_or_default())
+        });
+    super::super::responses_usage::complete(usage_details, derived_total)
 }
 
 fn cache_write_ttl_from_usage(usage: &Value) -> Option<&'static str> {

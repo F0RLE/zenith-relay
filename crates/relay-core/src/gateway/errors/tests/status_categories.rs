@@ -226,19 +226,24 @@ fn deactivated_workspace_detection_requires_the_exact_structured_code() {
 }
 
 #[test]
-fn generic_gateway_rejection_remains_a_candidate_failure() {
+fn generic_gateway_rejection_does_not_cool_or_retry_the_candidate() {
     let value: Value = serde_json::from_slice(
             br#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
         )
         .unwrap();
 
     let classification = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &value);
-    assert_eq!(classification.category, "upstream_candidate_rejected");
+    assert_eq!(classification.category, "upstream_invalid_request");
     assert_eq!(
         upstream_event_failure_category(Some("error"), &value),
-        Some("upstream_candidate_rejected")
+        Some("upstream_invalid_request")
     );
-    assert!(failure_category_requires_cooldown(classification.category));
+    assert!(!failure_category_requires_cooldown(classification.category));
+    assert!(!retryable_failure(
+        StatusCode::BAD_REQUEST,
+        classification.category,
+        false
+    ));
 }
 
 #[test]

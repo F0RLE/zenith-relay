@@ -264,11 +264,14 @@ fn account(
     quota_remaining_basis_points: i32,
 ) -> RuntimeChatGptAccount {
     RuntimeChatGptAccount {
+        oauth_client_kind: Default::default(),
         id: id.to_string(),
         source_id: "openai-codex".to_string(),
         chatgpt_account_id: chatgpt_account_id.to_string(),
+        chatgpt_user_id: None,
         responses_url: format!("{}/v1/responses", server.base_url),
         basis_points_enabled: false,
+        basis_points_headers: None,
         models: vec![MODEL.to_string()],
         enabled: true,
         draining: false,

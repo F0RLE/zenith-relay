@@ -135,14 +135,11 @@ impl GatewayRuntime {
             })
             .collect::<Vec<_>>();
         let order = crate::poison::mutex(&self.model_display_order);
-        models = self.model_metadata_catalog.as_ref().map_or_else(
-            || crate::normalize_model_ids(models.iter()),
-            |catalog| {
-                catalog
-                    .snapshot()
-                    .merge_display_order(models.iter(), &order)
-            },
+        let catalog = self.model_metadata_catalog.as_ref().map_or_else(
+            || Arc::new(crate::model_metadata::ModelMetadataCatalog::empty()),
+            |catalog| catalog.snapshot(),
         );
+        models = catalog.merge_display_order(models.iter(), &order);
         models
             .into_iter()
             .map(|model| match key.model_prefix.as_deref() {

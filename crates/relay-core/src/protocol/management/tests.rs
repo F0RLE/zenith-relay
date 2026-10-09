@@ -43,6 +43,8 @@ fn runtime_candidate(
 
 fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
     AccountSummary {
+        credit_balance_key: None,
+        oauth_client_kind: Default::default(),
         id: "account".into(),
         label: "Account".into(),
         identity_hint: "account".into(),

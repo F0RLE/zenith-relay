@@ -50,16 +50,27 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                         )?,
                     });
                 }
+                // Tools loaded during the turn are part of the catalog, which
+                // `responses_tools` reads; they are not conversation content.
+                "additional_tools" => {}
                 "function_call" => {
                     checked(
                         response_item,
-                        &["type", "id", "status", "call_id", "name", "arguments"],
+                        &[
+                            "type",
+                            "id",
+                            "status",
+                            "call_id",
+                            "name",
+                            "namespace",
+                            "arguments",
+                        ],
                     )?;
                     append_assistant_blocks(
                         &mut decoded_request.messages,
                         vec![Block::ToolCall {
                             id: required_text(response_item, "call_id")?.into(),
-                            name: required_text(response_item, "name")?.into(),
+                            name: upstream_call_name(response_item)?,
                             arguments: required_text(response_item, "arguments")?.into(),
                         }],
                     );
@@ -67,14 +78,22 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 "custom_tool_call" => {
                     checked(
                         response_item,
-                        &["type", "id", "status", "call_id", "name", "input"],
+                        &[
+                            "type",
+                            "id",
+                            "status",
+                            "call_id",
+                            "name",
+                            "namespace",
+                            "input",
+                        ],
                     )?;
                     let tool_input = required_text(response_item, "input")?;
                     append_assistant_blocks(
                         &mut decoded_request.messages,
                         vec![Block::ToolCall {
                             id: required_text(response_item, "call_id")?.into(),
-                            name: required_text(response_item, "name")?.into(),
+                            name: upstream_call_name(response_item)?,
                             arguments: serde_json::to_string(&json!({"input": tool_input}))
                                 .map_err(|_| AdapterError::invalid_request())?,
                         }],
@@ -129,7 +148,8 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             }
         }
     }
-    decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Responses)?;
+    (decoded_request.tools, decoded_request.client_tools) =
+        super::content::responses_tools(request_body)?;
     decoded_request.tool_choice =
         super::content::choice(request_body.get("tool_choice"), WireApi::Responses)?;
     decoded_request.parallel_tools = optional_bool(request_body, "parallel_tool_calls")?;
@@ -165,6 +185,25 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         }
     }
     Ok(decoded_request)
+}
+
+/// The upstream name of a replayed call: namespaced calls use the flattened
+/// name that the tool catalog declared for them.
+fn upstream_call_name(call_item: &Value) -> AdapterResult<String> {
+    let name = required_text(call_item, "name")?;
+    let Some(namespace) = call_item
+        .get("namespace")
+        .filter(|namespace_value| !namespace_value.is_null())
+    else {
+        return Ok(name.to_owned());
+    };
+    let namespace = namespace
+        .as_str()
+        .filter(|namespace_name| !namespace_name.is_empty())
+        .ok_or_else(AdapterError::invalid_request)?;
+    Ok(super::super::super::contracts::bridged_namespace_tool_name(
+        namespace, name,
+    ))
 }
 
 /// Responses emits each tool call as an output item; Chat Completions needs

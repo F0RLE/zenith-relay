@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::WireApi;
 
 fn catalog(raw: &str) -> ModelMetadataCatalog {
     ModelMetadataCatalog::from_models_dev_json(raw).unwrap()
@@ -274,6 +275,67 @@ fn keeps_source_and_canonical_model_identity_separate() {
         metadata.canonical_model_id.as_deref(),
         Some("anthropic/claude-sonnet-6-1")
     );
+}
+
+#[test]
+fn native_protocol_follows_the_model_group_not_the_host() {
+    let catalog = catalog(
+        r#"{
+            "openai/gpt-test": {"name": "GPT Test", "family": "gpt"},
+            "anthropic/claude-test": {"name": "Claude Test", "family": "claude"},
+            "google/gemini-test": {"name": "Gemini Test", "family": "gemini"},
+            "deepseek/deepseek-test": {"name": "DeepSeek Test", "family": "deepseek"},
+            "openrouter/gpt-reseller": {
+                "name": "GPT Reseller",
+                "family": "gpt",
+                "canonical_model_id": "openai/gpt-reseller"
+            },
+            "google-vertex/claude-vertex": {
+                "name": "Claude Vertex",
+                "canonical_model_id": "anthropic/claude-vertex"
+            },
+            "google-vertex/claude-family-only": {
+                "name": "Claude Family Only",
+                "family": "claude"
+            },
+            "groq/oss-test": {"name": "OSS Test", "family": "gpt-oss"}
+        }"#,
+    );
+    for (model, expected) in [
+        ("openai/gpt-test", WireApi::Responses),
+        ("anthropic/claude-test", WireApi::Messages),
+        ("google/gemini-test", WireApi::Gemini),
+        ("deepseek/deepseek-test", WireApi::ChatCompletions),
+        // A Relay-qualified or bare ID resolves through its unique leaf.
+        ("relay/gpt-test", WireApi::Responses),
+        ("claude-test", WireApi::Messages),
+        // The reseller namespace never decides; the canonical group does.
+        ("openrouter/gpt-reseller", WireApi::Responses),
+        ("google-vertex/claude-vertex", WireApi::Messages),
+        // Without a canonical ID the family still outranks the host namespace.
+        ("google-vertex/claude-family-only", WireApi::Messages),
+        // Open-weight "gpt-oss" is not an OpenAI-hosted GPT model.
+        ("groq/oss-test", WireApi::ChatCompletions),
+    ] {
+        assert_eq!(
+            catalog.native_protocol_for(model),
+            Some(expected),
+            "{model}"
+        );
+    }
+}
+
+#[test]
+fn native_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
+    let catalog = catalog(
+        r#"{
+            "alpha/shared": {"name": "Alpha Name"},
+            "beta/shared": {"name": "Beta Name"},
+            "openai/gpt-test": {"name": "GPT Test", "family": "gpt"}
+        }"#,
+    );
+    assert_eq!(catalog.native_protocol_for("unlisted-model"), None);
+    assert_eq!(catalog.native_protocol_for("shared"), None);
 }
 
 #[test]

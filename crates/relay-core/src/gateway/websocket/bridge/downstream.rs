@@ -211,7 +211,7 @@ async fn start_next_request(
         route.service_tier = client_request.service_tier(runtime, &route);
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
-        let request_payload = client_request.payload_for(&route)?;
+        let request_payload = client_request.observed_payload_for(runtime, &mut route)?;
         client_request.budget.configure_retry_window(
             runtime.route_recovery_window_ms(),
             runtime.route_recovery_enabled(),

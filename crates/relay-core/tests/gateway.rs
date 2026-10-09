@@ -33,6 +33,9 @@ mod protocol_matrix;
 #[path = "support/native_admission.rs"]
 mod native_admission;
 
+#[path = "support/cache_context.rs"]
+mod cache_context;
+
 #[path = "support/tool_policy.rs"]
 mod tool_policy;
 

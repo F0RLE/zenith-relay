@@ -61,7 +61,31 @@ pub(in crate::protocol::adapter::translation::decode) fn choice(
             } else {
                 choice_value
             };
-            ToolChoice::Function(required_text(target, "name")?.into())
+            let name = required_text(target, "name")?;
+            // A namespaced Responses tool is declared upstream under its
+            // flattened name, so a forced choice must select that name.
+            let namespace = if protocol == WireApi::Responses {
+                target
+                    .get("namespace")
+                    .filter(|namespace_value| !namespace_value.is_null())
+                    .map(|namespace_value| {
+                        namespace_value
+                            .as_str()
+                            .filter(|namespace_name| !namespace_name.is_empty())
+                            .ok_or_else(AdapterError::invalid_request)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            ToolChoice::Function(match namespace {
+                Some(namespace) => {
+                    super::super::super::super::contracts::bridged_namespace_tool_name(
+                        namespace, name,
+                    )
+                }
+                None => name.into(),
+            })
         }
         _ => return Err(AdapterError::unsupported_tool()),
     }))

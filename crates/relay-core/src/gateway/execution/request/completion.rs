@@ -380,10 +380,10 @@ async fn read_completed_body(
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
             } else {
-                settle_attempt_failure(
+                settle_route_failure(
                     read.runtime,
                     read.lease,
-                    read.source_model,
+                    read.route,
                     &failure,
                     read.response_headers,
                 )
@@ -435,6 +435,7 @@ async fn read_completed_body(
             apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
+                || route_forbids_fallback(read.route, failure.status, failure.category)
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return Err(CompletionStep::Respond(attempt_error_response(

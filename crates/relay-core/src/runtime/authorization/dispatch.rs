@@ -1,12 +1,11 @@
 use super::super::{
     runtime_now_ms, AuthorizationIncarnation, AuthorizedRequestError, AuthorizedResponse,
-    CandidateLease, CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime,
-    PreparedAuthorization,
+    CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime, PreparedAuthorization,
 };
 use super::prepare::{agent_credential_fingerprint, inspect_agent_identity_unauthorized};
+use super::AuthorizationDispatch;
 use crate::accounts::TokenDispatchRevisionGuard;
 use crate::providers::chatgpt::AgentIdentityCredential;
-use crate::scheduler::rotation::SharedRequestBudget;
 use reqwest::StatusCode;
 use std::sync::atomic::Ordering;
 use std::sync::RwLockReadGuard;
@@ -21,11 +20,9 @@ impl GatewayRuntime {
         &self,
         candidate_id: &str,
         request: reqwest::RequestBuilder,
-        client_version: Option<&str>,
-        turn_scope: Option<&CodexTurnStateScope<'_>>,
-        budget: Option<&SharedRequestBudget>,
-        lease: Option<&CandidateLease>,
+        dispatch: AuthorizationDispatch<'_>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
+        let budget = dispatch.budget;
         let first_request = request
             .try_clone()
             .ok_or(AuthorizedRequestError::NotReplayable)?;
@@ -34,15 +31,7 @@ impl GatewayRuntime {
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
         let upstream_response = self
-            .send_prepared_authorization(
-                candidate_id,
-                first_request,
-                &prepared,
-                client_version,
-                turn_scope,
-                budget,
-                lease,
-            )
+            .send_prepared_authorization(candidate_id, first_request, &prepared, dispatch)
             .await?;
         if upstream_response.status() == StatusCode::UNAUTHORIZED {
             if let Some(task_id) = prepared.agent_task_id.as_deref() {
@@ -77,15 +66,7 @@ impl GatewayRuntime {
                     .await
                     .map_err(AuthorizedRequestError::Prepare)?;
                 let refreshed_response = self
-                    .send_prepared_authorization(
-                        candidate_id,
-                        request,
-                        &refreshed,
-                        client_version,
-                        turn_scope,
-                        budget,
-                        lease,
-                    )
+                    .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
                     .await?;
                 return Ok(self.accept_authorized_response(
                     candidate_id,
@@ -128,15 +109,7 @@ impl GatewayRuntime {
         // admission fence before that same lease passes final dispatch.
         drop(fence);
         let refreshed_response = self
-            .send_prepared_authorization(
-                candidate_id,
-                request,
-                &refreshed,
-                client_version,
-                turn_scope,
-                budget,
-                lease,
-            )
+            .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
             .await?;
         Ok(self.accept_authorized_response(
             candidate_id,
@@ -211,19 +184,22 @@ impl GatewayRuntime {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn send_prepared_authorization(
         &self,
         candidate_id: &str,
         request: reqwest::RequestBuilder,
         prepared: &PreparedAuthorization,
-        client_version: Option<&str>,
-        scope: Option<&CodexTurnStateScope<'_>>,
-        budget: Option<&SharedRequestBudget>,
-        lease: Option<&CandidateLease>,
+        dispatch: AuthorizationDispatch<'_>,
     ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
+        let AuthorizationDispatch {
+            client_version,
+            identity_policy,
+            turn_scope: scope,
+            budget,
+            lease,
+        } = dispatch;
         let (client, mut authorized_request) =
-            apply_prepared_authorization(request, prepared, client_version)?;
+            apply_prepared_authorization(request, prepared, client_version, identity_policy)?;
         self.guard_turn_state(authorized_request.headers_mut(), scope, prepared);
         let url = authorized_request.url().clone();
         let cookies = self.routing_cookies(candidate_id, prepared);

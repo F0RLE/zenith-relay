@@ -2,7 +2,6 @@ use super::{AuthenticatedKey, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
 use crate::{CandidateKind, Error, Result, WireApi};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
@@ -69,7 +68,7 @@ impl GatewayRuntime {
         self.chatgpt_accounts
             .values()
             .filter(|account| {
-                !account.basis_points_enabled.load(Ordering::Relaxed)
+                account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex
                     && crate::poison::read(&account.model_inventory)
                         .configured_models
                         .iter()

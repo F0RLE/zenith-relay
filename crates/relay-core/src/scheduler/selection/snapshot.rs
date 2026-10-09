@@ -77,6 +77,8 @@ pub struct RoutingDiagnostics {
     /// credential, or provider response data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
 }
 
 impl PoolScheduler {
@@ -265,6 +267,7 @@ impl PoolScheduler {
             in_flight_before: self.in_flight_count(candidate_id, lane),
             dispatches_before: self.dispatch_count(candidate_id, lane),
             endpoint_kind: None,
+            cache_context: None,
         })
     }
 }

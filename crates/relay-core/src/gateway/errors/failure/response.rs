@@ -39,7 +39,13 @@ pub(crate) fn responses_function_call_output_has_invalid_call_id(
     let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {
         return false;
     };
-    responses_function_call_output_has_invalid_call_id_text(&upstream_error_text(&error_payload))
+    responses_function_call_output_has_invalid_call_id_value(&error_payload)
+}
+
+pub(crate) fn responses_function_call_output_has_invalid_call_id_value(
+    error_payload: &Value,
+) -> bool {
+    responses_function_call_output_has_invalid_call_id_text(&upstream_error_text(error_payload))
 }
 
 fn responses_function_call_output_has_invalid_call_id_text(text: &str) -> bool {
@@ -175,10 +181,9 @@ pub(crate) fn responses_tool_call_is_missing_output_message(message: &str) -> bo
     )
 }
 
-/// Zenith Gateway intentionally hides provider-specific 400 details. A
-/// Responses continuation with tool output can use the local replay state to
-/// recover the preceding tool call when this exact public envelope is returned.
-/// Do not match arbitrary 400 responses: those may be genuine client errors.
+/// Recognize the legacy Gateway envelope. Its generic text is not evidence of
+/// a broken route, lost response, or tool-link failure.
+#[cfg(test)]
 pub(crate) fn zenith_gateway_invalid_request(error_response_body: &[u8]) -> bool {
     let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {
         return false;

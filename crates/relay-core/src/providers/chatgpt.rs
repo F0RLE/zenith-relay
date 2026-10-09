@@ -1,7 +1,9 @@
 mod agent_identity;
+mod basis_points_headers;
 mod codex_identity;
 mod codex_release;
 mod models;
+mod oauth;
 mod passive_quota;
 mod quota_subscription;
 mod quota_usage;
@@ -14,6 +16,9 @@ use reqwest::header::{HeaderValue, InvalidHeaderValue};
 pub use agent_identity::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
 };
+pub use basis_points_headers::{
+    BasisPointsCapturedHeaders, BasisPointsHeader, BasisPointsHeadersError,
+};
 pub use codex_identity::{
     configure_codex_client_version, configured_codex_client_version, valid_codex_client_version,
     CodexIdentityEnvelope, CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_STABLE_FALLBACK_VERSION,
@@ -24,6 +29,10 @@ pub use codex_release::{
 };
 pub use models::{
     CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode, CODEX_MODELS_ENDPOINT,
+};
+pub use oauth::{
+    OAuthClientKind, BASIS_POINTS_OAUTH_CLIENT_ID, BASIS_POINTS_OAUTH_REDIRECT_URI,
+    CODEX_OAUTH_CLIENT_ID,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{
@@ -42,6 +51,21 @@ pub use runtime::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use token_errors::{token_refresh_failure_kind, token_refresh_provider_error_code};
 
 pub const CODEX_MODELS_CLIENT_VERSION: &str = CODEX_CLIENT_VERSION;
+
+/// One provider credit ledger can be observed through several OAuth clients.
+/// Hash the account id so snapshots can group balances without exposing it.
+pub fn credit_balance_key(provider_account_id: &str) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    let account_id = provider_account_id.trim().to_ascii_lowercase();
+    if account_id.is_empty() {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"chatgpt-credit-balance\0");
+    digest.update(account_id.as_bytes());
+    Some(digest.finalize().into())
+}
 
 /// Official Responses endpoint used by the Excel/Basis Points route. It is a
 /// fixed provider route; user supplied API sources never use it.
@@ -76,6 +100,7 @@ pub fn push_account_id_hint(hints: &mut Vec<String>, account_id_hint: String) {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ResponseBodyError {
+    Timeout,
     Transport,
     TooLarge,
 }
@@ -87,7 +112,13 @@ pub(super) async fn collect_response_body(
     let mut response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| ResponseBodyError::Transport)?;
+        let chunk = chunk.map_err(|error| {
+            if error.is_timeout() {
+                ResponseBodyError::Timeout
+            } else {
+                ResponseBodyError::Transport
+            }
+        })?;
         if response_bytes.len().saturating_add(chunk.len()) > limit {
             return Err(ResponseBodyError::TooLarge);
         }

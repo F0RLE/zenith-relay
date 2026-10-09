@@ -40,14 +40,10 @@ pub(super) fn incompatible_routes(
         let validate = || {
             if route.account_transport == AccountTransport::ExcelBasisPoints {
                 let selected = tier_policy.select_for_model(runtime, &route.source_model);
-                // A non-standard speed leaves Basis Points for the normal
-                // Responses endpoint, so it must not remove the only account.
-                if selected == DefaultServiceTier::Standard {
-                    if let Some(error) =
-                        basis_points_route_error(request, stream, tier_policy, selected)
-                    {
-                        return Err(error);
-                    }
+                if let Some(error) =
+                    basis_points_route_error(request, stream, tier_policy, selected)
+                {
+                    return Err(error);
                 }
             }
 

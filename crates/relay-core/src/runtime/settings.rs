@@ -242,19 +242,6 @@ impl GatewayRuntime {
         *crate::poison::mutex(&self.model_display_order) = crate::normalize_model_ids(models);
     }
 
-    /// Switches the explicitly labelled Excel/Basis Points transport for OAuth
-    /// accounts without rebuilding the scheduler. Agent Identity accounts
-    /// cannot use this transport. The account candidate, quota state and
-    /// concurrency reservation remain unchanged.
-    pub fn set_basis_points_enabled(&self, enabled: bool) {
-        for account in self.chatgpt_accounts.values() {
-            let oauth = crate::poison::read(&account.agent_identity).is_none();
-            account
-                .basis_points_enabled
-                .store(enabled && oauth, Ordering::Relaxed);
-        }
-    }
-
     /// A host replaces this runtime's routing graph without waiting for
     /// already-served streams to finish. Serialize retirement with final rotation
     /// dispatch, then wake admissions so they do not wait on dead capacity.

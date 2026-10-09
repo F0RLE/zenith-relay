@@ -1,6 +1,7 @@
 use super::super::errors::{
-    responses_tool_call_links_rejected_value, upstream_failure_status,
-    zenith_gateway_invalid_request_value, AttemptFailure, PreservedUpstreamError,
+    responses_function_call_output_has_invalid_call_id_value,
+    responses_tool_call_links_rejected_value, upstream_failure_status, AttemptFailure,
+    PreservedUpstreamError,
 };
 use super::events::{is_empty_responses_incomplete, parse_sse_event, TerminalOutcome};
 use super::UpstreamStream;
@@ -14,7 +15,7 @@ pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(in crate::gateway) failure: AttemptFailure,
     pub(in crate::gateway) preserved: Option<PreservedUpstreamError>,
-    pub(in crate::gateway) zenith_gateway_invalid_request: bool,
+    pub(in crate::gateway) invalid_function_call_output_call_id: bool,
     pub(in crate::gateway) responses_tool_call_links_rejected: bool,
 }
 
@@ -25,7 +26,7 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
             failure,
             upstream_error: None,
             preserved: None,
-            zenith_gateway_invalid_request: false,
+            invalid_function_call_output_call_id: false,
             responses_tool_call_links_rejected: false,
         }
     }
@@ -114,10 +115,12 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             failure,
                             upstream_error: event.upstream_error,
                             preserved: event.preserved_error,
-                            zenith_gateway_invalid_request: event
+                            invalid_function_call_output_call_id: event
                                 .event_payload
                                 .as_ref()
-                                .is_some_and(zenith_gateway_invalid_request_value),
+                                .is_some_and(
+                                    responses_function_call_output_has_invalid_call_id_value,
+                                ),
                             responses_tool_call_links_rejected: event
                                 .event_payload
                                 .as_ref()

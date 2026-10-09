@@ -1,6 +1,17 @@
 use super::AuthorizedRequestError;
 use crate::scheduler::rotation::ExecutionCertainty;
 
+/// Metadata and admission ownership shared by the first dispatch and its
+/// proven authorization repair. Reusing it keeps retries on the same budget.
+#[derive(Clone, Copy)]
+pub(crate) struct AuthorizationDispatch<'a> {
+    pub(crate) client_version: Option<&'a str>,
+    pub(crate) identity_policy: super::AuthorizationIdentityPolicy,
+    pub(crate) turn_scope: Option<&'a super::CodexTurnStateScope<'a>>,
+    pub(crate) budget: Option<&'a crate::scheduler::rotation::SharedRequestBudget>,
+    pub(crate) lease: Option<&'a super::CandidateLease>,
+}
+
 mod dispatch;
 mod prepare;
 

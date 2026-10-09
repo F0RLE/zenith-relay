@@ -48,7 +48,8 @@ pub(super) fn translate_tools(
             Some("function" | "custom") | None if tool.get("name").is_some() => {
                 translate_gemini_tool(&mut declarations, &mut targets, tool, None)?;
             }
-            _ => return Err(AdapterError::unsupported_tool()),
+            // Hosted tools have no Gemini function-declaration equivalent.
+            _ => {}
         }
     }
     Ok((declarations, targets))
@@ -79,23 +80,10 @@ fn translate_gemini_tool(
     }
     let mut declaration =
         Map::from_iter([("name".to_string(), Value::String(upstream_name.clone()))]);
-    let description = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|description_text| !description_text.is_empty());
-    if let Some(namespace) = namespace {
-        let mut description_value = format!("Codex namespace `{namespace}` tool `{tool_name}`.");
-        if let Some(description) = description {
-            description_value.push(' ');
-            description_value.push_str(description);
-        }
-        declaration.insert("description".to_string(), Value::String(description_value));
-    } else if let Some(description) = description {
-        declaration.insert(
-            "description".to_string(),
-            Value::String(description.to_string()),
-        );
+    if let Some(description) =
+        super::super::super::contracts::bridged_tool_description(tool, namespace, None, tool_name)
+    {
+        declaration.insert("description".to_string(), Value::String(description));
     }
     let parameters = if tool_kind == ResponsesToolKind::Custom {
         json!({"type":"object","properties":{"input":{"type":"string"}},"required":["input"]})
@@ -109,9 +97,7 @@ fn translate_gemini_tool(
     if !parameters.is_object() {
         return Err(AdapterError::invalid_request());
     }
-    if tool.get("strict").and_then(Value::as_bool) == Some(true) {
-        return Err(AdapterError::parameter_unsupported());
-    }
+    // Gemini has no strict-schema switch; the flag is a hint, so it is dropped.
     declaration.insert("parametersJsonSchema".to_string(), parameters);
     declarations.push(Value::Object(declaration));
     targets.insert(

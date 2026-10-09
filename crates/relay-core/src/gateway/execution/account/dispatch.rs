@@ -1,5 +1,5 @@
 use super::super::super::errors::{
-    apply_failure_state, current_failure_state, settle_attempt_failure, AttemptFailure,
+    apply_failure_state, current_failure_state, settle_route_failure, AttemptFailure,
 };
 use super::super::super::now_ms;
 use super::super::super::request::{
@@ -9,7 +9,10 @@ use super::super::super::request::{
 use super::super::super::response::{emit_usage, usage_event, UsageAttempt};
 use super::super::super::turn_state::request_scope;
 use super::super::{attempt_error_response, finish_request_failure, RequestFailureInput};
-use crate::runtime::{AuthenticatedKey, AuthorizedRequestError, CandidateLease, ExecutorRoute};
+use crate::runtime::{
+    AuthenticatedKey, AuthorizationIdentityPolicy, AuthorizedRequestError, CandidateLease,
+    ExecutorRoute,
+};
 use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
 use crate::usage::UsageEvent;
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
@@ -183,12 +186,19 @@ pub(super) async fn dispatch_account_attempt(
         .send_authorized_request(
             &route.candidate_id,
             upstream_request.body(request_body),
-            (!basis_points_route)
-                .then(|| codex_client_version(client_headers))
-                .flatten(),
-            turn_scope.as_ref(),
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: (!basis_points_route)
+                    .then(|| codex_client_version(client_headers))
+                    .flatten(),
+                identity_policy: if basis_points_route {
+                    AuthorizationIdentityPolicy::PreserveUpstream
+                } else {
+                    AuthorizationIdentityPolicy::RelayCodex
+                },
+                turn_scope: turn_scope.as_ref(),
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await;
     let attempt = u16::from(budget.dispatches());
@@ -303,13 +313,7 @@ fn reject_authorized_dispatch(
             request_id,
         ));
     }
-    let failure_state = settle_attempt_failure(
-        runtime,
-        lease,
-        &route.source_model,
-        &failure,
-        &HeaderMap::new(),
-    );
+    let failure_state = settle_route_failure(runtime, lease, route, &failure, &HeaderMap::new());
     apply_failure_state(&mut event, failure_state);
     emit_usage(runtime, event);
     *last_failure = Some(failure);
@@ -372,8 +376,7 @@ async fn fallback_missing_compact(
         Err(error) => {
             let (failure, headers) = *error;
             let mut event = failed_usage(route, u16::from(budget.dispatches()), failure);
-            let failure_state =
-                settle_attempt_failure(runtime, lease, &route.source_model, &failure, &headers);
+            let failure_state = settle_route_failure(runtime, lease, route, &failure, &headers);
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             Err(AccountDispatch::Respond(finish_request_failure(

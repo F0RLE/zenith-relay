@@ -98,7 +98,6 @@ pub(super) fn prepare_request_attempt(
     let source_model = route.source_model.clone();
     debug_assert_eq!(client_wire_api, route.client_wire_api);
     let account_route = route.account_id.is_some();
-    runtime.use_native_responses_when_speed_requested(&mut route);
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
     if basis_points_route {
         if let Some(step) = reject_basis_points_admission(
@@ -195,6 +194,7 @@ pub(super) fn prepare_request_attempt(
             error_codes::INVALID_REQUEST,
         ));
     };
+    tool_policy.observe_cache_context(runtime, &mut route, adapter_request.upstream_body());
     let tool_use = tool_policy.diagnostics.clone();
     RequestPrepare::Ready(Box::new(PreparedRequestAttempt {
         route,

@@ -4,6 +4,57 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn moonshot_balance_preserves_currency_zero_and_missing_spend() {
+    for currency in [SourceStatsCurrency::Usd, SourceStatsCurrency::Cny] {
+        for (balance, micros) in [("0", 0), ("12.345678", 12_345_678)] {
+            let stats = formats::moonshot_stats(
+                &json!({"code":0,"status":true,"data":{"available_balance":balance}}),
+                currency,
+            )
+            .unwrap();
+            assert_eq!(stats.provider, SourceStatsProvider::Moonshot);
+            assert_eq!(
+                stats.balance_micro_usd,
+                (currency == SourceStatsCurrency::Usd).then_some(micros)
+            );
+            assert_eq!(stats.amounts[0].currency, currency);
+            assert_eq!(stats.amounts[0].balance_micros, Some(micros));
+            assert_eq!(stats.spent_micro_usd, None);
+            assert_eq!(stats.requests, None);
+        }
+    }
+    for payload in [
+        json!({"code":1,"status":true,"data":{"available_balance":10}}),
+        json!({"code":0,"status":false,"data":{"available_balance":10}}),
+        json!({"code":0,"status":true,"data":{}}),
+        json!({"code":0,"status":true,"data":{"available_balance":"NaN"}}),
+    ] {
+        assert_eq!(
+            formats::moonshot_stats(&payload, SourceStatsCurrency::Usd),
+            Err(SourceStatsStatus::InvalidResponse)
+        );
+    }
+    for host in ["api.moonshot.ai", "api.moonshot.cn"] {
+        assert_eq!(
+            source_stats_provider(&format!("https://{host}/v1")),
+            SourceStatsProvider::Moonshot
+        );
+        assert_eq!(
+            source_stats_provider(&format!("https://{host}.example.test/v1")),
+            SourceStatsProvider::Unsupported
+        );
+        let client = StatsClient::new(&format!("https://{host}/v1"), "synthetic").unwrap();
+        assert_eq!(
+            client
+                .endpoint("/v1/users/me/balance", false)
+                .unwrap()
+                .path(),
+            "/v1/users/me/balance"
+        );
+    }
+}
+
+#[test]
 fn failed_stats_keep_only_a_fenced_success_and_unsupported_discards_it() {
     let good =
         SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::Available)

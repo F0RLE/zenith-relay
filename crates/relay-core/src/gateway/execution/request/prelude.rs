@@ -11,16 +11,16 @@ pub(super) use super::super::super::errors::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_function_call_output_has_invalid_call_id, responses_tool_call_is_missing_output,
     responses_tool_call_is_missing_output_message, responses_tool_call_links_rejected,
-    retryable_failure, retryable_status, settle_attempt_failure, settle_status_failure,
-    zenith_gateway_invalid_request, AttemptFailure, PreservedUpstreamError,
+    retryable_route_failure, retryable_route_status, route_forbids_fallback, settle_route_failure,
+    AttemptFailure, PreservedUpstreamError,
 };
 pub(super) use super::super::super::now_ms;
 pub(super) use super::super::super::request::{
     apply_codex_routing_hint, candidate_protocols, codex_client_version, contains_tool_call_output,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_messages_headers,
-    normalize_account_request, normalize_responses_lite_request, repair_legacy_responses_call_ids,
-    responses_lite_parallel_tool_calls_valid, unpaired_tool_output_ids, RequestToolPolicy,
-    CODEX_RESPONSES_LITE_HEADER,
+    forwarded_responses_headers, normalize_account_request, normalize_responses_lite_request,
+    repair_legacy_responses_call_ids, responses_lite_parallel_tool_calls_valid,
+    unpaired_tool_output_ids, RequestToolPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 pub(super) use super::super::super::response::{
     collect_upstream_response, emit_usage, populate_tokens, proxy_error_response,
@@ -48,7 +48,8 @@ pub(super) use crate::protocol::{
     AdapterError, AdapterRequestContext, AdapterResponse, PreparedAdapterRequest,
 };
 pub(super) use crate::runtime::{
-    AccountTransport, AuthenticatedKey, AuthorizedRequestError, CandidateLease,
+    AccountTransport, AuthenticatedKey, AuthorizationIdentityPolicy, AuthorizedRequestError,
+    CandidateLease,
 };
 pub(super) use crate::scheduler::rotation::ExecutionCertainty;
 pub(super) use crate::scheduler::rotation::SharedRequestBudget;

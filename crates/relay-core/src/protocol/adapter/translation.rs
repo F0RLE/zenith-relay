@@ -8,12 +8,13 @@ mod tests;
 
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
-    AdapterError, AdapterRequestContext, AdapterResult, MessagesBridgeResponse, MessagesBridgeState,
+    AdapterError, AdapterRequestContext, AdapterResult, ClientToolTarget, MessagesBridgeResponse,
+    MessagesBridgeState, ResponsesToolKind,
 };
 use crate::{MessagesReasoningMode, WireApi};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 pub use stream::TranslationStream;
 
@@ -57,7 +58,6 @@ struct Function {
     description: Option<String>,
     parameters: Value,
     strict: Option<bool>,
-    custom: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +89,9 @@ struct Request {
     instructions: Option<Message>,
     messages: Vec<Message>,
     tools: Vec<Function>,
+    /// Responses client identity (kind, local name, namespace) for each
+    /// upstream tool name. Only a Responses client fills it.
+    client_tools: BTreeMap<String, ClientToolTarget>,
     tool_choice: Option<ToolChoice>,
     parallel_tools: Option<bool>,
     max_tokens: Option<u64>,
@@ -136,7 +139,7 @@ pub struct TranslationRequest {
     response_id: String,
     reasoning_mode: MessagesReasoningMode,
     history: Vec<Message>,
-    custom_tools: BTreeSet<String>,
+    client_tools: BTreeMap<String, ClientToolTarget>,
 }
 
 impl TranslationRequest {
@@ -177,12 +180,6 @@ impl TranslationRequest {
             context.response_scope,
             context.response_id_seed,
         );
-        let custom_tools = decoded_request
-            .tools
-            .iter()
-            .filter(|tool| tool.custom)
-            .map(|tool| tool.name.clone())
-            .collect();
         Ok(Self {
             upstream_body,
             client: context.client_wire_api,
@@ -191,7 +188,7 @@ impl TranslationRequest {
             response_id,
             reasoning_mode: context.reasoning_mode,
             history: decoded_request.messages,
-            custom_tools,
+            client_tools: decoded_request.client_tools,
         })
     }
 
@@ -211,7 +208,7 @@ impl TranslationRequest {
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
         response.id = self.response_id.clone();
         let response_body =
-            response::encode(self.client, &response, &self.model, &self.custom_tools)?;
+            response::encode(self.client, &response, &self.model, &self.client_tools)?;
         let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
         let mut history = self.history;
         history.push(Message {

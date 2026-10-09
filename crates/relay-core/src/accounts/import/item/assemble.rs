@@ -10,6 +10,8 @@ pub(super) struct AssembleImport<'a> {
     pub(super) import_object: &'a Map<String, Value>,
     pub(super) meta: Option<&'a Map<String, Value>>,
     pub(super) tags_value: Option<&'a Value>,
+    pub(super) basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
+    pub(super) oauth_client_kind: Option<OAuthClientKind>,
     pub(super) use_api_key: bool,
     pub(super) use_tokens: bool,
     pub(super) use_agent_identity: bool,
@@ -36,6 +38,8 @@ pub(super) fn assemble_parsed_item(
         import_object,
         meta,
         tags_value,
+        basis_points_headers,
+        oauth_client_kind,
         use_api_key,
         use_tokens,
         use_agent_identity,
@@ -89,6 +93,7 @@ pub(super) fn assemble_parsed_item(
         chatgpt_user_id: chatgpt_user_id.as_deref(),
         email: email_value,
         base_url: base_url.as_deref(),
+        oauth_client_kind: oauth_client_kind.unwrap_or_default(),
     })?;
     let identity = email_value
         .map(mask_email)
@@ -182,6 +187,12 @@ pub(super) fn assemble_parsed_item(
         } else {
             None
         },
+        basis_points_headers: if use_tokens {
+            basis_points_headers
+        } else {
+            None
+        },
+        oauth_client_kind: if use_tokens { oauth_client_kind } else { None },
     };
     let preview = ImportPreviewRow {
         item_id: item_id.clone(),
@@ -189,6 +200,11 @@ pub(super) fn assemble_parsed_item(
         label: label.clone(),
         identity,
         auth_mode,
+        oauth_client_kind: if use_tokens {
+            Some(oauth_client_kind.unwrap_or_default())
+        } else {
+            None
+        },
         source_name,
         quota_status: ImportQuotaStatus::Skipped,
         status: ImportPreviewStatus::Ready,

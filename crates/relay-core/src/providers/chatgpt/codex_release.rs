@@ -109,7 +109,9 @@ async fn refresh_codex_client_release_from_endpoint(
     let release_response_body = collect_response_body(response, MAX_RELEASE_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
-            ResponseBodyError::Transport => CodexReleaseError::Transport,
+            ResponseBodyError::Timeout | ResponseBodyError::Transport => {
+                CodexReleaseError::Transport
+            }
             ResponseBodyError::TooLarge => CodexReleaseError::ResponseTooLarge,
         })?;
     drop(permit);

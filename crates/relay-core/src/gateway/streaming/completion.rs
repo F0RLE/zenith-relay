@@ -8,6 +8,9 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 
 pub(super) struct StreamCompletionSettlement {
+    // Keep the request-local comparison alive until terminal usage is emitted.
+    pub(super) _cache_context_observation:
+        Option<crate::runtime::cache_context::CacheContextObservation>,
     pub(super) upstream_usage: Option<Arc<Mutex<UpstreamUsage>>>,
     pub(super) lease: CandidateLease,
     pub(super) runtime: std::sync::Arc<crate::GatewayRuntime>,

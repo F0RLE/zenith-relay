@@ -9,7 +9,6 @@ pub(super) fn settle_collected_rejection(
         runtime,
         lease,
         route,
-        source_model,
         request_id,
         key,
         carry:
@@ -43,8 +42,7 @@ pub(super) fn settle_collected_rejection(
 ) -> FailureStep {
     let native_replay_attempted = &mut repairs.native_replay;
     let cache_write_rejected = prompt_cache_write_rejected(&bytes);
-    let rejection_state =
-        settle_attempt_failure(runtime, lease, source_model, &failure, response_headers);
+    let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
     let response_missing = previous_response_not_found(&bytes);
     let affinity_miss = recoverable_response_affinity_miss(
         status,
@@ -64,7 +62,7 @@ pub(super) fn settle_collected_rejection(
         && response_affinity_hit
         && *requires_affinity_owner
         && !*native_replay_attempted
-        && (retryable_failure(status, failure.category, has_previous_response_id)
+        && (retryable_route_failure(route, status, failure.category, has_previous_response_id)
             || (affinity_miss && response_missing))
     {
         match replay_native_tool_continuation(
@@ -108,8 +106,8 @@ pub(super) fn settle_collected_rejection(
         runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
     }
     if affinity_miss
-        || cache_write_rejected
-        || retryable_failure(status, failure.category, has_previous_response_id)
+        || (cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
+        || retryable_route_failure(route, status, failure.category, has_previous_response_id)
     {
         if affinity_miss {
             *confirmed_response_missing |= response_missing;

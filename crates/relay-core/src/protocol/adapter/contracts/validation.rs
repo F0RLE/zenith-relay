@@ -294,13 +294,9 @@ fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
                     return Err(AdapterError::invalid_request());
                 }
             }
-            if tool_object.get("defer_loading").and_then(Value::as_bool) == Some(true)
-                || tool_object
-                    .get("allowed_callers")
-                    .is_some_and(|caller_value| !caller_value.is_null())
-            {
-                return Err(AdapterError::unsupported_tool());
-            }
+            // `defer_loading` and `allowed_callers` only steer OpenAI-side tool
+            // search and caller policy. A bridged upstream sees an ordinary
+            // client tool, so the flags are dropped instead of failing the request.
         }
         Some("namespace") => {
             validate_bridge_fields(tool, &["type", "name", "description", "tools"])?;
@@ -319,6 +315,10 @@ fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
                 validate_bridge_tool(child)?;
             }
         }
+        // Hosted tools (web search, image generation, ...) run on OpenAI's
+        // servers and have no equivalent on a bridged upstream. They are left
+        // out of the translated catalog; a forced choice of one still fails.
+        Some(other) if !matches!(other, "function" | "custom") => {}
         _ => return Err(AdapterError::unsupported_tool()),
     }
     Ok(())
