@@ -8,6 +8,58 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- ChatGPT model discovery follows official catalog priorities instead of raw
+  array positions. Pool snapshots and runtime catalogs both prefer account
+  order for shared IDs, while API inventories retain their source order.
+  Manual ordering uses one shared merge and works without reference metadata.
+- Usage has one filter row for period, status, model, and pool member.
+  Model, member, and error reports show three summary cards; errors omit
+  success rates and speeds. Narrow request tables keep the pool member visible
+  while hiding the protocol.
+- More filters opens beside the pool-member selector, with labeled fields in
+  a compact panel above the summary. Option lists fit their contents; text
+  context menus and option lists use a neutral borderless surface.
+- Dialogs share a borderless shell, compact tabs, inset secret controls, and
+  consistent spacing. Source editing, pricing, account import/export, and proxy
+  choices use grouped surfaces; selected choices use background color.
+- API sources use compact cards with sorting and visible status details.
+  Source setup separates the provider selector from connection fields, without
+  repeated icons or introductory text.
+- Proxy check results are saved locally and remain visible after restarting
+  Relay. Rechecking updates the saved exit IP, country, latency, and check time.
+- Request details include a privacy-safe context comparison for native
+  Responses: client and sent parameter changes, history-prefix changes, and
+  pool-participant changes. The comparison does not alter requests or claim
+  to explain provider cache misses. Its Context tab is visible only in debug
+  mode. Estimated cost appears below total tokens and in the summary cards.
+- API setup includes Anthropic, Google Gemini, DeepSeek, Groq, Mistral,
+  Moonshot / Kimi API, Kimi Code, and MiniMax presets with console links.
+  Provider choices wrap to the available width. Kimi Code remains separate
+  from Moonshot's API wallet.
+- Moonshot balances retain USD or CNY according to the API region. Known
+  services without a supported balance reader no longer receive generic
+  billing probes; custom compatible services retain autodetection.
+- Sign-in and proxy selection share a neutral surface without redundant waiting
+  text, selection marks, or Cancel buttons. The selected sign-in method and
+  open-window action retain their accent color; switching methods keeps the
+  status row at the same height. Close either window with its close button or
+  Escape.
+- Integrations now has its own sidebar page between Pool and API. Application
+  setup and account settings are separate; ChatGPT model-substitution checks
+  live under Accounts. Compact client selectors replace the secondary tab bar;
+  sign-in explanations stay in Help. ChatGPT settings share one panel; the
+  extra launch button and missing-account warning are removed. Automatic
+  account selection is offered only when eligible accounts exist.
+  API retains server and access controls.
+- Basis Points is available only through a separate Excel / Basis Points
+  sign-in. Ordinary ChatGPT connections always use native Responses, including
+  when old settings enabled BPS. The API transport switch is removed.
+- Adding a regular ChatGPT account to the pool shows a risk notice with
+  Continue, Skip, and a device-local reminder preference. Right-click addition
+  bypasses the notice; skipped imports still save the accounts.
+- Request details use compact tabs and copy controls. Summary cards show total
+  time, first output, generation speed, and estimated cost; tool details omit
+  obsolete optimization fields and repeated values.
 - Documentation now separates current behavior from the roadmap, removes
   obsolete feature claims, and keeps the localized error reference unchanged.
 - ChatGPT account discovery and Codex model catalog requests accept up to 4 MiB,
@@ -17,14 +69,71 @@ release entries are kept concise and link to the corresponding tag.
   The logo and title stay on the right, while full-screen mode removes the
   reserved space for the native buttons.
   ([#85](https://github.com/F0RLE/zenith-relay/pull/85))
+- Excel / Basis Points imports preserve allowlisted provider client headers
+  through reauthentication and token refresh, keep native upstream identity on
+  routed requests, isolate attachment cache entries by credential session, and
+  return provider credential failures without rotating to another account.
+
+### Fixed
+
+- Switching between ChatGPT and Excel / Basis Points sign-in keeps the dialog
+  open and updates the selection immediately. The dialog blocks the previous
+  sign-in link during replacement.
+- Account and pool credit totals count a shared ChatGPT balance once across
+  Codex and Excel / Basis Points connections, using the newest reported balance.
+- Account monitoring distinguishes model-list and quota timeouts from other
+  connection failures. Error details use a quiet panel without a duplicate
+  warning, omit account identities, and show only the timestamp belonging to
+  the displayed error.
+- Native Responses API sources keep allowlisted client metadata. Failed
+  request details retain supported provider request IDs for support correlation.
+- Supported provider request IDs also appear in client-visible error messages,
+  including clients that ignore separate diagnostic fields.
+- Generic API request rejections no longer pause healthy pool members or
+  trigger tool-history replay. Recovery still requires a specific continuation
+  or tool-link error.
+- Explicitly unsupported protocols stay excluded when selecting stored or
+  fallback routes. A model with no available protocol has no executable route.
+- Clearing Usage filters also resets the selected period.
+- The active-filter badge stays inside its button on narrow Usage layouts.
+- Borderless buttons and tabs keep visible keyboard focus through their
+  background color.
+- Rejected encrypted compaction checkpoints no longer get discarded during
+  account history repair. The original rejection is returned without retrying
+  or rotating; reasoning-only repair retains its bounded pre-output retry.
 
 <!-- relay-notes:en -->
+
+- Sign-in offers separate Codex and Excel / Basis Points connections. Token
+  refresh keeps the issuing OAuth client. Excel is available through the pool
+  and supports Zenith and Sub2API exports.
+- Account cards and pickers identify Excel connections with a BPS badge after
+  the plan. Sign-in uses a two-option selector and contextual Help with setup
+  steps and limits; manual browser callback entry is removed.
+- Account error details use the same category labels as Usage. Request details
+  hide empty provider messages and show the attempt number only from attempt 2.
+- Basis Points is reserved for Excel sign-ins. Ordinary ChatGPT connections
+  use native Responses and show a risk notice before pool inclusion.
 
 - Account import recognizes Cockpit Tools JSON, and account export can create Cockpit Tools files with safe account metadata.
 
 - Direct ChatGPT OAuth clears Relay provider and catalog overrides from the root and named Codex profiles, then lets Codex discover its native models. Relay pool activation clears stale named-profile overrides and uses the validated catalog from Relay's live model endpoint. Profile backups and credential snapshots stay in Relay recovery storage and the OS secret store, outside the Codex directory; profile or account-token changes invalidate Codex's model cache.
 
 <!-- relay-notes:ru -->
+
+- При входе можно выбрать отдельное подключение Codex или Excel / Basis Points.
+  Токен обновляется через выдавший его OAuth-клиент. Excel работает через пул
+  и поддерживает экспорт Zenith и Sub2API.
+- Карточки и выбор аккаунтов отмечают подключение Excel плашкой BPS после
+  тарифа. Вход использует переключатель из двух вариантов и помощь с шагами
+  подключения и ограничениями; ручная вставка ссылки возврата убрана.
+- Детали ошибки аккаунта используют те же названия категорий, что и
+  «Использование». Сведения о запросе скрывают пустой ответ провайдера и
+  показывают номер попытки начиная со второй.
+- Basis Points доступен только через отдельный вход Excel. Обычный вход
+  ChatGPT использует нативный маршрут; добавление в пул показывает
+  предупреждение с «Продолжить», «Пропустить» и «Больше не напоминать».
+  ПКМ добавляет сразу, пропуск при импорте сохраняет аккаунт вне пула.
 
 - Импорт распознаёт JSON Cockpit Tools, а экспорт создаёт файлы Cockpit Tools с безопасными метаданными аккаунта.
 
@@ -64,6 +173,7 @@ Zenith Relay 1.1.5 меняет ротацию пула, сохраняет пр
 - В ротации пула два режима: «Автоматически» и «Вручную». Ручной режим проходит сохранённый порядок по кругу, пропускает недоступных участников и достигших лимита запросов. Автоматический режим сохраняет долю запросов и индивидуальные лимиты.
 - В автоматическом режиме карточки без положительной квоты сортируются по актуальным кредитам провайдера. Баланс API-источника на порядок не влияет.
 - В быстрой настройке логотип Relay стоит между подключениями и совместимыми приложениями. Кнопки окна остаются в перетаскиваемой верхней области без полосы.
+- Импорт Excel / Basis Points сохраняет разрешённые заголовки клиента провайдера после повторной авторизации и обновления токена, передаёт нативную идентичность провайдера, разделяет кэш вложений по сессии учётных данных и не переключает аккаунт при ошибках учётных данных провайдера.
 - В окне ротации нет пояснений режимов. Поведение описано в справке.
 - Заметки входа сохраняются по порядку, не пропадают после повторного входа и не показывают успешное сохранение при ошибке или закрытии окна. Повторный вход заменяет сохранённый токен, сохраняет локальные заметки и не открывает настройку пула для нового аккаунта.
 - Прямой запуск ChatGPT отключён для аккаунтов, которым нужен повторный вход или у которых есть окончательная ошибка учётных данных, прокси или состояния. Relay проверяет учётные данные до остановки уже запущенного ChatGPT и восстанавливает сессию после неудачной смены профиля.

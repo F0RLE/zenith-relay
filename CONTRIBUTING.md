@@ -95,17 +95,16 @@ Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
 ## Development setup
 
 Clone this repository. The commands below are the same on Windows, macOS, and
-Linux. `bun run setup` installs the locked project dependencies and, on
-Windows, bootstraps the portable native toolchain under
-`%USERPROFILE%\Development` when it is missing:
+Linux. Install Bun, Rust, and the native tools listed below before running
+`bun run setup`; it installs the locked project dependencies:
 
 - [Bun](https://bun.sh) 1.4.2 or newer.
 - [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
   Rust version.
 - Native libraries for the desktop shell:
-  - Windows: the portable MSVC/Windows SDK bundle installed by the setup
-    script, and the WebView2 runtime. A regular MSVC installation is supported
-    when no portable bundle is present.
+  - Windows: MSVC, Windows SDK, CMake, Ninja, and the WebView2 runtime.
+    Relay supports a portable bundle and a regular Visual Studio Build Tools
+    installation when no portable bundle is present.
   - macOS: Xcode Command Line Tools.
   - Linux: GTK 3, WebKitGTK 4.1, librsvg, and a secret service such as
     gnome-keyring. The Build workflow lists the packages CI installs.
@@ -117,7 +116,8 @@ bun scripts/setup/start-dev.mjs
 ~~~
 
 `bun run start` installs the locked frontend and Rust dependencies, then starts
-the desktop app. The same command from `src` is `bun run start`. Use
+the desktop app. The setup, start, and `app:*` commands work from the repository
+root and from `src`. Use
 `bun run setup` when you only want to prepare the checkout.
 On Windows, Relay's scripts prefer the portable toolchain in
 `%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
@@ -132,12 +132,13 @@ the same environment is applied:
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
 ~~~
 
-On a fresh Windows checkout the setup command calls the workspace
-`scripts/setup/setup-development.ps1` and keeps all downloaded tools in
-`Development`; `winget` and an elevated PowerShell window are required for
-that first installation. Use `-InstallBuildTools` when running that PowerShell
-script directly to force a repair. For a direct `cargo` invocation in
-an existing PowerShell session, load the same portable environment first:
+When cloned inside the Zenith workspace, setup can call the sibling
+`scripts/setup/setup-development.ps1` to install missing portable Windows tools
+under `Development`. This installer is not included in a standalone Relay
+clone. Standalone contributors must prepare native tools first. The workspace
+installer requires `winget` and an elevated PowerShell window;
+`-InstallBuildTools` forces a repair. For a direct `cargo` invocation from the
+workspace, load the same portable environment first:
 
 ~~~powershell
 . ..\scripts\setup\use-development-env.ps1
@@ -274,9 +275,19 @@ only the committed `docs/screenshots` assets.
 TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
 
 ~~~powershell
-cd src
 bun run app:build
 ~~~
+
+Run it from the repository root or from `src`. To build only the executable,
+without an installer:
+
+~~~powershell
+bun run app:build --no-bundle
+~~~
+
+On Windows, the executable is written to
+`src-tauri/target/release/zenith-relay.exe`. Building does not replace or
+restart an installed Relay.
 
 ### Shared runtime
 

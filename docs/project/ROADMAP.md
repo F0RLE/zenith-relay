@@ -47,6 +47,11 @@ accounts and real installed clients.
 
 ### Client and provider acceptance
 
+- Verify the new provider presets with permitted live keys, including Moonshot
+  USD/CNY balances, regional key mismatches, and Kimi Code discovery and tools.
+  Add Kimi Code subscription and MiniMax M Plan quota readers only after
+  verifying their cloud endpoint, credential scope, units, and reset semantics.
+  A local Kimi CLI usage endpoint is not a cloud quota contract.
 - Exercise ChatGPT and generic API sources through add, refresh, disable,
   remove, restore, model refresh, failed-write rollback, and configuration
   recovery.
@@ -59,6 +64,22 @@ accounts and real installed clients.
   returned by a source must not disappear only because a route is unavailable.
 - Use two permitted accounts to check rotation, proxy, quota refresh,
   cooldown/recovery, member removal, and redacted usage.
+
+### Excel / Basis Points acceptance
+
+- Exercise Excel PKCE sign-in and automatic callback validation in the Relay
+  window, cancellation, proxies, token rotation, and targeted reauthentication
+  with permitted live accounts. Check client selection and contextual Help
+  without losing the pending flow.
+- Verify separate Codex and Excel connections for the same principal through
+  import, export, server transfer, and concurrent credential replacement.
+- Check actual model entitlements, reasoning, tools, image input, usage,
+  streaming, and continuation on the Excel route.
+- Confirm ordinary ChatGPT connections remain native after old settings are
+  imported or the runtime is rebuilt. Excel refusals must never authorize an
+  unsafe replay or change another connection's transport.
+- Compare quality under controlled conditions. A separate Excel OAuth client
+  does not establish that account degradation has been eliminated.
 
 ### Concurrency and load
 
@@ -80,8 +101,9 @@ accounts and real installed clients.
 3. Compare requests, quota, usage, and timing with the desktop open and closed.
 4. Verify restart, upgrade, interrupted migration, backup, restore, and a
    request from the restored runtime.
-5. Check management responses, diagnostics, usage, and exports for secrets,
-   prompts, response bodies, and authorization headers.
+5. Check management snapshots, diagnostics, usage, and support exports for
+   secrets, prompts, response bodies, and authorization headers. Explicit
+   account exports contain credentials and must use a no-store response.
 
 ## P1 — make server publication explicit
 
