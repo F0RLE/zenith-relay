@@ -82,9 +82,9 @@ export function orderModelIdsBySnapshot(
 ) {
   const unique = uniqueModelIds(models);
   const byId = new Map(unique.map((model) => [modelIdKey(model), model]));
-  const ordered = summaries
-    .map((model) => byId.get(modelIdKey(model.id)))
-    .filter((model): model is string => Boolean(model));
+  const ordered = uniqueModelIds(summaries.map((model) => model.id))
+    .map((modelId) => byId.get(modelIdKey(modelId)))
+    .filter((model): model is string => model !== undefined);
   const knownModelIds = new Set(ordered.map((model) => modelIdKey(model)));
   const unknownModels = unique.filter((model) => !knownModelIds.has(modelIdKey(model)));
   return [...ordered, ...unknownModels];

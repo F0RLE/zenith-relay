@@ -10,6 +10,7 @@ import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } fro
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
+import { selectApiProvider } from "../../components/apiProviderModel";
 
 type SourceEditTab = "main" | "prices";
 export function SourceDialog({ source: initialSource, onClose, addToPool = false, modeOverride, onCreated }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean; modeOverride?: RelayMode; onCreated?: () => void }) {
@@ -19,7 +20,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
   const [savedSource, setSavedSource] = useState(initialSource);
   const createdSourceId = useRef<string | null>(null);
   const source = relayMode === currentMode ? runtime?.sources.find((sourceOption) => sourceOption.id === savedSource?.id) ?? savedSource : savedSource;
-  const [provider, setProvider] = useState(defaultApiProviderValue);
+  const [provider, setProvider] = useState(() => selectApiProvider(defaultApiProviderValue(), "custom"));
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
@@ -99,18 +100,17 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
       onClose();
     }
   };
-  const dialogClassName = source ? `source-edit-dialog connection-dialog${activeTab === "prices" ? " source-prices-dialog" : ""}` : "source-add-dialog";
+  const dialogClassName = source ? "source-edit-dialog connection-dialog" : "source-add-dialog";
   const submitSourceForm = () => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit();
   const footer = (
     <>
-      <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
       <Button
         variant="primary"
         busy={busy === "source-save"}
         disabled={source ? !modelPriceOverrides : !apiProviderReady(provider)}
         onClick={submitSourceForm}
       >
-        {t("common.save")}
+        {t(source ? "common.save" : "sources.add")}
       </Button>
     </>
   );
@@ -121,14 +121,17 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         className={dialogClassName}
         title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")}
         onClose={onClose}
-        footer={footer}
+        footer={source || provider.kind ? footer : undefined}
       >
         <form id="source-form" className="relay-form source-form" onSubmit={submit}>
           {source ? (
             <>
-              <div className="connection-dialog-context">
-                <Link2 aria-hidden />
-                <strong>{source.name}</strong>
+              <div className="connection-dialog-context source-editor-context">
+                <div className="source-editor-icon"><Link2 aria-hidden /></div>
+                <div className="source-editor-identity">
+                  <strong>{source.name}</strong>
+                  <small>{source.baseUrl}</small>
+                </div>
                 <span>{t("sources.groupModelsCount", { count: source.models.length })}</span>
               </div>
               <Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />

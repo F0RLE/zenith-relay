@@ -42,7 +42,7 @@ for (const guide of [
       await openContents();
       await navigation.getByRole("link", { name: guide.errors, exact: true }).focus();
       await page.keyboard.press("Enter");
-      const errorsHeading = document.getByRole("heading", { name: `8. ${guide.errors}`, exact: true });
+      const errorsHeading = document.getByRole("heading", { name: `9. ${guide.errors}`, exact: true });
       await expect(errorsHeading).toBeInViewport();
       await expect(errorsHeading).toBeFocused();
       await expect(navigation.locator("a[aria-current]")).toHaveText(guide.errors);

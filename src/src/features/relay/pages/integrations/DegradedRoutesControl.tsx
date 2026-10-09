@@ -10,7 +10,7 @@ export function DegradedRoutesControl() {
   const controlId = useId();
   const { checked, saving, select } = usePendingFlag(blockDegradedRoutesEnabled);
   if (mode === "zenith" || !runtime || (mode === "remote" && !runtime.capabilities.features.includes("block_degraded_routes"))) return null;
-  return <div className="gateway-api-toggle-setting">
+  return <div className="integration-account-policy">
     <div className="relay-toggle-setting">
       <label htmlFor={controlId} data-relay-tooltip={t("gateway.degradedRoutesHint")}>
         <strong>{t("gateway.degradedRoutes")}</strong>

@@ -12,6 +12,7 @@ export function Dialog({
   children,
   onClose,
   footer,
+  headerActions,
   wide = false,
   className = "",
   layer = "default",
@@ -20,6 +21,7 @@ export function Dialog({
   children: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
+  headerActions?: ReactNode;
   wide?: boolean;
   className?: string;
   layer?: "default" | "top";
@@ -125,6 +127,7 @@ export function Dialog({
       >
         <header>
           <h2 id={titleId}>{title}</h2>
+          {headerActions ? <div className="relay-dialog-header-actions">{headerActions}</div> : null}
           <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} />
         </header>
         <div className="relay-dialog-body">{children}</div>

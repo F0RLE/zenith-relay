@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plug, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
@@ -24,6 +24,7 @@ function lazyNamed<P>(load: () => Promise<ComponentType<P>>) {
 const connectionsPage = lazyNamed(async () => (await import("../pages/connections/ConnectionsPage")).ConnectionsPage);
 const importDialog = lazyNamed(async () => (await import("../pages/connections/ImportDialog")).ImportDialog);
 const poolPage = lazyNamed(async () => (await import("../pages/pool/PoolPage")).PoolPage);
+const integrationsPage = lazyNamed(async () => (await import("../pages/integrations/IntegrationsPage")).IntegrationsPage);
 const gatewayPage = lazyNamed(async () => (await import("../pages/gateway/GatewayPage")).GatewayPage);
 const usagePage = lazyNamed(async () => (await import("../pages/usage/UsagePage")).UsagePage);
 const profilesPage = lazyNamed(async () => (await import("../pages/profiles/ProfilesPage")).ProfilesPage);
@@ -34,6 +35,7 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "overview", icon: LayoutDashboard },
   { id: "connections", icon: Cable },
   { id: "pool", icon: SlidersHorizontal },
+  { id: "integrations", icon: Plug },
   { id: "gateway", icon: Gauge },
   { id: "usage", icon: Activity },
   { id: "profiles", icon: ArchiveRestore },
@@ -63,7 +65,7 @@ export function RelayShell() {
     openUpdateDialog,
     closeUpdateDialog,
   } = useAppUpdates();
-  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(pageItem.id));
+  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "integrations", "gateway", "usage"] as PageId[]).includes(pageItem.id));
   const focusModePicker = useCallback(() => {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
@@ -77,6 +79,7 @@ export function RelayShell() {
       connectionsPage.preload();
       importDialog.preload();
       poolPage.preload();
+      integrationsPage.preload();
       gatewayPage.preload();
       usagePage.preload();
       profilesPage.preload();
@@ -325,6 +328,7 @@ function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates 
   if (page === "overview") return <OverviewPage />;
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;
+  if (page === "integrations") return <integrationsPage.Component />;
   if (page === "gateway") return <gatewayPage.Component />;
   if (page === "usage") return <usagePage.Component />;
   if (page === "profiles") return <profilesPage.Component />;

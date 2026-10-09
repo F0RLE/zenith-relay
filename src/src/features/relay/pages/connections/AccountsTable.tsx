@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CircleAlert,
@@ -29,6 +29,7 @@ import {
   type AccountQuotaRefreshReport,
 } from "../../accountQuotaRefresh";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
+import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
 import {
   ActionMenu,
   ActionMenuItem,
@@ -88,6 +89,8 @@ export function AccountsTable({
   onExport: (accountIds: string[]) => void;
 }) {
   const { t, i18n } = useTranslation();
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const membershipPending = useRef(false);
   const {
     mode,
     runtime,
@@ -213,12 +216,21 @@ export function AccountsTable({
     localStorage.setItem("relay.accountsGroupByPlan", String(!previousGroupByPlan));
     return !previousGroupByPlan;
   });
-  const updateSelectedParticipation = async (participate: boolean) => {
-    const ok = await perform("pool-membership-bulk", async () => {
-      const accountIds = selectedAccounts.map((account) => account.id);
-      await updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate });
-    }, "feedback.saved", { backgroundRefresh: true });
-    if (ok) setSelected([]);
+  const updateSelectedParticipation = async (participate: boolean, bypassWarning = false) => {
+    if (membershipPending.current) return;
+    membershipPending.current = true;
+    const accountsToUpdate = [...selectedAccounts];
+    try {
+      const accepted = !participate || await confirmPoolAccounts(accountsToUpdate, bypassWarning);
+      const accountIds = accountsToUpdate
+        .filter((account) => accepted || account.oauthClientKind === "excel_bps" || account.inPool)
+        .map((account) => account.id);
+      if (!accountIds.length) return;
+      const ok = await perform("pool-membership-bulk", () => updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate }), "feedback.saved", { backgroundRefresh: true });
+      if (ok) setSelected((previous) => previous.filter((id) => !accountIds.includes(id)));
+    } finally {
+      membershipPending.current = false;
+    }
   };
   const deleteAccounts = async (accountIds: string[], operation: string) => {
     const ok = await perform(operation, async () => {
@@ -367,6 +379,12 @@ export function AccountsTable({
                 icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />}
                 disabled={busy === "pool-membership-bulk"}
                 onClick={() => void updateSelectedParticipation(true)}
+                data-relay-context-action
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void updateSelectedParticipation(true, true);
+                }}
               />
             ) : null}
             {canExcludeSelected ? (

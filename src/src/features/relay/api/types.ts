@@ -60,6 +60,7 @@ export type {
   AccountImportProgress,
   AccountTransferProgress,
   OAuthFlowStatus,
+  OAuthClientKind,
   OAuthFlow,
   OAuthFlowEvent,
   OAuthCompletion,
@@ -115,6 +116,9 @@ export type {
 } from "./types/runtime";
 
 export type {
+  CacheContextDiagnostics,
+  CacheContextSection,
+  CacheHistoryDiagnostics,
   RoutingDiagnostics,
   ToolUseDiagnostics,
   ErrorOrigin,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SourceSummary } from "../src/features/relay/api/types";
-import { filterAndSortSources } from "../src/features/relay/pages/connections/sourceTableModel";
+import { filterAndSortSources } from "../src/features/relay/pages/connections/sourceListModel";
 
 const source = (id: string, overrides: Partial<SourceSummary> = {}): SourceSummary => ({
   id,
@@ -23,7 +23,7 @@ const source = (id: string, overrides: Partial<SourceSummary> = {}): SourceSumma
   ...overrides,
 });
 
-describe("source table model", () => {
+describe("source list model", () => {
   test("follows runtime order and uses the name only as a tie-break", () => {
     const sources = [source("b"), source("a"), source("c")];
     const order = new Map([["c", 0], ["a", 1]]);

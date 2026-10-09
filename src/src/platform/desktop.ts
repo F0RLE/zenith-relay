@@ -38,7 +38,11 @@ export function getSystemLocale() {
   return invoke<string | null>("get_system_locale");
 }
 
-export function openApiKeyPage(provider: "zenith" | "openai" | "openrouter") {
+export type ApiKeyPageProvider =
+  | "zenith" | "openai" | "openrouter" | "anthropic" | "gemini"
+  | "deepseek" | "groq" | "mistral" | "moonshot" | "kimi" | "minimax";
+
+export function openApiKeyPage(provider: ApiKeyPageProvider) {
   return invoke<void>("open_api_key_page", { provider });
 }
 

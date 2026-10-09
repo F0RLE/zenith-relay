@@ -27,6 +27,7 @@ import type {
   ProfileSnapshotList,
   MoveAccountsToRemoteResult,
   OAuthFlow,
+  OAuthClientKind,
   OAuthFlowEvent,
   OAuthCompletion,
   ProfileActivation,
@@ -154,7 +155,7 @@ export const relayCommands = {
   previewTotpCode: (secret: string) => invoke<AccountTotpPreview>("preview_totp_code", { secret }),
   revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
 
-  startOAuth: (openBrowser = true, accountId?: string, proxyId?: string) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}), ...(proxyId ? { proxyId } : {}) }),
+  startOAuth: (openBrowser = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}), ...(proxyId ? { proxyId } : {}), ...(clientKind ? { clientKind } : {}) }),
   resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
   onOAuthStatus: (callback: (event: OAuthFlowEvent) => void) => listen<OAuthFlowEvent>("relay-oauth-status", (event) => callback(event.payload)),
   completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),
@@ -170,7 +171,7 @@ export const relayCommands = {
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   previewLocalConfigurationPreset: () => invoke<ConfigurationPresetPreview | null>("preview_local_configuration_preset"),
   applyLocalConfigurationPreset: (preview: ConfigurationPresetPreview) => invoke<ConfigurationPresetApplyResult>("apply_local_configuration_preset", { input: { baseRevision: preview.baseRevision, preset: preview.preset } }),
-  updateRouting: (maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, poolRouting?: PoolRoutingPolicy, expectedPoolRouting?: PoolRoutingSnapshot, basisPointsEnabled?: boolean) => invoke("update_local_routing", { input: { maxRetryCandidates, defaultServiceTier, poolRouting, expectedPoolRouting, basisPointsEnabled } }),
+  updateRouting: (maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, poolRouting?: PoolRoutingPolicy, expectedPoolRouting?: PoolRoutingSnapshot) => invoke("update_local_routing", { input: { maxRetryCandidates, defaultServiceTier, poolRouting, expectedPoolRouting } }),
 
   syncCodexDefaultServiceTier: (defaultServiceTier: DefaultServiceTier) => invoke<void>("sync_codex_default_service_tier", { defaultServiceTier }),
   startGateway: () => invoke("start_local_gateway"),

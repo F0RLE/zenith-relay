@@ -322,6 +322,7 @@ for (const theme of themes) {
       expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
       await page.screenshot({ path: `output/playwright/gateway-api-connection-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
+      await page.getByRole("button", { name: "Интеграции", exact: true }).click();
       await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Аккаунт ChatGPT" })).toBeVisible();
@@ -372,7 +373,8 @@ for (const theme of themes) {
     await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
     await page.goto("/");
     await page.getByRole("button", { name: "API", exact: true }).click();
-    await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
+    await page.getByRole("button", { name: "Интеграции", exact: true }).click();
+      await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
     const panel = page.getByRole("tabpanel", { name: "ChatGPT", exact: true });
     const switches = panel.getByRole("checkbox");
     await expect(switches).toHaveCount(3);

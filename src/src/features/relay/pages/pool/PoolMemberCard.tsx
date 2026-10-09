@@ -4,7 +4,7 @@ import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode } from "
 import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { AccountPlanBadge, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
+import { AccountBadges, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
 import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
@@ -150,7 +150,7 @@ export function PoolMemberCard({
           </strong>
           <div className="pool-member-meta">
             {member.kind === "account"
-              ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} />
+              ? <AccountBadges planType={member.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")} />
               : <small data-relay-tooltip={detail}>{detail}</small>}
           </div>
         </div>

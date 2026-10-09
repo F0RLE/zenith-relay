@@ -133,7 +133,16 @@
   color: var(--relay-muted);
 }
 
-.account-plan-badge {
+.account-badges {
+  min-width: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.account-plan-badge,
+.account-client-badge {
   --plan-accent: var(--relay-muted);
   width: fit-content;
   max-width: 100%;
@@ -162,6 +171,10 @@
 .account-plan-badge[data-plan="go"] { --plan-accent: #15869a; }
 .account-plan-badge[data-plan="edu"],
 .account-plan-badge[data-plan="k12"] { --plan-accent: #ad4f82; }
+
+.account-client-badge {
+  --plan-accent: var(--relay-accent-hover);
+}
 
 @media (max-width: 1023px) {
   .scope-grid {
@@ -285,10 +298,10 @@
   margin-left: auto;
 }
 
-.mode-menu button:hover,
-.relay-sidebar nav button:hover,
-.sidebar-footer button:hover,
-.sidebar-update:hover {
+.mode-menu button:is(:hover, :focus-visible),
+.relay-sidebar nav button:is(:hover, :focus-visible),
+.sidebar-footer button:is(:hover, :focus-visible),
+.sidebar-update:is(:hover, :focus-visible) {
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
@@ -676,13 +689,13 @@
   color: var(--relay-error);
 }
 
-.relay-icon-button.danger:hover:not(:disabled) {
+.relay-icon-button.danger:is(:hover, :focus-visible):not(:disabled) {
   border-color: transparent;
   background: var(--relay-error-soft);
 }
 
-.relay-button:hover:not(:disabled),
-.relay-icon-button:hover:not(:disabled) {
+.relay-button:is(:hover, :focus-visible):not(:disabled),
+.relay-icon-button:is(:hover, :focus-visible):not(:disabled) {
   border-color: transparent;
   background: var(--relay-subtle);
 }
@@ -694,7 +707,7 @@
   box-shadow: 0 1px 2px rgb(5 78 58 / 22%);
 }
 
-.relay-button.primary:hover:not(:disabled) {
+.relay-button.primary:is(:hover, :focus-visible):not(:disabled) {
   border-color: transparent;
   background: var(--relay-accent-hover);
 }
@@ -705,7 +718,7 @@
   color: var(--relay-on-accent);
 }
 
-:root[data-theme="dark"] .relay-button.primary:hover:not(:disabled) {
+:root[data-theme="dark"] .relay-button.primary:is(:hover, :focus-visible):not(:disabled) {
   border-color: transparent;
   background: var(--relay-accent-hover);
 }
@@ -717,7 +730,7 @@
     color: var(--relay-on-accent);
   }
 
-  :root[data-theme="system"] .relay-button.primary:hover:not(:disabled) {
+  :root[data-theme="system"] .relay-button.primary:is(:hover, :focus-visible):not(:disabled) {
     border-color: transparent;
     background: var(--relay-accent-hover);
   }
@@ -769,6 +782,7 @@ textarea:focus-visible {
 .relay-tabs button:focus-visible {
   outline: 0;
   border-radius: 4px;
+  background: var(--relay-subtle);
 }
 
 .relay-tabs {

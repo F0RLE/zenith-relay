@@ -7,7 +7,7 @@
   place-items: center;
   padding: 20px;
   background: var(--relay-overlay);
-  backdrop-filter: blur(3px);
+  backdrop-filter: blur(6px);
 }
 
 /* Error details can be opened from a toast while another modal is active. */
@@ -16,13 +16,14 @@
 }
 
 .relay-dialog {
+  --relay-dialog-field-background: var(--relay-subtle);
   width: min(560px, 100%);
   max-height: calc(100dvh - 76px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 18px;
   background: var(--relay-surface);
   box-shadow: var(--relay-dialog-shadow);
 }
@@ -37,38 +38,66 @@
 
 .relay-dialog > header,
 .relay-dialog > footer {
-  min-height: 60px;
+  min-height: 64px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--relay-border);
+  gap: 12px;
+  padding: 22px 24px 12px;
+}
+
+.relay-dialog-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.relay-dialog-header-actions .relay-icon-button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+}
+
+.relay-dialog.help-topic-dialog {
+  width: min(720px, 100%);
+}
+
+.help-topic-dialog .help-document > :first-child {
+  margin-top: 0;
+}
+
+.help-topic-dialog .help-document > :last-child {
+  margin-bottom: 0;
 }
 
 .relay-dialog > header {
   position: relative;
   justify-content: flex-start;
-  padding-right: 60px;
-  background: var(--relay-surface);
+  padding-right: 68px;
+  background: transparent;
 }
 
 .relay-dialog > header h2 {
   max-width: 100%;
   margin: 0;
   color: var(--relay-text);
-  font-size: 17px;
-  font-weight: 650;
-  line-height: 22px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 26px;
   text-align: left;
   overflow-wrap: anywhere;
 }
 
 .relay-dialog > header > .relay-icon-button {
   position: absolute;
-  right: 16px;
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
+  right: 20px;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border-radius: 9px;
   border-color: transparent;
   background: transparent;
 }
@@ -76,35 +105,136 @@
 .relay-dialog > footer {
   justify-content: flex-end;
   flex-wrap: wrap;
-  padding-block: 12px;
-  background: var(--relay-surface);
-  border-top: 1px solid var(--relay-border);
-  border-bottom: 0;
+  padding: 4px 24px 24px;
+  background: transparent;
 }
 
 .relay-dialog-body {
   min-width: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 20px;
+  padding: 16px 24px 24px;
+  scrollbar-gutter: stable;
 }
 
 .relay-dialog .relay-field {
   min-width: 0;
 }
 
-.relay-dialog .relay-field > input:not([type="checkbox"]):not([type="radio"]),
+.relay-dialog .relay-field > input:where(:not([type="checkbox"]):not([type="radio"])),
+.relay-dialog .secret-field > input,
+.relay-dialog .search-field > input,
 .relay-dialog textarea {
   min-width: 0;
   width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--relay-dialog-field-background);
+  transition: background-color 120ms ease;
+}
+
+.relay-dialog .relay-field > input:hover,
+.relay-dialog .secret-field > input:hover,
+.relay-dialog .search-field > input:hover,
+.relay-dialog textarea:hover {
+  background: color-mix(in srgb, var(--relay-border) 18%, var(--relay-dialog-field-background));
+}
+
+.relay-dialog .relay-field > input:focus,
+.relay-dialog .secret-field > input:focus,
+.relay-dialog .search-field > input:focus,
+.relay-dialog textarea:focus {
+  background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-dialog-field-background));
+}
+
+.relay-dialog .secret-field {
+  position: relative;
+  display: block;
+}
+
+.relay-dialog .secret-field > input {
+  padding-right: 46px;
+}
+
+.relay-dialog .secret-field > .relay-icon-button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs {
+  width: fit-content;
+  max-width: 100%;
+  height: auto;
+  min-height: 40px;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 4px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--relay-subtle);
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs button {
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 12px;
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs button.active {
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs button:hover:not(.active) {
+  background: color-mix(in srgb, var(--relay-border) 22%, transparent);
+}
+
+.relay-dialog .relay-button {
+  border-color: transparent;
+  border-radius: 9px;
+}
+
+.relay-dialog .relay-button.secondary {
+  background: var(--relay-subtle);
+}
+
+.relay-dialog .source-price-group {
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
+}
+
+.relay-dialog .source-price-group[open] > summary {
+  border: 0;
+}
+
+.relay-dialog .source-price-input {
+  border: 0;
+  background: var(--relay-surface);
+}
+
+.relay-dialog .source-price-currency {
+  border: 0;
 }
 
 .relay-dialog > footer .relay-button {
-  min-height: 36px;
+  min-height: 40px;
   white-space: normal;
 }
 
-.relay-dialog.source-add-dialog,
 .relay-dialog.account-export-dialog {
   width: min(640px, 100%);
 }
@@ -141,7 +271,7 @@
   .relay-dialog {
     width: 100%;
     max-height: calc(100dvh - 60px);
-    border-radius: 10px;
+    border-radius: 14px;
   }
 
   .relay-dialog > header,
@@ -151,6 +281,10 @@
 
   .relay-dialog > header {
     padding-right: 56px;
+  }
+
+  .relay-dialog > header > .relay-icon-button {
+    right: 12px;
   }
 
   .relay-dialog-body {
@@ -167,6 +301,23 @@
   color: var(--relay-secondary);
   line-height: 1.55;
   white-space: pre-line;
+}
+
+.confirm-dialog-remember {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  color: var(--relay-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.confirm-dialog-remember input {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--relay-accent);
 }
 
 .update-dialog {
@@ -374,15 +525,15 @@
 }
 
 .import-file-source {
-  min-height: 118px;
+  min-height: 136px;
   display: grid;
   place-items: center;
   align-content: center;
   gap: 5px;
   padding: 16px;
-  border: 1px dashed transparent;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--relay-accent) 5%, var(--relay-surface));
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
   color: var(--relay-text);
   cursor: pointer;
 }
@@ -464,8 +615,8 @@
 .import-package-description {
   display: grid;
   gap: 4px;
-  padding: 10px 12px;
-  border-left: 2px solid var(--relay-accent);
+  padding: 14px 16px;
+  border-radius: 10px;
   background: var(--relay-subtle);
 }
 
@@ -606,8 +757,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--relay-border);
+  padding-top: 8px;
 }
 
 .post-import-options > span {
@@ -627,22 +777,19 @@
 .import-account-list {
   display: grid;
   margin: 0;
-  padding: 0;
+  padding: 4px;
   overflow: hidden;
   list-style: none;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: var(--relay-surface);
+  gap: 4px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
 }
 
 .import-account-card {
   min-width: 0;
-  border-bottom: 1px solid var(--relay-border);
+  border-radius: 9px;
   background: transparent;
-}
-
-.import-account-card:last-child {
-  border-bottom: 0;
 }
 
 .import-account-card:hover,
@@ -769,27 +916,20 @@
   min-height: 64px;
   padding: 14px 16px;
   border: 0;
-  border-radius: 0;
-  border-bottom: 1px solid var(--relay-border);
-  background: transparent;
+  border-radius: 10px;
+  background: var(--relay-subtle);
 }
 
-.import-after .import-after-toggle:last-child {
-  border-bottom: 0;
+.import-after .settings-group-body {
+  display: grid;
+  gap: 6px;
 }
 
 .import-after .import-after-toggle:hover,
 .import-after .import-after-toggle:has(input:checked),
 .import-after .import-after-toggle:has(input:checked):hover {
   border-color: transparent;
-  border-bottom-color: var(--relay-border);
-  background: color-mix(in srgb, var(--relay-subtle) 72%, transparent);
-}
-
-.import-after .import-after-toggle:last-child:hover,
-.import-after .import-after-toggle:last-child:has(input:checked),
-.import-after .import-after-toggle:last-child:has(input:checked):hover {
-  border-bottom-color: transparent;
+  background: var(--relay-accent-soft);
 }
 
 .import-after .import-after-toggle:has(input:disabled) {

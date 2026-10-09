@@ -16,7 +16,7 @@ export async function openGatewayApi(page: Page) {
 }
 
 export async function openGatewayApplication(page: Page) {
-  await openGatewayApi(page);
+  await page.getByRole("button", { name: "Integrations", exact: true }).click();
   await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
 }
 

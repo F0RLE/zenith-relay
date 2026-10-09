@@ -111,7 +111,7 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("upstream_forbidden")).toBe("usage.errorCategories.upstream_forbidden");
     expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
     expect(accountErrorTranslationKey("models_prepare")).toBe("accounts.errors.models");
-    expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.models");
+    expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.modelsConnection");
     expect(accountErrorTranslationKey("proxy_unavailable")).toBe("accounts.errors.connection");
     expect(accountErrorTranslationKey("quota_forbidden")).toBe("accounts.errors.quota");
     expect(accountErrorTranslationKey("subscription_forbidden")).toBe("accounts.errors.blocked");

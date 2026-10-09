@@ -25,6 +25,7 @@ for (const viewport of viewports) {
     await accountSearch.fill("");
     await dialog.getByText("Business Workspace", { exact: true }).click();
     await dialog.getByRole("button", { name: "Добавить выбранные (1)" }).click();
+    await page.getByRole("dialog", { name: "Добавить обычный аккаунт в пул?", exact: true }).getByRole("button", { name: "Продолжить", exact: true }).click();
 
     const memberActions = page.locator(".pool-member-card .pool-member-actions");
     await expect(memberActions.getByRole("button")).toHaveCount(3);
@@ -109,8 +110,11 @@ for (const viewport of viewports) {
     await expect(members.locator(".pool-member-card")).toHaveCount(6);
     await expect(members.locator('.pool-member-card[data-current="true"]')).toHaveCount(1);
     expect(await members.locator('.pool-member-card[data-current="true"]').evaluate((element) => {
-      const indicator = getComputedStyle(element, "::before");
-      return indicator.content !== "none" && Math.abs(Number.parseFloat(indicator.width) - element.clientWidth) <= 2;
+      const style = getComputedStyle(element);
+      const other = element.parentElement?.querySelector('.pool-member-card[data-current="false"]');
+      return getComputedStyle(element, "::before").display === "none"
+        && style.borderTopColor === "rgba(0, 0, 0, 0)"
+        && other != null && style.backgroundColor !== getComputedStyle(other).backgroundColor;
     })).toBe(true);
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
@@ -492,7 +496,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
     let dialog = page.getByRole("dialog", { name: "Sign in" });
-    await expect(dialog.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("timer")).toBeVisible();
     await expect(dialog.getByText("Time remaining", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/oauth-dialog-${viewport.width}x${viewport.height}.png` });
@@ -500,7 +504,7 @@ for (const viewport of viewports) {
     await expect(dialog).toHaveCount(0);
 
     await page.getByRole("tab", { name: "Sources" }).click();
-    const sourceActions = page.locator(".relay-table .row-actions");
+    const sourceActions = page.locator(".source-card .row-actions");
     expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
     await sourceActions.locator("summary").click();
     const sourceMenu = page.getByRole("menu");

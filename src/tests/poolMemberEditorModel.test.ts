@@ -61,7 +61,7 @@ describe("pool member editor model", () => {
     const groups = groupModels(["newer", "older", "unrelated", "gpt-custom-alias"], {
       metadata: (model) => catalog.get(model),
     });
-    expect(groups.map((group) => [group.provider, group.items])).toEqual([
+    expect(groups.map((group) => [group.provider, group.models])).toEqual([
       ["openai", ["newer", "older"]],
       ["anthropic", ["unrelated"]],
       ["other", ["gpt-custom-alias"]],

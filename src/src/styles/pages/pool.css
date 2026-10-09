@@ -413,7 +413,7 @@
   white-space: nowrap;
 }
 
-.pool-member-meta .account-plan-badge {
+.pool-member-meta .account-badges {
   flex: 0 0 auto;
 }
 
@@ -1276,7 +1276,7 @@
   margin: 0;
 }
 
-.pool-picker-option > .account-plan-badge {
+.pool-picker-option .account-badges > span {
   padding-inline: 6px;
 }
 

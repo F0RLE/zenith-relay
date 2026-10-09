@@ -28,9 +28,11 @@ export function useSourceRefresh({ mode, sources, resetKey, perform }: UseSource
     setReport(null);
   }, [resetKey]);
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback((sourceIds?: readonly string[]) => {
     const revision = contextRevision.current;
-    const sourceSnapshot = sources.map(({ id: sourceId, secretAvailable }) => ({ id: sourceId, secretAvailable }));
+    const sourceSnapshot = sources
+      .filter((source) => !sourceIds || sourceIds.includes(source.id))
+      .map(({ id: sourceId, secretAvailable }) => ({ id: sourceId, secretAvailable }));
     let nextReport: SourceRefreshReport | undefined;
     setReport(null);
     void perform("sources-refresh-all", async () => {

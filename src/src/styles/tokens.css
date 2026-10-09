@@ -31,10 +31,10 @@
   --relay-primary: var(--relay-accent);
   --relay-shadow: 0 8px 24px rgb(32 43 41 / 7%);
   --relay-shadow-soft: 0 1px 2px rgb(32 43 41 / 5%);
-  --relay-popover-radius: 8px;
+  --relay-popover-radius: 10px;
   --relay-popover-item-radius: 6px;
   --relay-popover-item-height: 34px;
-  --relay-popover-padding: 5px;
+  --relay-popover-padding: 6px;
   --relay-popover-shadow: var(--relay-shadow);
   --relay-dialog-shadow: 0 20px 64px rgb(32 43 41 / 20%);
   --relay-overlay: rgb(32 43 41 / 52%);

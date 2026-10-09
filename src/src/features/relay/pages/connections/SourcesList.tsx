@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, CircleAlert, ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
@@ -8,27 +8,46 @@ import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialo
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../../sourceProtocolBindings";
 import { sourceHost } from "../../sourceUrl";
-import { ActionMenu, ActionMenuItem, EmptyState, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, EmptyState, ErrorDetailsDialog, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
+import type { FeedbackError } from "../../state/feedback";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults } from "./connectionHelpers";
 import { routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
-import { filterAndSortSources, type SourceSortKey } from "./sourceTableModel";
+import { filterAndSortSources, type SourceSortKey, type SourceSortDirection } from "./sourceListModel";
+import { sourceErrorDetails } from "./sourceError";
 
-type SourceSortDirection = "asc" | "desc";
 const EMPTY_SOURCES: SourceSummary[] = [];
 const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
 
-export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEdit: (source: SourceSummary) => void; onRefresh: (sourceId: string) => void }) {
+export function SourcesList({ query, onEdit, onRefresh, onRefreshSelected }: {
+  query: string;
+  onEdit: (source: SourceSummary) => void;
+  onRefresh: (sourceId: string) => void;
+  onRefreshSelected: (sourceIds: readonly string[]) => void;
+}) {
   const { t } = useTranslation();
-  const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
+  const { mode, runtime, perform, refresh, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
   const [sort, setSort] = useState<{ key: SourceSortKey; direction: SourceSortDirection }>({ key: "runtime", direction: "asc" });
   const [pendingPool, setPendingPool] = useState<Record<string, boolean>>({});
   const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
   const [launchSourceId, setLaunchSourceId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [errorDetails, setErrorDetails] = useState<FeedbackError | null>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const sourcesSnapshot = runtime?.sources ?? EMPTY_SOURCES;
+  useEffect(() => {
+    setSelected((previous) => previous.filter((id) => sourcesSnapshot.some((source) => source.id === id)));
+  }, [sourcesSnapshot]);
+  useEffect(() => {
+    setSelected([]);
+    setErrorDetails(null);
+    setLaunchSourceId(null);
+    setPendingPool({});
+    setPendingEnabled({});
+  }, [mode]);
   const membershipSignature = sourcesSnapshot.map((source) => `${source.id}:${source.inPool}:${source.enabled}`).join("|");
   useEffect(() => {
     const savedPool = new Map(sourcesSnapshot.map((source) => [source.id, source.inPool]));
@@ -45,10 +64,15 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
     () => filterAndSortSources(sourcesSnapshot, query, sort.key, sort.direction, runtimePosition),
     [query, runtimePosition, sort.direction, sort.key, sourcesSnapshot],
   );
+  const selectedSources = sourcesSnapshot.filter((source) => selected.includes(source.id));
+  const selectedVisibleCount = sources.filter((source) => selected.includes(source.id)).length;
+  const allVisibleSelected = sources.length > 0 && selectedVisibleCount === sources.length;
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = selectedVisibleCount > 0 && !allVisibleSelected;
+  }, [selectedVisibleCount, allVisibleSelected]);
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
   }
-  if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
   const launchSource = launchSourceId ? sourcesSnapshot.find((source) => source.id === launchSourceId) ?? null : null;
   const sortColumn = (key: SourceSortKey) => setSort((previousSort) =>
@@ -56,22 +80,6 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
       ? { key, direction: previousSort.direction === "asc" ? "desc" : "asc" }
       : { key, direction: "asc" },
   );
-  const sortLabel = (key: SourceSortKey, label: string) => {
-    const active = sort.key === key;
-    const direction = active ? sort.direction : "asc";
-    const Icon = active ? (direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
-    return (
-      <button
-        className="source-sort-button"
-        type="button"
-        aria-label={t(direction === "asc" ? "sources.sortAscending" : "sources.sortDescending", { column: label })}
-        aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}
-        onClick={() => sortColumn(key)}
-      >
-        <span>{label}</span><Icon aria-hidden />
-      </button>
-    );
-  };
   const rememberFlag = (
     setFlag: (update: (previousFlags: Record<string, boolean>) => Record<string, boolean>) => void,
     id: string,
@@ -97,7 +105,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
       `source-pool-${source.id}`,
       () => updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool }),
       "feedback.saved",
-      { backgroundRefresh: true, uiLock: false },
+      { backgroundRefresh: true },
     ).then((ok) => {
       if (!ok) rollbackFlag(setPendingPool, source.id, inPool);
     });
@@ -110,15 +118,76 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
         ? relayCommands.setSourceEnabled(source.id, enabled)
         : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled }),
       "feedback.saved",
-      { backgroundRefresh: true, uiLock: false },
+      { backgroundRefresh: true },
     ).then((ok) => {
       if (!ok) rollbackFlag(setPendingEnabled, source.id, enabled);
     });
   };
+  const updateSelectedParticipation = async (inPool: boolean) => {
+    const sourceIds = selectedSources
+      .filter((source) => (pendingPool[source.id] ?? source.inPool) !== inPool)
+      .map((source) => source.id);
+    if (!sourceIds.length) return;
+    for (const id of sourceIds) rememberFlag(setPendingPool, id, inPool);
+    const ok = await perform(
+      "sources-pool-selected",
+      () => updatePoolMembership(mode, { accountIds: [], sourceIds, inPool }),
+      "feedback.saved",
+      { backgroundRefresh: true },
+    );
+    if (!ok) for (const id of sourceIds) rollbackFlag(setPendingPool, id, inPool);
+  };
+  const updateSelectedEnabled = (enabled: boolean) => {
+    const sourceIds = selectedSources
+      .filter((source) => (pendingEnabled[source.id] ?? source.enabled) !== enabled)
+      .map((source) => source.id);
+    if (!sourceIds.length) return;
+    void perform("sources-enabled-selected", async () => {
+      try {
+        for (const id of sourceIds) {
+          if (localSource) await relayCommands.setSourceEnabled(id, enabled);
+          else await relayCommands.remoteAction({ type: "update_source", id }, { enabled });
+        }
+      } catch (cause) {
+        // Earlier commands may have succeeded; show the saved state before reporting the failure.
+        await refresh().catch(() => undefined);
+        throw cause;
+      }
+    }, "feedback.saved");
+  };
+  const deleteSelected = async () => {
+    const sourceIds = selectedSources.map((source) => source.id);
+    if (!sourceIds.length || !await confirm(t("sources.deleteSelectedConfirm", { count: sourceIds.length }), { danger: true })) return;
+    await perform("sources-delete-selected", async () => {
+      try {
+        for (const id of sourceIds) {
+          if (localSource) await relayCommands.deleteSource(id);
+          else await relayCommands.remoteAction({ type: "delete_source", id });
+          setSelected((previous) => previous.filter((selectedId) => selectedId !== id));
+        }
+      } catch (cause) {
+        await refresh().catch(() => undefined);
+        throw cause;
+      }
+    }, "feedback.deleted");
+  };
   return (
-    <div className="relay-table-wrap connection-list-wrap relay-compact-content">
-      <table className="relay-table source-table connection-table">
-        <caption className="connection-mobile-sort">
+    <div className="sources-workspace">
+        <div className="sources-list-heading">
+          <div className="sources-selection-heading">
+            <input
+              ref={selectAllRef}
+              type="checkbox"
+              checked={allVisibleSelected}
+              disabled={!sources.length || Boolean(busy)}
+              aria-label={t("sources.selectVisible")}
+              onChange={(event) => setSelected((previous) => event.target.checked
+                ? [...new Set([...previous, ...sources.map((source) => source.id)])]
+                : previous.filter((id) => !sources.some((source) => source.id === id)))}
+            />
+            <span className="sources-list-count">{t("connections.sources")} <strong>{sources.length}</strong></span>
+          </div>
+          <div className="sources-sort-controls">
           <OptionMenu
             label={t("sources.sortLabel")}
             value={sort.key}
@@ -138,20 +207,31 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
               onClick={() => sortColumn(sort.key)}
             />
           ) : null}
-        </caption>
-        <thead><tr>
-          <th aria-sort={sort.key === "status" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("status", t("common.status"))}</th>
-          <th aria-sort={sort.key === "name" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("name", t("common.name"))}</th>
-          <th aria-sort={sort.key === "server" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("server", t("sources.host"))}</th>
-          <th aria-sort={sort.key === "models" ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>{sortLabel("models", t("common.models"))}</th>
-          <th><span className="sr-only">{t("common.actions")}</span></th>
-        </tr></thead>
-        <tbody>{sources.map((source) => {
+          </div>
+        </div>
+        {selectedSources.length ? <div className="sources-selection-toolbar">
+          <span>{t("sources.selectedCount", { count: selectedSources.length })}</span>
+          <div className="sources-selection-actions">
+            {mode !== "zenith" ? <>
+              <Button variant="secondary" icon={<ListPlus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingPool[source.id] ?? source.inPool)} onClick={() => void updateSelectedParticipation(true)}>{t("sources.addToPoolAction")}</Button>
+              <Button variant="secondary" icon={<ListMinus aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingPool[source.id] ?? source.inPool))} onClick={() => void updateSelectedParticipation(false)}>{t("sources.removeFromPoolAction")}</Button>
+            </> : null}
+            <ActionMenu label={t("common.actions")}>
+              <ActionMenuItem icon={<RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => onRefreshSelected(selectedSources.map((source) => source.id))}>{t("sources.refreshData")}</ActionMenuItem>
+              <ActionMenuItem icon={<Power aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => pendingEnabled[source.id] ?? source.enabled)} onClick={() => updateSelectedEnabled(true)}>{t("common.enable")}</ActionMenuItem>
+              <ActionMenuItem icon={<Power aria-hidden />} disabled={Boolean(busy) || selectedSources.every((source) => !(pendingEnabled[source.id] ?? source.enabled))} onClick={() => updateSelectedEnabled(false)}>{t("common.disable")}</ActionMenuItem>
+              <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={() => void deleteSelected()}>{t("common.delete")}</ActionMenuItem>
+            </ActionMenu>
+          </div>
+          <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} disabled={Boolean(busy)} onClick={() => setSelected([])} />
+        </div> : null}
+        {!sources.length ? <NoResults /> : null}
+        <div className="source-cards" role="list">{sources.map((source) => {
           const inPool = pendingPool[source.id] ?? source.inPool;
           const enabled = pendingEnabled[source.id] ?? source.enabled;
           const launchBusy = busy === `launch-source-${source.id}`;
           const supportsNative = sourceSupportsNativeProtocol(source);
-          const launchDisabled = !localSource || !supportsNative || !enabled || !source.secretAvailable || launchBusy;
+          const launchDisabled = !localSource || !supportsNative || !enabled || !source.secretAvailable || Boolean(busy);
           const launchTitle = !localSource
             ? t("sources.launchLocalOnly")
             : !supportsNative
@@ -163,8 +243,8 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
              ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi)
             : undefined;
           const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
-           const modelRetries = upcomingModelRetries(runtimeState, nowMs);
-           const firstModelRetry = modelRetries[0];
+          const modelRetries = upcomingModelRetries(runtimeState, nowMs);
+          const firstModelRetry = modelRetries[0];
           const runtimeHint = runtimeState?.halfOpen
             ? t("pool.recoveryProbe")
              : firstModelRetry
@@ -175,27 +255,36 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
             : runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
               ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
               : null;
-          const runtimeError = source.lastErrorCode?.trim()
-            ? t("pool.runtimeError", { code: source.lastErrorCode.trim() })
-            : null;
-          const statusLabel = t(`connections.status.${source.operationalStatus}`);
-          const indicatorLabel = [runtimeError, runtimeHint, statusLabel].filter(Boolean).join(" · ");
-          const indicatorTone = runtimeError
-            ? "error"
-            : source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
-            ? operationalStatusTone(source.operationalStatus)
+          const failure = sourceErrorDetails(source.lastErrorCode);
+          const statusLabel = !enabled
+            ? t("connections.status.disabled")
+            : mode !== "zenith" && !inPool
+              ? t("sources.notInPoolLabel")
+              : source.operationalStatus === "rotation"
+                ? t("sources.inPoolLabel")
+                : t(`connections.status.${source.operationalStatus}`);
+          const indicatorLabel = [runtimeHint, statusLabel].filter(Boolean).join(" · ");
+          const indicatorTone = !enabled || (mode !== "zenith" && !inPool)
+            ? "disabled"
             : runtimeTone ?? operationalStatusTone(source.operationalStatus);
-          return <tr key={source.id} data-source-id={source.id}>
-            <td><div className="connection-status"><StatusIcon status={indicatorTone} label={indicatorLabel} /><span>{statusLabel}</span></div></td>
-            <td><div className="connection-identity"><strong>{source.name}</strong>{mode !== "zenith" ? <small>{t(inPool ? "sources.inPoolLabel" : "sources.notInPoolLabel")}</small> : null}</div></td>
-            <td><code className="connection-host" data-relay-tooltip={source.baseUrl}>{sourceHost(source.baseUrl)}</code></td>
-            <td><span className="connection-model-count">{source.models.length}</span></td>
-            <td className="row-actions-cell">
+          return <article className="source-card" role="listitem" key={source.id} data-source-id={source.id} data-enabled={enabled} data-selected={selected.includes(source.id)}>
+            <header className="source-card-header">
+              <label className="source-card-select">
+                <input type="checkbox" checked={selected.includes(source.id)} disabled={Boolean(busy)}
+                  aria-label={t("sources.select", { name: source.name })}
+                  onChange={(event) => setSelected((previous) => event.target.checked
+                    ? [...previous, source.id]
+                    : previous.filter((id) => id !== source.id))} />
+              </label>
+              <div className="source-card-identity">
+                <strong>{source.name}</strong>
+                <span data-relay-tooltip={source.baseUrl}>{sourceHost(source.baseUrl)}</span>
+              </div>
               <div className="row-actions">
                 <ActionMenu>
                   <ActionMenuItem
                     icon={busy === `source-refresh-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />}
-                    disabled={busy === `source-refresh-${source.id}`}
+                    disabled={Boolean(busy)}
                     onClick={() => onRefresh(source.id)}
                   >
                     {t("sources.refreshData")}
@@ -203,6 +292,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                   {mode !== "zenith" ? (
                     <ActionMenuItem
                       icon={inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
+                      disabled={Boolean(busy)}
                       onClick={() => void updateParticipation(source, !inPool)}
                     >
                       {t(inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}
@@ -210,6 +300,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                   ) : null}
                   <ActionMenuItem
                     icon={<Power aria-hidden />}
+                    disabled={Boolean(busy)}
                     onClick={() => void updateEnabled(source, !enabled)}
                   >
                     {enabled ? t("common.disable") : t("common.enable")}
@@ -217,6 +308,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                   <ActionMenuItem
                     danger
                     icon={<Trash2 aria-hidden />}
+                    disabled={Boolean(busy)}
                     onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(
                       `delete-${source.id}`,
                       () => localSource
@@ -229,7 +321,7 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                     {t("common.delete")}
                   </ActionMenuItem>
                 </ActionMenu>
-                <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
+                <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} disabled={Boolean(busy)} onClick={() => onEdit(source)} />
                 <IconButton
                   label={t("sources.launch")}
                   icon={<Play aria-hidden />}
@@ -239,10 +331,23 @@ export function SourcesTable({ query, onEdit, onRefresh }: { query: string; onEd
                   onClick={() => setLaunchSourceId(source.id)}
                 />
               </div>
-            </td>
-          </tr>;
-        })}</tbody>
-      </table>
+            </header>
+            <div className="source-card-meta">
+              <div className="source-card-status" data-tone={indicatorTone}>
+                <StatusIcon status={indicatorTone} label={indicatorLabel} />
+                <span>{statusLabel}</span>
+              </div>
+              <span className="source-card-models">{t("sources.groupModelsCount", { count: source.models.length })}</span>
+            </div>
+            {failure || runtimeHint ? <div className="source-card-diagnostics">
+              {failure ? <button type="button" className="source-card-error" aria-label={`${t("feedback.errorDetails")}: ${failure.summary}`} onClick={() => setErrorDetails(failure.error)}>
+                <CircleAlert aria-hidden /><span>{failure.summary}</span>
+              </button> : null}
+              {runtimeHint ? <small>{runtimeHint}</small> : null}
+            </div> : null}
+          </article>;
+        })}</div>
+      {errorDetails ? <ErrorDetailsDialog error={errorDetails} message={errorDetails.message} onClose={() => setErrorDetails(null)} /> : null}
       {launchSource ? <ApplicationPickerDialog
         title={t("sources.launchPickerTitle")}
         showLaunchToggle={false}
@@ -265,7 +370,7 @@ function dropConfirmedFlags(pending: Record<string, boolean>, saved: ReadonlyMap
   let changed = false;
   const remainingFlags = { ...pending };
   for (const [id, pendingValue] of Object.entries(pending)) {
-    if (saved.get(id) === pendingValue) {
+    if (!saved.has(id) || saved.get(id) === pendingValue) {
       delete remainingFlags[id];
       changed = true;
     }

@@ -62,50 +62,6 @@
   background: var(--relay-subtle);
 }
 
-.source-table th:not(:last-child),
-.source-table td:not(:last-child) {
-  text-align: center;
-}
-
-.source-sort-button {
-  width: 100%;
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  line-height: 15px;
-  text-align: center;
-}
-
-.source-sort-button svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  opacity: 0.62;
-}
-
-.source-sort-button:hover,
-.source-sort-button:focus-visible {
-  color: var(--relay-text);
-}
-
-.source-sort-button:hover svg,
-.source-sort-button:focus-visible svg {
-  opacity: 1;
-}
-
-.source-table td:not(:last-child) > .relay-status {
-  margin-inline: auto;
-}
-
 .relay-table td small,
 .remote-status small {
   display: block;

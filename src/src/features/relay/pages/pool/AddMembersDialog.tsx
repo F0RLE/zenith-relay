@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Check, CheckCheck, Layers, Plus, Search, Server, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { AccountPlanBadge, Button, Dialog, EmptyState, OptionMenu, accountErrorLabel } from "../../components/Ui";
+import { AccountBadges, Button, Dialog, EmptyState, OptionMenu, accountErrorLabel } from "../../components/Ui";
 import { accountPlanOption, compareAccountPlans } from "../../accountPlans";
 import { accountQuotaRefreshState, currentAccountErrorCode } from "../../accountStatus";
 import { compareStableText, toggle } from "../../poolHelpers";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
 import { accountPickerTone, compareMemberPickerHealth, MEMBER_PICKER_HEALTH_ORDER, memberPickerHealth, sourcePickerTone, type MemberPickerHealth } from "./memberPickerStatus";
 import type { AccountSummary, SourceSummary } from "../../api/types";
 import type { TFunction } from "i18next";
@@ -54,6 +55,8 @@ function sourcePickerStatus(source: SourceSummary, t: TFunction): { status: Surf
 export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const addPending = useRef(false);
   const canAddSource = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("sources"));
   const [accountIds, setAccountIds] = useState<string[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
@@ -128,29 +131,49 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   useEffect(() => {
     if (healthFilter !== "all" && !availableHealth.split("\n").includes(healthFilter)) setHealthFilter("all");
   }, [availableHealth, healthFilter]);
-  const add = async () => {
-    const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: selectedAccounts, sourceIds: selectedSources, inPool: true }), "feedback.saved", { backgroundRefresh: true });
-    if (ok) onClose();
+  const add = async (bypassWarning = false) => {
+    if (addPending.current) return;
+    addPending.current = true;
+    const accountsToAdd = allAccounts.filter((account) => selectedAccounts.includes(account.id));
+    const sourcesToAdd = [...selectedSources];
+    try {
+      const accepted = await confirmPoolAccounts(accountsToAdd, bypassWarning);
+      const accountsToInclude = accountsToAdd.filter((account) => accepted || account.oauthClientKind === "excel_bps").map((account) => account.id);
+      if (!accountsToInclude.length && !sourcesToAdd.length) return;
+      const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: accountsToInclude, sourceIds: sourcesToAdd, inPool: true }), "feedback.saved", { backgroundRefresh: true });
+      if (ok) onClose();
+    } finally {
+      addPending.current = false;
+    }
   };
   const saving = busy === "pool-add-members";
+  const requestClose = () => {
+    if (!addPending.current) onClose();
+  };
   const views: Array<{ id: MemberView; label: string; icon: ReactNode }> = [
     { id: "all", label: t("pool.allConnections"), icon: <Layers aria-hidden /> },
     { id: "accounts", label: t("connections.accounts"), icon: <UserRound aria-hidden /> },
     { id: "sources", label: t("connections.sources"), icon: <Server aria-hidden /> },
     { id: "selected", label: t("pool.selectedMembers"), icon: <CheckCheck aria-hidden /> },
   ];
-  return <Dialog className="pool-add-dialog" title={t("pool.addMembersTitle")} onClose={onClose} footer={<>
+  return <Dialog className="pool-add-dialog" title={t("pool.addMembersTitle")} onClose={requestClose} footer={<>
     <div className="pool-picker-summary" role="status">
       <span className="pool-picker-summary-icon" data-active={selectedCount > 0}><Check aria-hidden /></span>
       <span>{selectedCount ? t("pool.selectionCount", { count: selectedCount }) : t("pool.chooseMembers")}</span>
     </div>
-    <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+    <Button variant="secondary" disabled={saving} onClick={requestClose}>{t("common.cancel")}</Button>
     <Button
       variant="primary"
       busy={saving}
       disabled={!selectedCount}
       aria-label={t("pool.addSelected", { count: selectedCount })}
-      onClick={add}
+      onClick={() => void add()}
+      data-relay-context-action
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (selectedCount && !saving) void add(true);
+      }}
     >
       {t("pool.confirmAdd")}
     </Button>
@@ -228,7 +251,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
                 {...accountPickerStatus(account, mode === "local" && Boolean(account.remoteLocation), t)}
                 name={account.label}
                 icon={<UserRound />}
-                badge={<AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} />}
+                badge={<AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />}
                 checked={accountIds.includes(account.id)}
                 disabled={saving}
                 onChange={() => setAccountIds((previousAccountIds) => toggle(previousAccountIds, account.id))}

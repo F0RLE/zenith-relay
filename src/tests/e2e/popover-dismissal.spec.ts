@@ -133,7 +133,7 @@ test("mobile help contents and usage hint close outside", async ({ page }) => {
   await expect(contentsToggle).toHaveAttribute("aria-expanded", "false");
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await page.locator(".usage-account-menu").getByRole("button").click();
+  await page.getByRole("button", { name: /^Pool member:/ }).click();
   await page.getByRole("option", { name: "Personal Plus", exact: true }).click();
   const accountSummary = page.locator(".usage-account-value");
   await accountSummary.locator("summary").click();

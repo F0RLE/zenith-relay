@@ -452,57 +452,59 @@
   container-type: inline-size;
 }
 
-.api-provider-empty {
-  margin: 0;
-  color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .api-provider-options {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
   gap: 8px;
 }
 
 .api-provider-options button {
   min-width: 0;
-  min-height: 54px;
+  min-height: 40px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 10px;
-  border: 1px solid var(--relay-border);
+  justify-content: flex-start;
+  padding: 10px 12px;
+  border: 0;
   border-radius: 8px;
-  background: var(--relay-surface);
-  color: var(--relay-text);
-  text-align: center;
+  background: transparent;
+  color: var(--relay-secondary);
+  text-align: left;
   cursor: pointer;
 }
 
 .api-provider-title {
   width: 100%;
   min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-}
-
-.api-provider-title svg {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  color: var(--relay-secondary);
-}
-
-.api-provider-title strong {
-  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 600;
 }
 
+.api-provider-picker,
 .api-provider-configuration {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.api-provider-setup h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.api-provider-picker h3 {
+  color: var(--relay-muted);
+}
+
+.api-provider-options button.selected {
+  color: var(--relay-accent-hover);
+}
+
+.api-provider-identity {
   display: grid;
   gap: 16px;
 }
@@ -580,14 +582,6 @@
 
 .source-access-grid > .relay-field:only-child {
   grid-column: 1 / -1;
-}
-
-.relay-dialog.source-edit-dialog {
-  width: min(1040px, 100%);
-}
-
-.source-edit-dialog .source-form > .relay-tabs {
-  margin-bottom: 2px;
 }
 
 .source-editor-tab-panel {
@@ -1081,21 +1075,9 @@
   height: 34px;
 }
 
-.relay-dialog.source-add-dialog {
-  width: min(620px, 100%);
-}
-
-.source-add-dialog .relay-dialog-body {
-  padding: 22px 24px 24px;
-}
-
 .source-add-dialog .source-form {
   width: 100%;
   margin-inline: auto;
-}
-
-.source-add-dialog > footer {
-  justify-content: flex-end;
 }
 
 .setup-connect-options button {
@@ -1444,9 +1426,6 @@ input[type="password"] {
     gap: 12px;
   }
 
-  .source-add-dialog .relay-dialog-body {
-    padding-block: 18px;
-  }
 }
 
 @media (max-width: 700px) {
@@ -1535,9 +1514,6 @@ input[type="password"] {
     justify-self: end;
   }
 
-  .source-add-dialog .relay-dialog-body {
-    padding: 18px;
-  }
 
   .intro-actions {
     width: 100%;

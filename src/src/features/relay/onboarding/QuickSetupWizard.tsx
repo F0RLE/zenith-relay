@@ -7,6 +7,7 @@ import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
+import { usePoolAccountWarning } from "../hooks/usePoolAccountWarning";
 import { useRelayState } from "../state/RelayStateProvider";
 import { captureOperationResult } from "../state/relayOperationModel";
 
@@ -21,6 +22,7 @@ type CurrentProfileImportState =
 
 export function QuickSetupWizard() {
   const { t } = useTranslation();
+  const confirmPoolAccounts = usePoolAccountWarning();
   const { mode: appMode, runtime, finishOnboarding, perform, activateCodexProfile, busy } = useRelayState();
   const [intro, setIntro] = useState(true);
   const [step, setStep] = useState(1);
@@ -123,7 +125,11 @@ export function QuickSetupWizard() {
           .filter((row) => row.selectable && row.defaultSelected)
           .map((row) => row.itemId);
         if (!selectedItemIds.length) throw new Error("current_profile_import_has_no_selectable_items");
-        return relayCommands.confirmImport(session.sessionId, selectedItemIds, true);
+        const poolRows = session.preview.rows.filter((row) => selectedItemIds.includes(row.itemId) && row.authMode !== "api_key");
+        const addToPool = await confirmPoolAccounts(poolRows);
+        if (run !== currentProfileImportRun.current) return null;
+        const result = await relayCommands.confirmImport(session.sessionId, selectedItemIds, addToPool);
+        return { result, addToPool };
       },
     );
     if (run !== currentProfileImportRun.current) return;
@@ -132,13 +138,17 @@ export function QuickSetupWizard() {
       if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
     }
-    const importedCount = captured.value.results.filter((importResult) => importResult.status === "succeeded").length;
-    if (!importedCount || captured.value.results.some((importResult) => importResult.status === "failed")) {
+    const importedCount = captured.value.result.results.filter((importResult) => importResult.status === "succeeded").length;
+    if (!importedCount || captured.value.result.results.some((importResult) => importResult.status === "failed")) {
       await cancelCurrentProfileImport();
       if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
     }
     currentProfileImportSession.current = null;
+    if (!captured.value.addToPool) {
+      setCurrentProfileImport({ kind: "idle" });
+      return;
+    }
     await completeCurrentProfileSetup(run, importedCount);
   };
 
@@ -252,7 +262,7 @@ export function QuickSetupWizard() {
           {...(importSession ? { initialSession: importSession } : {})}
           modeOverride="local"
           defaultAddToPool
-          onImported={() => setConnectionReady(true)}
+          onImported={(addedToPool) => { if (addedToPool) setConnectionReady(true); }}
           onClose={closeImport}
         />
       </Suspense>
@@ -298,9 +308,19 @@ function ConnectionStep({
 }: ConnectionStepProps) {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
+  const confirmPoolAccounts = usePoolAccountWarning();
   const oauth = useOAuthSignIn(async (oauthResult) => {
-    const added = await perform("oauth-pool-membership", () => relayCommands.setPoolMembership([oauthResult.account.id], [], true), "feedback.accountAdded", { backgroundRefresh: true });
-    if (added) onConnected();
+    const added = await captureOperationResult(
+      (work) => perform("oauth-pool-membership", work, undefined, { backgroundRefresh: true }),
+      async () => {
+        const snapshot = await relayCommands.localState();
+        const account = snapshot.accounts.find((candidate) => candidate.id === oauthResult.account.id);
+        if (!await confirmPoolAccounts(account ? [account] : [{}])) return false;
+        await relayCommands.setPoolMembership([oauthResult.account.id], [], true);
+        return true;
+      },
+    );
+    if (added.ok && added.value) onConnected();
   });
   useEffect(() => {
     onOAuthPendingChange(Boolean(oauth.flow));

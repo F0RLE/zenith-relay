@@ -143,7 +143,7 @@ export function PoolPage() {
         onClose={() => setConfigurationPreview(null)}
       />
     ) : null}
-    {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}
+    {oauth.flow ? <OAuthDialog flow={oauth.flow} starting={oauth.starting} onCancel={oauth.cancel} /> : null}
     {!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}
   </section>;
 }

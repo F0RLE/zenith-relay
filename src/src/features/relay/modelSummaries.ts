@@ -38,6 +38,11 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
 
   for (const model of runtime.gateway.models ?? []) add(model.id, model);
   for (const modelId of runtime.gateway.visibleModelIds) add(modelId);
+  // Match the pool/runtime inventory: native accounts establish the order of
+  // shared IDs, then API sources append their remaining models.
+  for (const account of runtime.accounts) {
+    for (const modelId of account.models) add(modelId);
+  }
   for (const source of runtime.sources) {
     for (const modelId of source.models) add(modelId);
     // A partially migrated source can have the model only on its binding.
@@ -45,10 +50,6 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
       for (const modelId of binding.modelIds) add(modelId);
     }
   }
-  for (const account of runtime.accounts) {
-    for (const modelId of account.models) add(modelId);
-  }
-
   const memberCount = new Map<string, number>();
   for (const member of [...runtime.sources, ...runtime.accounts]) {
     const memberModelIds = new Set(member.models.map((modelId) => modelIdKey(modelId)).filter(Boolean));

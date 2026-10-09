@@ -1,131 +1,29 @@
 import { useEffect, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
-import { SlidersHorizontal, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { EmptyState, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
+import { EmptyState, StatusIcon } from "../../components/Ui";
 import { tokenSpeed } from "../../usageSpeed";
 import { loadRequestTableLayout, reorderColumns, REQUEST_COLUMN_IDS, REQUEST_COLUMN_MAX_WIDTH, REQUEST_COLUMN_MIN_WIDTH, REQUEST_TABLE_LAYOUT_KEY, shiftColumn, useColumnDrag } from "./useColumnLayout";
 import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
 import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatTiming, requestStatusLabel, formatServiceTier, formatWireApi, formatErrorCategory } from "./usageReportFormat";
+import { formatTiming, requestStatusLabel, formatServiceTier, formatWireApi } from "./usageReportFormat";
 import { SpeedValue, UsageModel, CompactNumber } from "./usageReportParts";
 
 type RequestsViewProps = {
   rows: UsageRow[];
-  status: string;
-  setStatus: (statusValue: string) => void;
-  modelQuery: string;
-  modelOptions: Array<{ value: string; label: string }>;
-  setModelQuery: (modelQueryValue: string) => void;
-  connectionQuery: string;
-  poolMemberOptions: Array<{ value: string; label: string }>;
-  setConnectionQuery: (connectionQueryValue: string) => void;
-  wireApi: string;
-  setWireApi: (wireApiValue: string) => void;
-  transport: string;
-  setTransport: (transportValue: string) => void;
-  errorQuery: string;
-  setErrorQuery: (errorQueryValue: string) => void;
-  requestQuery: string;
-  setRequestQuery: (requestQueryValue: string) => void;
-  clearFilters: () => void;
   formatTime: (timestamp: string) => string;
   onSelect: (row: UsageRow) => void;
 };
 
 export function RequestsView({
   rows,
-  status,
-  setStatus,
-  modelQuery,
-  modelOptions,
-  setModelQuery,
-  connectionQuery,
-  poolMemberOptions,
-  setConnectionQuery,
-  wireApi,
-  setWireApi,
-  transport,
-  setTransport,
-  errorQuery,
-  setErrorQuery,
-  requestQuery,
-  setRequestQuery,
-  clearFilters,
   formatTime,
   onSelect,
 }: RequestsViewProps) {
   const { t } = useTranslation();
-  const [showMoreFilters, setShowMoreFilters] = useState(false);
-  const secondaryCount = [wireApi, transport, errorQuery, requestQuery].filter(Boolean).length;
-  const hasFilters = status !== "all" || Boolean(modelQuery || connectionQuery || secondaryCount);
-  const errorOptions = [
-    { value: "", label: t("usage.anyErrorCategory") },
-    ...Array.from(new Set([
-      ...rows.flatMap((row) => row.errorCategory ? [row.errorCategory] : []),
-      ...(errorQuery ? [errorQuery] : []),
-    ])).sort().map((errorCategory) => ({ value: errorCategory, label: formatErrorCategory(errorCategory, t) })),
-  ];
-  return <><div className="usage-filter-panel">
-    <div className="usage-filters usage-filter-primary">
-      <OptionMenu
-        className="filter-option-menu"
-        label={t("common.status")}
-        value={status}
-        onChange={setStatus}
-        options={[
-          { value: "all", label: t("usage.anyStatus") },
-          { value: "success", label: t("common.success") },
-          { value: "failed", label: t("common.failed") },
-        ]}
-      />
-      <OptionMenu className="filter-option-menu" label={t("common.model")} value={modelQuery} onChange={setModelQuery} options={modelOptions} />
-      <OptionMenu className="filter-option-menu" label={t("usage.poolMember")} value={connectionQuery} onChange={setConnectionQuery} options={poolMemberOptions} />
-    </div>
-    <div className="usage-filter-controls">
-      {hasFilters ? <IconButton label={t("usage.clearFilters")} icon={<X aria-hidden />} onClick={clearFilters} /> : null}
-      <span className="usage-filter-toggle-wrap">
-        <IconButton
-          className="usage-filter-toggle"
-          label={t("usage.moreFilters")}
-          icon={<SlidersHorizontal aria-hidden />}
-          aria-expanded={showMoreFilters}
-          onClick={() => setShowMoreFilters((isVisible) => !isVisible)}
-        />
-        {secondaryCount ? <small>{secondaryCount}</small> : null}
-      </span>
-    </div>
-    {showMoreFilters ? <div className="usage-filters usage-filter-secondary">
-      <OptionMenu
-        className="filter-option-menu"
-        label={t("usage.protocol")}
-        value={wireApi}
-        onChange={setWireApi}
-        options={[
-          { value: "", label: t("usage.anyProtocol") },
-          { value: "responses", label: "Responses" },
-          { value: "messages", label: "Messages" },
-          { value: "chat_completions", label: "Chat Completions" },
-          { value: "gemini", label: "Gemini" },
-        ]}
-      />
-      <OptionMenu
-        className="filter-option-menu"
-        label={t("usage.transport")}
-        value={transport}
-        onChange={setTransport}
-        options={[
-          { value: "", label: t("usage.anyTransport") },
-          { value: "http", label: t("usage.transports.http") },
-          { value: "websocket", label: t("usage.transports.websocket") },
-        ]}
-      />
-      <OptionMenu className="filter-option-menu" label={t("usage.errorCategory")} value={errorQuery} onChange={setErrorQuery} options={errorOptions} />
-      <input value={requestQuery} onChange={(event) => setRequestQuery(event.target.value)} aria-label={t("usage.requestId")} placeholder={t("usage.requestId")} />
-    </div> : null}
-  </div>{rows.length ? <RequestTable rows={rows} formatTime={formatTime} onSelect={onSelect} /> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />}</>;
+  return rows.length ? <RequestTable rows={rows} formatTime={formatTime} onSelect={onSelect} /> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />;
 }
 
 function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {

@@ -2,13 +2,23 @@ import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 async function expectReportFits(page: Page) {
-  const overflow = await page.locator(".usage-page, .usage-view-toolbar, .usage-scope-controls, .usage-metric, .usage-metric-copy, .usage-filter-panel, .usage-filter-secondary, .usage-page .relay-table-wrap, .usage-sortable-table td, .usage-pagination, .usage-pagination-form").evaluateAll((elements) => elements
+  const overflow = await page.locator(".usage-page, .usage-view-toolbar, .usage-scope-controls, .usage-metric, .usage-metric-copy, .usage-filter-panel, .usage-filters, .usage-page .relay-table-wrap, .usage-sortable-table td, .usage-pagination, .usage-pagination-form").evaluateAll((elements) => elements
     .filter((element) => element.getBoundingClientRect().width > 0)
     .filter((element) => {
       const rect = element.getBoundingClientRect();
       return element.scrollWidth > element.clientWidth + 1 || rect.left < 0 || rect.right > innerWidth + 1;
     })
-    .map((element) => `${element.className || element.tagName}: ${element.textContent?.slice(0, 100)}`));
+    .map((element) => ({
+      element: element.className || element.tagName,
+      width: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      columns: getComputedStyle(element).gridTemplateColumns,
+      children: Array.from(element.children).map((child) => ({
+        element: child.className || child.tagName,
+        width: child.getBoundingClientRect().width,
+        column: getComputedStyle(child).gridColumn,
+      })),
+    })));
   expect(overflow).toEqual([]);
 }
 
@@ -37,7 +47,7 @@ for (const theme of ["light", "dark"] as const) {
 
       await page.getByRole("button", { name: "Другие фильтры" }).click();
       await expectReportFits(page);
-      await page.locator(".usage-filter-secondary").getByRole("button", { name: /^Протокол:/ }).click();
+      await page.locator(".usage-filters").getByRole("button", { name: /^Протокол:/ }).click();
       await page.getByRole("option", { name: "Responses", exact: true }).click();
       await expect(page.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
       await expectReportFits(page);
@@ -61,7 +71,8 @@ for (const theme of ["light", "dark"] as const) {
         if (width === 1160 || width === 390) await page.screenshot({ path: `output/playwright/${table.slice(1)}-${theme}-${width}.png` });
       }
 
-      await page.locator(".usage-account-menu").getByRole("button").click();
+      await page.getByRole("tab", { name: "Запросы", exact: true }).click();
+      await page.getByRole("button", { name: /^Участник пула:/ }).click();
       await page.getByRole("option", { name: "Personal Plus", exact: true }).click();
       const account = page.locator(".usage-account-value");
       await expect(account).toBeVisible();

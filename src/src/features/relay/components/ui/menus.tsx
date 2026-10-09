@@ -158,7 +158,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       );
     };
     const preferredWidth = fitContent ? measuredWidth() : 220;
-    const width = Math.min(Math.max(trigger.width, preferredWidth), window.innerWidth - margin * 2);
+    const width = Math.min(fitContent ? preferredWidth : Math.max(trigger.width, preferredWidth), window.innerWidth - margin * 2);
     const preferredLeft = align === "start"
       ? trigger.left
       : align === "center"

@@ -6,6 +6,35 @@ import type {
 } from "./common";
 import type { ApiEquivalentSummary, PricingMetadata } from "./pricing";
 
+/** Local comparisons only, not evidence of a provider cache hit or miss. */
+export type CacheContextDiagnostics = {
+  baseline: "first_observation" | "completed_request" | "overlapping_requests" | "unavailable" | "size_limit";
+  scope: "client_session" | "cache_key" | "unavailable";
+  clientChanges: CacheContextSection[];
+  upstreamChanges: CacheContextSection[];
+  relayChanges: CacheContextSection[];
+  clientHistory: CacheHistoryDiagnostics;
+  upstreamHistory: CacheHistoryDiagnostics;
+  relayHistory: CacheHistoryDiagnostics;
+  candidateChanged: boolean | null;
+  previousCompletedAgeMs: number | null;
+};
+
+export type CacheContextSection =
+  | "model" | "tools" | "instructions" | "reasoning" | "output_format" | "verbosity"
+  | "tool_choice" | "parallel_tool_calls" | "cache_key" | "cache_policy" | "service_tier"
+  | "context_management" | "truncation";
+
+export type CacheHistoryDiagnostics = {
+  comparison: "not_compared" | "unchanged" | "appended" | "rewritten" | "truncated" | "continuation";
+  inputItems: number | null;
+  /** Compact JSON bytes, not tokens. */
+  inputBytes: number | null;
+  sharedPrefixItems: number | null;
+  firstChangedItemKind: "developer" | "user" | "assistant" | "tool_result" | "tool_call"
+    | "reasoning" | "compaction" | "additional_tools" | "configuration_update" | "other" | null;
+};
+
 export type RoutingDiagnostics = {
   reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "weighted_rotation" | "fair_rotation" | "fallback_attempt" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
@@ -13,6 +42,7 @@ export type RoutingDiagnostics = {
   inFlightBefore: number;
   dispatchesBefore: number;
   endpointKind?: string | null;
+  cacheContext?: CacheContextDiagnostics | null;
 };
 
 export type ToolUseDiagnostics = {
@@ -37,6 +67,7 @@ export type UpstreamErrorDetails = {
   httpStatus: number | null;
   code: string | null;
   errorType: string | null;
+  requestId?: string | null;
   message: string | null;
   redacted: boolean;
   truncated: boolean;

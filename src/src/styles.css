@@ -16,6 +16,8 @@
 @import "./styles/pages/connections-workspace.css";
 @import "./styles/responsive.css";
 @import "./styles/pages/workspace.css";
+@import "./styles/pages/integrations.css";
+@import "./styles/pages/sources.css";
 
 /* The launcher uses no focus rings on controls or their field wrappers. */
 :focus,

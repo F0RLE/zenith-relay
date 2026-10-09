@@ -472,6 +472,7 @@ test("remote bulk import previews multiple files and confirms selected rows", as
   await expect(existing).not.toBeChecked();
   await dialog.getByLabel("Add selected to pool after import").check();
   await dialog.getByRole("button", { name: "Import 2 account(s)" }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
   await expect(dialog).toBeHidden();
 
   const importCalls = await page.evaluate(() => {
@@ -592,9 +593,9 @@ test("remote account usage uses the server usage identity without exposing its h
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, distinctAccountIdentityHints: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await chooseOption(page, page, "Account", "account_synthetic");
+  await chooseOption(page, page, "Pool member", "account_synthetic");
 
-  await expect(page.locator(".usage-account-value")).toContainText("p***@example.test");
+  await expect(page.locator(".usage-pool-member-menu")).toContainText("p***@example.test");
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceOrAccountQuery?: string } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_remote_server_usage")?.args.input?.sourceOrAccountQuery;
@@ -629,7 +630,7 @@ test("remote capability omissions disable or hide unsupported operations", async
   await expect(page.getByRole("button", { name: "Connect ChatGPT", exact: true })).toBeDisabled();
   await expect(page.locator(".gateway-settings-panel")).toHaveCount(0);
   await expect(page.locator(".proxy-settings")).toHaveCount(0);
-  await page.getByRole("tab", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: "API", exact: true }).click();
   await page.locator(".relay-page-actions .relay-action-menu summary").click();
   await expect(page.getByRole("menuitem", { name: "Restart API" })).toBeDisabled();
 

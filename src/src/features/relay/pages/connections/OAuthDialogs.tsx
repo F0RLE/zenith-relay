@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { Check, ChevronDown, Clock3, Copy, ExternalLink, Loader2, Lock, Network } from "lucide-react";
+import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import { Check, ChevronDown, CircleAlert, CircleHelp, Clock3, Copy, ExternalLink, Loader2, Lock, Network } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { OAuthFlow, ProxyPoolEntry } from "../../api/types";
+import type { OAuthClientKind, OAuthFlow, ProxyPoolEntry } from "../../api/types";
 import { Button, Dialog, IconButton, copyText } from "../../components/Ui";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
 import { secondsUntil, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
@@ -10,40 +10,72 @@ import { useTransientFlag } from "../../hooks/useTransientFlag";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { isHttpProxyEndpoint, rememberedSignInProxyId } from "./signInProxyPreference";
 import { useProxyPool } from "./useProxyPool";
-export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; onCancel: () => Promise<void>; onUseProxy?: ((proxyId: string) => void) | undefined }) {
+import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
+import { captureOperationResult } from "../../state/relayOperationModel";
+
+const HelpTopicDialog = lazy(async () => ({ default: (await import("../../help/HelpCenter")).HelpTopicDialog }));
+
+export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting = false }: {
+  flow: OAuthFlow;
+  onCancel: () => Promise<void>;
+  onUseProxy?: ((proxyId: string) => void) | undefined;
+  onUseClient?: ((clientKind: OAuthClientKind) => void) | undefined;
+  starting?: boolean;
+}) {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
   const [reopenAt, setReopenAt] = useState(0);
   const [notesOpen, setNotesOpen] = useState(false);
   const [proxyOpen, setProxyOpen] = useState(false);
-  const [linkCopied, showLinkCopied] = useTransientFlag(1_500);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const clientChoiceId = useId();
+  const actionPending = useRef(false);
+  const [linkCopied, showLinkCopied, clearLinkCopied] = useTransientFlag(1_500);
   const now = useRelativeTimeClock([flow.expiresAtMs, reopenAt || null]);
   const secondsRemaining = secondsUntil(flow.expiresAtMs, now);
   const reopenIn = secondsUntil(reopenAt, now);
   const callbackReceived = flow.status === "callback_received" || busy === "oauth-complete";
-  const flowFailed = flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed";
+  const failureStatus = starting ? null : flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed"
+    ? flow.status
+    : secondsRemaining === 0 && !callbackReceived ? "expired" : null;
   const flowUnavailable = secondsRemaining === 0 || flow.status !== "pending";
-  const closeLocked = busy === "oauth-complete" || busy === "oauth-cancel";
+  const closeLocked = starting || busy === "oauth-complete" || busy === "oauth-cancel"
+    || busy === "oauth-start" || busy === "oauth-reopen";
   const reauthentication = Boolean(flow.targetAccountId);
+  const clientKind = flow.clientKind ?? "codex";
   const proxies = useProxyPool(!reauthentication && Boolean(onUseProxy));
   const requestClose = () => {
-    if (closeLocked) return;
+    if (closeLocked || actionPending.current) return;
     void onCancel();
   };
   const reopen = async () => {
-    const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId), undefined, { backgroundRefresh: true });
-    if (opened) setReopenAt(Date.now() + 3_000);
+    if (flowUnavailable || closeLocked || reopenIn > 0 || actionPending.current) return;
+    actionPending.current = true;
+    try {
+      const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId), undefined, { backgroundRefresh: true });
+      if (opened) setReopenAt(Date.now() + 3_000);
+    } finally {
+      actionPending.current = false;
+    }
   };
   const copyLink = async () => {
+    if (flowUnavailable || closeLocked || actionPending.current) return;
     await copyText(flow.authorizationUrl);
     showLinkCopied();
   };
+  useEffect(() => {
+    setReopenAt(0);
+    clearLinkCopied();
+  }, [flow.loginId, clearLinkCopied]);
+  useEffect(() => {
+    if (closeLocked || flowUnavailable) setProxyOpen(false);
+  }, [closeLocked, flowUnavailable]);
   const chooseProxy = () => {
-    if (!onUseProxy || flowUnavailable) return;
+    if (!onUseProxy || flowUnavailable || closeLocked || actionPending.current) return;
     setProxyOpen(true);
   };
   const repeatProxy = () => {
-    if (!onUseProxy || flowUnavailable) return;
+    if (!onUseProxy || flowUnavailable || closeLocked || actionPending.current) return;
     const remembered = rememberedSignInProxyId();
     const proxyEntry = proxies.pool?.entries.find((candidateProxy) => candidateProxy.id === remembered);
     if (proxyEntry && isHttpProxyEndpoint(proxyEntry.endpoint)) {
@@ -54,29 +86,53 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
   };
   return <>
   <Dialog
-    className="oauth-sign-in-dialog"
+    className="sign-in-dialog oauth-sign-in-dialog"
     title={t("accounts.signIn")}
+    headerActions={<IconButton label={t("accounts.signInHelp")} icon={<CircleHelp aria-hidden />} onClick={() => setHelpOpen(true)} />}
     onClose={requestClose}
-    footer={<Button variant="secondary" busy={busy === "oauth-cancel"} disabled={closeLocked} onClick={requestClose}>{t("common.cancel")}</Button>}
   >
-    <div className="relay-form oauth-waiting">
-      <div className="oauth-waiting-status">
-        <Loader2 className="spin" aria-hidden />
-        <div>
-          <strong>{t(callbackReceived ? "accounts.completingSignIn" : "accounts.waitingForSignIn")}</strong>
-          <p>{t("accounts.waitingForSignInHint")}</p>
+    <div className="relay-form oauth-waiting" aria-busy={starting}>
+      <fieldset className="oauth-client-choice" disabled={reauthentication || !onUseClient || flowUnavailable || closeLocked}>
+        <legend className="sr-only">{t("accounts.oauthClient")}</legend>
+        <div className="oauth-client-options">
+          {([
+            { kind: "codex", label: t("accounts.oauthChatGpt") },
+            { kind: "excel_bps", label: t("accounts.oauthExcel") },
+          ] as const).map((client) => <label key={client.kind} className="oauth-client-option">
+            <input
+              className="sr-only"
+              type="radio"
+              name={clientChoiceId}
+              value={client.kind}
+              checked={clientKind === client.kind}
+              onChange={() => {
+                if (reauthentication || flowUnavailable || closeLocked || actionPending.current || clientKind === client.kind) return;
+                onUseClient?.(client.kind);
+              }}
+            />
+            <span>{client.label}</span>
+          </label>)}
         </div>
-      </div>
-      {flowFailed ? <p role="alert" className="form-note error-text">{t(`accounts.oauthStatus.${flow.status}`)}</p> : null}
-      <div className="oauth-expiry" role="timer"><Clock3 aria-hidden /><span>{t("accounts.oauthRemaining")}</span><strong>{formatCountdown(secondsRemaining)}</strong></div>
+      </fieldset>
+      <section className="oauth-progress">
+        {failureStatus ? <div className="oauth-waiting-status is-error" role="alert">
+          <CircleAlert aria-hidden />
+          <strong>{t(`accounts.oauthStatus.${failureStatus}`)}</strong>
+        </div> : null}
+        <div className="oauth-expiry" role={starting || callbackReceived ? "status" : "timer"}>
+          <Clock3 aria-hidden />
+          <span>{t(starting ? "accounts.preparingSignIn" : callbackReceived ? "accounts.completingSignIn" : "accounts.oauthRemaining")}</span>
+          <strong>{starting || callbackReceived ? "—" : formatCountdown(secondsRemaining)}</strong>
+        </div>
+      </section>
       <div className="oauth-link-actions">
         {onUseProxy && !reauthentication ? (
-          <div className={flowUnavailable ? "oauth-open-with-lock is-disabled" : "oauth-open-with-lock"}>
+          <div className={flowUnavailable || closeLocked ? "oauth-open-with-lock is-disabled" : "oauth-open-with-lock"}>
             <Button
               variant="primary"
               icon={<ExternalLink aria-hidden />}
               busy={busy === "oauth-reopen"}
-              disabled={flowUnavailable || reopenIn > 0}
+              disabled={flowUnavailable || closeLocked || reopenIn > 0}
               onClick={() => void reopen()}
             >
               {reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t(reopenAt ? "accounts.reopenSignIn" : "accounts.openSignIn")}
@@ -86,7 +142,7 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
               label={t("accounts.signInWithProxy")}
               title={t("accounts.signInWithProxyHint")}
               icon={<Lock aria-hidden />}
-              disabled={flowUnavailable || busy === "oauth-start"}
+              disabled={flowUnavailable || closeLocked}
               onClick={chooseProxy}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -99,20 +155,19 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
             variant="primary"
             icon={<ExternalLink aria-hidden />}
             busy={busy === "oauth-reopen"}
-            disabled={flowUnavailable || reopenIn > 0}
+            disabled={flowUnavailable || closeLocked || reopenIn > 0}
             onClick={() => void reopen()}
           >
             {reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t(reopenAt ? "accounts.reopenSignIn" : "accounts.openSignIn")}
           </Button>
         )}
-        <Button
-          variant="secondary"
+        {clientKind === "codex" ? <IconButton
+          className="oauth-copy-link"
+          label={t(linkCopied ? "accounts.signInLinkCopied" : "accounts.copySignInLink")}
           icon={linkCopied ? <Check aria-hidden /> : <Copy aria-hidden />}
-          disabled={flowUnavailable}
+          disabled={flowUnavailable || closeLocked}
           onClick={() => void copyLink()}
-        >
-          {t(linkCopied ? "accounts.signInLinkCopied" : "accounts.copySignInLink")}
-        </Button>
+        /> : null}
       </div>
       {reauthentication ? <section className="oauth-notes-card">
         <button type="button" className="oauth-notes-toggle" aria-expanded={notesOpen} onClick={() => setNotesOpen((open) => !open)}>
@@ -132,10 +187,11 @@ export function OAuthDialog({ flow, onCancel, onUseProxy }: { flow: OAuthFlow; o
       onClose={() => setProxyOpen(false)}
       onConfirm={(proxyId) => {
         setProxyOpen(false);
-        onUseProxy(proxyId);
+        if (!flowUnavailable && !closeLocked && !actionPending.current) onUseProxy(proxyId);
       }}
     />
   ) : null}
+  {helpOpen ? <Suspense fallback={null}><HelpTopicDialog topic="sign-in" onClose={() => setHelpOpen(false)} /></Suspense> : null}
   </>;
 }
 
@@ -143,33 +199,58 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
   const { t } = useTranslation();
   const { runtime, busy, perform } = useRelayState();
   const { pool } = useProxyPool();
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const applying = useRef(false);
   const [addToPool, setAddToPool] = useState(false);
   const [assignProxy, setAssignProxy] = useState(false);
   const account = runtime?.accounts.find((candidateAccount) => candidateAccount.id === accountId);
   const hasAccountProxy = preserveProxy || account?.proxyMode === "account";
   const closeLocked = busy === "oauth-setup";
   const requestClose = () => {
-    if (closeLocked) return;
+    if (closeLocked || applying.current) return;
     onClose();
   };
-  const apply = async () => {
+  const apply = async (bypassWarning = false) => {
+    if (applying.current) return;
+    applying.current = true;
     const assignStoredProxy = assignProxy && !hasAccountProxy;
-    if (!addToPool && !assignStoredProxy) {
-      onClose();
-      return;
+    try {
+      if (!addToPool && !assignStoredProxy) {
+        onClose();
+        return;
+      }
+      const captured = addToPool && !account ? await captureOperationResult(
+        (work) => perform("oauth-setup-state", work, undefined, { backgroundRefresh: true }),
+        () => relayCommands.localState(),
+      ) : null;
+      if (captured && !captured.ok) return;
+      const freshAccount = account ?? captured?.value?.accounts.find((candidate) => candidate.id === accountId);
+      const includeInPool = addToPool && await confirmPoolAccounts(freshAccount ? [freshAccount] : [{}], bypassWarning);
+      if (!includeInPool && !assignStoredProxy) {
+        onClose();
+        return;
+      }
+      const ok = await perform("oauth-setup", async () => {
+        if (includeInPool) await relayCommands.setPoolMembership([accountId], [], true);
+        if (assignStoredProxy) await relayCommands.assignAutomaticProxies([accountId]);
+      }, "feedback.saved", { backgroundRefresh: true });
+      if (ok) onClose();
+    } finally {
+      applying.current = false;
     }
-    const ok = await perform("oauth-setup", async () => {
-      if (addToPool) await relayCommands.setPoolMembership([accountId], [], true);
-      if (assignStoredProxy) await relayCommands.assignAutomaticProxies([accountId]);
-    }, "feedback.saved", { backgroundRefresh: true });
-    if (ok) onClose();
   };
   return <Dialog
     title={t("accounts.accountAdded")}
     onClose={requestClose}
     footer={<>
       <Button variant="secondary" disabled={closeLocked} onClick={requestClose}>{t("accounts.configureLater")}</Button>
-      <Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}>{t("common.done")}</Button>
+      <Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}
+        data-relay-context-action onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void apply(true);
+        }}
+      >{t("common.done")}</Button>
     </>}
   >
     <div className="relay-form oauth-account-setup">
@@ -222,17 +303,14 @@ export function SignInProxyDialog({
   return (
     <Dialog
       layer="top"
+      className="sign-in-dialog sign-in-proxy-dialog"
       title={t("accounts.signInWithProxy")}
       onClose={onClose}
       footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="primary" disabled={!selected} onClick={() => { if (selected) onConfirm(selected.id); }}>{t("accounts.signIn")}</Button>
-        </>
+        <Button variant="secondary" disabled={!selected} onClick={() => { if (selected) onConfirm(selected.id); }}>{t("accounts.signIn")}</Button>
       }
     >
       <div className="relay-form proxy-route-form">
-        <p className="form-note">{t("accounts.signInProxyDialogHint")}</p>
         {loading ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : null}
         {!loading && failed ? <p role="alert" className="form-note error-text">{t("accounts.signInProxyUnavailable")}</p> : null}
         {!loading && !failed && proxyEntries.length === 0 ? <p className="form-note">{t("accounts.signInProxyEmpty")}</p> : null}
@@ -247,9 +325,8 @@ export function SignInProxyDialog({
                   <Network aria-hidden />
                   <span>
                     <strong>{proxyEntry.endpoint}</strong>
-                    <small>{isHttpProxy ? proxyLocation : t("accounts.signInProxyHttps")}</small>
+                    {!isHttpProxy || proxyLocation ? <small>{isHttpProxy ? proxyLocation : t("accounts.signInProxyHttps")}</small> : null}
                   </span>
-                  {isSelected ? <Check className="proxy-route-check" aria-hidden /> : null}
                 </button>
               );
             })}

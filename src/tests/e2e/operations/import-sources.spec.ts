@@ -94,7 +94,7 @@ test("OAuth callback offers pool and stored proxy setup for the added account", 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Sign in" });
-  await expect(dialog.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("timer")).toBeVisible();
 
   await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
 
@@ -362,11 +362,13 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
 
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add source" });
-  await expect(dialog.locator(".api-provider-title strong")).toHaveText(["OpenAI", "OpenRouter", "Zenith API", "Custom API"]);
-  expect(await dialog.getByRole("radio").evaluateAll((items) => items.map((item) => item.getAttribute("aria-checked")))).toEqual(["false", "false", "false", "false"]);
+  await expect(dialog.locator(".api-provider-title")).toHaveText(["OpenAI", "Anthropic", "Google Gemini", "DeepSeek", "Groq", "Mistral", "Moonshot / Kimi API", "Kimi Code", "MiniMax", "OpenRouter", "Zenith API", "Custom API"]);
+  await expect(dialog.getByRole("radio", { name: "Custom API", exact: true })).toBeChecked();
+  await expect(dialog.getByRole("radio")).toHaveCount(12);
+  await expect(dialog.locator('[role="radio"][aria-checked="true"]')).toHaveCount(1);
   await expect(dialog.getByText("Recommended", { exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Get API key", exact: true })).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toHaveCount(1);
+  await expect(dialog.locator("footer").getByRole("button", { name: "Add source", exact: true })).toBeDisabled();
 
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
@@ -388,7 +390,7 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
 
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
   await dialog.getByLabel("Upstream API key").fill("test-source-key");
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("Zenith API", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Mode: Choose API", exact: true })).toBeVisible();
@@ -416,7 +418,7 @@ test("provider presets leave automatic protocol discovery to the connector", asy
   await expect(dialog.locator(".source-route-simple-options")).toHaveCount(0);
 
   await dialog.getByLabel("Upstream API key").fill("sk-synthetic-ready-key");
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("OpenAI", { exact: true })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as {
@@ -452,7 +454,7 @@ test("source creation errors stay in one topmost dialog", async ({ page }) => {
   const sourceDialog = page.getByRole("dialog", { name: "Add source" });
   await sourceDialog.getByRole("radio", { name: /OpenAI/ }).click();
   await sourceDialog.getByLabel("Upstream API key").fill("sk-synthetic-invalid");
-  await sourceDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await sourceDialog.getByRole("button", { name: "Add source", exact: true }).click();
 
   const errorDialog = page.getByRole("dialog", { name: "Error details" });
   await expect(errorDialog).toBeVisible();
@@ -505,7 +507,7 @@ test("bridge-only sources stay pool-compatible but cannot launch ChatGPT directl
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
 
-  const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
+  const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
   const launch = sourceRow.getByRole("button", { name: "Launch", exact: true });
   await launch.click();
   const dialog = page.getByRole("dialog", { name: "Where do you want to launch this source?" });

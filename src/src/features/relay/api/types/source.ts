@@ -86,7 +86,7 @@ export type SourceSummary = {
 };
 
 export type SourceStats = {
-  provider: "zenith" | "openrouter" | "sub2api" | "new_api" | "billing" | "deepseek" | "siliconflow" | "unsupported";
+  provider: "zenith" | "openrouter" | "sub2api" | "new_api" | "billing" | "deepseek" | "siliconflow" | "moonshot" | "unsupported";
   balanceMicroUsd: number | null;
   spentMicroUsd: number | null;
   requests: number | null;

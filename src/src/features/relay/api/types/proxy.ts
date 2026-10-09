@@ -10,6 +10,7 @@ export type ProxyPoolEntry = {
   countryCode: string | null;
   region: string | null;
   createdAtMs: number;
+  lastCheck?: ProxyCheckResult | null;
 };
 
 export type ProxyPoolSummary = {

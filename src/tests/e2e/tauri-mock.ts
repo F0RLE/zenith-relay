@@ -1,5 +1,6 @@
 import type { Page } from "../bun-playwright";
 import type { ModelSummary, SourceStats, UpstreamErrorDetails, SourceProtocolBinding, SourceProtocolConfig, SourceProbeInput, WakeTask, ToolPolicy, ToolPolicyUpdate } from "../../src/features/relay/api/types";
+import type { CacheContextDiagnostics } from "../../src/features/relay/api/types";
 
 export type MockOptions = {
   platform?: "windows" | "macos" | "linux";
@@ -39,6 +40,7 @@ export type MockOptions = {
   usageRequestedModel?: string;
   usageResolvedModel?: string;
   usageEndpointKind?: string;
+  usageCacheContext?: CacheContextDiagnostics;
   activeModelCounts?: Array<{ model: string; requestCount: number }>;
   usageToolDiagnostics?: "forwarded_text_only" | "dropped_text_only";
   usageTotalPages?: number;
@@ -512,7 +514,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     const sourceUsage = input.usageCandidateKind === "source";
-    const routing = { reason: sourceUsage ? "weighted_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3, endpointKind: input.usageEndpointKind ?? null };
+    const routing = { reason: sourceUsage ? "weighted_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3, endpointKind: input.usageEndpointKind ?? null, cacheContext: input.usageCacheContext };
     const localUnpricedTokens = Math.min(28, Math.max(0, input.usageUnpricedTokens ?? 0));
     const remoteUnpricedTokens = Math.min(25, Math.max(0, input.usageUnpricedTokens ?? 0));
     const requestedUsageModel = input.usageRequestedModel ?? "gpt-5.4";
@@ -847,10 +849,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             }
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
-            if (request.basisPointsEnabled !== undefined) {
-              localRuntime.gateway.basisPointsEnabled = request.basisPointsEnabled;
-              for (const account of localRuntime.accounts) account.basisPointsEnabled = account.basisPointsAvailable && request.basisPointsEnabled;
-            }
+            localRuntime.gateway.basisPointsEnabled = false;
             return structuredClone(localRuntime);
           }
           case "sync_codex_default_service_tier": return null;
@@ -1468,10 +1467,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         }
         remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);
         if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast" | "ultrafast";
-        if (typeof input.payload?.basisPointsEnabled === "boolean") {
-          remoteRuntime.gateway.basisPointsEnabled = input.payload.basisPointsEnabled;
-          for (const account of remoteRuntime.accounts) account.basisPointsEnabled = account.basisPointsAvailable && input.payload.basisPointsEnabled;
-        }
+        remoteRuntime.gateway.basisPointsEnabled = false;
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_all_quotas") return { refreshed: remoteRuntime.accounts.length, failed: 0, snapshot: structuredClone(remoteRuntime) };

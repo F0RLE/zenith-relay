@@ -47,7 +47,7 @@ export function transientCandidateTone(
 }
 
 export function isCodexOauthAccountEligible(account: AccountSummary) {
-  return account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
+  return account.oauthClientKind !== "excel_bps" && account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
 }
 
 export function requiresAccountReauthentication(account: Pick<AccountSummary, "authState" | "routingBlockReason">) {
@@ -62,7 +62,8 @@ export function requiresAccountReauthentication(account: Pick<AccountSummary, "a
  * account state. Pool membership and a temporary quota wait do not prevent a
  * direct launch, but terminal account failures do.
  */
-export function canLaunchCodexAccount(account: Pick<AccountSummary, "enabled" | "secretAvailable" | "proxyAvailable" | "authState" | "routingBlockReason" | "clientAuthStatus" | "health">) {
+export function canLaunchCodexAccount(account: Pick<AccountSummary, "oauthClientKind" | "enabled" | "secretAvailable" | "proxyAvailable" | "authState" | "routingBlockReason" | "clientAuthStatus" | "health">) {
+  if (account.oauthClientKind === "excel_bps") return false;
   if (!account.enabled || !account.secretAvailable || account.proxyAvailable === false || requiresAccountReauthentication(account)) return false;
   if (account.clientAuthStatus === "login_required") return false;
   if (account.authState.state === "error" || account.health === "unhealthy" || account.health === "blocked") return false;
@@ -127,8 +128,11 @@ export function accountErrorTranslationKey(code: string) {
   if (normalized === "subscription_forbidden") return "accounts.errors.blocked";
   if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";
   if (/rate.?limit|too_many/.test(normalized)) return "accounts.errors.rateLimited";
+  if (normalized === "models_timeout") return "accounts.errors.modelsTimeout";
+  if (normalized === "models_transport") return "accounts.errors.modelsConnection";
+  if (/timeout/.test(normalized)) return "accounts.errors.connectionTimeout";
+  if (/transport|network|connect|proxy/.test(normalized)) return "accounts.errors.connection";
   if (normalized.startsWith("models_")) return "accounts.errors.models";
-  if (/transport|timeout|network|connect|proxy/.test(normalized)) return "accounts.errors.connection";
   if (normalized === "quota_exhausted" || normalized === "upstream_quota_exhausted") return "accounts.errors.quotaExhausted";
   if (/quota/.test(normalized)) return "accounts.errors.quota";
   if (/auth_error|unauthorized|authentication/.test(normalized)) return "accounts.errors.authorization";

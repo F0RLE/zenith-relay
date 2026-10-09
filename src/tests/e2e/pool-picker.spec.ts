@@ -33,6 +33,7 @@ for (const mode of ["local", "remote"] as const) {
     await dialog.getByRole("navigation").getByRole("button", { name: /^Selected/ }).click();
     await expect(dialog.locator(".pool-picker-option")).toHaveCount(3);
     await dialog.getByRole("button", { name: "Add selected (3)" }).click();
+    await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await expect(page.locator(".pool-member-card")).toHaveCount(3);
     await expect(page.locator(".pool-member-card").filter({ hasText: "Example compatible API" })).toHaveCount(0);

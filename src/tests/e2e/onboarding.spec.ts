@@ -101,6 +101,7 @@ test("local quick setup imports through the unified dialog and selects pool memb
   await dialog.getByRole("button", { name: /Choose account files/ }).click();
   await expect(dialog.getByLabel("Add selected to pool after import")).toBeChecked();
   await dialog.getByRole("button", { name: /Import 2 account/ }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "confirm_local_account_import"));
   expect(call?.args.input).toMatchObject({ addToPool: true });
@@ -113,6 +114,7 @@ test("local quick setup imports the current ChatGPT profile and allows adding an
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("button", { name: /Import current profile/ })).toBeVisible();
   await page.getByRole("button", { name: /Import current profile/ }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
   const status = page.locator(".setup-current-profile-status");
   await expect(status).toContainText("Importing current profile");
   await expect(page.getByRole("dialog", { name: "Import accounts" })).toHaveCount(0);
@@ -147,6 +149,7 @@ test("current profile import keeps setup on the connection step when an item fai
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: /Import current profile/ }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.locator(".setup-current-profile-status.failed")).toContainText("Could not import the current profile");
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expectSetupFrame(page);
@@ -196,6 +199,7 @@ test("all onboarding steps keep progress and actions in one bounded workspace", 
   await page.screenshot({ path: "output/playwright/onboarding-step-2-connection-ru-dark-1160x760.png" });
 
   await page.getByRole("button", { name: /Импортировать текущий профиль/ }).click();
+  await page.getByRole("dialog", { name: "Добавить обычный аккаунт в пул?", exact: true }).getByRole("button", { name: "Продолжить", exact: true }).click();
   await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
   await page.getByRole("button", { name: "Продолжить" }).click();
   await expect(page.locator(".client-options")).toBeVisible();
@@ -212,12 +216,13 @@ test("local quick setup combines an account and an OpenRouter source in the pool
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: /Import current profile/ }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
   await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
   await page.getByRole("button", { name: "Add API source" }).click();
   const dialog = page.getByRole("dialog", { name: "Add API source" });
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
   await dialog.getByLabel("Upstream API key").fill("sk-or-synthetic");
-  await dialog.getByRole("button", { name: "Save" }).click();
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.locator(".setup-current-profile-status.complete")).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
@@ -244,10 +249,10 @@ test("repeated quick setup adds a custom API to the local pool from a previous d
   const dialog = page.getByRole("dialog", { name: "Add API source" });
   await dialog.getByRole("radio", { name: /Custom API/ }).click();
   await dialog.getByLabel("Upstream API key").fill("synthetic-custom-api-key");
-  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Add source", exact: true })).toBeDisabled();
   await dialog.getByLabel("API address").fill("https://api.example.invalid/v1");
   await dialog.getByLabel("Name").fill("My API");
-  await dialog.getByRole("button", { name: "Save" }).click();
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
@@ -323,10 +328,10 @@ for (const theme of ["light", "dark"] as const) {
       await dialog.getByLabel("Ключ внешнего API", { exact: true }).fill("synthetic-preview-key");
       await dialog.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
       await dialog.getByLabel("Название", { exact: true }).fill("Рабочий API");
-      await expect(dialog.getByRole("button", { name: "Сохранить" })).toBeEnabled();
+      await expect(dialog.getByRole("button", { name: "Добавить источник", exact: true })).toBeEnabled();
       await expectSetupFrame(page);
       await page.screenshot({ path: `output/playwright/onboarding-pool-api-custom-ru-${theme}-${viewport.width}x${viewport.height}.png`, animations: "disabled" });
-      await dialog.getByRole("button", { name: "Сохранить" }).click();
+      await dialog.getByRole("button", { name: "Добавить источник", exact: true }).click();
       await expect(dialog).toHaveCount(0);
       await page.getByRole("button", { name: "Продолжить" }).click();
       await expect(page.locator(".client-options")).toBeVisible();

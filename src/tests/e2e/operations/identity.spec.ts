@@ -18,7 +18,7 @@ test("OAuth sign-in exposes only safe recovery actions", async ({ page }) => {
   await expect(dialog.getByRole("button", { name: /Open again in 3 s|Reopen sign-in window/ })).toBeVisible();
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "resume_codex_oauth")).toBe(true);
-  await expect(dialog.locator("input, textarea, details")).toHaveCount(0);
+  await expect(dialog.locator("input:not([type=radio]), textarea, details")).toHaveCount(0);
 });
 
 test("OAuth countdown follows the active locale", async ({ page }) => {
@@ -331,6 +331,7 @@ test("pool controls delegate an exhausted OAuth account to the backend", async (
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   await dialog.getByText("Personal Plus", { exact: true }).click();
   await dialog.getByRole("button", { name: "Add selected (1)" }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
 
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   const start = page.getByRole("button", { name: "Start API", exact: true });

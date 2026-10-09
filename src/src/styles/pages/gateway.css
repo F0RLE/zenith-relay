@@ -666,7 +666,7 @@
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
+  gap: 8px;
 }
 
 .sign-in-proxy-options {
@@ -676,21 +676,21 @@
 
 .proxy-route-options > button {
   min-width: 0;
-  min-height: 54px;
+  min-height: 64px;
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
   color: var(--relay-text);
   text-align: left;
 }
 
 .proxy-route-options > button:hover:not(:disabled) {
-  background: var(--relay-subtle);
+  background: color-mix(in srgb, var(--relay-border) 25%, var(--relay-subtle));
 }
 
 .proxy-route-options > button.selected {
@@ -712,11 +712,6 @@
   color: var(--relay-accent-hover);
 }
 
-.proxy-route-options .proxy-route-check {
-  width: 16px;
-  height: 16px;
-}
-
 .proxy-account-context {
   margin: 0 0 4px;
   color: var(--relay-muted);
@@ -727,26 +722,32 @@
 .proxy-route-options span {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: 4px;
 }
 
 .proxy-route-options strong,
 .proxy-route-options small {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+
+.proxy-route-options strong {
+  font-size: 13px;
+  font-weight: 550;
 }
 
 .proxy-route-options small {
   color: var(--relay-muted);
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .proxy-route-control {
   min-width: 0;
   display: grid;
-  gap: 7px;
-  padding-top: 3px;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--relay-subtle);
 }
 
 .success-text {
@@ -1105,30 +1106,6 @@
   margin-top: 2px;
 }
 
-.oauth-binding-selection-hint {
-  min-width: 0;
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-weight: 400;
-  line-height: 16px;
-}
-
-.oauth-binding-selection-hint > svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-  color: var(--relay-accent-hover);
-}
-
-.oauth-binding-selection-hint.warning,
-.oauth-binding-selection-hint.warning > svg {
-  color: var(--relay-warning);
-}
 
 .config-preview {
   margin: 16px 0;
@@ -1144,7 +1121,8 @@
   color: var(--relay-text);
 }
 
-.gateway-api-toggle-setting {
+.gateway-api-toggle-setting,
+.integration-account-policy {
   border: 1px solid var(--relay-border);
   border-radius: 10px;
   padding: 16px 20px;
@@ -1153,20 +1131,24 @@
 }
 
 @container (max-width: 340px) {
-  .gateway-api-toggle-setting .relay-toggle-setting {
+  .gateway-api-toggle-setting .relay-toggle-setting,
+  .integration-account-policy .relay-toggle-setting {
     flex-wrap: wrap;
     align-items: flex-start;
   }
 
-  .gateway-api-toggle-setting .relay-toggle-setting > label {
+  .gateway-api-toggle-setting .relay-toggle-setting > label,
+  .integration-account-policy .relay-toggle-setting > label {
     flex: 1 1 100%;
   }
 
-  .gateway-api-toggle-setting .relay-switch {
+  .gateway-api-toggle-setting .relay-switch,
+  .integration-account-policy .relay-switch {
     margin-left: auto;
   }
 }
 
 @media (max-width: 640px) {
-  .gateway-api-toggle-setting { padding: 16px 18px; }
+  .gateway-api-toggle-setting,
+  .integration-account-policy { padding: 16px 18px; }
 }

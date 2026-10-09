@@ -108,6 +108,7 @@ test("connections stay outside the pool until the user adds selected members", a
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   await dialog.getByText("Business Workspace", { exact: true }).click();
   await dialog.getByRole("button", { name: "Add selected (1)" }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
 
   const rows = page.locator(".pool-member-card");
   await expect(rows).toHaveCount(1);
@@ -147,7 +148,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Sources" }).click();
 
-    const row = page.getByRole("row").filter({ hasText: "Example compatible API" });
+    const row = page.locator(".source-card").filter({ hasText: "Example compatible API" });
     await expect(row).not.toContainText("Stabilizer");
     await row.locator(".relay-action-menu summary").click();
     await page.getByRole("menuitem", { name: "Remove from pool" }).click();
@@ -180,7 +181,7 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByLabel("Name", { exact: true }).fill("Failover API");
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
     await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
-    await sourceDialog.getByRole("button", { name: "Save" }).click();
+    await sourceDialog.getByRole("button", { name: "Add source" }).click();
     await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
@@ -767,7 +768,7 @@ test("source and automation rows keep rare actions in consistent menus", async (
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   await page.getByRole("tab", { name: "Sources" }).click();
-  let actions = page.locator(".relay-table .row-actions");
+  let actions = page.locator(".source-card .row-actions");
   expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
   await actions.locator("summary").click();
   expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Refresh API data", "Remove from pool", "Disable", "Delete"]);

@@ -5,7 +5,7 @@ import type { ProxyCheckResult } from "../../api/types";
 export type ProxyCheckState = { pending: boolean; result?: ProxyCheckResult };
 export type ProxyChecks = ReturnType<typeof useProxyChecks>;
 
-/** Session-only diagnostics, separate from proxy assignments and routing health. */
+/** Tracks pending checks; saved diagnostics come from the proxy pool. */
 export function useProxyChecks(resetKey: string) {
   const [checks, setChecks] = useState<Record<string, ProxyCheckState>>({});
   const generation = useRef(0);
@@ -21,7 +21,7 @@ export function useProxyChecks(resetKey: string) {
     if (inFlight.current.has(proxyId)) return;
     const generationAtStart = generation.current;
     inFlight.current.add(proxyId);
-    setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { pending: true } }));
+    setChecks((previousChecks) => ({ ...previousChecks, [proxyId]: { ...previousChecks[proxyId], pending: true } }));
     let proxyCheckResult: ProxyCheckResult;
     try {
       proxyCheckResult = await relayCommands.checkStoredProxy(proxyId);

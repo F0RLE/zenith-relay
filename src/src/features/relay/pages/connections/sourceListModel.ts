@@ -25,7 +25,7 @@ function sourceSortValue(source: SourceSummary, key: SourceSortColumn) {
   }
 }
 
-export function compareSourcesForTable(
+export function compareSources(
   left: SourceSummary,
   right: SourceSummary,
   key: SourceSortKey,
@@ -61,5 +61,5 @@ export function filterAndSortSources(
       effectiveSourceProtocolBindings(source).map((binding) => binding.wireApi),
       source.models,
     ))
-    .sort((left, right) => compareSourcesForTable(left, right, key, direction, runtimePosition));
+    .sort((left, right) => compareSources(left, right, key, direction, runtimePosition));
 }

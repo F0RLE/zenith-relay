@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
-import { Check, CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, MapPin, Network, Plus, RefreshCw, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, MapPin, Network, Plus, RefreshCw, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolImportResult, ProxyPoolSummary, StoredProxyAssignmentResult } from "../../api/types";
-import { AccountPlanBadge, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, SecretField, useConfirm } from "../../components/Ui";
+import { AccountBadges, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, SecretField, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { captureOperationResult } from "../../state/relayOperationModel";
 import { matchesQuery, NoResults } from "./connectionHelpers";
@@ -29,6 +29,8 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
     proxyEntry.endpoint,
     proxyEntry.countryCode,
     proxyEntry.region,
+    (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.ip,
+    (diagnostics.checks[proxyEntry.id]?.result ?? proxyEntry.lastCheck)?.countryCode,
     proxyEntry.assignedAccountIds.map((accountId) => accounts.get(accountId)?.label ?? t("accounts.importUnknownAccount")),
   ));
   const allSelectableSelected = proxyEntries.length > 0 && proxyEntries.every((proxyEntry) => selected.includes(proxyEntry.id));
@@ -101,6 +103,8 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
       : !proxyEntries.length ? <NoResults />
         : <div className="proxy-storage-list" role="list">{proxyEntries.map((proxyEntry) => {
           const assignedNames = proxyEntry.assignedAccountIds.map((accountId) => accounts.get(accountId)?.label ?? t("accounts.importUnknownAccount"));
+          const checkState = diagnostics.checks[proxyEntry.id];
+          const lastCheck = checkState?.result ?? proxyEntry.lastCheck;
           return <div className={`proxy-storage-row${selected.includes(proxyEntry.id) ? " selected" : ""}`} role="listitem" key={proxyEntry.id}>
             <label className="proxy-row-select" data-relay-tooltip={t("proxies.selectForDelete")}>
               <input
@@ -114,7 +118,10 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
               <div><Network aria-hidden /><strong>{proxyEntry.endpoint}</strong></div>
               {proxyEntry.countryCode || proxyEntry.region ? <small data-relay-tooltip={t("proxies.locationSource")}><MapPin aria-hidden />{t("proxies.declaredLocation", { location: proxyLocationLabel(proxyEntry, i18n.resolvedLanguage ?? i18n.language, t) })}</small> : null}
             </div>
-            <ProxyDiagnostic state={diagnostics.checks[proxyEntry.id]} />
+            <ProxyDiagnostic state={{
+              pending: checkState?.pending ?? false,
+              ...(lastCheck ? { result: lastCheck } : {}),
+            }} />
             <div className="proxy-storage-account-count" data-relay-tooltip={assignedNames.join(", ")}><span>{assignedNames[0] ?? "-"}</span>{assignedNames.length > 1 ? <small>+{assignedNames.length - 1}</small> : null}</div>
             <div className="row-actions">
               <IconButton label={t("proxies.testConnection")} icon={<Globe aria-hidden />} busy={Boolean(diagnostics.checks[proxyEntry.id]?.pending)} onClick={() => void diagnostics.check(proxyEntry.id)} />
@@ -136,7 +143,10 @@ function ProxyDiagnostic({ state }: { state: ProxyCheckState | undefined }) {
   const success = Boolean(proxyCheckResult?.ip && !proxyCheckResult.errorCode);
   const Icon = pending ? Loader2 : success ? CircleCheck : proxyCheckResult ? CircleAlert : Globe;
   const country = proxyCheckResult?.countryCode ? proxyLocationLabel({ countryCode: proxyCheckResult.countryCode, region: null }, i18n.resolvedLanguage ?? i18n.language, t) : null;
-  return <div className="proxy-diagnostic" data-state={pending ? "pending" : success ? "success" : proxyCheckResult ? "failed" : "unknown"} role="status">
+  const checkedAt = proxyCheckResult
+    ? new Intl.DateTimeFormat(i18n.resolvedLanguage ?? i18n.language, { dateStyle: "short", timeStyle: "short" }).format(proxyCheckResult.checkedAtMs)
+    : undefined;
+  return <div className="proxy-diagnostic" data-relay-tooltip={checkedAt ? t("proxies.checkedAt", { time: checkedAt }) : undefined} data-state={pending ? "pending" : success ? "success" : proxyCheckResult ? "failed" : "unknown"} role="status">
     <div><Icon className={pending ? "spin" : undefined} aria-hidden /><strong>{t(pending ? "proxies.checking" : success ? "proxies.checkSuccess" : proxyCheckResult ? "proxies.checkFailed" : "proxies.notChecked")}</strong></div>
     {success && proxyCheckResult ? <><code>{proxyCheckResult.ip}</code><small>{[country, t("proxies.latency", { ms: proxyCheckResult.elapsedMs })].filter(Boolean).join(" · ")}</small></> : proxyCheckResult && !pending ? <small>{t(`proxies.checkErrors.${proxyCheckResult.errorCode}`, { defaultValue: t("proxies.checkUnavailable") })}</small> : null}
   </div>;
@@ -185,7 +195,7 @@ function ProxyAccountsDialog({ proxyEntry, accounts, onSaved, onClose }: { proxy
       <div className="scope-grid proxy-account-grid">{visible.map((account) => <label key={account.id}>
         <input type="checkbox" checked={selected.includes(account.id)} onChange={() => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.includes(account.id) ? previousSelectedAccountIds.filter((selectedAccountId) => selectedAccountId !== account.id) : [...previousSelectedAccountIds, account.id])} />
         <span className="proxy-account-identity" data-relay-tooltip={account.label}><strong>{account.label}</strong></span>
-        <AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} />
+        <AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} />
       </label>)}</div>
       {!visible.length ? <NoResults /> : null}
       <p className="form-note">{t("proxies.sharedProxyHint")}</p>
@@ -472,7 +482,6 @@ function ProxyRouteOption({
     >
       {icon}
       <span><strong>{label}</strong><small>{hint}</small></span>
-      {selected ? <Check className="proxy-route-check" aria-hidden /> : null}
     </button>
   );
 }

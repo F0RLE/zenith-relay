@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import enGuide from "../../../../../docs/help/en/README.md?url";
 import ruGuide from "../../../../../docs/help/ru/README.md?url";
-import { Button, PageHeader } from "../components/Ui";
+import { Button, Dialog, PageHeader } from "../components/Ui";
 import { useRelayState } from "../state/RelayStateProvider";
 import { HelpContents } from "./HelpContents";
 import { HelpErrorReference } from "./HelpErrorReference";
@@ -27,7 +27,21 @@ export function HelpCenter() {
   </section>;
 }
 
-function HelpGuide({ language }: { language: keyof typeof guides }) {
+export function HelpTopicDialog({ topic, onClose }: { topic: "sign-in"; onClose: () => void }) {
+  const { t, i18n } = useTranslation();
+  const language = i18n.resolvedLanguage?.startsWith("ru") ? "ru" : "en";
+  return <Dialog
+    title={t("accounts.signInHelp")}
+    onClose={onClose}
+    layer="top"
+    className="help-topic-dialog"
+    footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}
+  >
+    <HelpGuide key={`${language}:${topic}`} language={language} topic={topic} />
+  </Dialog>;
+}
+
+function HelpGuide({ language, topic }: { language: keyof typeof guides; topic?: "sign-in" }) {
   const { t } = useTranslation();
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -39,12 +53,19 @@ function HelpGuide({ language }: { language: keyof typeof guides }) {
       if (!response.ok) throw new Error("Help asset unavailable");
       const text = await response.text();
       if (!text.includes("<!-- relay:error-reference -->")) throw new Error("Invalid Help asset");
-      if (!abort.signal.aborted) setMarkdown(text);
+      const content = topic
+        ? text.split(`<!-- relay:topic:${topic} -->`)[1]?.split(`<!-- relay:topic-end:${topic} -->`)[0]?.trim()
+        : text;
+      if (!content || (topic && !text.includes(`<!-- relay:topic-end:${topic} -->`))) throw new Error("Help topic unavailable");
+      if (!abort.signal.aborted) setMarkdown(content);
     }).catch(() => { if (!abort.signal.aborted) setFailed(true); });
     return () => abort.abort();
-  }, [language, attempt]);
+  }, [language, topic, attempt]);
   if (failed) return <div role="alert"><p>{t("helpCenter.loadFailed")}</p><Button icon={<RotateCcw aria-hidden />} onClick={() => setAttempt((attempt) => attempt + 1)}>{t("helpCenter.retry")}</Button></div>;
   if (markdown === null) return <p role="status">{t("helpCenter.loading")}</p>;
+  if (topic) return <article className="help-document">
+    <ReactMarkdown skipHtml remarkPlugins={[remarkGfm]} components={helpMarkdownComponents}>{markdown}</ReactMarkdown>
+  </article>;
   return <HelpDocument markdown={markdown} language={language} />;
 }
 
