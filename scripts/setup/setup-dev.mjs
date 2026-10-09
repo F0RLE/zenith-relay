@@ -92,8 +92,9 @@ try {
     const workspaceSetup = resolve(root, "..", "scripts", "setup", "setup-development.ps1");
     if (!existsSync(workspaceSetup)) {
       throw new Error(
-        "Portable Windows tools are missing. Run the workspace setup script " +
-        "scripts\\setup\\setup-development.ps1 -InstallBuildTools, then run setup again.",
+        "Windows native tools are missing. Install MSVC, Windows SDK, CMake, and Ninja " +
+        "as described in CONTRIBUTING.md, then run setup again. " +
+        "The optional portable installer belongs to the Zenith workspace and is not in this clone.",
       );
     }
 

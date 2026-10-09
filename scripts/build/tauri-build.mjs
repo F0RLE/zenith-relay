@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { repoRoot, tauriInvocation, withZenithRustEnv } from "../lib/tauri-env.mjs";
 
 const cliArgs = process.argv.slice(2);
-const buildArgs = ["build", ...cliArgs, "--config", "src-tauri/tauri.conf.json"];
+const buildArgs = ["build", "--config", "src-tauri/tauri.conf.json", ...cliArgs];
 const isInformationInvocation = cliArgs.some((argument) =>
   ["--help", "-h", "--version", "-V"].includes(argument),
 );
@@ -36,7 +36,13 @@ const buildResult = spawnSync(invocation.command, invocation.args, {
   env: withZenithRustEnv(),
   shell: invocation.shell,
   stdio: "inherit",
+  windowsHide: true,
 });
+
+if (buildResult.error) {
+  console.error(`[build] Failed to start Tauri: ${buildResult.error.message}`);
+  process.exit(1);
+}
 
 const buildStatus = buildResult.status ?? 1;
 if (buildStatus === 0 && isLocalWindowsRelease && existsSync(executable)) {

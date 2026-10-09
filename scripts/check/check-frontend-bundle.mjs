@@ -7,7 +7,8 @@ const indexPath = join(distDirectory, "index.html");
 const limits = {
   initialJavaScript: 150 * 1024,
   initialCss: 40 * 1024,
-  totalAssets: 360 * 1024,
+  // Includes lazy integration settings and debug context diagnostics.
+  totalAssets: 375 * 1024,
   helpDocuments: 64 * 1024,
 };
 
