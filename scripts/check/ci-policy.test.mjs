@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const releasePush = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')";
 
@@ -55,5 +59,48 @@ describe("server CI", () => {
     expect(needs(server.jobs.publish)).toEqual(["smoke"]);
     expect(JSON.stringify(server.jobs.smoke)).not.toContain("docker/login-action");
     expect(JSON.stringify(server.jobs.publish.steps)).not.toContain("edge-");
+  });
+});
+
+describe("agent guardrails", () => {
+  test("checks a large patch through its last line and excludes test files", () => {
+    const root = mkdtempSync(join(tmpdir(), "zenith-guardrails-test-"));
+    const script = fileURLToPath(new URL("./check-agent-guardrails.mjs", import.meta.url));
+    const env = { ...process.env };
+    delete env.GITHUB_BASE_REF;
+    try {
+      for (const args of [
+        ["init", "--quiet"],
+        ["config", "user.name", "Synthetic fixture"],
+        ["config", "user.email", "fixture@example.test"],
+        ["config", "commit.gpgsign", "false"],
+        ["commit", "--allow-empty", "--quiet", "-m", "fixture base"],
+      ]) {
+        const result = spawnSync("git", args, { cwd: root, encoding: "utf8", env, windowsHide: true });
+        expect(result.status, result.stderr).toBe(0);
+      }
+      mkdirSync(join(root, "crates"));
+      mkdirSync(join(root, "crates/tests"));
+      const source = join(root, "crates/source.rs");
+      const patch = "// Synthetic padding exercises the complete release diff.\n".repeat(25_000);
+      expect(Buffer.byteLength(patch)).toBeGreaterThan(1_048_576);
+      writeFileSync(source, patch);
+      writeFileSync(join(root, "crates/tests/fixture.rs"), 'fn fixture() { panic!("synthetic"); }\n');
+      const stage = spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true });
+      expect(stage.status).toBe(0);
+      const run = () => spawnSync(process.execPath, [script, "HEAD"], {
+        cwd: root, env, encoding: "utf8", windowsHide: true,
+      });
+      const clean = run();
+      expect(clean.status, clean.stderr).toBe(0);
+      writeFileSync(source, patch + 'fn failed() { panic!("synthetic"); }\n');
+      expect(spawnSync("git", ["add", "crates"], { cwd: root, env, windowsHide: true }).status).toBe(0);
+      const rejected = run();
+      expect(rejected.status).toBe(1);
+      expect(rejected.stderr).toContain("[panic] crates/source.rs");
+      expect(rejected.stderr).not.toContain("ENOBUFS");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

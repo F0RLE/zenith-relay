@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline";
 
 const paths = ["crates", "relay-server", "src-tauri"];
 const rules = [
@@ -30,41 +31,66 @@ function hasCommit(ref) {
 }
 
 const requestedBase = process.argv.slice(2).find((arg) => arg && !arg.startsWith("-"));
-const diffParts = [];
+const diffs = [];
 
 if (requestedBase) {
   if (!hasCommit(requestedBase)) {
     throw new Error(`Guardrail check requires a valid base ref, got '${requestedBase}'.`);
   }
-  diffParts.push(git(["diff", "--unified=0", `${requestedBase}...HEAD`, "--", ...paths]));
+  diffs.push(["diff", "--unified=0", `${requestedBase}...HEAD`, "--", ...paths]);
 } else if (process.env.GITHUB_BASE_REF) {
   git(["fetch", "--no-tags", "--quiet", "origin", process.env.GITHUB_BASE_REF]);
-  diffParts.push(
-    git(["diff", "--unified=0", `origin/${process.env.GITHUB_BASE_REF}...HEAD`, "--", ...paths]),
-  );
+  diffs.push(["diff", "--unified=0", `origin/${process.env.GITHUB_BASE_REF}...HEAD`, "--", ...paths]);
 } else if (hasCommit("HEAD^")) {
-  diffParts.push(git(["diff", "--unified=0", "HEAD^", "HEAD", "--", ...paths]));
+  diffs.push(["diff", "--unified=0", "HEAD^", "HEAD", "--", ...paths]);
 }
 
-diffParts.push(git(["diff", "--unified=0", "--", ...paths]));
-diffParts.push(git(["diff", "--cached", "--unified=0", "--", ...paths]));
+diffs.push(["diff", "--unified=0", "--", ...paths]);
+diffs.push(["diff", "--cached", "--unified=0", "--", ...paths]);
 
-let currentPath = "";
 const violations = [];
-for (const line of diffParts.join("\n").split(/\r?\n/)) {
-  const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-  if (header) {
-    currentPath = header[2];
-    continue;
-  }
-  if (!line.startsWith("+") || line.startsWith("+++") || testPath.test(currentPath)) {
-    continue;
-  }
-  if (line.includes("fixture") && /\.(unwrap|expect)\s*\(/i.test(line)) {
-    continue;
-  }
-  for (const rule of rules) {
-    if (rule.pattern.test(line)) violations.push(`[${rule.name}] ${line}`);
+for (const args of diffs) {
+  // Release branches can have a large diff. Read every line without buffering
+  // the whole patch in spawnSync or truncating the end of the check.
+  const child = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-8_192); });
+  const finished = new Promise((resolve) => {
+    child.once("error", (error) => resolve({ error }));
+    child.once("close", (code) => resolve({ code }));
+  });
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  let currentPath = "";
+  try {
+    for await (const line of lines) {
+      const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+      if (header) {
+        currentPath = header[2];
+        continue;
+      }
+      if (!line.startsWith("+") || line.startsWith("+++") || testPath.test(currentPath)) {
+        continue;
+      }
+      if (line.includes("fixture") && /\.(unwrap|expect)\s*\(/i.test(line)) {
+        continue;
+      }
+      for (const rule of rules) {
+        if (rule.pattern.test(line) && violations.length < 40) {
+          violations.push(`[${rule.name}] ${currentPath}: ${line}`);
+        }
+      }
+    }
+    const result = await finished;
+    if (result.error || result.code !== 0) {
+      const detail = result.error?.message ?? stderr.trim();
+      throw new Error(`git ${args.join(" ")} failed${detail ? `: ${detail}` : ""}`);
+    }
+  } catch (error) {
+    child.kill();
+    throw error;
+  } finally {
+    lines.close();
   }
 }
 
