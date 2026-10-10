@@ -63,7 +63,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(dialog.getByRole("button", { name: "Добавить выбранные (1)" })).toBeInViewport();
       await dialog.screenshot({ path: `output/playwright/pool-picker-${theme}-${viewport.width}.png` });
       await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-      await expect(dialog.getByText("Backup API 7", { exact: true })).toBeInViewport();
+      await expect(list.locator(".pool-picker-option").last()).toBeInViewport();
       await expect(dialog.getByRole("searchbox")).toBeInViewport();
       await expect(dialog.getByRole("button", { name: "Добавить выбранные (1)" })).toBeInViewport();
     });
