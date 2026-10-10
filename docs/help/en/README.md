@@ -290,6 +290,19 @@ tasks and the ChatGPT WebSocket setting control that client integration only.
 ChatGPT model cards and Relay model rules are updated separately;
 Ultra is a ChatGPT orchestration mode, not a provider reasoning level.
 
+When connecting Codex, Relay automatically creates a model catalog and publishes
+known model limits. Native account cards retain their own values; API
+connections publish reference maxima separately from the default window in
+the exact installed Codex card. A large maximum does not automatically enable
+long context. Unknown limits remain unspecified. Codex
+owns history and compaction. Relay does not set a fallback window or compaction
+threshold and preserves manual `model_context_window` and
+`model_auto_compact_token_limit` settings in the client configuration.
+These root `config.toml` settings control the application's shared budget
+and compaction threshold, overriding the default window in the model card.
+The budget is capped by the selected model's maximum window. Without a shared
+override, the client uses the card's default window.
+
 #### OpenCode
 
 Use **Pool → Connect → OpenCode** for a pooled connection or **Launch** for one
@@ -310,11 +323,21 @@ frames. Unsupported structured output, remote image URLs, and opaque
 `previous_response_id` continuation are rejected. Fast service tiers are
 unavailable for Excel.
 
+Relay refreshes Excel model access before showing or using the route. Only
+models allowed by the provider's access response are executable; disabled,
+restricted, or policy-blocked entries are omitted while the provider's order
+is kept. The access result is refreshed after a token change and is never
+replaced with an older result after a failed check.
+
 Excel uses the normal route cooldown and recovery rules. Explicit
 credential and account failures still require their ordinary recovery. A
 transport refusal does not invent exhausted quota or mark the account broken;
-Relay does not rotate accounts to replay an access refusal. Basis Points does
-not guarantee model quality or protection from account restrictions.
+An access check before generation may select another compatible member.
+After a generation is sent, timeout, an incomplete response, or a tool-conversion
+error does not start another generation. SSE heartbeats alone cannot keep an
+Excel request open indefinitely; already reported token usage is retained on
+failure. Basis Points does not guarantee model quality or protection from
+account restrictions.
 
 #### Model substitution checks
 

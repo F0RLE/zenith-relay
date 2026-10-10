@@ -243,6 +243,27 @@ when needed. Unsupported structured output, remote image URLs, opaque
 `previous_response_id`, and non-standard service tiers are rejected. Ordinary
 ChatGPT credentials stay on native Responses regardless of legacy preferences.
 
+Before publishing or executing an Excel route, Relay reads the provider access
+envelope with `include_models=true`. `allowed`, restricted models, availability,
+enabled state, picker state, and policy state determine executable models; the
+provider's order is preserved and duplicate or malformed model rows are
+ignored. The result is cached for 60 seconds per account and exact token
+incarnation. A token change or an access failure never reuses an older
+permission result; a proven 401 may refresh the token once. Discovery is
+bounded by a five-second timeout and a one-megabyte body limit.
+
+Declared Excel efforts restrict the reference catalog's modes for that account.
+Request encoding and access checks share BPS alias normalization, including
+`max` to `xhigh`; an omitted effort leaves the provider default intact.
+Catalog filtering takes an access snapshot before locking the scheduler.
+The final dispatch still checks the current credential and model permissions.
+
+Excel defaults to a 120-second upstream progress deadline. SSE comments and blank
+lines do not reset it; fragmented event data does. A terminal event ends
+collection without waiting for EOF. Timeout and body failure retain already
+reported usage and never authorize another generation. Completed-response
+translation errors are terminal, including malformed client-tool envelopes.
+
 Excel refusals use the ordinary scheduler settlement and cooldown rules,
 including refusals inside HTTP 200 responses. Execution certainty is retained:
 a refusal does not authorize replay after unknown or completed execution.
@@ -270,6 +291,14 @@ tools such as web search are dropped because the upstream cannot run them.
 Responses and streams restore the client's tool kind, name, and namespace. A
 forced tool choice that names a tool that was not declared still fails before
 sending.
+
+Excel translates client tools through its native transport envelope. Current
+root declarations override historical `additional_tools` and `tool_search_output`
+definitions; the latest history fills omitted definitions. Original function
+schemas validate both declarations and returned arguments with external
+reference retrieval disabled. Simple schemas have a compact prompt rendering;
+unfamiliar or complex schemas stay verbatim. Encrypted agent assignments are
+rejected before their technical history is removed.
 
 ## Usage and prices
 
@@ -323,6 +352,21 @@ restore. Automatic rollback changes only unchanged Relay-owned fields and never
 overwrites a newer manual sign-in. ChatGPT OAuth writes the native token fields
 and clears Relay overrides so Codex can discover its models. Pool activation
 writes the Relay provider and validated catalog through the live local endpoint.
+Native Codex account cards retain their own context window, extended maximum,
+compaction threshold, and effective-window percentage when reference semantics
+are projected; missing fields stay absent. An account route without its own
+card does not inherit a reference API maximum. Pooled API routes and direct API
+profiles publish known reference maxima separately from the default window
+in the exact installed Codex card. The API maximum never becomes the default
+window; the client default is capped by a smaller known API maximum.
+Without an exact Codex card the default stays absent. Relay does not invent a
+fallback window, compaction threshold, or effective-window percentage. Codex owns its
+history budget and compaction policy; explicit configuration overrides remain
+user-owned and are preserved by Relay.
+Root `model_context_window` and `model_auto_compact_token_limit` settings
+belong to the client application, not individual catalog rows. The client's
+window override takes precedence over the card default and is capped by the
+selected model maximum; catalog refresh does not change either setting.
 Backups stay in Relay recovery storage; credential snapshots use the OS secret
 store. OpenCode keeps its original JSON/JSONC configuration and restores user
 edits through a semantic merge.

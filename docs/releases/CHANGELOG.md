@@ -8,6 +8,13 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Codex connections retain native account context and compaction settings.
+  API connections publish known model maxima separately from the default
+  window in the exact installed Codex card, keeping long context opt-in.
+  Relay does not set a history budget or compaction threshold; unknown limits
+  remain unspecified.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+
 - ChatGPT model discovery follows official catalog priorities instead of raw
   array positions. Pool snapshots and runtime catalogs both prefer account
   order for shared IDs, while API inventories retain their source order.
@@ -54,6 +61,16 @@ release entries are kept concise and link to the corresponding tag.
 - Basis Points is available only through a separate Excel / Basis Points
   sign-in. Ordinary ChatGPT connections always use native Responses, including
   when old settings enabled BPS. The API transport switch is removed.
+- Excel model access is refreshed from the provider's access envelope before
+  catalog publication and execution. Disabled, restricted, and policy-blocked
+  models are omitted, provider order is preserved, and the result is scoped to
+  the current token with bounded timeout and body size.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- Excel / Basis Points tool declarations prefer the current catalog over
+  history and support tools returned by tool search. Function arguments are
+  checked against their original schemas; simple schemas use a compact prompt
+  representation. Encrypted agent assignments are rejected before sending.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 - Adding a regular ChatGPT account to the pool shows a risk notice with
   Continue, Skip, and a device-local reminder preference. Right-click addition
   bypasses the notice; skipped imports still save the accounts.
@@ -76,6 +93,19 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Excel requests default to a 120-second limit without upstream progress; SSE
+  heartbeats do not extend the wait. Terminal events finish without waiting
+  for the connection to close, and failures retain reported token usage.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- A completed Excel response with invalid tool output returns a conversion
+  error without automatically starting a second generation.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- Excel access and request encoding use the same reasoning aliases, so a
+  supported `max` mode is not hidden when the provider reports `xhigh`.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
+- Reported stream token totals remain consistent when later events update the
+  input and output counters, including when the final response is interrupted.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 - Switching between ChatGPT and Excel / Basis Points sign-in keeps the dialog
   open and updates the selection immediately. The dialog blocks the previous
   sign-in link during replacement.
@@ -134,6 +164,11 @@ release entries are kept concise and link to the corresponding tag.
   ChatGPT использует нативный маршрут; добавление в пул показывает
   предупреждение с «Продолжить», «Пропустить» и «Больше не напоминать».
   ПКМ добавляет сразу, пропуск при импорте сохраняет аккаунт вне пула.
+- Доступ к моделям Excel обновляется по ответу провайдера перед публикацией
+  каталога и выполнением запроса. Отключённые, ограниченные и заблокированные
+  правилами модели исключаются, порядок провайдера сохраняется, а результат
+  привязан к текущему токену и ограничен таймаутом и размером ответа.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 
 - Импорт распознаёт JSON Cockpit Tools, а экспорт создаёт файлы Cockpit Tools с безопасными метаданными аккаунта.
 
