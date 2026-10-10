@@ -32,6 +32,7 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
 
   useEffect(() => {
     if (!calculationOpen) return;
+    calculationRef.current?.querySelector<HTMLElement>("p")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node) || !calculationRef.current?.contains(target)) setCalculationOpen(false);

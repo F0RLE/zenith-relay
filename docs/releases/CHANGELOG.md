@@ -93,6 +93,9 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Fixed
 
+- Usage calculation hints remain visible when opened near the bottom of a
+  narrow window.
+  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
 - Excel requests default to a 120-second limit without upstream progress; SSE
   heartbeats do not extend the wait. Terminal events finish without waiting
   for the connection to close, and failures retain reported token usage.

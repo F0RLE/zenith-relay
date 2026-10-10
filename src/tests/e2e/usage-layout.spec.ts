@@ -77,12 +77,14 @@ for (const theme of ["light", "dark"] as const) {
       const account = page.locator(".usage-account-value");
       await expect(account).toBeVisible();
       await expectReportFits(page);
+      await account.locator("summary").evaluate((element) => element.scrollIntoView({ block: "end" }));
       await account.locator("summary").click();
       const hint = account.locator("details p");
       await expect(hint).toBeInViewport();
-      expect(await hint.evaluate((element) => {
+      await expect.poll(() => hint.evaluate((element) => {
         const rect = element.getBoundingClientRect();
-        return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth + 1;
+        return rect.top >= 36 && rect.bottom <= innerHeight + 1 && rect.left >= 0 && rect.right <= innerWidth
+          && element.scrollWidth <= element.clientWidth + 1;
       })).toBe(true);
       if (width === 1160 || width === 390) await page.screenshot({ path: `output/playwright/usage-account-${theme}-${width}.png` });
     });
