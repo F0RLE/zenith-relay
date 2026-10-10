@@ -47,17 +47,32 @@ mod ultra_tests {
     use super::*;
 
     #[test]
-    fn bundled_codex_metadata_uses_exact_models_and_only_orchestration_fields() {
+    fn bundled_codex_metadata_uses_exact_models_and_only_client_owned_fields() {
         let catalog = json!({"models": [
             {"slug": "gpt-future", "supported_reasoning_levels": [
                 {"effort": "max"}, {"effort": "ultra"}
             ], "multi_agent_version": "v2", "multi_agent_reasoning_effort": "xhigh",
                "base_instructions": "not a Relay instruction"},
+            {"slug": "gpt-short", "context_window": 272000, "max_context_window": 872000,
+               "auto_compact_token_limit": 244800, "effective_context_window_percent": 95,
+               "supported_reasoning_levels": [{"effort": "max"}]},
             {"slug": "gpt-other", "supported_reasoning_levels": [{"effort": "max"}]}
         ]});
         let official = official_codex_ultra_rows(&catalog);
         assert!(official.contains_key("gpt-future"));
         assert!(!official.contains_key("gpt-other"));
+        assert_eq!(official["gpt-short"]["context_window"], 272_000);
+        assert_eq!(
+            official["gpt-short"]["supported_reasoning_levels"],
+            json!([])
+        );
+        assert!(official["gpt-short"].get("max_context_window").is_none());
+        assert!(official["gpt-short"]
+            .get("auto_compact_token_limit")
+            .is_none());
+        assert!(official["gpt-short"]
+            .get("effective_context_window_percent")
+            .is_none());
         let mut relay = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
         relay["slug"] = json!("gpt-future");
         relay["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);

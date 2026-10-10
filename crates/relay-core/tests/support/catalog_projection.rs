@@ -523,8 +523,8 @@ async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model()
     assert_eq!(model["use_responses_lite"], true);
     assert_eq!(model["supports_reasoning_summaries"], false);
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
-    assert!(model.get("context_window").is_none());
-    assert!(model.get("max_context_window").is_none());
+    assert_eq!(model["context_window"], 128_000);
+    assert_eq!(model["max_context_window"], 120_000);
 
     let source_requests_before = source_state.requests.lock().unwrap().len();
     assert_eq!(source_requests_before, 0);

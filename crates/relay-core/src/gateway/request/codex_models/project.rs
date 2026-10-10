@@ -115,7 +115,7 @@ pub(super) fn build_codex_models_response_from_manifests(
                     // account's otherwise valid transport template.
                     let official_manifest = account_manifest.clone();
                     let mut catalog_entry = account_manifest.clone();
-                    capabilities.apply_to_codex(&mut catalog_entry);
+                    capabilities.apply_to_native_codex(&mut catalog_entry);
                     catalog_entry["display_name"] =
                         json!(runtime.codex_model_display_name(&upstream_id));
                     catalog_entry
@@ -160,9 +160,25 @@ pub(super) fn build_codex_models_response_from_manifests(
                 uses_responses_lite,
             );
         }
-        capabilities.apply_to_codex(&mut catalog_model);
-        if native_catalog_model.is_none() {
-            crate::publish_routed_codex_context(&mut catalog_model, capabilities.context_limit);
+        if native_catalog_model.is_some() {
+            capabilities.apply_to_native_codex(&mut catalog_model);
+        } else {
+            capabilities.apply_to_codex(&mut catalog_model);
+            // An account without its own card must not inherit the reference
+            // API maximum as its native Codex conversation window.
+            let context_limit = if has_native_account_route {
+                None
+            } else {
+                capabilities.context_limit
+            };
+            let default_context_window = runtime
+                .official_codex_ultra_model(&upstream_id)
+                .and_then(|official| official.get("context_window").and_then(Value::as_u64));
+            crate::publish_routed_codex_context(
+                &mut catalog_model,
+                context_limit,
+                default_context_window,
+            );
         }
         let mut supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
         let native_ultra = native_catalog_model.as_ref().is_some_and(|(_, official)| {

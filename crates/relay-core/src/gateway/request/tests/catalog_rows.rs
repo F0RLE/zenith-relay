@@ -104,7 +104,7 @@ fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
     }
 }
 #[test]
-fn known_non_native_model_publishes_reference_context_for_auto_compact() {
+fn known_non_native_model_publishes_reference_limits_without_client_policy() {
     use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
     let catalog = ModelMetadataCatalog::from_models_dev_json(
         r#"{
@@ -128,10 +128,10 @@ fn known_non_native_model_publishes_reference_context_for_auto_compact() {
     let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
     let model_row = &response["models"][0];
     assert_eq!(model_row["input_modalities"], json!(["text"]));
-    assert_eq!(model_row["context_window"], 64_000);
+    assert!(model_row.get("context_window").is_none());
     assert_eq!(model_row["max_context_window"], 64_000);
-    assert_eq!(model_row["auto_compact_token_limit"], 57_600);
-    assert_eq!(model_row["effective_context_window_percent"], 95);
+    assert!(model_row.get("auto_compact_token_limit").is_none());
+    assert!(model_row.get("effective_context_window_percent").is_none());
     assert_eq!(model_row["supports_parallel_tool_calls"], true);
     assert_eq!(model_row["default_reasoning_level"], "high");
     assert_eq!(
@@ -142,6 +142,36 @@ fn known_non_native_model_publishes_reference_context_for_auto_compact() {
         2
     );
     assert!(codex_catalog_entry_is_compatible(model_row));
+}
+
+#[test]
+fn api_catalog_keeps_installed_short_context_separate_from_reference_maximum() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+    let catalog = ModelMetadataCatalog::from_models_dev_json(
+        r#"{"gpt-future":{"limit":{"context":1050000}}}"#,
+    )
+    .unwrap();
+    let runtime = capability_test_runtime(
+        &["gpt-future"],
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(catalog)),
+            ..GatewayRuntimeOptions::default()
+        },
+    );
+    runtime.set_official_codex_ultra_models(std::collections::BTreeMap::from([(
+        "gpt-future".into(),
+        json!({"slug": "gpt-future", "context_window": 272000}),
+    )]));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+        .unwrap();
+    let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+    let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
+    let row = &response["models"][0];
+    assert_eq!(row["context_window"], 272_000);
+    assert_eq!(row["max_context_window"], 1_050_000);
+    assert!(row.get("auto_compact_token_limit").is_none());
+    assert!(row.get("effective_context_window_percent").is_none());
 }
 #[test]
 fn messages_bridge_does_not_invent_codex_ultra_from_max() {
@@ -451,7 +481,7 @@ fn mixed_upstream_and_fallback_catalog_rows_get_unique_priorities() {
     );
 }
 #[test]
-fn provider_context_does_not_replace_the_reference_window() {
+fn unknown_api_model_does_not_inherit_participant_context_or_client_policy() {
     let runtime = capability_test_runtime(&["gpt-5.4"], GatewayRuntimeOptions::default());
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
@@ -468,9 +498,8 @@ fn provider_context_does_not_replace_the_reference_window() {
         .expect("coding model catalog");
     let model = &response["models"][0];
 
-    assert_eq!(model["context_window"], 272_000);
-    assert_eq!(model["max_context_window"], 272_000);
-    assert_eq!(model["auto_compact_token_limit"], 244_800);
-    assert_ne!(model["context_window"], 128_000);
-    assert_ne!(model["auto_compact_token_limit"], 122_000);
+    assert!(model.get("context_window").is_none());
+    assert!(model.get("max_context_window").is_none());
+    assert!(model.get("auto_compact_token_limit").is_none());
+    assert!(model.get("effective_context_window_percent").is_none());
 }

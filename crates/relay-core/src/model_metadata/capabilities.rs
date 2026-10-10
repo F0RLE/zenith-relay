@@ -181,6 +181,29 @@ impl ModelCapabilities {
             .collect()
     }
 
+    /// Project reference semantics while retaining the owning account's Codex
+    /// context policy. A reference maximum is not a native conversation window.
+    pub fn apply_to_native_codex(&self, catalog_entry: &mut Value) {
+        let context_fields = [
+            "context_window",
+            "max_context_window",
+            "auto_compact_token_limit",
+            "effective_context_window_percent",
+        ];
+        let context = context_fields
+            .iter()
+            .filter_map(|field| {
+                catalog_entry
+                    .get(*field)
+                    .map(|value| ((*field).to_string(), value.clone()))
+            })
+            .collect::<Vec<_>>();
+        self.apply_to_codex(catalog_entry);
+        if let Some(object) = catalog_entry.as_object_mut() {
+            object.extend(context);
+        }
+    }
+
     /// Replace model capability fields, including stale fields from provider
     /// templates. Routing IDs and native transport settings are left intact.
     pub fn apply_to_codex(&self, catalog_entry: &mut Value) {
@@ -246,9 +269,9 @@ impl ModelCapabilities {
         {
             catalog_object.insert("default_reasoning_level".into(), json!(default));
         }
-        // Native Codex cards keep Codex's own window. Advertising a theoretical
-        // catalog maximum here makes Codex expand a conversation instead.
-        // Non-native cards publish the reference limit after this call.
+        // Context is a client policy, projected separately: native cards use
+        // apply_to_native_codex; API cards publish their reference limit after
+        // this call.
     }
 }
 

@@ -7,7 +7,6 @@ use super::shape::{
 use super::{
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
     set_codex_service_tiers, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
-    CODEX_RELAY_FALLBACK_CONTEXT_WINDOW,
 };
 use serde_json::{json, Map, Value};
 
@@ -102,21 +101,18 @@ pub fn routed_codex_catalog_entry(
         "truncation_policy".into(),
         json!({"mode": "tokens", "limit": 10000}),
     );
-    let context_window = advertised_context_window
-        .or_else(|| catalog_entry.get("context_window").and_then(Value::as_u64))
-        .filter(|window| *window > 0)
-        .unwrap_or(CODEX_RELAY_FALLBACK_CONTEXT_WINDOW);
-    catalog_entry.insert("context_window".into(), context_window.into());
-    if advertised_context_window.is_some() {
+    // A template can belong to a different model. Publish only a supplied
+    // limit, never its window or a Relay-invented client history budget.
+    catalog_entry.remove("context_window");
+    catalog_entry.remove("max_context_window");
+    if let Some(context_window) = advertised_context_window.filter(|window| *window > 0) {
         catalog_entry.insert("max_context_window".into(), context_window.into());
-    } else {
-        catalog_entry.remove("max_context_window");
     }
     // Do not synthesize auto-compaction metadata for routed models. The
-    // provider owns that policy, and publishing a Relay-side limit would make
+    // client owns that policy, and publishing a Relay-side limit would make
     // the catalog claim a capability that was never observed upstream.
     catalog_entry.remove("auto_compact_token_limit");
-    catalog_entry.insert("effective_context_window_percent".into(), 95.into());
+    catalog_entry.remove("effective_context_window_percent");
     catalog_entry.insert(
         "comp_hash".into(),
         Value::String(CODEX_RELAY_CATALOG_HASH.into()),

@@ -417,6 +417,14 @@ fn managed_catalog_does_not_add_context_to_an_incomplete_native_row() {
 #[test]
 fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     let (root, home, backups) = profile_dirs("model-catalog-refresh");
+    let user_config = concat!(
+        "model_context_window = 200000\n",
+        "model_auto_compact_token_limit = 190000\n",
+        "\n[profiles.short]\n",
+        "model_context_window = 128000\n",
+        "model_auto_compact_token_limit = 110000\n",
+    );
+    fs::write(home.join(CONFIG_FILE), user_config).unwrap();
     let cache_path = home.join(MODELS_CACHE_FILE);
     fs::write(
         &cache_path,
@@ -434,6 +442,22 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     )
     .unwrap();
 
+    let attached_config = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let attached_auth = fs::read(home.join(AUTH_FILE)).unwrap();
+    let attached = parse_config(std::str::from_utf8(&attached_config).unwrap()).unwrap();
+    assert_eq!(attached["model_context_window"].as_integer(), Some(200_000));
+    assert_eq!(
+        attached["model_auto_compact_token_limit"].as_integer(),
+        Some(190_000)
+    );
+    assert_eq!(
+        attached["profiles"]["short"]["model_context_window"].as_integer(),
+        Some(128_000)
+    );
+    assert_eq!(
+        attached["profiles"]["short"]["model_auto_compact_token_limit"].as_integer(),
+        Some(110_000)
+    );
     assert!(refresh_managed_model_catalog(
         &home,
         &backups,
@@ -441,6 +465,8 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
         None
     )
     .unwrap());
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), attached_config);
+    assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), attached_auth);
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let catalog: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
@@ -457,6 +483,11 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
         None,
     )
     .unwrap());
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        user_config
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -999,7 +1030,7 @@ fn account_switch_clears_the_current_catalog_for_native_codex_models() {
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context() {
+fn direct_source_catalog_publishes_known_limits_without_client_context_policy() {
     let (root, home, _backups) = profile_dirs("direct-source-models-dev");
     ensure_test_native_catalog(&home);
     let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{
@@ -1019,12 +1050,18 @@ fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context
     assert_eq!(value["models"][1]["display_name"], "Unknown");
     assert_eq!(value["models"][0]["input_modalities"], json!(["text"]));
     assert!(value["models"][0].get("context_window").is_none());
+    assert_eq!(value["models"][0]["max_context_window"], 64_000);
+    assert!(value["models"][0].get("auto_compact_token_limit").is_none());
+    assert!(value["models"][0]
+        .get("effective_context_window_percent")
+        .is_none());
     assert_eq!(
         value["models"][1]["input_modalities"],
         json!(["text", "image"])
     );
     assert_eq!(value["models"][1]["supported_reasoning_levels"], json!([]));
     assert!(value["models"][1].get("context_window").is_none());
+    assert!(value["models"][1].get("auto_compact_token_limit").is_none());
     let image = direct_source_model_catalog(
         &home,
         &["gpt-image-2".into(), "vendor/degrade2-model".into()],

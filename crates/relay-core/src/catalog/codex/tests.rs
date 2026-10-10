@@ -295,23 +295,44 @@ fn native_models_keep_an_arbitrary_upstream_slug_over_the_routing_name() {
 }
 
 #[test]
-fn routed_models_use_advertised_context_and_do_not_clamp_unknown_overrides() {
+fn routed_models_publish_known_limits_without_inheriting_template_context_policy() {
     let template = json!({
         "context_window": 272_000,
         "max_context_window": 272_000,
         "auto_compact_token_limit": 244_800,
+        "effective_context_window_percent": 90,
     });
 
     let advertised =
         routed_codex_catalog_entry(template.as_object(), "vendor/large", 1_000, Some(1_000_000));
-    assert_eq!(advertised["context_window"], 1_000_000);
+    assert!(advertised.get("context_window").is_none());
     assert_eq!(advertised["max_context_window"], 1_000_000);
     assert!(advertised.get("auto_compact_token_limit").is_none());
+    assert!(advertised.get("effective_context_window_percent").is_none());
 
     let unknown = routed_codex_catalog_entry(template.as_object(), "vendor/unknown", 1_001, None);
-    assert_eq!(unknown["context_window"], 272_000);
+    assert!(unknown.get("context_window").is_none());
     assert!(unknown.get("max_context_window").is_none());
     assert!(unknown.get("auto_compact_token_limit").is_none());
+    assert!(unknown.get("effective_context_window_percent").is_none());
+}
+
+#[test]
+fn api_maximum_does_not_replace_codex_default_context_window() {
+    let mut model = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+    publish_routed_codex_context(&mut model, Some(1_050_000), Some(272_000));
+    assert_eq!(model["context_window"], 272_000);
+    assert_eq!(model["max_context_window"], 1_050_000);
+    assert!(model.get("auto_compact_token_limit").is_none());
+    assert!(model.get("effective_context_window_percent").is_none());
+
+    publish_routed_codex_context(&mut model, Some(128_000), Some(272_000));
+    assert_eq!(model["context_window"], 128_000);
+    assert_eq!(model["max_context_window"], 128_000);
+
+    publish_routed_codex_context(&mut model, Some(1_050_000), None);
+    assert!(model.get("context_window").is_none());
+    assert_eq!(model["max_context_window"], 1_050_000);
 }
 
 #[test]
@@ -322,7 +343,8 @@ fn routed_models_publish_codex_required_truncation_policy() {
         catalog_entry.get("truncation_policy"),
         Some(&json!({"mode": "tokens", "limit": 10000}))
     );
-    assert_eq!(catalog_entry["context_window"], 1_000_000);
+    assert!(catalog_entry.get("context_window").is_none());
+    assert_eq!(catalog_entry["max_context_window"], 1_000_000);
 }
 
 #[test]

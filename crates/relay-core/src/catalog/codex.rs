@@ -12,7 +12,6 @@ use shape::{display_word, valid_model_id};
 pub const CODEX_RELAY_ALIAS_PREFIX: &str = "zenith/";
 pub const CODEX_RELAY_CATALOG_HASH: &str = "zenith-relay";
 pub const CODEX_CATALOG_PRIORITY_BASE: u64 = 1_000;
-const CODEX_RELAY_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
 
 mod entry;
 
@@ -21,22 +20,34 @@ pub use entry::{
     normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
 };
 
-/// Publish the context window Codex needs before it will start auto-compact.
-/// Native account cards are left untouched: Codex already knows those models.
-/// A missing reference limit uses the same Relay fallback as routed rows, not
-/// a theoretical million-token catalog value.
-pub fn publish_routed_codex_context(catalog_entry: &mut Value, context_limit: Option<u64>) {
+/// Keep the model maximum separate from Codex's default conversation window.
+/// Only an exact Codex-owned card supplies a default; a reference API maximum
+/// must never enable long context by default.
+pub fn publish_routed_codex_context(
+    catalog_entry: &mut Value,
+    context_limit: Option<u64>,
+    default_context_window: Option<u64>,
+) {
     let Some(catalog_object) = catalog_entry.as_object_mut() else {
         return;
     };
-    let window = context_limit
-        .filter(|window| *window > 0)
-        .unwrap_or(CODEX_RELAY_FALLBACK_CONTEXT_WINDOW);
-    let auto_compact = (window.saturating_mul(9) / 10).max(1);
-    catalog_object.insert("context_window".into(), window.into());
-    catalog_object.insert("max_context_window".into(), window.into());
-    catalog_object.insert("auto_compact_token_limit".into(), auto_compact.into());
-    catalog_object.insert("effective_context_window_percent".into(), 95.into());
+    for field in [
+        "context_window",
+        "max_context_window",
+        "auto_compact_token_limit",
+        "effective_context_window_percent",
+    ] {
+        catalog_object.remove(field);
+    }
+    if let Some(window) = context_limit.filter(|window| *window > 0) {
+        catalog_object.insert("max_context_window".into(), window.into());
+    }
+    if let Some(window) = default_context_window.filter(|window| *window > 0) {
+        let window = context_limit
+            .filter(|limit| *limit > 0)
+            .map_or(window, |limit| window.min(limit));
+        catalog_object.insert("context_window".into(), window.into());
+    }
 }
 
 /// Replace source-provided tier fields with the shared Relay model policy.
