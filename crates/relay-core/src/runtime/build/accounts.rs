@@ -149,6 +149,8 @@ pub(super) fn build_accounts(
                 agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
                 agent_identity_revision: AtomicU64::new(0),
                 agent_task_lock: tokio::sync::Mutex::new(()),
+                basis_points_access: RwLock::new(None),
+                basis_points_access_refresh: tokio::sync::Mutex::new(()),
                 routing_cookies: super::super::routing_cookies::RoutingCookies::default(),
             },
         );

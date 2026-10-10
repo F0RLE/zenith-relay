@@ -6,6 +6,47 @@ use axum::http::StatusCode;
 use futures_util::StreamExt;
 use serde_json::Value;
 
+pub(in crate::gateway) fn stop_basis_points_event(
+    event: &[u8],
+    expected_model: Option<&str>,
+) -> bool {
+    let event = parse_sse_event(event);
+    event.outcome.is_some()
+        || (event.has_data && !event.valid)
+        || expected_model.is_some_and(|expected| {
+            event.event_payload.as_ref().is_some_and(|payload| {
+                super::super::streaming::served_model_is_rejected(payload, expected)
+            })
+        })
+}
+
+pub(in crate::gateway) async fn collect_basis_points_response(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
+    let bytes = crate::transport::collect_with_progress(
+        upstream,
+        crate::transport::basis_points_progress_timeout(),
+        |event| stop_basis_points_event(event, expected_model),
+    )
+    .await
+    .map_err(|error| {
+        let category = if error.timed_out {
+            error_codes::STREAM_IDLE_TIMEOUT
+        } else {
+            error_codes::UPSTREAM_BODY
+        };
+        Box::new(StreamBootstrapFailure {
+            partial_body: error.bytes,
+            ..AttemptFailure::stream(category).into()
+        })
+    })?;
+    completed_upstream_response(&bytes, true, expected_model).map_err(|mut failure| {
+        failure.partial_body = bytes;
+        failure
+    })
+}
+
 /// Inspect the SSE preamble before collecting a buffered response. Basis Points
 /// can stream upstream even though its tool envelope is translated at completion.
 pub(in crate::gateway) async fn collect_upstream_response(

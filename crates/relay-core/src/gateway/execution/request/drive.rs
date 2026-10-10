@@ -45,7 +45,6 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) service_tier_policy: &'a ServiceTierPolicy,
     pub(super) tool_policy: &'a mut RequestToolPolicy,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) basis_points_relay_retry_parameter: &'a mut Option<&'static str>,
     pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) forwarded_headers: &'a HeaderMap,
     pub(super) attempt: &'a mut u16,
@@ -60,7 +59,6 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) allow_previous_response_reset: bool,
     pub(super) confirmed_response_missing: &'a mut bool,
-    pub(super) basis_points_relay_retry_attempted: &'a mut bool,
 }
 
 fn carry(
@@ -99,7 +97,6 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         service_tier_policy,
         tool_policy,
         client_context_id,
-        basis_points_relay_retry_parameter,
         last_adapter_error,
         forwarded_headers,
         attempt,
@@ -114,7 +111,6 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         response_affinity_key,
         allow_previous_response_reset,
         confirmed_response_missing,
-        basis_points_relay_retry_attempted,
     } = drive_input;
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
@@ -135,7 +131,6 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         diagnostics: selected.diagnostics,
         client_context_id,
         client_transport: transport,
-        basis_points_relay_retry_parameter: *basis_points_relay_retry_parameter,
         last_adapter_error,
     }) {
         RequestPrepare::Continue => {
@@ -303,14 +298,10 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             last_failure_origin,
             last_preserved_upstream_error,
             has_previous_response_id,
-            basis_points_route,
             basis_points_request: &basis_points_request,
             stream,
             adapter_request,
-            basis_points_relay_retry_attempted,
-            basis_points_relay_retry_parameter,
             tried,
-            last_adapter_error,
             selected_error_origin,
             response_affinity_hit,
             prompt_affinity_key: &prompt_affinity_key,

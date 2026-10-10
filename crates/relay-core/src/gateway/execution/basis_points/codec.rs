@@ -46,13 +46,11 @@ pub(super) fn parse_function_arguments(
     Ok(parsed)
 }
 
-/// Basis Points accepts the provider's effort vocabulary (`low`, `medium`,
-/// `high`, `xhigh`, `ultra`). Relay's catalog also exposes the client-facing
-/// `max` label, which is the same level as `xhigh` for this transport. Keep
-/// that normalization local to the adapter so native account routes retain
-/// their original request value and diagnostics.
-pub(super) fn basis_points_reasoning_effort(request_body: &Map<String, Value>) -> String {
-    let effort = request_body
+/// Normalize client aliases without replacing an explicit level. The fresh
+/// access catalog decides which levels this account accepts. An omitted level
+/// leaves the provider's default intact.
+pub(super) fn basis_points_reasoning_effort(request_body: &Map<String, Value>) -> Option<String> {
+    request_body
         .get("reasoning")
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("effort"))
@@ -60,19 +58,7 @@ pub(super) fn basis_points_reasoning_effort(request_body: &Map<String, Value>) -
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|effort_text| !effort_text.is_empty())
-        .map(str::to_ascii_lowercase);
-    match effort.as_deref() {
-        Some("low") => "low",
-        Some("medium") => "medium",
-        Some("high") => "high",
-        Some("xhigh" | "x-high" | "extra-high" | "extra_high" | "max") => "xhigh",
-        Some("ultra") => "ultra",
-        // The Basis Points plugin uses medium as its safe default for an
-        // absent or unknown level. This keeps a stale client label from
-        // producing the upstream 422 `Invalid request body` response.
-        _ => "medium",
-    }
-    .to_string()
+        .map(crate::providers::chatgpt::normalize_basis_points_reasoning_effort)
 }
 
 pub(super) fn sanitized_metadata(metadata_value: Option<&Value>) -> Option<Value> {

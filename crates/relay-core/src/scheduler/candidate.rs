@@ -171,6 +171,14 @@ impl RuntimeCandidate {
         self.is_configured(model, allowed_protocols, scope) && self.health.is_eligible()
     }
 
+    pub(crate) fn is_discovery_visible(&self, scope: &CandidateScope) -> bool {
+        self.enabled
+            && !self.draining
+            && self.secret_available
+            && self.health.is_eligible()
+            && scope.includes(self)
+    }
+
     pub(crate) fn is_configured(
         &self,
         model: &str,

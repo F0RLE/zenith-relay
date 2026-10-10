@@ -6,7 +6,9 @@ use super::super::super::request::{
     apply_codex_routing_hint, codex_client_version, forwarded_codex_headers, AccountEndpoint,
     CODEX_RESPONSES_LITE_HEADER,
 };
-use super::super::super::response::{emit_usage, usage_event, UsageAttempt};
+use super::super::super::response::{
+    emit_usage, populate_tokens, stop_basis_points_event, usage_event, UsageAttempt,
+};
 use super::super::super::turn_state::request_scope;
 use super::super::{attempt_error_response, finish_request_failure, RequestFailureInput};
 use crate::runtime::{
@@ -224,18 +226,36 @@ pub(super) async fn dispatch_account_attempt(
     };
     let mut status = upstream.status();
     let mut response_headers = upstream.headers().clone();
-    let mut bytes = match crate::transport::collect(upstream).await {
+    let mut bytes = match crate::transport::collect_with_progress(
+        upstream,
+        if basis_points_route {
+            crate::transport::basis_points_progress_timeout()
+        } else {
+            None
+        },
+        |event| {
+            basis_points_route
+                && stop_basis_points_event(
+                    event,
+                    runtime
+                        .block_degraded_routes_enabled()
+                        .then_some(route.source_model.as_str()),
+                )
+        },
+    )
+    .await
+    {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return continue_after_unreadable_body(
+        Err(error) => {
+            return reject_unreadable_body(
                 runtime,
                 lease,
                 &route,
                 attempt,
                 &failed_usage,
                 selected_error_origin,
-                last_failure,
-                last_failure_origin,
+                request_id,
+                error,
             );
         }
     };
@@ -322,25 +342,33 @@ fn reject_authorized_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn continue_after_unreadable_body(
+fn reject_unreadable_body(
     runtime: &GatewayRuntime,
     lease: &CandidateLease,
     route: &ExecutorRoute,
     attempt: u16,
     failed_usage: &impl Fn(&ExecutorRoute, u16, AttemptFailure) -> UsageEvent,
     selected_error_origin: ErrorOrigin,
-    last_failure: &mut Option<AttemptFailure>,
-    last_failure_origin: &mut ErrorOrigin,
+    request_id: &str,
+    error: crate::transport::BodyReadFailure,
 ) -> AccountDispatch {
     lease.settle_rotation_unknown(now_ms());
-    let failure = AttemptFailure::upstream_response_body_failure();
+    let failure = AttemptFailure::stream(if error.timed_out {
+        crate::error_codes::STREAM_IDLE_TIMEOUT
+    } else {
+        crate::error_codes::UPSTREAM_BODY
+    });
     let failure_state = current_failure_state(runtime, &route.candidate_id, &route.source_model);
     let mut event = failed_usage(route, attempt, failure);
+    populate_tokens(&mut event, &error.bytes);
     apply_failure_state(&mut event, failure_state);
     emit_usage(runtime, event);
-    *last_failure = Some(failure);
-    *last_failure_origin = selected_error_origin;
-    AccountDispatch::Continue
+    AccountDispatch::Respond(attempt_error_response(
+        failure,
+        None,
+        selected_error_origin,
+        request_id,
+    ))
 }
 
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]

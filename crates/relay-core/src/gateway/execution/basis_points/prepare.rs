@@ -5,10 +5,8 @@ use super::codec::{
 };
 use super::history::translate_input_items;
 use super::response::has_encrypted_agent_message;
-use super::{
-    is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_RETRY_HINT, TRANSPORT_TOOL,
-    TRANSPORT_TOOL_ALIAS,
-};
+use super::schema::{matches as schema_matches, parameter_schema, prompt_schema, validator};
+use super::{is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
@@ -49,13 +47,9 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
                     line.push_str(&format);
                 }
             }
-        } else if let Some(schema) = tool_parameter_schema(tool) {
-            line.push_str(". Its arguments are an object with ");
-            line.push_str(&describe_parameter_names(schema));
-            if let Ok(schema_text) = serde_json::to_string(schema) {
-                line.push_str(". JSON Schema: ");
-                line.push_str(&schema_text);
-            }
+        } else if let Some(schema) = parameter_schema(tool) {
+            line.push_str(". Arguments (names followed by ? are optional): ");
+            line.push_str(&prompt_schema(schema));
         }
         lines.push(line);
     }
@@ -121,10 +115,10 @@ fn tool_relay_examples(tools: &[ClientTool]) -> String {
             let Some(arguments) = function_arguments else {
                 continue;
             };
-            let Some(schema) = tool_parameter_schema(tool) else {
+            let Some(schema) = parameter_schema(tool) else {
                 continue;
             };
-            if !schema_matches(&arguments, &Value::Object(schema.clone())) {
+            if !schema_matches(&arguments, schema) {
                 continue;
             }
             let Ok(arguments_json) = serde_json::to_string(&arguments) else {
@@ -160,191 +154,6 @@ fn is_named_tool(tool: &ClientTool, bare: &str) -> bool {
     tool.name == bare || tool.name.ends_with(&suffix)
 }
 
-fn tool_parameter_schema(tool: &ClientTool) -> Option<&Map<String, Value>> {
-    ["parameters", "inputSchema", "input_schema"]
-        .into_iter()
-        .find_map(|key| tool.spec.get(key).and_then(Value::as_object))
-}
-
-fn describe_parameter_names(schema: &serde_json::Map<String, Value>) -> String {
-    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
-        return "the arguments required by the client".to_string();
-    };
-    if properties.is_empty() {
-        return "the arguments required by the client".to_string();
-    }
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|required_parameter_names| {
-            required_parameter_names
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let mut property_summaries = properties
-        .keys()
-        .map(|property_name| {
-            let suffix = if required.contains(property_name.as_str()) {
-                "required"
-            } else {
-                "optional"
-            };
-            format!("{property_name} ({suffix})")
-        })
-        .collect::<Vec<_>>();
-    property_summaries.sort();
-    property_summaries.join(", ")
-}
-
-fn schema_matches(candidate_value: &Value, schema_value: &Value) -> bool {
-    let Some(schema_object) = schema_value.as_object() else {
-        return false;
-    };
-    if schema_object.is_empty() {
-        return true;
-    }
-    if let Some(alternatives) = schema_object.get("type").and_then(Value::as_array) {
-        return alternatives.iter().any(|alternative| {
-            let mut alternative_schema = schema_object.clone();
-            alternative_schema.insert("type".to_string(), alternative.clone());
-            schema_matches(candidate_value, &Value::Object(alternative_schema))
-        });
-    }
-    match schema_object.get("type").and_then(Value::as_str) {
-        Some("object") => {
-            let Some(candidate_object) = candidate_value.as_object() else {
-                return false;
-            };
-            if schema_object
-                .get("required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| {
-                    required.iter().any(|required_property_name| {
-                        required_property_name.as_str().is_none_or(|property_name| {
-                            !candidate_object.contains_key(property_name)
-                        })
-                    })
-                })
-            {
-                return false;
-            }
-            if let Some(properties) = schema_object.get("properties").and_then(Value::as_object) {
-                for (key, nested_value) in candidate_object {
-                    let nested_schema = properties
-                        .get(key)
-                        .filter(|property_schema| property_schema.is_object());
-                    if let Some(nested_schema) = nested_schema {
-                        if !schema_matches(nested_value, nested_schema) {
-                            return false;
-                        }
-                        continue;
-                    }
-                    // A missing or non-object property schema is not validated.
-                    // `additionalProperties: false` still rejects that key,
-                    // matching the upstream object-schema check.
-                    if schema_object.get("additionalProperties") == Some(&Value::Bool(false)) {
-                        return false;
-                    }
-                }
-            }
-        }
-        Some("array") => {
-            let Some(candidate_items) = candidate_value.as_array() else {
-                return false;
-            };
-            if let Some(item_schema) = schema_object
-                .get("items")
-                .filter(|item_schema| item_schema.is_object())
-            {
-                if candidate_items
-                    .iter()
-                    .any(|candidate_item| !schema_matches(candidate_item, item_schema))
-                {
-                    return false;
-                }
-            }
-        }
-        Some("string") if !candidate_value.is_string() => return false,
-        Some("integer" | "number") if !candidate_value.is_number() => return false,
-        Some("boolean") if !candidate_value.is_boolean() => return false,
-        Some("null") if !candidate_value.is_null() => return false,
-        _ => {}
-    }
-    if let Some(options) = schema_object.get("enum").and_then(Value::as_array) {
-        if !options.is_empty() && !options.iter().any(|option| option == candidate_value) {
-            return false;
-        }
-    }
-    true
-}
-
-/// The upstream Basis Points adapter regenerates one malformed client-tool
-/// relay before returning an error. Keep the same bounded recovery in Relay,
-/// but only for errors that prove the model emitted the transport envelope;
-/// malformed response bodies and missing terminal status are not retried.
-pub(in crate::gateway::execution) fn should_retry_tool_relay(
-    error: AdapterError,
-    upstream_response_body: &[u8],
-) -> bool {
-    if error.code() != crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID {
-        return false;
-    }
-    let Some(parameter) = error.parameter() else {
-        return false;
-    };
-    if !(parameter.starts_with("output.run_officejs.") || parameter == "output.tool_call") {
-        return false;
-    }
-    serde_json::from_slice::<Value>(upstream_response_body)
-        .ok()
-        .is_some_and(|response| response.get("status").and_then(Value::as_str) == Some("completed"))
-}
-
-/// Claim the one-shot malformed-tool regeneration without duplicating its
-/// eligibility rules in the pooled and account-only execution loops.
-pub(in crate::gateway::execution) fn take_tool_relay_retry(
-    error: AdapterError,
-    upstream_response_body: &[u8],
-    attempted: &mut bool,
-    parameter: &mut Option<&'static str>,
-) -> bool {
-    if *attempted || !should_retry_tool_relay(error, upstream_response_body) {
-        return false;
-    }
-    *attempted = true;
-    *parameter = error.parameter();
-    true
-}
-
-/// Add the one-shot regeneration hint after the prepared input. The diagnostic
-/// contains only the adapter's safe parameter name; provider data and tool
-/// arguments never enter the prompt or logs.
-pub(in crate::gateway::execution) fn add_tool_relay_retry_hint(
-    request_body: &mut Value,
-    parameter: Option<&str>,
-) -> bool {
-    let Some(input_items) = request_body.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let diagnostic = parameter.unwrap_or("output.run_officejs");
-    let hint = format!("{TRANSPORT_RETRY_HINT} {FUNCTION_RELAY_ENCODING} Diagnostic: {diagnostic}");
-    let message = text_message("developer", "input_text", hint);
-    // The adapter appends the correction after the prepared input. A trailing
-    // compaction trigger stays last so the hint does not become the trigger.
-    let insert_at = match input_items
-        .last()
-        .and_then(|input_item| input_item.get("type"))
-        .and_then(Value::as_str)
-    {
-        Some("compaction_trigger") if !input_items.is_empty() => input_items.len() - 1,
-        _ => input_items.len(),
-    };
-    input_items.insert(insert_at, message);
-    true
-}
-
 /// Prepare a client Responses request for the Basis Points executor.
 pub(in crate::gateway::execution) fn prepare_request(
     request: &Value,
@@ -368,11 +177,20 @@ pub(in crate::gateway::execution) fn prepare_request(
         ));
     }
     validate_text_format(request_object.get("text"))?;
-    let all_tools = client_tools(request);
+    let all_tools = client_tools(request)?;
     if all_tools.iter().any(|tool| is_transport_tool(&tool.key())) {
         return Err(AdapterError::invalid_request().with_parameter("tools"));
     }
     let callable = selected_tools(request, &all_tools);
+    for tool in &callable {
+        if tool.kind == "function" {
+            if let Some(schema) = parameter_schema(tool) {
+                validator(schema).map_err(|_| {
+                    AdapterError::invalid_request().with_parameter("tools.parameters")
+                })?;
+            }
+        }
+    }
     let tool_choice_requires_call = requires_tool_call(request_object.get("tool_choice"));
     if tool_choice_requires_call && callable.is_empty() {
         return Err(AdapterError::invalid_request().with_parameter("tool_choice"));
@@ -462,10 +280,9 @@ pub(in crate::gateway::execution) fn prepare_request(
     // instructions and lets the model emit the native run_officejs transport
     // call. Keeping these fields out of the strict upstream schema avoids a
     // generic 422 before generation.
-    upstream_request.insert(
-        "reasoning_effort".to_string(),
-        Value::String(basis_points_reasoning_effort(request_object)),
-    );
+    if let Some(effort) = basis_points_reasoning_effort(request_object) {
+        upstream_request.insert("reasoning_effort".to_string(), Value::String(effort));
+    }
     Ok(Value::Object(upstream_request))
 }
 
@@ -495,16 +312,4 @@ fn validate_text_format(text_value: Option<&Value>) -> Result<(), AdapterError> 
         }
         _ => Err(AdapterError::invalid_request().with_parameter("text.format")),
     }
-}
-
-/// Prepare the upstream body and attach the one-shot relay hint when a retry is already claimed.
-pub(in crate::gateway::execution) fn prepare_upstream(
-    request: &Value,
-    retry_parameter: Option<&str>,
-) -> Result<Value, AdapterError> {
-    let mut prepared = prepare_request(request)?;
-    if retry_parameter.is_some() {
-        add_tool_relay_retry_hint(&mut prepared, retry_parameter);
-    }
-    Ok(prepared)
 }

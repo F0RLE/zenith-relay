@@ -21,7 +21,7 @@ pub(super) fn catalog_protocol(headers: &HeaderMap) -> Option<WireApi> {
     }
 }
 
-pub(super) fn native_catalog(
+pub(super) async fn native_catalog(
     runtime: &GatewayRuntime,
     headers: &HeaderMap,
     protocol: WireApi,
@@ -41,6 +41,7 @@ pub(super) fn native_catalog(
     if !runtime.allows_client_wire_api(&key, client) {
         return client_api_forbidden();
     }
+    runtime.refresh_basis_points_access(&key).await;
     let models = runtime.visible_models(&key, &[protocol], super::now_ms());
     let build_catalog_entry = |model_id: &str| -> Value {
         if protocol == WireApi::Gemini {
@@ -84,7 +85,7 @@ pub(super) async fn gemini_models(
     State(runtime): State<Arc<GatewayRuntime>>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    native_catalog(&runtime, &headers, WireApi::Gemini, None)
+    native_catalog(&runtime, &headers, WireApi::Gemini, None).await
 }
 
 pub(super) async fn native_model(
@@ -94,10 +95,10 @@ pub(super) async fn native_model(
     uri: Uri,
 ) -> Response<Body> {
     if uri.path().starts_with("/v1beta/") {
-        return native_catalog(&runtime, &headers, WireApi::Gemini, Some(&model));
+        return native_catalog(&runtime, &headers, WireApi::Gemini, Some(&model)).await;
     }
     if let Some(protocol) = catalog_protocol(&headers) {
-        return native_catalog(&runtime, &headers, protocol, Some(&model));
+        return native_catalog(&runtime, &headers, protocol, Some(&model)).await;
     }
     if !valid_local_host(&headers) {
         return invalid_host();
@@ -119,6 +120,7 @@ pub(super) async fn native_model(
     if protocols.is_empty() {
         return client_api_forbidden();
     }
+    runtime.refresh_basis_points_access(&key).await;
     if runtime
         .visible_models(&key, &protocols, super::now_ms())
         .iter()

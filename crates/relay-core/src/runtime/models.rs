@@ -124,6 +124,7 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Vec<String> {
         let scope = key.scope_snapshot();
+        let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
         let mut models = crate::poison::mutex(&self.registry)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
@@ -132,6 +133,10 @@ impl GatewayRuntime {
                 !self.degraded_route_blocked(model)
                     && key.model_rules.allows(model)
                     && self.model_enabled(model)
+                    && scheduler.candidates().any(|candidate| {
+                        candidate.is_catalog_visible(model, allowed_protocols, &scope)
+                            && basis_points_models.model_available(&candidate.id, model)
+                    })
             })
             .collect::<Vec<_>>();
         let order = crate::poison::mutex(&self.model_display_order);
@@ -177,6 +182,15 @@ impl GatewayRuntime {
                         .count();
                     if visible_models == 0 {
                         return None;
+                    }
+                    if self.is_basis_points_account(&account.id) {
+                        return Some((
+                            account.id.clone(),
+                            crate::providers::chatgpt::basis_points_access_url(
+                                &account.basis_points_url,
+                            )?,
+                            visible_models,
+                        ));
                     }
                     let mut url = account.responses_url.clone();
                     let mut segments = url.path_segments_mut().ok()?;

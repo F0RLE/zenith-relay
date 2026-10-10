@@ -56,6 +56,7 @@ pub(in crate::local_pool) async fn prepare_account_request_authorization(
         None
     };
     Ok(PreparedAccountAuthorization {
+        oauth_client_kind: stored.oauth_client_kind(),
         authorization: stored
             .authorization(current_time_ms())
             .map_err(credential_local_error)?,

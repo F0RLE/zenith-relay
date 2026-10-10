@@ -26,10 +26,14 @@ impl GatewayRuntime {
         let first_request = request
             .try_clone()
             .ok_or(AuthorizedRequestError::NotReplayable)?;
-        let prepared = self
-            .prepare_authorization(candidate_id, runtime_now_ms())
-            .await
-            .map_err(AuthorizedRequestError::Prepare)?;
+        let prepared = if budget.is_some() && self.is_basis_points_account(candidate_id) {
+            self.prepare_basis_points_authorization(candidate_id)
+                .await?
+        } else {
+            self.prepare_authorization(candidate_id, runtime_now_ms())
+                .await
+                .map_err(AuthorizedRequestError::Prepare)?
+        };
         let upstream_response = self
             .send_prepared_authorization(candidate_id, first_request, &prepared, dispatch)
             .await?;
@@ -200,6 +204,10 @@ impl GatewayRuntime {
         } = dispatch;
         let (client, mut authorized_request) =
             apply_prepared_authorization(request, prepared, client_version, identity_policy)?;
+        if budget.is_some() {
+            self.verify_basis_points_request(candidate_id, prepared, &authorized_request)
+                .await?;
+        }
         self.guard_turn_state(authorized_request.headers_mut(), scope, prepared);
         let url = authorized_request.url().clone();
         let cookies = self.routing_cookies(candidate_id, prepared);
@@ -242,10 +250,17 @@ impl GatewayRuntime {
                 .dispatch_guard(self, candidate_id)
                 .ok_or_else(stale_authorization)?;
         }
-        let upstream_response = client
-            .execute(authorized_request)
-            .await
-            .map_err(AuthorizedRequestError::Transport)?;
+        let upstream_response = match self
+            .is_basis_points_account(candidate_id)
+            .then(crate::transport::basis_points_progress_timeout)
+            .flatten()
+        {
+            Some(timeout) => tokio::time::timeout(timeout, client.execute(authorized_request))
+                .await
+                .map_err(|_| AuthorizedRequestError::ProgressTimeout)?,
+            None => client.execute(authorized_request).await,
+        }
+        .map_err(AuthorizedRequestError::Transport)?;
         if let Some(cookies) = cookies {
             cookies.observe(&url, upstream_response.headers());
         }

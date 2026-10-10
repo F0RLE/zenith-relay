@@ -131,10 +131,24 @@ pub(super) async fn handle_upstream_failure(
         None,
         started.elapsed().as_millis() as u64,
     );
-    let bytes = match crate::transport::collect(upstream).await {
+    let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
+    let bytes = match crate::transport::collect_with_progress(
+        upstream,
+        if basis_points {
+            crate::transport::basis_points_progress_timeout()
+        } else {
+            None
+        },
+        |event| basis_points && crate::gateway::response::stop_basis_points_event(event, None),
+    )
+    .await
+    {
         Ok(bytes) => bytes,
-        Err(_) if retryable_route_status(route, status, has_previous_response_id) => {
+        Err(error)
+            if !basis_points && retryable_route_status(route, status, has_previous_response_id) =>
+        {
             let failure = AttemptFailure::status_with_body(status, None);
+            populate_tokens(&mut event, &error.bytes);
             event.error_category = Some(failure.category.to_string());
             let failure_state =
                 settle_route_failure(runtime, lease, route, &failure, response_headers);
@@ -144,8 +158,22 @@ pub(super) async fn handle_upstream_failure(
             *last_failure_origin = selected_error_origin;
             return FailureStep::Continue;
         }
-        Err(_) => {
+        Err(error) => {
             lease.settle_rotation_unknown(now_ms());
+            populate_tokens(&mut event, &error.bytes);
+            if error.timed_out {
+                let failure = AttemptFailure::stream(error_codes::STREAM_IDLE_TIMEOUT);
+                event.error_category = Some(failure.category.to_string());
+                event.http_status = failure.status.as_u16();
+                event.latency_ms = started.elapsed().as_millis() as u64;
+                emit_usage(runtime, event);
+                return FailureStep::Respond(attempt_error_response(
+                    failure,
+                    None,
+                    selected_error_origin,
+                    request_id,
+                ));
+            }
             return FailureStep::Respond(upstream_body_error_response(runtime, event, started));
         }
     };

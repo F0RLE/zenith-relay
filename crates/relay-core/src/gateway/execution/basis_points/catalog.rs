@@ -1,3 +1,4 @@
+use crate::protocol::AdapterError;
 use serde_json::{Map, Value};
 
 #[derive(Clone, Debug)]
@@ -25,32 +26,51 @@ pub(super) fn collect_tools(
     tool_value: Option<&Value>,
     namespace: Option<&str>,
     collected_tools: &mut Vec<ClientTool>,
-) {
-    let Some(Value::Array(tool_values)) = tool_value else {
-        return;
+) -> Result<(), AdapterError> {
+    let Some(tool_value) = tool_value else {
+        return Ok(());
     };
+    let tool_values = tool_value
+        .as_array()
+        .ok_or_else(|| AdapterError::invalid_request().with_parameter("tools"))?;
     for tool_value in tool_values {
-        let Some(tool_object) = tool_value.as_object() else {
-            continue;
-        };
+        let tool_object = tool_value
+            .as_object()
+            .ok_or_else(|| AdapterError::invalid_request().with_parameter("tools"))?;
         let tool_kind = tool_object
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("function")
             .trim()
             .to_ascii_lowercase();
-        let Some(tool_name) = tool_object.get("name").and_then(Value::as_str) else {
-            if tool_kind == "namespace" {
-                continue;
+        if !matches!(tool_kind.as_str(), "namespace" | "function" | "custom") {
+            // Built-in tools are not part of the client callable catalog.
+            // A named unsupported declaration cannot revive a historical tool.
+            if tool_object.contains_key("name") {
+                return Err(AdapterError::invalid_request().with_parameter("tools.type"));
             }
             continue;
-        };
+        }
+        let tool_name = tool_object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AdapterError::invalid_request().with_parameter("tools.name"))?;
         let tool_name = tool_name.trim();
         if tool_name.is_empty() {
-            continue;
+            return Err(AdapterError::invalid_request().with_parameter("tools.name"));
         }
         if tool_kind == "namespace" {
-            collect_tools(tool_object.get("tools"), Some(tool_name), collected_tools);
+            let qualified_namespace = namespace
+                .map(|parent| format!("{parent}.{tool_name}"))
+                .unwrap_or_else(|| tool_name.to_string());
+            if !tool_object.contains_key("tools") {
+                return Err(AdapterError::invalid_request().with_parameter("tools"));
+            }
+            collect_tools(
+                tool_object.get("tools"),
+                Some(&qualified_namespace),
+                collected_tools,
+            )?;
         } else if matches!(tool_kind.as_str(), "function" | "custom") {
             let tool = ClientTool {
                 name: tool_name.to_string(),
@@ -58,25 +78,35 @@ pub(super) fn collect_tools(
                 kind: tool_kind,
                 spec: tool_object.clone(),
             };
-            // A later additional_tools item replaces the earlier definition
-            // for this qualified name, including its kind and schema.
-            collected_tools.retain(|existing_tool| existing_tool.key() != tool.key());
-            collected_tools.push(tool);
-        }
-    }
-}
-
-pub(super) fn client_tools(request_body: &Value) -> Vec<ClientTool> {
-    let mut client_tools = Vec::new();
-    collect_tools(request_body.get("tools"), None, &mut client_tools);
-    if let Some(input_items) = request_body.get("input").and_then(Value::as_array) {
-        for input_item in input_items {
-            if input_item.get("type").and_then(Value::as_str) == Some("additional_tools") {
-                collect_tools(input_item.get("tools"), None, &mut client_tools);
+            // Replace the definition without moving its catalog position.
+            if let Some(existing) = collected_tools
+                .iter_mut()
+                .find(|item| item.key() == tool.key())
+            {
+                *existing = tool;
+            } else {
+                collected_tools.push(tool);
             }
         }
     }
-    client_tools
+    Ok(())
+}
+
+pub(super) fn client_tools(request_body: &Value) -> Result<Vec<ClientTool>, AdapterError> {
+    let mut client_tools = Vec::new();
+    if let Some(input_items) = request_body.get("input").and_then(Value::as_array) {
+        for input_item in input_items {
+            if matches!(
+                input_item.get("type").and_then(Value::as_str),
+                Some("additional_tools" | "tool_search_output")
+            ) {
+                collect_tools(input_item.get("tools"), None, &mut client_tools)?;
+            }
+        }
+    }
+    // Current declarations are authoritative; history fills omitted tools only.
+    collect_tools(request_body.get("tools"), None, &mut client_tools)?;
+    Ok(client_tools)
 }
 
 pub(super) fn selected_tools(request_body: &Value, tools: &[ClientTool]) -> Vec<ClientTool> {

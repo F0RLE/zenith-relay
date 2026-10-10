@@ -8,8 +8,14 @@ use reqwest::{
 use std::time::Duration;
 use url::Url;
 
+mod basis_points;
 mod failure;
 mod parse;
+pub(crate) use basis_points::normalize_basis_points_reasoning_effort;
+pub use basis_points::{
+    basis_points_access_url, parse_basis_points_model_access, BasisPointsModelAccess,
+    BASIS_POINTS_ACCESS_ENDPOINT, MAX_BASIS_POINTS_ACCESS_BYTES,
+};
 pub use failure::{ModelDiscoveryFailure, ModelDiscoveryFailureCode};
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
@@ -20,13 +26,15 @@ const MAX_MODELS: usize = 4_096;
 const MAX_MODELS_RESPONSE_BYTES: usize = crate::transport::MAX_MODEL_CATALOG_BODY_BYTES;
 
 #[derive(Clone)]
-pub struct CodexModelsClient {
+pub struct AccountModelsClient {
     http: reqwest::Client,
     endpoint: Url,
+    endpoint_is_custom: bool,
     scope: ManagementHttpScope,
+    client_kind: super::OAuthClientKind,
 }
 
-impl CodexModelsClient {
+impl AccountModelsClient {
     pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, ModelDiscoveryFailure> {
         Self::new_with_proxy_and_timeout_and_user_agent(
             proxy,
@@ -52,12 +60,14 @@ impl CodexModelsClient {
 
     #[cfg(test)]
     pub fn with_endpoint(endpoint: Url) -> Result<Self, ModelDiscoveryFailure> {
-        Self::with_endpoint_proxy_timeout_and_user_agent(
+        let mut client = Self::with_endpoint_proxy_timeout_and_user_agent(
             endpoint,
             None,
             Duration::from_secs(10),
             "Zenith Relay",
-        )
+        )?;
+        client.endpoint_is_custom = true;
+        Ok(client)
     }
 
     fn with_endpoint_proxy_timeout_and_user_agent(
@@ -80,8 +90,22 @@ impl CodexModelsClient {
         Ok(Self {
             http,
             endpoint,
+            endpoint_is_custom: false,
             scope: ManagementHttpScope::default(),
+            client_kind: super::OAuthClientKind::Codex,
         })
+    }
+
+    pub fn with_oauth_client_kind(mut self, kind: super::OAuthClientKind) -> Self {
+        if self.client_kind != kind && !self.endpoint_is_custom {
+            self.endpoint = Url::parse(match kind {
+                super::OAuthClientKind::ExcelBps => BASIS_POINTS_ACCESS_ENDPOINT,
+                super::OAuthClientKind::Codex => CODEX_MODELS_ENDPOINT,
+            })
+            .expect("constant HTTPS endpoint");
+        }
+        self.client_kind = kind;
+        self
     }
 
     pub fn with_http_scope(mut self, scope: ManagementHttpScope) -> Self {
@@ -112,24 +136,36 @@ impl CodexModelsClient {
         client_version: &str,
     ) -> Result<Vec<String>, ModelDiscoveryFailure> {
         parse::validate_account_id(chatgpt_account_id)?;
-        parse::validate_client_version(client_version)?;
-        let identity = CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
-            .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccountId))?;
+        let basis_points = self.client_kind == super::OAuthClientKind::ExcelBps;
         let mut request_url = self.endpoint.clone();
-        request_url
-            .query_pairs_mut()
-            .append_pair("client_version", client_version);
+        if basis_points {
+            request_url
+                .query_pairs_mut()
+                .append_pair("include_models", "true");
+        } else {
+            parse::validate_client_version(client_version)?;
+            request_url
+                .query_pairs_mut()
+                .append_pair("client_version", client_version);
+        }
+        let request = self
+            .http
+            .get(request_url)
+            .header(AUTHORIZATION, authorization);
+        let request = if basis_points {
+            request
+                .headers(super::basis_points_headers(chatgpt_account_id, None, None))
+                .timeout(Duration::from_secs(5))
+        } else {
+            CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
+                .map_err(|_| {
+                    ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccountId)
+                })?
+                .apply(request)
+        };
         let (response, permit) = self
             .scope
-            .send(
-                &self.http,
-                identity.apply(
-                    self.http
-                        .get(request_url)
-                        .header(AUTHORIZATION, authorization),
-                ),
-                HttpClass::Ordinary,
-            )
+            .send(&self.http, request, HttpClass::Ordinary)
             .await
             .map_err(|error| {
                 ModelDiscoveryFailure::retryable(if error.is_timeout() {
@@ -141,21 +177,28 @@ impl CodexModelsClient {
         let status = response.status();
         let retry_after_ms =
             crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
-        let models_response_body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES)
-            .await
-            .map_err(|error| match error {
-                Error::UpstreamBodyTooLarge => {
-                    ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
-                }
-                Error::Upstream(error) if error.is_timeout() => {
-                    ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Timeout)
-                }
-                _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
-            })
-            .map_err(|mut failure| {
-                failure.retry_after_ms = retry_after_ms;
-                failure
-            })?;
+        let models_response_body = collect_limited(
+            response,
+            if basis_points {
+                MAX_BASIS_POINTS_ACCESS_BYTES
+            } else {
+                MAX_MODELS_RESPONSE_BYTES
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            Error::UpstreamBodyTooLarge => {
+                ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
+            }
+            Error::Upstream(error) if error.is_timeout() => {
+                ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Timeout)
+            }
+            _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
+        })
+        .map_err(|mut failure| {
+            failure.retry_after_ms = retry_after_ms;
+            failure
+        })?;
         drop(permit);
         if !status.is_success() {
             let (code, retryable) = if is_agent_identity_task_invalid_response(
@@ -180,7 +223,11 @@ impl CodexModelsClient {
             });
         }
 
-        parse::parse_models(&models_response_body)
+        if basis_points {
+            parse_basis_points_model_access(&models_response_body).map(|access| access.model_ids())
+        } else {
+            parse::parse_models(&models_response_body)
+        }
     }
 }
 

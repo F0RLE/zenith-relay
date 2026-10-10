@@ -44,19 +44,14 @@ mod failure;
 mod prelude;
 mod prepare;
 mod recovery;
-mod retry;
 mod selection;
 mod stream;
 mod translate;
 
 pub(super) use execute::execute_request;
 pub(super) use recovery::{
-    adapter_error_response, adapter_error_response_for_origin, recover_stale_tool_history,
-    should_wait_for_candidate_availability,
-};
-pub(super) use retry::{
-    basis_points_relay_error_response, handle_basis_points_relay_retry, mark_adapter_failure,
-    BasisPointsRelayRetryContext,
+    adapter_error_response, adapter_error_response_for_origin, mark_adapter_failure,
+    recover_stale_tool_history, should_wait_for_candidate_availability,
 };
 
 #[cfg(test)]

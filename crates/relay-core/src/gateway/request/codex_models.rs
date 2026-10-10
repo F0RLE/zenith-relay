@@ -45,7 +45,7 @@ pub(in crate::gateway) async fn models(
     uri: Uri,
 ) -> Response<Body> {
     if let Some(protocol) = crate::gateway::catalog::catalog_protocol(&headers) {
-        return crate::gateway::catalog::native_catalog(&runtime, &headers, protocol, None);
+        return crate::gateway::catalog::native_catalog(&runtime, &headers, protocol, None).await;
     }
     if !valid_local_host(&headers) {
         return invalid_host();
@@ -69,6 +69,7 @@ pub(in crate::gateway) async fn models(
         // discovery contract and must not be presented as an OpenAI model.
         None => allowed_openai_model_protocols(&runtime, &key),
     };
+    runtime.refresh_basis_points_access(&key).await;
     let models = runtime.visible_models(&key, &protocols, now_ms());
     if let Some(client_version) = client_version.as_deref() {
         if !valid_codex_client_version(client_version) {
@@ -167,7 +168,10 @@ async fn codex_account_model_manifests(
     let stale = runtime.stale_codex_model_manifests(
         candidate_ids
             .iter()
-            .filter(|candidate_id| !live_candidate_ids.contains(candidate_id.as_str()))
+            .filter(|candidate_id| {
+                !runtime.is_basis_points_account(candidate_id)
+                    && !live_candidate_ids.contains(candidate_id.as_str())
+            })
             .map(String::as_str),
     );
     live_manifests.into_iter().chain(stale).collect()
@@ -179,6 +183,11 @@ async fn fetch_codex_account_manifest(
     mut url: url::Url,
     client_versions: &[String],
 ) -> Option<Value> {
+    if runtime.is_basis_points_account(candidate_id) {
+        return runtime
+            .fresh_basis_points_access(candidate_id)
+            .map(|access| access.manifest());
+    }
     for client_version in client_versions {
         url.query_pairs_mut()
             .clear()

@@ -88,7 +88,7 @@ pub(in crate::gateway::execution) fn translate_response(
     else {
         return Err(AdapterError::upstream_response_invalid().with_parameter("response.output"));
     };
-    let all_tools = client_tools(request_body);
+    let all_tools = client_tools(request_body)?;
     let tools = selected_tools(request_body, &all_tools);
     let mut call_ids = std::collections::HashSet::new();
     for output_item in output_items.iter_mut() {
@@ -165,6 +165,11 @@ pub(in crate::gateway::execution) fn translate_response(
                 })
                 .filter(|argument_value| argument_value.is_object())
                 .ok_or_else(|| invalid_tool_output("output.run_officejs.args"))?;
+            if super::schema::parameter_schema(tool)
+                .is_some_and(|schema| !super::schema::matches(&function_arguments, schema))
+            {
+                return Err(invalid_tool_output("output.run_officejs.args"));
+            }
             translated.insert(
                 "arguments".to_string(),
                 Value::String(json_text(&function_arguments)?),
@@ -177,10 +182,8 @@ pub(in crate::gateway::execution) fn translate_response(
         return Err(invalid_tool_output("output.tool_call"));
     }
     if request_body.get("parallel_tool_calls") == Some(&Value::Bool(false)) && call_ids.len() > 1 {
-        // The upstream transport cannot enforce this Responses option in its
-        // strict request body. Do not return a successful response that breaks
-        // the client's serial tool contract; the bounded relay retry can ask
-        // the model to regenerate it once.
+        // The strict upstream body cannot enforce this Responses option.
+        // Reject the completed result without regenerating it.
         return Err(invalid_tool_output(
             "output.run_officejs.parallel_tool_calls",
         ));
@@ -191,14 +194,17 @@ pub(in crate::gateway::execution) fn translate_response(
 pub(super) fn has_encrypted_agent_message(request_input: Option<&Value>) -> bool {
     let is_encrypted_agent_message = |output_item: &Value| {
         output_item.get("type").and_then(Value::as_str) == Some("agent_message")
-            && output_item
-                .get("content")
-                .and_then(Value::as_array)
-                .is_some_and(|content| {
-                    content.iter().any(|part| {
-                        part.get("type").and_then(Value::as_str) == Some("encrypted_content")
-                    })
-                })
+            && (output_item
+                .get("encrypted_content")
+                .is_some_and(|content| !content.is_null())
+                || output_item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        content.iter().any(|part| {
+                            part.get("type").and_then(Value::as_str) == Some("encrypted_content")
+                        })
+                    }))
     };
     match request_input {
         Some(Value::Array(output_items)) => output_items.iter().any(is_encrypted_agent_message),

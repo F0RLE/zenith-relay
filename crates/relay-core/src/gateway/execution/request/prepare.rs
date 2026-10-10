@@ -47,7 +47,6 @@ pub(super) struct RequestPrepareInput<'a> {
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
     pub(super) client_transport: crate::UsageTransport,
-    pub(super) basis_points_relay_retry_parameter: Option<&'static str>,
     pub(super) last_adapter_error: &'a mut Option<AdapterError>,
 }
 
@@ -73,7 +72,6 @@ pub(super) fn prepare_request_attempt(
         diagnostics,
         client_context_id,
         client_transport,
-        basis_points_relay_retry_parameter,
         last_adapter_error,
     } = request_prepare_input;
     let allowed_protocols = candidate_protocols(client_wire_api);
@@ -173,11 +171,7 @@ pub(super) fn prepare_request_attempt(
     }
     let basis_points_request = basis_points_route.then(|| adapter_request.upstream_body().clone());
     if basis_points_route {
-        if let Some(step) = rewrite_basis_points_body(
-            &mut adapter_request,
-            basis_points_relay_retry_parameter,
-            last_adapter_error,
-        ) {
+        if let Some(step) = rewrite_basis_points_body(&mut adapter_request, last_adapter_error) {
             return step;
         }
     }
@@ -372,13 +366,9 @@ fn apply_prepared_tool_policy(
 
 fn rewrite_basis_points_body(
     adapter_request: &mut PreparedAdapterRequest,
-    retry_parameter: Option<&'static str>,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Option<RequestPrepare> {
-    match super::super::basis_points::prepare_upstream(
-        adapter_request.upstream_body(),
-        retry_parameter,
-    ) {
+    match super::super::basis_points::prepare_request(adapter_request.upstream_body()) {
         Ok(prepared) => {
             *adapter_request.upstream_body_mut() = prepared;
             None

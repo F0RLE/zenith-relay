@@ -17,11 +17,10 @@ mod codec;
 mod history;
 mod prepare;
 mod response;
+mod schema;
 
 pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};
-#[cfg(test)]
-pub(in crate::gateway::execution) use prepare::{add_tool_relay_retry_hint, prepare_request};
-pub(in crate::gateway::execution) use prepare::{prepare_upstream, take_tool_relay_retry};
+pub(in crate::gateway::execution) use prepare::prepare_request;
 pub(in crate::gateway::execution) use response::{synthetic_stream, translate_response};
 
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";
@@ -39,7 +38,6 @@ pub(super) const FUNCTION_RELAY_ENCODING: &str = concat!(
     "The decoded code must itself parse as one JSON object. ",
     "A function with a single patch, code, cmd or input field still requires the object wrapper named by its schema; raw patch or script text is only valid for a custom tool.",
 );
-pub(super) const TRANSPORT_RETRY_HINT: &str = "The previous run_officejs relay was malformed. Retry once using exactly one client tool name in outer references and only its payload in code: a JSON arguments object for function tools, or unchanged raw input for custom tools. Do not wrap the payload in a tool/args object.";
 
 #[cfg(test)]
 mod tests;

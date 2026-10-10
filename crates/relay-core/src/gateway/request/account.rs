@@ -248,6 +248,7 @@ async fn read_account_request(
         return Err(Box::new(client_api_forbidden()));
     }
     let request_fields = read_json_object(&headers, body).await?;
+    runtime.refresh_basis_points_access(&key).await;
     Ok((headers, key, request_fields))
 }
 

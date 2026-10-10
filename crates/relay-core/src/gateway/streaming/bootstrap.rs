@@ -17,6 +17,7 @@ pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) preserved: Option<PreservedUpstreamError>,
     pub(in crate::gateway) invalid_function_call_output_call_id: bool,
     pub(in crate::gateway) responses_tool_call_links_rejected: bool,
+    pub(in crate::gateway) partial_body: Vec<u8>,
 }
 
 impl From<AttemptFailure> for StreamBootstrapFailure {
@@ -28,6 +29,7 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
             preserved: None,
             invalid_function_call_output_call_id: false,
             responses_tool_call_links_rejected: false,
+            partial_body: Vec::new(),
         }
     }
 }
@@ -125,6 +127,7 @@ pub(in crate::gateway) async fn bootstrap_stream(
                                 .event_payload
                                 .as_ref()
                                 .is_some_and(responses_tool_call_links_rejected_value),
+                            partial_body: buffered.clone(),
                         });
                     }
                     if event.output_item.is_some() && !event.is_compaction {

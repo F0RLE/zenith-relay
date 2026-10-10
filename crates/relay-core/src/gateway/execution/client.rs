@@ -88,6 +88,7 @@ async fn execute_client_request_inner(
             Ok(request_object) => Value::Object(request_object),
             Err(error_response) => return *error_response,
         };
+    runtime.refresh_basis_points_access(&key).await;
     let mut tool_policy = parts
         .extensions
         .get::<super::super::request::RequestToolPolicy>()

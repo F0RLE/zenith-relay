@@ -13,7 +13,7 @@ use zenith_relay_core::{
     },
     error_codes,
     providers::chatgpt::{
-        configured_codex_client_version, CodexModelsClient, ModelDiscoveryFailure,
+        configured_codex_client_version, AccountModelsClient, ModelDiscoveryFailure,
         ModelDiscoveryFailureCode,
     },
     scheduler::account_candidate_health,
@@ -156,12 +156,13 @@ async fn discover_account_models(
             None,
         )
     })?;
-    let models_client = CodexModelsClient::new_with_proxy_and_timeout_and_user_agent(
+    let models_client = AccountModelsClient::new_with_proxy_and_timeout_and_user_agent(
         proxy.as_ref(),
         Duration::from_secs(20),
         "Zenith Relay Server",
     )
     .map_err(|_| (error_codes::MODELS_CLIENT_INIT.to_string(), false, None))?
+    .with_oauth_client_kind(credential.oauth_client_kind)
     .with_http_scope(super::refresh::account_http_scope(state, fence));
     let client_version = configured_codex_client_version();
     let mut model_read_result = models_client

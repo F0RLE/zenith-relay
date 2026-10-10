@@ -47,7 +47,6 @@ pub(super) struct AccountPrepareInput<'a> {
     pub(super) half_open_probe: bool,
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) basis_points_relay_retry_parameter: Option<&'static str>,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_adapter_error: &'a mut Option<crate::protocol::AdapterError>,
 }
@@ -73,7 +72,6 @@ pub(super) fn prepare_account_attempt(
         half_open_probe,
         diagnostics,
         client_context_id,
-        basis_points_relay_retry_parameter,
         last_failure,
         last_adapter_error,
         ..
@@ -147,11 +145,7 @@ pub(super) fn prepare_account_attempt(
         return step;
     }
     if basis_points_route {
-        match rewrite_account_basis_points_body(
-            &upstream_body,
-            basis_points_relay_retry_parameter,
-            last_adapter_error,
-        ) {
+        match rewrite_account_basis_points_body(&upstream_body, last_adapter_error) {
             Ok(prepared) => upstream_body = prepared,
             Err(step) => return step,
         }
@@ -271,10 +265,9 @@ fn apply_account_tool_policy(
 #[allow(clippy::result_large_err)]
 fn rewrite_account_basis_points_body(
     upstream_body: &Value,
-    retry_parameter: Option<&'static str>,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<Value, AccountPrepare> {
-    match super::super::basis_points::prepare_upstream(upstream_body, retry_parameter) {
+    match super::super::basis_points::prepare_request(upstream_body) {
         Ok(prepared) => Ok(prepared),
         Err(error) if error.is_route_incompatible() => {
             *last_adapter_error = Some(error);

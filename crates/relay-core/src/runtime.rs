@@ -4,7 +4,9 @@ use crate::accounts::{
 use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::{AgentIdentityCredential, CodexIdentityEnvelope};
+use crate::providers::chatgpt::{
+    basis_points_headers, AgentIdentityCredential, CodexIdentityEnvelope,
+};
 #[cfg(test)]
 use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::quota::QuotaSnapshot;
@@ -39,6 +41,7 @@ mod admission;
 mod attempt;
 mod authentication;
 mod authorization;
+mod basis_points_access;
 pub(crate) use authorization::AuthorizationDispatch;
 mod build;
 pub(crate) mod cache_context;
@@ -57,10 +60,10 @@ mod source_metadata;
 mod support;
 
 pub(in crate::runtime) use support::{
-    all_native_wire_apis, apply_candidate_policy, basis_points_headers, client_wire_apis_to_native,
-    model_rules, normalize_client_wire_api, normalize_prefix, normalized_responses_url,
-    normalized_set, parse_bearer, require_runtime_value, runtime_client, runtime_now_ms,
-    runtime_websocket_client, strip_prefix_ignore_ascii_case,
+    all_native_wire_apis, apply_candidate_policy, client_wire_apis_to_native, model_rules,
+    normalize_client_wire_api, normalize_prefix, normalized_responses_url, normalized_set,
+    parse_bearer, require_runtime_value, runtime_client, runtime_now_ms, runtime_websocket_client,
+    strip_prefix_ignore_ascii_case,
 };
 
 use config::source_candidate_id;
@@ -210,6 +213,8 @@ struct ChatGptAccountExecutor {
     agent_identity: RwLock<Option<AgentIdentityCredential>>,
     agent_identity_revision: AtomicU64,
     agent_task_lock: tokio::sync::Mutex<()>,
+    basis_points_access: RwLock<Option<basis_points_access::CachedBasisPointsAccess>>,
+    basis_points_access_refresh: tokio::sync::Mutex<()>,
     routing_cookies: routing_cookies::RoutingCookies,
 }
 
@@ -292,6 +297,10 @@ pub(crate) enum AuthorizedRequestError {
     Transport(reqwest::Error),
     NotReplayable,
     DispatchBudgetExhausted,
+    ModelAccess(crate::providers::chatgpt::ModelDiscoveryFailure),
+    ModelUnavailable,
+    ReasoningUnavailable,
+    ProgressTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

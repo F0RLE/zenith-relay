@@ -180,7 +180,23 @@ pub(super) fn build_codex_models_response_from_manifests(
                         &upstream_id,
                     )
                 });
-        if (native_ultra || installed_ultra) && !supported.iter().any(|level| level == "ultra") {
+        let ultra_route_available = runtime
+            .configured_executor_routes(key, &upstream_id, &[WireApi::Responses], false)
+            .iter()
+            .any(|route| {
+                route
+                    .adapter
+                    .supports_reasoning_effort(route.reasoning_mode, "ultra")
+                    && runtime.basis_points_reasoning_available(
+                        &route.candidate_id,
+                        &route.source_model,
+                        "ultra",
+                    )
+            });
+        if (native_ultra || installed_ultra)
+            && ultra_route_available
+            && !supported.iter().any(|level| level == "ultra")
+        {
             supported.push("ultra".into());
         }
         let catalog_default = catalog_model["default_reasoning_level"]

@@ -4,23 +4,14 @@ use super::super::super::response::{
 };
 use super::super::super::turn_state::relay_account_response_header;
 use super::super::bind_responses_turn;
-use super::super::request::{
-    adapter_error_response_for_origin, basis_points_relay_error_response,
-    handle_basis_points_relay_retry, mark_adapter_failure, BasisPointsRelayRetryContext,
-};
+use super::super::request::{adapter_error_response_for_origin, mark_adapter_failure};
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorRoute};
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
 use crate::{ErrorOrigin, GatewayRuntime};
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::time::Instant;
-
-pub(super) enum AccountSuccess {
-    Continue,
-    Respond(Response<Body>),
-}
 
 pub(super) struct AccountSuccessInput<'a> {
     pub(super) status: StatusCode,
@@ -41,17 +32,13 @@ pub(super) struct AccountSuccessInput<'a> {
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) basis_points_route: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) basis_points_relay_retry_attempted: &'a mut bool,
-    pub(super) basis_points_relay_retry_parameter: &'a mut Option<&'static str>,
-    pub(super) last_adapter_error: &'a mut Option<crate::protocol::AdapterError>,
 }
 
-/// Record a successful account response and build the client body. A Basis
-/// Points translation retry stays inside the attempt loop.
+/// Build the client body from a completed generation. Translation failures
+/// settle the attempt without repeating accepted execution.
 pub(super) fn complete_account_response(
     account_success_input: AccountSuccessInput<'_>,
-) -> AccountSuccess {
+) -> Response<Body> {
     let AccountSuccessInput {
         status,
         bytes,
@@ -71,10 +58,6 @@ pub(super) fn complete_account_response(
         selected_error_origin,
         basis_points_route,
         prompt_affinity_key,
-        tried,
-        basis_points_relay_retry_attempted,
-        basis_points_relay_retry_parameter,
-        last_adapter_error,
     } = account_success_input;
     let client_stream = request.get("stream").and_then(Value::as_bool) == Some(true);
     let mut event = usage_event(
@@ -115,44 +98,21 @@ pub(super) fn complete_account_response(
             );
             super::super::super::errors::apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
-            return AccountSuccess::Respond(super::super::attempt_error_response(
+            return super::super::attempt_error_response(
                 failure,
                 rejected.preserved.as_ref(),
                 selected_error_origin,
                 request_id,
-            ));
+            );
         }
     }
     let client_bytes = if basis_points_route {
         match super::super::basis_points::translate_response(&bytes, request) {
             Ok(bytes) => bytes,
             Err(error) => {
-                return match handle_basis_points_relay_retry(
-                    error,
-                    &bytes,
-                    event,
-                    BasisPointsRelayRetryContext {
-                        attempted: basis_points_relay_retry_attempted,
-                        parameter: basis_points_relay_retry_parameter,
-                        runtime,
-                        tried,
-                        candidate_id: &route.candidate_id,
-                        lease,
-                        last_adapter_error,
-                    },
-                ) {
-                    Ok(()) => AccountSuccess::Continue,
-                    Err(pair) => {
-                        let (error, event) = *pair;
-                        AccountSuccess::Respond(basis_points_relay_error_response(
-                            error,
-                            event,
-                            runtime,
-                            lease,
-                            selected_error_origin,
-                        ))
-                    }
-                };
+                emit_usage(runtime, mark_adapter_failure(event, &error));
+                lease.settle_rotation_terminal(now_ms());
+                return adapter_error_response_for_origin(error, selected_error_origin);
             }
         }
     } else {
@@ -164,10 +124,7 @@ pub(super) fn complete_account_response(
             Err(error) => {
                 emit_usage(runtime, mark_adapter_failure(event, &error));
                 lease.settle_rotation_terminal(now_ms());
-                return AccountSuccess::Respond(adapter_error_response_for_origin(
-                    error,
-                    selected_error_origin,
-                ));
+                return adapter_error_response_for_origin(error, selected_error_origin);
             }
         }
     } else {
@@ -200,11 +157,11 @@ pub(super) fn complete_account_response(
     if let Some(stream_body) = basis_points_stream {
         let mut response = proxy_sse_response(status, response_headers, Body::from(stream_body));
         relay_account_response_header(client_headers, response_headers, &mut response);
-        return AccountSuccess::Respond(response);
+        return response;
     }
     let mut response = proxy_response(status, response_headers, Body::from(client_bytes));
     if route.account_id.is_some() {
         relay_account_response_header(client_headers, response_headers, &mut response);
     }
-    AccountSuccess::Respond(response)
+    response
 }

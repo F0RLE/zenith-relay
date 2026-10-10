@@ -138,16 +138,6 @@ fn serial_tool_requests_do_not_return_multiple_client_tool_calls() {
         error.parameter(),
         Some("output.run_officejs.parallel_tool_calls")
     );
-
-    let mut attempted = false;
-    let mut parameter = None;
-    assert!(take_tool_relay_retry(
-        error,
-        &body,
-        &mut attempted,
-        &mut parameter
-    ));
-    assert_eq!(parameter, Some("output.run_officejs.parallel_tool_calls"));
 }
 
 #[test]
@@ -173,18 +163,18 @@ fn ambiguous_namespace_tool_name_is_rejected() {
 }
 
 #[test]
-fn additional_tools_replace_earlier_definitions_and_keep_namespaces() {
+fn current_tools_override_history_and_keep_namespaces() {
     let request = json!({
         "model": "gpt-6-astra",
         "tools": [{"type":"namespace","name":"functions","tools":[
-            {"type":"function","name":"exec","description":"OLD_DEFINITION"}
+            {"type":"custom","name":"exec","description":"LATEST_DEFINITION","format":{"type":"text"}}
         ]}],
         "input": [
             {"type":"additional_tools","tools":[{"type":"namespace","name":"clock","tools":[
                 {"type":"function","name":"sleep"}
             ]}]},
             {"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[
-                {"type":"custom","name":"exec","description":"LATEST_DEFINITION","format":{"type":"text"}}
+                {"type":"function","name":"exec","description":"OLD_DEFINITION"}
             ]}]},
             {"role":"user","content":[{"type":"input_text","text":"Run a command"}]}
         ],

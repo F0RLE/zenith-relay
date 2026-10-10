@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
         let scope = key.scope_snapshot();
+        let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
         let mut models = BTreeSet::new();
         for account in self.chatgpt_accounts.values() {
@@ -17,6 +18,7 @@ impl GatewayRuntime {
                 if !self.degraded_route_blocked(model)
                     && key.model_rules.allows(model)
                     && self.model_enabled(model)
+                    && basis_points_models.model_available(&account.id, model)
                     && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
                 {
                     models.insert(match key.model_prefix.as_deref() {
@@ -190,7 +192,11 @@ impl GatewayRuntime {
                 fallback
                     .iter()
                     .filter(|level| {
-                        route
+                        self.basis_points_reasoning_available(
+                            &route.candidate_id,
+                            &route.source_model,
+                            level,
+                        ) && route
                             .adapter
                             .supports_reasoning_effort(route.reasoning_mode, level)
                     })

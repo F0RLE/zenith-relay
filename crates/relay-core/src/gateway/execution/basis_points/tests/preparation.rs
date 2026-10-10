@@ -1,93 +1,59 @@
-use super::super::prepare::should_retry_tool_relay;
 use super::*;
-use crate::protocol::AdapterError;
 use serde_json::json;
 
 #[test]
-fn malformed_tool_relay_is_retryable_once_but_incomplete_is_not() {
-    let error =
-        AdapterError::upstream_response_invalid().with_parameter("output.run_officejs.references");
-    let completed = json!({"status": "completed", "output": []});
-    assert!(should_retry_tool_relay(
-        error,
-        &serde_json::to_vec(&completed).unwrap()
-    ));
-
-    let incomplete = json!({"status": "incomplete", "output": []});
-    assert!(!should_retry_tool_relay(
-        error,
-        &serde_json::to_vec(&incomplete).unwrap()
-    ));
-    assert!(!should_retry_tool_relay(
-        AdapterError::upstream_response_invalid().with_parameter("response.output"),
-        &serde_json::to_vec(&completed).unwrap()
-    ));
-    assert!(!should_retry_tool_relay(
-        error,
-        &serde_json::to_vec(&json!({"output": []})).unwrap()
-    ));
-    assert!(!should_retry_tool_relay(error, b"not-json"));
+fn encrypted_agent_assignment_is_rejected_before_technical_history_is_removed() {
+    for input in [
+        json!({"type":"agent_message","encrypted_content":"synthetic-ciphertext","content":[]}),
+        json!([
+            {"type":"agent_message","encrypted_content":"synthetic-ciphertext"},
+            {"type":"tool_search_output","tools":[]},
+            {"type":"additional_tools","tools":[]},
+            {"type":"compaction_trigger"}
+        ]),
+        json!([
+            {"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"synthetic-ciphertext"}]},
+            {"role":"user","content":"next"}
+        ]),
+    ] {
+        let request = json!({"model":"gpt-test","input":input});
+        assert_eq!(
+            prepare_request(&request).unwrap_err().parameter(),
+            Some("input.agent_message.encrypted_content")
+        );
+    }
 }
 
 #[test]
-fn tool_relay_retry_claim_is_one_shot_and_keeps_only_the_safe_parameter() {
-    let error =
-        AdapterError::upstream_response_invalid().with_parameter("output.run_officejs.code");
-    let body = serde_json::to_vec(&json!({"status": "completed", "output": []})).unwrap();
-    let mut attempted = false;
-    let mut parameter = None;
-
-    assert!(take_tool_relay_retry(
-        error,
-        &body,
-        &mut attempted,
-        &mut parameter
-    ));
-    assert_eq!(parameter, Some("output.run_officejs.code"));
-    assert!(!take_tool_relay_retry(
-        error,
-        &body,
-        &mut attempted,
-        &mut parameter
-    ));
-}
-
-#[test]
-fn tool_relay_retry_hint_follows_prepared_input_without_provider_data() {
-    let mut body = prepare_request(&request_with_tool()).unwrap();
-    let prepared_len = body["input"].as_array().unwrap().len();
-    assert!(add_tool_relay_retry_hint(
-        &mut body,
-        Some("output.run_officejs.code")
-    ));
-    let input = body["input"].as_array().unwrap();
-    assert_eq!(input.len(), prepared_len + 1);
-    let hint = input.last().unwrap()["content"][0]["text"]
-        .as_str()
-        .unwrap();
-    assert!(hint.contains("previous run_officejs relay was malformed"));
-    assert!(hint.contains("output.run_officejs.code"));
-    assert!(hint.contains("two distinct JSON layers"));
-    assert!(!hint.contains("private"));
-    assert!(!input[0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("previous run_officejs relay was malformed"));
-
-    body["input"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"type": "compaction_trigger"}));
-    assert!(add_tool_relay_retry_hint(
-        &mut body,
-        Some("output.run_officejs.code")
-    ));
-    let input = body["input"].as_array().unwrap();
-    assert_eq!(input.last().unwrap()["type"], "compaction_trigger");
-    assert!(input[input.len() - 2]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("output.run_officejs.code"));
+fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema() {
+    let request = json!({
+        "model":"gpt-test",
+        "input":[
+            {"type":"additional_tools","tools":[{"type":"namespace","name":"mcp","tools":[
+                {"type":"namespace","name":"repo","tools":[{"type":"function","name":"read","description":"old"}]}
+            ]}]},
+            {"type":"tool_search_output","tools":[{"type":"namespace","name":"mcp","tools":[
+                {"type":"namespace","name":"repo","tools":[{"type":"function","name":"read","description":"latest","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}]}
+            ]}]},
+            {"role":"user","content":"Read a file"}
+        ],
+        "tool_choice":{"type":"function","namespace":"mcp.repo","name":"read"}
+    });
+    let before = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(instructions.contains("mcp.repo.read (function): latest"));
+    assert!(!instructions.contains("mcp.repo.read (function): old"));
+    assert_eq!(request, before);
+    assert_eq!(prepared["input"].as_array().unwrap().len(), 2);
+    let response = serde_json::to_vec(&json!({"status":"completed","output":[{
+        "type":"function_call","name":"run_officejs","call_id":"call_fixture",
+        "arguments":json!({"references":["mcp.repo.read"],"code":r#"{"path":"src/main.rs"}"#}).to_string()
+    }]})).unwrap();
+    let translated: Value =
+        serde_json::from_slice(&translate_response(&response, &request).unwrap()).unwrap();
+    assert_eq!(translated["output"][0]["namespace"], "mcp.repo");
+    assert_eq!(translated["output"][0]["name"], "read");
 }
 
 #[test]
@@ -96,7 +62,7 @@ fn preparation_wraps_tools_and_omits_empty_context() {
     request["context_management"] = json!([]);
     let prepared = prepare_request(&request).unwrap();
     assert_eq!(prepared["stream"], false);
-    assert_eq!(prepared["reasoning_effort"], "medium");
+    assert!(prepared.get("reasoning_effort").is_none());
     assert!(prepared.get("context_management").is_none());
     assert!(prepared.get("tools").is_none());
     assert!(prepared.get("tool_choice").is_none());
@@ -111,7 +77,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
     let prepared = prepare_request(&request_with_tool()).unwrap();
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
-    assert!(instructions.contains("cmd (required)"));
+    assert!(instructions.contains("\"cmd\":string"));
     assert!(!instructions.contains("Example outer arguments for apply_patch"));
     assert!(!instructions.contains("*** Begin Patch"));
 
@@ -221,7 +187,7 @@ fn tool_catalog_is_one_message_and_examples_follow_the_bare_name() {
 }
 
 #[test]
-fn non_object_property_schema_matches_only_when_additional_properties_are_open() {
+fn boolean_property_schema_is_valid_with_closed_additional_properties() {
     let open = json!({
         "model": "gpt-6-astra",
         "input": "edit",
@@ -259,7 +225,7 @@ fn non_object_property_schema_matches_only_when_additional_properties_are_open()
         .as_str()
         .unwrap()
         .to_string();
-    assert!(!closed_instructions.contains("Example outer arguments"));
+    assert!(closed_instructions.contains("Example outer arguments"));
 }
 
 #[test]

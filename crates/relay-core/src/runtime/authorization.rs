@@ -21,6 +21,7 @@ impl AuthorizedRequestError {
     /// known to be pre-send; never transparently replay an unknown outcome.
     pub(crate) fn execution_certainty(&self) -> ExecutionCertainty {
         match self {
+            Self::ProgressTimeout => ExecutionCertainty::Unknown,
             Self::Transport(error) if !error.is_connect() => ExecutionCertainty::Unknown,
             _ => ExecutionCertainty::NotSent,
         }

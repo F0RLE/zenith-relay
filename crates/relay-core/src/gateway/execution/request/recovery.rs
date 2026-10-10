@@ -1,5 +1,15 @@
 use super::prelude::*;
 
+pub(in crate::gateway::execution) fn mark_adapter_failure(
+    mut event: UsageEvent,
+    error: &AdapterError,
+) -> UsageEvent {
+    event.success = false;
+    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+    event.error_category = Some(error.code().to_string());
+    event
+}
+
 pub(in crate::gateway::execution) fn should_wait_for_candidate_availability(
     enabled: bool,
     last_failure: &Option<AttemptFailure>,

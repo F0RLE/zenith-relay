@@ -119,7 +119,8 @@ pub(in crate::local_pool::accounts) async fn discover_account_models(
     prepared: &PreparedAccountAuthorization,
     http_scope: &ManagementHttpScope,
 ) -> std::result::Result<Vec<String>, ModelDiscoveryFailure> {
-    let client = CodexModelsClient::new_with_proxy(prepared.proxy.as_ref())?
+    let client = AccountModelsClient::new_with_proxy(prepared.proxy.as_ref())?
+        .with_oauth_client_kind(prepared.oauth_client_kind)
         .with_http_scope(http_scope.clone());
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
     client

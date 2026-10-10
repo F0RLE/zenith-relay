@@ -151,7 +151,7 @@ pub(super) fn translate_input_items(
                     translated_items.push(visible_item);
                 }
             }
-            "additional_tools" => {}
+            "additional_tools" | "tool_search_output" => {}
             "item_reference" => {}
             _ => translated_items.push(input_item),
         }

@@ -33,8 +33,6 @@ pub(in crate::gateway::execution) async fn execute_request(
     let mut attempt = attempt_offset;
     let mut confirmed_response_missing = false;
     let mut repairs = AttemptRepairs::default();
-    let mut basis_points_relay_retry_attempted = false;
-    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error: Option<AdapterError> = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -212,7 +210,6 @@ pub(in crate::gateway::execution) async fn execute_request(
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
             client_context_id: &client_context_id,
-            basis_points_relay_retry_parameter: &mut basis_points_relay_retry_parameter,
             last_adapter_error: &mut last_adapter_error,
             forwarded_headers: &forwarded_headers,
             attempt: &mut attempt,
@@ -227,7 +224,6 @@ pub(in crate::gateway::execution) async fn execute_request(
             response_affinity_key: &mut response_affinity_key,
             allow_previous_response_reset,
             confirmed_response_missing: &mut confirmed_response_missing,
-            basis_points_relay_retry_attempted: &mut basis_points_relay_retry_attempted,
         })
         .await;
         let kept = match driven {

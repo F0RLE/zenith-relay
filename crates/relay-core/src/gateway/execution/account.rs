@@ -41,7 +41,7 @@ use prepare::{
 use selection::{handle_account_selection_miss, AccountSelectionMiss, AccountSelectionMissInput};
 use serde_json::Value;
 use std::sync::Arc;
-use success::{complete_account_response, AccountSuccess, AccountSuccessInput};
+use success::{complete_account_response, AccountSuccessInput};
 
 pub(in crate::gateway::execution) use encrypted_context::drop_rejected_encrypted_context;
 
@@ -115,8 +115,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut tried = account_only_exclusions.clone();
     let budget = SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget());
     let mut repairs = AttemptRepairs::default();
-    let mut basis_points_relay_retry_attempted = false;
-    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -263,7 +261,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             half_open_probe: selected_candidate.half_open_probe,
             diagnostics: selected_candidate.diagnostics,
             client_context_id: &client_context_id,
-            basis_points_relay_retry_parameter,
             last_failure: &mut last_failure,
             last_adapter_error: &mut last_adapter_error,
         }) {
@@ -402,7 +399,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
             }
         }
-        match complete_account_response(AccountSuccessInput {
+        let response = complete_account_response(AccountSuccessInput {
             status,
             bytes,
             response_headers: &response_headers,
@@ -421,22 +418,14 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             selected_error_origin,
             basis_points_route,
             prompt_affinity_key: &prompt_affinity_key,
-            tried: &mut tried,
-            basis_points_relay_retry_attempted: &mut basis_points_relay_retry_attempted,
-            basis_points_relay_retry_parameter: &mut basis_points_relay_retry_parameter,
-            last_adapter_error: &mut last_adapter_error,
-        }) {
-            AccountSuccess::Continue => continue,
-            AccountSuccess::Respond(response) => {
-                release_encrypted_context_repair_owner(
-                    &mut repairs,
-                    &mut response_affinity_key,
-                    &mut requires_affinity_owner,
-                    &runtime,
-                );
-                return response;
-            }
-        }
+        });
+        release_encrypted_context_repair_owner(
+            &mut repairs,
+            &mut response_affinity_key,
+            &mut requires_affinity_owner,
+            &runtime,
+        );
+        return response;
     }
 
     release_encrypted_context_repair_owner(

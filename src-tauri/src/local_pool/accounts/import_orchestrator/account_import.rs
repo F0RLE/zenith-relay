@@ -12,7 +12,7 @@ use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
 use zenith_relay_core::accounts::ParsedImportItem;
 use zenith_relay_core::error_codes;
-use zenith_relay_core::providers::chatgpt::CodexModelsClient;
+use zenith_relay_core::providers::chatgpt::AccountModelsClient;
 
 mod quota_probe;
 mod reconcile;
@@ -97,7 +97,9 @@ pub(super) async fn import_account_item(
         identity_is_registered,
     } = reconciled;
     let discovered_models = if discover_models && identity_is_registered {
-        let client = CodexModelsClient::new_with_proxy(proxy.as_ref()).map_err(model_item_error)?;
+        let client = AccountModelsClient::new_with_proxy(proxy.as_ref())
+            .map_err(model_item_error)?
+            .with_oauth_client_kind(credentials.oauth_client_kind());
         let client_version =
             zenith_relay_core::providers::chatgpt::configured_codex_client_version();
         let models = client

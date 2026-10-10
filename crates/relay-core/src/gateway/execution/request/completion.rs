@@ -1,10 +1,7 @@
 use super::prelude::*;
+use super::recovery::mark_adapter_failure;
 use super::recovery::{
     adapter_error_response, adapter_error_response_for_origin, replay_native_tool_continuation,
-};
-use super::retry::{
-    basis_points_relay_error_response, handle_basis_points_relay_retry, mark_adapter_failure,
-    BasisPointsRelayRetryContext,
 };
 use super::translate::{
     translate_basis_points_completed, translate_completed_response, CompletedBasisPointsResponse,
@@ -42,14 +39,10 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) last_failure_origin: &'a mut ErrorOrigin,
     pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
     pub(super) has_previous_response_id: bool,
-    pub(super) basis_points_route: bool,
     pub(super) basis_points_request: &'a Option<Value>,
     pub(super) stream: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) basis_points_relay_retry_attempted: &'a mut bool,
-    pub(super) basis_points_relay_retry_parameter: &'a mut Option<&'static str>,
     pub(super) tried: &'a mut HashSet<String>,
-    pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) response_affinity_hit: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
@@ -89,14 +82,10 @@ pub(super) async fn complete_buffered_response(
         last_failure_origin,
         last_preserved_upstream_error,
         has_previous_response_id,
-        basis_points_route,
         basis_points_request,
         stream,
         adapter_request,
-        basis_points_relay_retry_attempted,
-        basis_points_relay_retry_parameter,
         tried,
-        last_adapter_error,
         selected_error_origin,
         response_affinity_hit,
         prompt_affinity_key,
@@ -158,7 +147,6 @@ pub(super) async fn complete_buffered_response(
     let mut event = usage(true, status.as_u16(), None);
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
-    let basis_points_retry_body = basis_points_route.then(|| bytes.clone());
     let translated = if let Some(responses_request) = basis_points_request.as_ref() {
         translate_basis_points_completed(adapter_request, &bytes, responses_request, stream)
     } else {
@@ -177,34 +165,6 @@ pub(super) async fn complete_buffered_response(
     } = match translated {
         Ok(response) => response,
         Err(error) => {
-            if basis_points_route {
-                match handle_basis_points_relay_retry(
-                    error,
-                    basis_points_retry_body.as_deref().unwrap_or_default(),
-                    event,
-                    BasisPointsRelayRetryContext {
-                        attempted: basis_points_relay_retry_attempted,
-                        parameter: basis_points_relay_retry_parameter,
-                        runtime,
-                        tried,
-                        candidate_id: &route.candidate_id,
-                        lease,
-                        last_adapter_error,
-                    },
-                ) {
-                    Ok(()) => return CompletionStep::Continue,
-                    Err(pair) => {
-                        let (error, event) = *pair;
-                        return CompletionStep::Respond(basis_points_relay_error_response(
-                            error,
-                            event,
-                            runtime,
-                            lease,
-                            selected_error_origin,
-                        ));
-                    }
-                }
-            }
             emit_usage(runtime, mark_adapter_failure(event, &error));
             lease.settle_rotation_terminal(now_ms());
             return CompletionStep::Respond(adapter_error_response_for_origin(
@@ -363,20 +323,25 @@ async fn read_completed_body(
     read: &mut CompletedBodyRead<'_>,
     usage: &impl Fn(bool, u16, Option<String>) -> UsageEvent,
 ) -> Result<Vec<u8>, CompletionStep> {
-    match collect_upstream_response(
-        upstream,
-        read.account_route,
-        (read.account_route && read.runtime.block_degraded_routes_enabled())
-            .then_some(read.route.source_model.as_str()),
-    )
-    .await
+    let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
+        .then_some(read.route.source_model.as_str());
+    let collected = if read.route.account_transport
+        == crate::runtime::AccountTransport::ExcelBasisPoints
     {
+        super::super::super::response::collect_basis_points_response(upstream, expected_model).await
+    } else {
+        collect_upstream_response(upstream, read.account_route, expected_model).await
+    };
+    match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
             let mut failure = upstream_failure.failure;
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
-            let failure_state = if matches!(failure.category, error_codes::UPSTREAM_BODY) {
+            let failure_state = if matches!(
+                failure.category,
+                error_codes::UPSTREAM_BODY | error_codes::STREAM_IDLE_TIMEOUT
+            ) {
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
             } else {
@@ -393,6 +358,7 @@ async fn read_completed_body(
                 failure.status.as_u16(),
                 Some(failure.category.to_string()),
             );
+            populate_tokens(&mut event, &upstream_failure.partial_body);
             event.upstream_error = upstream_failure.upstream_error.map(|mut details| {
                 details.http_status = Some(read.status.as_u16());
                 details

@@ -24,7 +24,7 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::AccountAuthMode,
     providers::chatgpt::{
-        AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, OAuthClientKind,
+        AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, OAuthClientKind,
     },
     quota::QuotaRefreshFailure,
     ProxyConfig,
@@ -184,7 +184,10 @@ async fn prepare_oauth_completion(
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
-    if model_issue.is_none() && !account_record.models.is_empty() {
+    if model_issue.is_none()
+        && (!account_record.models.is_empty()
+            || credentials.oauth_client_kind() == OAuthClientKind::ExcelBps)
+    {
         account_record.discovered_models = Some(account_record.models.clone());
     }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
@@ -278,8 +281,9 @@ async fn discover_sign_in_models(
     previous_models: Vec<String>,
 ) -> LocalResult<(Vec<String>, Option<InitialModelIssue>)> {
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
-    match CodexModelsClient::new_with_proxy(proxy) {
+    match AccountModelsClient::new_with_proxy(proxy) {
         Ok(client) => match client
+            .with_oauth_client_kind(credentials.oauth_client_kind())
             .discover_authorized(
                 credentials
                     .authorization(now_ms)

@@ -79,6 +79,30 @@ impl AttemptFailure {
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
             AuthorizedRequestError::NotReplayable => Self::upstream_response_body_failure(),
             AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
+            AuthorizedRequestError::ModelAccess(failure) => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::BAD_GATEWAY,
+                category: failure.code.management_code(),
+                message: "Basis Points model access could not be verified",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ModelUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::NOT_ACCEPTABLE,
+                category: error_codes::UPSTREAM_MODEL_UNSUPPORTED,
+                message: "Basis Points access does not include this model",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ReasoningUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::BAD_REQUEST,
+                category: error_codes::ADAPTER_REASONING_UNSUPPORTED,
+                message: "Basis Points access does not include this reasoning level",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ProgressTimeout => {
+                Self::stream(error_codes::STREAM_IDLE_TIMEOUT)
+            }
         }
     }
 
@@ -175,6 +199,9 @@ impl AttemptFailure {
             category,
             message: match category {
                 error_codes::UPSTREAM_BODY => "upstream response failed",
+                error_codes::STREAM_IDLE_TIMEOUT => {
+                    "Basis Points response stopped making progress; the request was not repeated"
+                }
                 _ => "upstream stream failed before client output",
             },
             cooldown_hint: RateLimitBodyHint::default(),

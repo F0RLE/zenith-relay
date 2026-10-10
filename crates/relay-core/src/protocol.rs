@@ -1,7 +1,7 @@
 mod adapter;
 mod capabilities;
 mod management;
-mod sse;
+pub(crate) mod sse;
 mod version;
 
 pub use adapter::{

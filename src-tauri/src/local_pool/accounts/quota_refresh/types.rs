@@ -138,6 +138,8 @@ pub(crate) struct PreparedAccountCredentials {
 
 #[derive(Clone)]
 pub(in crate::local_pool) struct PreparedAccountAuthorization {
+    pub(in crate::local_pool::accounts) oauth_client_kind:
+        zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub(in crate::local_pool::accounts) authorization: HeaderValue,
     pub(in crate::local_pool::accounts) subscription_authorization: Option<HeaderValue>,
     pub(in crate::local_pool::accounts) tokens: Option<TokenSet>,
@@ -169,6 +171,7 @@ impl PreparedAccountAuthorization {
                 LocalPoolError::new(ErrorCode::InvalidState, "account token is invalid")
             })?;
         Ok(Self {
+            oauth_client_kind: credentials.oauth_client_kind,
             subscription_authorization: Some(authorization.clone()),
             authorization,
             tokens: Some(credentials.tokens),

@@ -16,6 +16,7 @@ use reqwest::header::{HeaderValue, InvalidHeaderValue};
 pub use agent_identity::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
 };
+pub(crate) use basis_points_headers::basis_points_headers;
 pub use basis_points_headers::{
     BasisPointsCapturedHeaders, BasisPointsHeader, BasisPointsHeadersError,
 };
@@ -27,8 +28,11 @@ pub use codex_release::{
     refresh_codex_client_release, CodexRelease, CodexReleaseError, CODEX_RELEASES_API_URL,
     CODEX_RELEASE_REFRESH_INTERVAL,
 };
+pub(crate) use models::normalize_basis_points_reasoning_effort;
 pub use models::{
-    CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode, CODEX_MODELS_ENDPOINT,
+    basis_points_access_url, parse_basis_points_model_access, AccountModelsClient,
+    BasisPointsModelAccess, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
+    CODEX_MODELS_ENDPOINT, MAX_BASIS_POINTS_ACCESS_BYTES,
 };
 pub use oauth::{
     OAuthClientKind, BASIS_POINTS_OAUTH_CLIENT_ID, BASIS_POINTS_OAUTH_REDIRECT_URI,

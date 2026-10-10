@@ -91,6 +91,18 @@ pub(in crate::gateway) fn usage_event(
 
 pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body: &[u8]) {
     let Ok(response_payload) = serde_json::from_slice::<Value>(response_body) else {
+        // Buffered BPS failures can still contain usage in complete SSE frames.
+        // Observe those frames without treating a truncated response as success.
+        let mut offset = 0;
+        while let Some(end) = crate::protocol::sse::event_end(&response_body[offset..]) {
+            let data = crate::protocol::sse::event_data(&response_body[offset..offset + end]);
+            if let Ok(payload) = serde_json::from_slice::<Value>(&data) {
+                if let Some(usage) = find_usage(&payload) {
+                    apply_usage(event, usage);
+                }
+            }
+            offset += end;
+        }
         return;
     };
     event.tool_use.set_terminal_response(&response_payload);
@@ -248,11 +260,10 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .get("total_tokens")
         .or_else(|| gemini_usage_metadata.get("totalTokenCount"))
         .and_then(Value::as_u64);
-    if let Some(total_tokens) = reported_total.or_else(|| {
-        input_tokens
-            .zip(output_tokens)
-            .map(|(input, output)| input.saturating_add(output))
-    }) {
+    let frame_total = input_tokens
+        .zip(output_tokens)
+        .map(|(input, output)| input.saturating_add(output));
+    if let Some(total_tokens) = reported_total.or(frame_total).or(event.total_tokens) {
         event.total_tokens = Some(
             total_tokens.max(
                 event

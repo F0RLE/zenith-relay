@@ -321,6 +321,7 @@ async fn upload_image(
         .post(endpoint)
         .headers(headers)
         .header(ACCEPT, "application/json")
+        .timeout(std::time::Duration::from_secs(30))
         .body(multipart_bytes);
     let upstream = runtime
         .send_authorized_request(
