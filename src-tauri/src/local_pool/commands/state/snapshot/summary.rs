@@ -4,6 +4,7 @@ use crate::local_pool::{
     state::AccountCredentialFacts,
 };
 use zenith_relay_core::error_codes;
+use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::protocol::ProxyMode;
 use zenith_relay_core::protocol::{
     account_operational_state, AccountOperationalInput, AccountSummary, QuotaWindowUsage,
@@ -14,19 +15,21 @@ use zenith_relay_core::{
 };
 
 pub(super) fn local_source_summary(
-    record: &ProviderSourceRecord,
+    source_record: &ProviderSourceRecord,
     refresh_revision: Option<u64>,
     secret_available: bool,
     runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
+    reference_catalog: &ModelMetadataCatalog,
 ) -> crate::local_pool::error::Result<SourceSummary> {
     Ok(SourceSummary::from_stored_source(
-        record,
+        source_record,
         secret_available,
         runtime_available,
         api_equivalent,
-        record.last_error.clone(),
+        source_record.last_error.clone(),
         refresh_revision,
+        Some(reference_catalog),
     ))
 }
 
@@ -42,7 +45,7 @@ pub(super) struct LocalAccountSummaryContext<'a> {
 }
 
 pub(super) fn local_account_summary(
-    record: &LocalAccountRecord,
+    account_record: &LocalAccountRecord,
     context: LocalAccountSummaryContext<'_>,
 ) -> crate::local_pool::error::Result<AccountSummary> {
     let LocalAccountSummaryContext {
@@ -63,58 +66,64 @@ pub(super) fn local_account_summary(
         .unwrap_or((ProxyMode::Direct, false));
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     let operational = account_operational_state(AccountOperationalInput::from_source(
-        &record.account,
+        &account_record.account,
         secret_available,
         proxy_available,
         now_ms,
         quota_stale_after_ms,
     ));
     Ok(AccountSummary {
-        id: record.account.id.clone(),
-        label: record.account.label.clone(),
-        identity_hint: record
+        credit_balance_key: credentials
+            .and_then(|facts| facts.credit_balance_key)
+            .map(hex::encode),
+        oauth_client_kind: credentials
+            .map(|facts| facts.oauth_client_kind)
+            .unwrap_or_default(),
+        id: account_record.account.id.clone(),
+        label: account_record.account.label.clone(),
+        identity_hint: account_record
             .account
             .identity
             .identity_hash
             .chars()
             .take(12)
             .collect(),
-        provider_family: record.provider_family.clone(),
+        provider_family: account_record.provider_family.clone(),
         basis_points_available: credentials
             .is_some_and(AccountCredentialFacts::basis_points_available),
-        basis_points_enabled: settings.basis_points_enabled
-            && credentials.is_some_and(AccountCredentialFacts::basis_points_available),
-        enabled: record.account.enabled,
-        in_pool: record.account.in_pool,
-        draining: record.account.draining,
+        basis_points_enabled: credentials
+            .is_some_and(AccountCredentialFacts::basis_points_available),
+        enabled: account_record.account.enabled,
+        in_pool: account_record.account.in_pool,
+        draining: account_record.account.draining,
         operational_status: operational.status.with_runtime_available(runtime_available),
-        auth_state: record.account.auth_state,
-        health: record.account.health.summary_label(),
-        models: record.effective_models().to_vec(),
-        allowed_models: record.allowed_models.clone(),
-        excluded_models: record.excluded_models.clone(),
-        priority: record.priority,
-        weight: record.weight,
+        auth_state: account_record.account.auth_state,
+        health: account_record.account.health.summary_label(),
+        models: account_record.effective_models().to_vec(),
+        allowed_models: account_record.allowed_models.clone(),
+        excluded_models: account_record.excluded_models.clone(),
+        priority: account_record.priority,
+        weight: account_record.weight,
         api_equivalent,
         quota_window_usage,
-        purchase_cost_micro_usd: record.purchase_cost_micro_usd,
-        subscription: record.account.subscription.clone(),
-        quota: record.account.quota.clone(),
+        purchase_cost_micro_usd: account_record.purchase_cost_micro_usd,
+        subscription: account_record.account.subscription.clone(),
+        quota: account_record.account.quota.clone(),
         secret_available,
-        remote_location: record.remote_location.clone(),
+        remote_location: account_record.remote_location.clone(),
         proxy_mode,
         proxy_available,
         proxy_id: None,
         quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
-            record.account.auth_state,
-            &record.account.quota,
+            account_record.account.auth_state,
+            &account_record.account.quota,
             refreshing,
         ),
         refresh_state: Default::default(),
         routing_block_reason: operational.routing_block_reason,
-        last_error_code: record.account.last_error_code.clone(),
-        client_auth_status: record.client_auth_status.clone(),
-        last_client_login_redirect_at_ms: record.last_client_login_redirect_at_ms,
+        last_error_code: account_record.account.last_error_code.clone(),
+        client_auth_status: account_record.client_auth_status.clone(),
+        last_client_login_redirect_at_ms: account_record.last_client_login_redirect_at_ms,
     })
 }
 
@@ -131,7 +140,7 @@ pub(in crate::local_pool::commands::state) fn oauth_account_runtime_available(
 }
 
 pub(super) fn account_runtime_warning(
-    record: &LocalAccountRecord,
+    account_record: &LocalAccountRecord,
     settings: &GatewaySettings,
     credentials: Option<AccountCredentialFacts>,
     common_proxy_available: bool,
@@ -152,12 +161,17 @@ pub(super) fn account_runtime_warning(
         }
         Some(_) => "account_runtime_not_registered",
     };
-    let redacted = if record.account.id.chars().count() <= 12 {
-        record.account.id.clone()
+    let redacted = if account_record.account.id.chars().count() <= 12 {
+        account_record.account.id.clone()
     } else {
         format!(
             "{}...",
-            record.account.id.chars().take(8).collect::<String>()
+            account_record
+                .account
+                .id
+                .chars()
+                .take(8)
+                .collect::<String>()
         )
     };
     format!("{code}:{redacted}")

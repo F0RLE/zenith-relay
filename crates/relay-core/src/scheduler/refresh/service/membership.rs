@@ -54,13 +54,13 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
         kind: RefreshKind,
         delay_ms: u64,
     ) -> bool {
-        let mut state = self.state.lock().expect("refresh state poisoned");
-        let scheduled = state.coordinator.schedule_event(
+        let mut service_state = self.state.lock().expect("refresh state poisoned");
+        let scheduled = service_state.coordinator.schedule_event(
             identity,
             kind,
             self.now_ms().saturating_add(delay_ms),
         );
-        drop(state);
+        drop(service_state);
         self.signal();
         scheduled
     }
@@ -74,16 +74,16 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
     }
 
     pub fn remove_member(&self, member_id: &str) -> bool {
-        let mut state = self.state.lock().expect("refresh state poisoned");
-        let keys = state
+        let mut service_state = self.state.lock().expect("refresh state poisoned");
+        let keys = service_state
             .entries
             .range(RefreshKey::member_range(member_id))
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in &keys {
-            Self::remove_entry(&mut state, key);
+            Self::remove_entry(&mut service_state, key);
         }
-        drop(state);
+        drop(service_state);
         self.signal();
         if !keys.is_empty() {
             self.notify_progress();
@@ -94,16 +94,16 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
     /// Retire one resource after its own endpoint changes. A different kind's
     /// in-flight read still charges capacity until it actually finishes.
     pub fn remove_kind(&self, identity: &RefreshIdentity, kind: RefreshKind) -> bool {
-        let mut state = self.state.lock().expect("refresh state poisoned");
+        let mut service_state = self.state.lock().expect("refresh state poisoned");
         let key = RefreshKey {
             identity: identity.clone(),
             kind,
         };
-        if !state.entries.contains_key(&key) {
+        if !service_state.entries.contains_key(&key) {
             return false;
         }
-        Self::remove_entry(&mut state, &key);
-        drop(state);
+        Self::remove_entry(&mut service_state, &key);
+        drop(service_state);
         self.signal();
         self.notify_progress();
         true
@@ -124,8 +124,8 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
     }
 
     pub fn set_member_active(&self, member_id: &str) {
-        let mut state = self.state.lock().expect("refresh state poisoned");
-        let identities = state
+        let mut service_state = self.state.lock().expect("refresh state poisoned");
+        let identities = service_state
             .entries
             .range(RefreshKey::member_range(member_id))
             .map(|(key, _)| key)
@@ -133,26 +133,28 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
             .collect::<std::collections::BTreeSet<_>>();
         let mut changed = false;
         for identity in identities {
-            changed |= state.coordinator.set_active(&identity, true, self.now_ms());
+            changed |= service_state
+                .coordinator
+                .set_active(&identity, true, self.now_ms());
         }
-        drop(state);
+        drop(service_state);
         if changed {
             self.signal();
         }
     }
 
     pub fn retain(&self, mut keep: impl FnMut(&RefreshIdentity, RefreshKind) -> bool) {
-        let mut state = self.state.lock().expect("refresh state poisoned");
-        let removed = state
+        let mut service_state = self.state.lock().expect("refresh state poisoned");
+        let removed = service_state
             .entries
             .keys()
             .filter(|key| !keep(&key.identity, key.kind))
             .cloned()
             .collect::<Vec<_>>();
         for key in removed {
-            Self::remove_entry(&mut state, &key);
+            Self::remove_entry(&mut service_state, &key);
         }
-        drop(state);
+        drop(service_state);
         self.signal();
     }
 }

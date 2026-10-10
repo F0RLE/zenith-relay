@@ -58,7 +58,7 @@ export function cacheLifetime(
 ): CacheLifetime {
   const documented = documentedCacheRetentionMinimum(input.model, 1, 0, input.cacheWriteTtl);
   const windows = cacheWriteDurationWindows(input.cacheWriteTtl, documented);
-  const durations = windows.map(cacheWindowMs).filter((value): value is number => value != null);
+  const durations = windows.map(cacheWindowMs).filter((durationValue): durationValue is number => durationValue != null);
   const windowMs = durations.length ? Math.max(...durations) : null;
   const touchedMs = Date.parse(input.touchedAt);
   if (windowMs == null || !Number.isFinite(touchedMs)) {

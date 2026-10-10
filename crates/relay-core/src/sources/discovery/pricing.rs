@@ -5,13 +5,15 @@ use serde_json::Value;
 /// catalog endpoint. Untagged cache-write prices only imply Anthropic's 5m
 /// tariff when discovered through a Messages endpoint.
 pub(super) fn detected_model_price(
-    model: &Value,
+    model_record: &Value,
     messages_cache_write_supported: bool,
 ) -> Option<ApiModelPriceOverride> {
-    let pricing = model.get("pricing").filter(|value| value.is_object());
-    let input = price_component(
-        model,
-        pricing,
+    let pricing_record = model_record
+        .get("pricing")
+        .filter(|pricing_value| pricing_value.is_object());
+    let input_price = price_component(
+        model_record,
+        pricing_record,
         &[
             "inputCostMicrousdPerMillion",
             "inputMicroUsdPerMillion",
@@ -20,9 +22,9 @@ pub(super) fn detected_model_price(
         ],
         &["inputCostPerToken", "input_cost_per_token", "prompt"],
     )?;
-    let output = price_component(
-        model,
-        pricing,
+    let output_price = price_component(
+        model_record,
+        pricing_record,
         &[
             "outputCostMicrousdPerMillion",
             "outputMicroUsdPerMillion",
@@ -33,12 +35,15 @@ pub(super) fn detected_model_price(
     )?;
     // The API-equivalent meter is token based. Do not turn a request-priced
     // model into a misleading zero-cost token model.
-    if input == 0 && output == 0 && request_price(model, pricing).is_some_and(|price| price > 0) {
+    if input_price == 0
+        && output_price == 0
+        && request_price(model_record, pricing_record).is_some_and(|price| price > 0)
+    {
         return None;
     }
-    let cached_input = price_component(
-        model,
-        pricing,
+    let cache_read_price = price_component(
+        model_record,
+        pricing_record,
         &[
             "cachedInputCostMicrousdPerMillion",
             "cachedInputMicroUsdPerMillion",
@@ -51,11 +56,25 @@ pub(super) fn detected_model_price(
             "input_cache_read",
         ],
     )
-    .or_else(|| ttl_price(model, pricing, "promptCacheReadCostsByTtl", "5m"))
-    .or_else(|| ttl_price(model, pricing, "promptCacheReadCostsByTtl", "1h"));
-    let cache_write_5m = price_component(
-        model,
-        pricing,
+    .or_else(|| {
+        ttl_price(
+            model_record,
+            pricing_record,
+            "promptCacheReadCostsByTtl",
+            "5m",
+        )
+    })
+    .or_else(|| {
+        ttl_price(
+            model_record,
+            pricing_record,
+            "promptCacheReadCostsByTtl",
+            "1h",
+        )
+    });
+    let short_cache_write_price = price_component(
+        model_record,
+        pricing_record,
         &[
             "cacheWrite5mMicrousdPerMillion",
             "cacheWrite5mMicroUsdPerMillion",
@@ -64,12 +83,19 @@ pub(super) fn detected_model_price(
         ],
         &[],
     )
-    .or_else(|| ttl_price(model, pricing, "promptCacheWriteCostsByTtl", "5m"))
+    .or_else(|| {
+        ttl_price(
+            model_record,
+            pricing_record,
+            "promptCacheWriteCostsByTtl",
+            "5m",
+        )
+    })
     .or_else(|| {
         if messages_cache_write_supported {
             price_component(
-                model,
-                pricing,
+                model_record,
+                pricing_record,
                 &[
                     "cacheCreationInputCostMicrousdPerMillion",
                     "cache_creation_input_cost_microusd_per_million",
@@ -84,9 +110,9 @@ pub(super) fn detected_model_price(
             None
         }
     });
-    let cache_write_1h = price_component(
-        model,
-        pricing,
+    let long_cache_write_price = price_component(
+        model_record,
+        pricing_record,
         &[
             "cacheWrite1hMicrousdPerMillion",
             "cacheWrite1hMicroUsdPerMillion",
@@ -95,57 +121,70 @@ pub(super) fn detected_model_price(
         ],
         &[],
     )
-    .or_else(|| ttl_price(model, pricing, "promptCacheWriteCostsByTtl", "1h"));
+    .or_else(|| {
+        ttl_price(
+            model_record,
+            pricing_record,
+            "promptCacheWriteCostsByTtl",
+            "1h",
+        )
+    });
     ApiModelPriceOverride::from_optional_fields(
-        Some(input),
-        cached_input,
-        cache_write_5m,
-        cache_write_1h,
-        Some(output),
+        Some(input_price),
+        cache_read_price,
+        short_cache_write_price,
+        long_cache_write_price,
+        Some(output_price),
     )
     .ok()
     .flatten()
 }
 
 fn price_component(
-    model: &Value,
-    pricing: Option<&Value>,
+    model_record: &Value,
+    pricing_record: Option<&Value>,
     micro_usd_fields: &[&str],
     usd_per_token_fields: &[&str],
 ) -> Option<u64> {
-    micro_usd_field(model, micro_usd_fields)
-        .or_else(|| pricing.and_then(|value| micro_usd_field(value, micro_usd_fields)))
-        .or_else(|| usd_per_token_field(model, usd_per_token_fields))
-        .or_else(|| pricing.and_then(|value| usd_per_token_field(value, usd_per_token_fields)))
+    micro_usd_field(model_record, micro_usd_fields)
+        .or_else(|| {
+            pricing_record
+                .and_then(|pricing_value| micro_usd_field(pricing_value, micro_usd_fields))
+        })
+        .or_else(|| usd_per_token_field(model_record, usd_per_token_fields))
+        .or_else(|| {
+            pricing_record
+                .and_then(|pricing_value| usd_per_token_field(pricing_value, usd_per_token_fields))
+        })
 }
 
-fn micro_usd_field(value: &Value, fields: &[&str]) -> Option<u64> {
+fn micro_usd_field(price_record: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
-        .find_map(|field| unsigned_integer(value.get(*field)?))
+        .find_map(|field| unsigned_integer(price_record.get(*field)?))
 }
 
-fn usd_per_token_field(value: &Value, fields: &[&str]) -> Option<u64> {
+fn usd_per_token_field(price_record: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
-        .find_map(|field| usd_per_token_to_micro_usd_per_million(value.get(*field)?))
+        .find_map(|field| usd_per_token_to_micro_usd_per_million(price_record.get(*field)?))
 }
 
-fn usd_per_request_field(value: &Value, fields: &[&str]) -> Option<u64> {
+fn usd_per_request_field(price_record: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
-        .find_map(|field| usd_per_request_to_micro_usd(value.get(*field)?))
+        .find_map(|field| usd_per_request_to_micro_usd(price_record.get(*field)?))
 }
 
 fn ttl_price(model: &Value, pricing: Option<&Value>, field: &str, ttl: &str) -> Option<u64> {
     model
         .get(field)
-        .and_then(|values| values.get(ttl))
+        .and_then(|ttl_prices| ttl_prices.get(ttl))
         .and_then(unsigned_integer)
         .or_else(|| {
             pricing
-                .and_then(|value| value.get(field))
-                .and_then(|values| values.get(ttl))
+                .and_then(|pricing_value| pricing_value.get(field))
+                .and_then(|ttl_prices| ttl_prices.get(ttl))
                 .and_then(unsigned_integer)
         })
 }
@@ -163,25 +202,31 @@ fn request_price(model: &Value, pricing: Option<&Value>) -> Option<u64> {
         "request",
     ];
     micro_usd_field(model, &micro_usd_fields)
-        .or_else(|| pricing.and_then(|value| micro_usd_field(value, &micro_usd_fields)))
+        .or_else(|| {
+            pricing.and_then(|pricing_value| micro_usd_field(pricing_value, &micro_usd_fields))
+        })
         .or_else(|| usd_per_request_field(model, &usd_per_request_fields))
-        .or_else(|| pricing.and_then(|value| usd_per_request_field(value, &usd_per_request_fields)))
+        .or_else(|| {
+            pricing.and_then(|pricing_value| {
+                usd_per_request_field(pricing_value, &usd_per_request_fields)
+            })
+        })
 }
 
-fn unsigned_integer(value: &Value) -> Option<u64> {
-    value.as_u64().or_else(|| {
-        value
+fn unsigned_integer(numeric_value: &Value) -> Option<u64> {
+    numeric_value.as_u64().or_else(|| {
+        numeric_value
             .as_str()
-            .and_then(|value| value.trim().parse::<u64>().ok())
+            .and_then(|number_text| number_text.trim().parse::<u64>().ok())
     })
 }
 
-fn usd_per_token_to_micro_usd_per_million(value: &Value) -> Option<u64> {
-    crate::usd_per_token_to_micro_usd_per_million(value).ok()
+fn usd_per_token_to_micro_usd_per_million(price_value: &Value) -> Option<u64> {
+    crate::usd_per_token_to_micro_usd_per_million(price_value).ok()
 }
 
-fn usd_per_request_to_micro_usd(value: &Value) -> Option<u64> {
-    crate::usd_per_request_to_micro_usd(value).ok()
+fn usd_per_request_to_micro_usd(price_value: &Value) -> Option<u64> {
+    crate::usd_per_request_to_micro_usd(price_value).ok()
 }
 
 #[cfg(test)]

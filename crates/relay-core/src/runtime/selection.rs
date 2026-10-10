@@ -15,14 +15,17 @@ impl GatewayRuntime {
         stream: bool,
     ) -> Vec<ExecutorRoute> {
         let scope = key.scope_snapshot();
-        let ids = self
+        let candidate_ids = self
             .lock_scheduler()
             .candidates()
             .filter(|candidate| candidate.is_configured(model, protocols, &scope))
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
-        ids.iter()
-            .filter_map(|id| self.executor_route(id, model, &scope, protocols, stream))
+        candidate_ids
+            .iter()
+            .filter_map(|candidate_id| {
+                self.executor_route(candidate_id, model, &scope, protocols, stream)
+            })
             .collect()
     }
 
@@ -131,7 +134,7 @@ impl GatewayRuntime {
         .await
     }
 
-    pub(crate) fn automatic_response_owner_should_yield_for_quota(
+    pub(crate) fn automatic_response_owner_should_yield(
         &self,
         key: &AuthenticatedKey,
         affinity_key: &str,
@@ -141,14 +144,13 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> bool {
         let scope = key.scope_snapshot();
-        self.lock_scheduler()
-            .automatic_response_owner_should_yield_for_quota(
-                affinity_key,
-                model,
-                allowed_protocols,
-                &scope,
-                tried,
-                now_ms,
-            )
+        self.lock_scheduler().automatic_response_owner_should_yield(
+            affinity_key,
+            model,
+            allowed_protocols,
+            &scope,
+            tried,
+            now_ms,
+        )
     }
 }

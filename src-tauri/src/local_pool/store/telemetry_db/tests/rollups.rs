@@ -20,12 +20,34 @@ fn usage_survives_database_reopen() {
             in_flight_before: 0,
             dispatches_before: 3,
             endpoint_kind: None,
+            cache_context: Some(
+                serde_json::from_value(serde_json::json!({
+                    "baseline": "completed_request", "scope": "client_session",
+                    "clientChanges": ["tools"], "upstreamChanges": ["tools", "reasoning"],
+                    "relayChanges": ["reasoning"], "candidateChanged": false,
+                    "previousCompletedAgeMs": 12_000,
+                    "clientHistory": {
+                        "comparison": "appended", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 2, "firstChangedItemKind": null
+                    },
+                    "upstreamHistory": {
+                        "comparison": "appended", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 2, "firstChangedItemKind": null
+                    },
+                    "relayHistory": {
+                        "comparison": "unchanged", "inputItems": 3, "inputBytes": 100,
+                        "sharedPrefixItems": 3, "firstChangedItemKind": null
+                    }
+                }))
+                .unwrap(),
+            ),
         }),
         requested_model: Some("gpt-5.4".into()),
         resolved_model: Some("gpt-5.4".into()),
         requested_reasoning_effort: Some("max".into()),
         effective_reasoning_effort: Some("low".into()),
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Fast,
         applied_service_tier: Some("flex".into()),
         success: true,
@@ -67,6 +89,7 @@ fn usage_survives_database_reopen() {
     let logs = database.list(10).unwrap();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].tool_use.as_ref(), Some(&event.tool_use));
+    assert_eq!(logs[0].routing, event.routing);
     assert!(logs[0].created_at.ends_with('Z'));
     assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
     assert_eq!(
@@ -93,6 +116,7 @@ fn usage_survives_database_reopen() {
         Some(SelectionReason::QuotaHeadroom)
     );
     let page = database.usage_page(&UsageQuery::default()).unwrap();
+    assert_eq!(page.events[0].routing, event.routing);
     // The event carries a measured value and the totals are that same value
     // merged once, so the relation holds regardless of catalog prices.
     assert!(page.events[0].api_equivalent.micro_usd > 0);
@@ -454,10 +478,12 @@ fn usage_keeps_only_the_terminal_fallback_attempt() {
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     let mut event = failed_fallback_test_event("req_fallback");
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.requested_reasoning_effort = Some("max".into());
     event.effective_reasoning_effort = Some("max".into());
     database.record(&event).unwrap();
@@ -503,10 +529,12 @@ fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
     ));
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = failed_fallback_test_event("req_failed");
-    event.upstream_error = Some(zenith_relay_core::usage::UpstreamErrorDetails::from_body(
-        Some(503),
-        br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
-    ));
+    event.upstream_error = Some(
+        zenith_relay_core::usage::UpstreamErrorDetails::from_response_body(
+            Some(503),
+            br#"{"error":{"code":"future_capacity","message":"Capacity temporarily exhausted"}}"#,
+        ),
+    );
     event.upstream_error.as_mut().unwrap().message =
         Some("Capacity exhausted; Bearer synthetic-private".into());
     database.record(&event).unwrap();

@@ -28,7 +28,7 @@ export async function runAccountIdentityReveal({
 }: AccountIdentityRevealRun) {
   const results = await Promise.allSettled(accountIds.map(reveal));
   if (!isActive()) return;
-  onRevealed(results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+  onRevealed(results.flatMap((revealResult) => revealResult.status === "fulfilled" ? [revealResult.value] : []));
   if (isActive()) onComplete();
 }
 
@@ -48,7 +48,7 @@ export function useAccountIdentityReveal({
       return;
     }
     if (!canReveal || !accountSignature) {
-      setRevealedIdentities((current) => replaceRevealedAccountIdentities(current, mode, []));
+      setRevealedIdentities((previousIdentities) => replaceRevealedAccountIdentities(previousIdentities, mode, []));
       setBusy(false);
       return;
     }
@@ -62,7 +62,7 @@ export function useAccountIdentityReveal({
         ? relayCommands.revealLocalAccountIdentity(accountId)
         : relayCommands.revealRemoteAccountIdentity(accountId),
       onRevealed: (identities) => {
-        setRevealedIdentities((current) => replaceRevealedAccountIdentities(current, mode, identities));
+      setRevealedIdentities((previousIdentities) => replaceRevealedAccountIdentities(previousIdentities, mode, identities));
       },
       onComplete: () => setBusy(false),
     });

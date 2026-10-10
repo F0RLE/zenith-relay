@@ -47,10 +47,10 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         .map(String::as_str)
         .collect::<HashSet<_>>();
     let refresh_exchange_required = !session.prepared
-        && session.items.iter().any(|item| {
-            selected.contains(item.item_id.as_str())
-                && item.secrets().access_token().is_none()
-                && item.secrets().refresh_token().is_some()
+        && session.items.iter().any(|import_item| {
+            selected.contains(import_item.item_id.as_str())
+                && import_item.secrets().access_token().is_none()
+                && import_item.secrets().refresh_token().is_some()
         });
     let probe_quota = input.probe_quota
         && !session.preview.rows.iter().any(|row| {
@@ -85,10 +85,10 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
             )
         })
         .collect::<HashMap<_, _>>();
-    let mut items = session
+    let mut import_items_by_id = session
         .items
         .into_iter()
-        .map(|item| (item.item_id.clone(), item))
+        .map(|import_item| (import_item.item_id.clone(), import_item))
         .collect::<HashMap<_, _>>();
     let mut results = Vec::with_capacity(selected_item_ids.len());
     let total = selected_item_ids.len();
@@ -99,7 +99,7 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
     let mut batch = ConfirmImport {
         state,
         credentials: &credentials,
-        items: &mut items,
+        pending_items: &mut import_items_by_id,
         add_to_pool: input.add_to_pool,
         discover_models: input.discover_models,
         probe_quota,
@@ -130,13 +130,13 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
             failed,
             Some(label),
         );
-        let context = row_context.get(&item_id);
-        let result = import_confirmed_item(&mut batch, item_id, context).await;
-        match result.status {
+        let row_context = row_context.get(&item_id);
+        let import_result = import_confirmed_item(&mut batch, item_id, row_context).await;
+        match import_result.status {
             ImportItemStatus::Succeeded => succeeded += 1,
             ImportItemStatus::Failed => {
                 failed += 1;
-                if let Some(error) = result.error.as_ref() {
+                if let Some(error) = import_result.error.as_ref() {
                     crate::diagnostics::record_error(
                         "account-import",
                         Some(&error.code),
@@ -150,7 +150,7 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
                 }
             }
         }
-        results.push(result);
+        results.push(import_result);
         crate::diagnostics::breadcrumb(
             "account-import",
             "item_finished",
@@ -191,7 +191,7 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
 struct ConfirmImport<'a> {
     state: &'a DesktopState,
     credentials: &'a CredentialStore<NativeSecretBackend>,
-    items: &'a mut HashMap<String, ParsedImportItem>,
+    pending_items: &'a mut HashMap<String, ParsedImportItem>,
     add_to_pool: bool,
     discover_models: bool,
     probe_quota: bool,
@@ -218,7 +218,7 @@ async fn import_confirmed_item(
             ),
         );
     }
-    let Some(item) = batch.items.remove(&item_id) else {
+    let Some(import_item) = batch.pending_items.remove(&item_id) else {
         return ImportItemResult::failure(
             item_id,
             ImportItemError::new(
@@ -230,7 +230,7 @@ async fn import_confirmed_item(
     if context.auth_mode == ImportAuthMode::ApiKey {
         return match import_source_item(
             batch.state,
-            item,
+            import_item,
             batch.add_to_pool,
             batch.discover_models,
             batch.configured_models,
@@ -244,7 +244,7 @@ async fn import_confirmed_item(
     match import_account_item(
         batch.state,
         batch.credentials,
-        item,
+        import_item,
         context,
         AccountImportOptions {
             add_to_pool: batch.add_to_pool,

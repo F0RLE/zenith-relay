@@ -8,20 +8,20 @@ use url::Url;
 /// its original jar, so a late response cannot populate a new credential's jar.
 #[derive(Default)]
 pub(super) struct RoutingCookies {
-    current: Mutex<Option<([u8; 32], Arc<RoutingCookieJar>)>>,
+    active_credential_jar: Mutex<Option<([u8; 32], Arc<RoutingCookieJar>)>>,
 }
 
 impl RoutingCookies {
     pub(super) fn for_credential(&self, credential: &[u8]) -> Arc<RoutingCookieJar> {
         let owner: [u8; 32] = Sha256::digest(credential).into();
-        let mut current = crate::poison::mutex(&self.current);
-        if let Some((previous, jar)) = current.as_ref() {
-            if *previous == owner {
+        let mut active_credential_jar = crate::poison::mutex(&self.active_credential_jar);
+        if let Some((previous_credential, jar)) = active_credential_jar.as_ref() {
+            if *previous_credential == owner {
                 return jar.clone();
             }
         }
         let jar = Arc::new(RoutingCookieJar::default());
-        *current = Some((owner, jar.clone()));
+        *active_credential_jar = Some((owner, jar.clone()));
         jar
     }
 }
@@ -45,15 +45,15 @@ impl RoutingCookieJar {
             return;
         }
         let store = crate::poison::mutex(&self.store);
-        let value = store
+        let cookie_header = store
             .get_request_values(url)
-            .map(|(name, value)| format!("{name}={value}"))
+            .map(|(name, cookie_value)| format!("{name}={cookie_value}"))
             .collect::<Vec<_>>()
             .join("; ");
-        if !value.is_empty() {
-            if let Ok(mut value) = HeaderValue::from_str(&value) {
-                value.set_sensitive(true);
-                headers.insert(COOKIE, value);
+        if !cookie_header.is_empty() {
+            if let Ok(mut cookie_header_value) = HeaderValue::from_str(&cookie_header) {
+                cookie_header_value.set_sensitive(true);
+                headers.insert(COOKIE, cookie_header_value);
             }
         }
     }
@@ -63,22 +63,24 @@ impl RoutingCookieJar {
             return;
         }
         let mut store = crate::poison::mutex(&self.store);
-        for value in headers.get_all(SET_COOKIE) {
-            if value.as_bytes().len() > 4096 {
+        for set_cookie_header in headers.get_all(SET_COOKIE) {
+            if set_cookie_header.as_bytes().len() > 4096 {
                 continue;
             }
-            let Ok(value) = value.to_str() else { continue };
-            let Ok(cookie) = Cookie::parse(value.to_owned(), url) else {
+            let Ok(set_cookie_text) = set_cookie_header.to_str() else {
+                continue;
+            };
+            let Ok(cookie) = Cookie::parse(set_cookie_text.to_owned(), url) else {
                 continue;
             };
             if cookie.name() != "__oailb" || !matches!(cookie.domain(), None | Some("chatgpt.com"))
             {
                 continue;
             }
-            let existing = store
-                .iter_any()
-                .any(|entry| entry.domain == cookie.domain && entry.path == cookie.path);
-            if existing || store.iter_any().count() < 16 {
+            let matching_cookie_exists = store.iter_any().any(|stored_cookie| {
+                stored_cookie.domain == cookie.domain && stored_cookie.path == cookie.path
+            });
+            if matching_cookie_exists || store.iter_any().count() < 16 {
                 let _ = store.insert(cookie, url);
             }
         }
@@ -93,9 +95,12 @@ mod tests {
         Url::parse(&format!("https://chatgpt.com{path}")).unwrap()
     }
 
-    fn observe(jar: &RoutingCookieJar, value: &str) {
+    fn observe(jar: &RoutingCookieJar, set_cookie_header: &str) {
         let mut headers = HeaderMap::new();
-        headers.insert(SET_COOKIE, HeaderValue::from_str(value).unwrap());
+        headers.insert(
+            SET_COOKIE,
+            HeaderValue::from_str(set_cookie_header).unwrap(),
+        );
         jar.observe(&url("/backend-api/codex/responses"), &headers);
     }
 
@@ -113,9 +118,9 @@ mod tests {
             &jar,
             "__oailb=synthetic-route; Path=/backend-api; Max-Age=3600; Secure; HttpOnly",
         );
-        let value = sent(&jar, &url("/backend-api/codex/models")).unwrap();
-        assert_eq!(value, "__oailb=synthetic-route");
-        assert!(value.is_sensitive());
+        let cookie_header_value = sent(&jar, &url("/backend-api/codex/models")).unwrap();
+        assert_eq!(cookie_header_value, "__oailb=synthetic-route");
+        assert!(cookie_header_value.is_sensitive());
         for target in [
             "https://chatgpt.com/",
             "https://chatgpt.com/backend-api-other",
@@ -143,18 +148,21 @@ mod tests {
     fn accounts_credentials_and_late_responses_are_isolated() {
         let account = RoutingCookies::default();
         let other_account = RoutingCookies::default();
-        let old = account.for_credential(b"synthetic-old");
-        observe(&old, "__oailb=old; Path=/; Secure");
-        assert!(Arc::ptr_eq(&old, &account.for_credential(b"synthetic-old")));
-        let new = account.for_credential(b"synthetic-new");
-        observe(&old, "__oailb=late; Path=/; Secure");
-        assert!(sent(&new, &url("/backend-api/codex/models")).is_none());
+        let previous_cookie_jar = account.for_credential(b"synthetic-old");
+        observe(&previous_cookie_jar, "__oailb=old; Path=/; Secure");
+        assert!(Arc::ptr_eq(
+            &previous_cookie_jar,
+            &account.for_credential(b"synthetic-old")
+        ));
+        let new_cookie_jar = account.for_credential(b"synthetic-new");
+        observe(&previous_cookie_jar, "__oailb=late; Path=/; Secure");
+        assert!(sent(&new_cookie_jar, &url("/backend-api/codex/models")).is_none());
         assert!(sent(
             &other_account.for_credential(b"synthetic-old"),
             &url("/backend-api/codex/models")
         )
         .is_none());
-        observe(&new, "__oailb=new; Path=/; Secure");
+        observe(&new_cookie_jar, "__oailb=new; Path=/; Secure");
         assert_eq!(
             sent(
                 &account.for_credential(b"synthetic-new"),

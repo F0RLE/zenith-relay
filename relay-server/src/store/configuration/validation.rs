@@ -33,10 +33,10 @@ pub(super) fn validate_configuration_settings(
         return Err("configuration preset is not normalized".to_string());
     }
 
-    let mut ids = HashSet::new();
+    let mut member_keys = HashSet::new();
     for rule in &settings.sources {
         if rule.id.is_empty()
-            || !ids.insert(("source", rule.id.as_str()))
+            || !member_keys.insert(("source", rule.id.as_str()))
             || rule.weight == 0
             || rule.recovery_delay_seconds > zenith_relay_core::MAX_SOURCE_RECOVERY_DELAY_SECONDS
             || rule.name.is_empty()
@@ -54,7 +54,7 @@ pub(super) fn validate_configuration_settings(
 
     for rule in &settings.accounts {
         if rule.id.is_empty()
-            || !ids.insert(("account", rule.id.as_str()))
+            || !member_keys.insert(("account", rule.id.as_str()))
             || rule.weight == 0
             || rule.identity_hint.is_empty()
             || rule.identity_hint.len() > 128
@@ -97,17 +97,18 @@ fn is_valid_source_base_url(base_url: &str) -> bool {
 }
 
 pub(super) fn model_reasoning_allowed_levels_from_metadata(
-    current: Option<String>,
+    stored_levels_json: Option<String>,
     legacy: Option<String>,
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
-    if let Some(current) = current {
-        let allowed_levels = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&current)
-            .map_err(|_| "model reasoning allowed levels are invalid".to_string())?;
+    if let Some(stored_levels_json) = stored_levels_json {
+        let allowed_levels =
+            serde_json::from_str::<BTreeMap<String, Vec<String>>>(&stored_levels_json)
+                .map_err(|_| "model reasoning allowed levels are invalid".to_string())?;
         return normalize_model_reasoning_allowed_levels(allowed_levels).map_err(str::to_string);
     }
 
-    let legacy = legacy.map_or(Ok(BTreeMap::new()), |value| {
-        serde_json::from_str::<BTreeMap<String, String>>(&value)
+    let legacy = legacy.map_or(Ok(BTreeMap::new()), |legacy_json| {
+        serde_json::from_str::<BTreeMap<String, String>>(&legacy_json)
             .map_err(|_| "model reasoning overrides are invalid".to_string())
     })?;
     let allowed_levels = legacy

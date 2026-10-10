@@ -14,7 +14,7 @@ for (const mode of ["local", "remote"] as const) {
       await page.getByRole("button", { name: "Usage", exact: true }).click();
       await page.getByRole("button", { name: `Request details: req_synthetic_${mode}` }).click();
       const dialog = page.getByRole("dialog", { name: "Request details" });
-      await expect(dialog.getByRole("heading", { name: "Provider response" })).toBeVisible();
+      await expect(dialog.getByRole("heading", { name: "Error" })).toBeVisible();
       await expect(dialog.getByText("future_validation_error", { exact: true })).toBeVisible();
       await expect(dialog.getByText("invalid_request_error", { exact: true })).toBeVisible();
       await expect(dialog.locator(".request-upstream-message pre")).toHaveText(message);
@@ -26,7 +26,7 @@ for (const mode of ["local", "remote"] as const) {
         return element.scrollWidth <= element.clientWidth + 1 && box.left >= 0 && box.right <= window.innerWidth;
       });
       expect(messageFits).toBe(true);
-      expect(await dialog.locator(".request-provider-fields dd").evaluateAll((elements) =>
+      expect(await dialog.locator(".request-details-error .request-details-list dd").evaluateAll((elements) =>
         elements.every((element) => element.scrollWidth <= element.clientWidth + 1),
       )).toBe(true);
       await page.screenshot({ path: testInfo.outputPath("provider-error.png") });
@@ -40,7 +40,7 @@ test("legacy failures show absence without inventing a provider message", async 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await expect(dialog.getByText("No provider message recorded", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-upstream-message")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Copy provider message" })).toHaveCount(0);
 });
 
@@ -54,9 +54,9 @@ test("Russian provider diagnostics fit a narrow dialog", async ({ page }, testIn
   await page.getByRole("button", { name: "Использование", exact: true }).click();
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
-  await expect(dialog.getByRole("heading", { name: "Ответ провайдера" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Ошибка" })).toBeVisible();
   await expect(dialog.getByText("future_validation_error", { exact: true })).toBeVisible();
-  expect(await dialog.locator(".request-provider-fields dd").evaluateAll((elements) =>
+  expect(await dialog.locator(".request-details-error .request-details-list dd").evaluateAll((elements) =>
     elements.every((element) => element.scrollWidth <= element.clientWidth + 1),
   )).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("provider-error-ru.png") });

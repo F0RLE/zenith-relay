@@ -25,9 +25,9 @@ impl SourceStatsObservation {
         base_url: &str,
         freshness: RefreshFreshness,
     ) -> Option<SourceProviderStats> {
-        let mut value = self.current(base_url)?.clone();
-        value.stale |= matches!(freshness, RefreshFreshness::Stale { .. });
-        Some(value)
+        let mut stats_snapshot = self.current(base_url)?.clone();
+        stats_snapshot.stale |= matches!(freshness, RefreshFreshness::Stale { .. });
+        Some(stats_snapshot)
     }
 
     /// Projects one cached balance read. A mismatched endpoint or another read kind is absent.

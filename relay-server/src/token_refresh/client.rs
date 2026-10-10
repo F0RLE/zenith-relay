@@ -2,10 +2,18 @@ use super::*;
 
 pub(crate) struct CodexRefreshClient {
     http: reqwest::Client,
+    kind: OAuthClientKind,
 }
 
 impl CodexRefreshClient {
     pub(crate) fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, String> {
+        Self::new_with_proxy_for_kind(OAuthClientKind::Codex, proxy)
+    }
+
+    pub(crate) fn new_with_proxy_for_kind(
+        kind: OAuthClientKind,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, String> {
         let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(20))
@@ -16,7 +24,7 @@ impl CodexRefreshClient {
         }
         .build()
         .map_err(|error| error.to_string())?;
-        Ok(Self { http })
+        Ok(Self { http, kind })
     }
 }
 
@@ -34,8 +42,8 @@ impl TokenRefreshAdapter for ServerRefreshClients {
         now_ms: u64,
     ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
         Box::pin(async move {
-            let client = match self.clients.get(account_id) {
-                Some(client) => client,
+            let refresh_client = match self.clients.get(account_id) {
+                Some(refresh_client) => refresh_client,
                 None if self.direct_accounts.contains(account_id) => &self.direct,
                 None => {
                     return Err(TokenRefreshFailure::new(
@@ -44,7 +52,9 @@ impl TokenRefreshAdapter for ServerRefreshClients {
                     ))
                 }
             };
-            client.refresh(account_id, refresh_token, now_ms).await
+            refresh_client
+                .refresh(account_id, refresh_token, now_ms)
+                .await
         })
     }
 }
@@ -66,43 +76,54 @@ impl TokenRefreshAdapter for CodexRefreshClient {
                     error_codes::INVALID_REFRESH_TOKEN,
                 ));
             }
+            let payload = serde_json::json!({
+                "client_id": self.kind.client_id(),
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            });
+            let request = match self.kind {
+                OAuthClientKind::Codex => self.http.post(CODEX_TOKEN_ENDPOINT).json(&payload),
+                OAuthClientKind::ExcelBps => self
+                    .http
+                    .post(format!("{CODEX_TOKEN_ENDPOINT}?unified=true"))
+                    .form(&payload),
+            };
             let (response, permit) = management_http_gate()
-                .send(
-                    &self.http,
-                    self.http
-                        .post(CODEX_TOKEN_ENDPOINT)
-                        .json(&serde_json::json!({
-                            "client_id": CODEX_CLIENT_ID,
-                            "grant_type": "refresh_token",
-                            "refresh_token": refresh_token,
-                        })),
-                    HttpClass::Auth,
-                )
+                .send(&self.http, request, HttpClass::Auth)
                 .await
                 .map_err(|_| {
                     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
                 })?;
-            let status = response.status();
-            let body = collect_token_response(response).await?;
+            let response_status = response.status();
+            let token_response_bytes = collect_token_response(response).await?;
             drop(permit);
-            if !status.is_success() {
-                let code = token_refresh_provider_error_code(&body)
+            if !response_status.is_success() {
+                let code = token_refresh_provider_error_code(&token_response_bytes)
                     .unwrap_or_else(|| "token_refresh_failed".to_string());
-                let kind = token_refresh_failure_kind(&code);
-                return Err(TokenRefreshFailure::new(kind, &code));
+                let failure_kind = token_refresh_failure_kind(&code);
+                return Err(TokenRefreshFailure::new(failure_kind, &code));
             }
-            let payload: TokenResponse = serde_json::from_slice(&body).map_err(|_| {
-                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
-            })?;
-            let expires_at_ms = payload.expires_in.and_then(|seconds| {
+            let token_response: TokenResponse = serde_json::from_slice(&token_response_bytes)
+                .map_err(|_| {
+                    TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
+                })?;
+            self.kind
+                .validate_token_hints(
+                    token_response.id_token.as_deref(),
+                    Some(&token_response.access_token),
+                )
+                .map_err(|_| {
+                    TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
+                })?;
+            let expires_at_ms = token_response.expires_in.and_then(|seconds| {
                 u64::try_from(seconds)
                     .ok()
                     .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000)))
             });
             TokenRefresh::new(
-                payload.access_token,
-                payload.refresh_token,
-                payload.id_token,
+                token_response.access_token,
+                token_response.refresh_token,
+                token_response.id_token,
                 expires_at_ms,
             )
             .map_err(|_| {
@@ -115,26 +136,26 @@ impl TokenRefreshAdapter for CodexRefreshClient {
 pub(super) async fn collect_token_response(
     response: reqwest::Response,
 ) -> Result<Vec<u8>, TokenRefreshFailure> {
-    let oversized =
+    let response_too_large =
         || TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "response_too_large");
     if response
         .content_length()
         .is_some_and(|length| length > MAX_TOKEN_RESPONSE_BYTES as u64)
     {
-        return Err(oversized());
+        return Err(response_too_large());
     }
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
         let chunk = chunk.map_err(|_| {
             TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
         })?;
-        if body.len().saturating_add(chunk.len()) > MAX_TOKEN_RESPONSE_BYTES {
-            return Err(oversized());
+        if response_bytes.len().saturating_add(chunk.len()) > MAX_TOKEN_RESPONSE_BYTES {
+            return Err(response_too_large());
         }
-        body.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(response_bytes)
 }
 
 #[derive(serde::Deserialize)]

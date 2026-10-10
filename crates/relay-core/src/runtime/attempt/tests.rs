@@ -80,6 +80,33 @@ async fn reserve(
         .1
 }
 
+async fn reserve_from(
+    runtime: &GatewayRuntime,
+    budget: &SharedRequestBudget,
+    protocol: WireApi,
+    candidate_id: &str,
+) -> CandidateLease {
+    let tried = runtime
+        .lock_scheduler()
+        .candidates()
+        .filter(|candidate| candidate.id != candidate_id)
+        .map(|candidate| candidate.id.clone())
+        .collect::<HashSet<_>>();
+    runtime
+        .select_and_reserve_with_budget(
+            &key(runtime),
+            "model-a",
+            &[protocol],
+            &tried,
+            (None, None),
+            crate::unix_time_ms(),
+            budget,
+        )
+        .await
+        .unwrap()
+        .1
+}
+
 fn rejected() -> AttemptObservation {
     AttemptObservation {
         execution: ExecutionObservation::not_sent(),

@@ -11,58 +11,57 @@
 </div>
 
 <p align="center">
-  Zenith Relay keeps user-owned ChatGPT accounts and compatible API sources in
-  one place, lets you choose which connections receive requests, and exposes
-  one private OpenAI-compatible endpoint.<br>
-  Relay-managed ChatGPT settings are reversible, and OpenCode keeps its
-  original configuration for recovery.
+  Relay keeps user-owned accounts and API sources in one place, selects an
+  eligible connection for each request, and exposes a private compatible API.
 </p>
+
+## What it does
+
+- Combines ChatGPT accounts and compatible API sources in a local pool.
+- Selects a member by model, protocol, availability, quota, load, and the
+  selected rotation mode.
+- Preserves a provider-native route when the request can use it and converts
+  only supported protocol shapes.
+- Provides a local API for Responses, Chat Completions, Anthropic Messages, and
+  Gemini requests.
+- Can manage a user-operated Relay Server. Hosted multi-user accounts, billing,
+  and customer wallets are not part of Relay.
+
+Relay is a separate personal-pool product. It must not contain Zenith production
+credentials, customer data, or production routing and billing logic.
 
 ## Download
 
-Download the package for your platform from
+Download a package for your platform from
 [GitHub Releases](https://github.com/F0RLE/zenith-relay/releases/latest).
 
-- **Windows:** use the Setup installer. The portable EXE runs without
-  installation, but its folder must be writable for in-place updates.
+- **Windows:** use the Setup installer or the portable EXE. The portable folder
+  must be writable for in-place updates.
 - **Linux:** choose AppImage, DEB, or RPM.
-- **macOS:** choose the DMG for Intel or Apple Silicon. This build is ad-hoc
-  signed and is not Apple notarized; follow the one-time [English](docs/help/en/README.md#install-on-macos)
-  or [Russian](docs/help/ru/README.md#установка-на-macos) installation steps.
+- **macOS:** choose the DMG for Intel or Apple Silicon. It is ad-hoc signed and
+  not notarized; follow the [English](docs/help/en/README.md#install-on-macos)
+  or [Russian](docs/help/ru/README.md#установка-на-macos) first-launch steps.
 
-The first launch opens Quick Setup. Choose whether the shared pool runs on
-this computer or your server, add accounts and API sources to it, then select
-the client. You can add more connections later. Quick Setup can be opened
-again from **Help**.
-
-## Choose a mode
+## Modes
 
 | Mode | Use it when | What remains running |
 | --- | --- | --- |
-| **Computer** | You want to combine personal accounts and API sources without deploying a server. | The Relay process and its local API. Closing the window leaves them in the tray. |
-| **Choose API** | You want to connect an application directly to one saved API source. Choose this after setup. | The provider runs the requests. Pool, API, and Usage are hidden. |
-| **On your server** | You operate a Relay Server for continuous or remote access. | The server runs the pool. Closing the desktop app does not stop it. |
+| **Computer** | The pool should run on this device. | Relay and its local API. Closing the window leaves the process in the tray. |
+| **Choose API** | One saved API source should receive requests directly. | The selected provider. Pool rotation and pooled usage are not used. |
+| **On your server** | A user-operated Relay Server should run the pool. | The server; closing the desktop does not stop it. |
 
-## Everyday workflow
+## Quick start
 
-For a pool in **Computer** mode:
+1. Open **Connections** and add a ChatGPT account or API source.
+2. In **Pool**, add the connections and allow the required models.
+3. Start **API**, then use **Pool → Connect** for ChatGPT or OpenCode. Other
+   clients use the displayed address and request key.
+4. Check **Overview** for state, **Usage** for request history, and **Recovery**
+   for Relay-managed client settings.
 
-1. Open **Connections** and add a ChatGPT account or an API source. Configure
-   a proxy there if needed.
-2. In **Pool**, include the connections and models that may receive traffic.
-3. Start the endpoint in **API**, then use **Pool → Connect** to connect
-   ChatGPT or OpenCode. Other compatible clients use the displayed API address
-   and request key.
-4. Use **Overview** for status and performance, **Usage** for request history,
-   and **Recovery** to restore Relay-managed ChatGPT settings or the saved
-   OpenCode configuration.
-
-**Choose API** connects directly to the selected provider without pool
-rotation. The ChatGPT interface account is separate from the member chosen
-to serve a request through the pool.
-
-The complete behavior and troubleshooting guidance are kept in the in-app
-**Help** section and the [English guide](docs/help/en/README.md).
+The full user guide is available in the application and in
+[English](docs/help/en/README.md) and [Russian](docs/help/ru/README.md).
+Quick Setup can be opened again from **Help**.
 
 ## Screenshots
 
@@ -77,31 +76,19 @@ The complete behavior and troubleshooting guidance are kept in the in-app
   </tr>
 </table>
 
-## Help
+## Development
 
-The same user guide is available in the application and in the repository:
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the project.
+Implemented contracts are in [PLANNING.md](docs/project/PLANNING.md); open work
+is in the [roadmap](docs/project/ROADMAP.md). The project uses
+[AGPL-3.0-only](LICENSE). Before submitting a pull request, read the
+[Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md).
 
-| Language | Guide |
-| --- | --- |
-| English | [Open the guide](docs/help/en/README.md) |
-| Русский | [Открыть справку](docs/help/ru/README.md) |
-
-## For contributors
-
-Development and release checks are documented in
-[CONTRIBUTING.md](CONTRIBUTING.md). Current product boundaries live in
-[PLANNING.md](docs/project/PLANNING.md); unfinished work is tracked in the
-[roadmap](docs/project/ROADMAP.md).
-
-The project is licensed under [AGPL-3.0-only](LICENSE). Before submitting a PR,
-read the [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md): accepted
-original contributions are assigned to the project owner, with a license back
-to their authors. Existing AGPL grants and third-party rights remain unchanged.
-
-```powershell
-cd src
-bun install
-bun run verify
-bun run test:e2e
-bun run screenshots
+```sh
+bun scripts/setup/start-dev.mjs
 ```
+
+The same command is available as `bun run start` from `src`. It prepares locked
+frontend and Rust dependencies, then starts the desktop app. Install Bun,
+rustup, and the platform's native desktop libraries first. Use
+`bun run setup:browsers` only when Playwright browsers are needed.

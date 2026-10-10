@@ -16,7 +16,7 @@ pub(in crate::local_pool::commands::opencode) fn serialize_config(
         serde_json::ser::PrettyFormatter::with_indent(b"  "),
     );
     OrderedJsonObject {
-        object: config,
+        object_fields: config,
         parent_key: None,
     }
     .serialize(&mut serializer)?;
@@ -26,7 +26,7 @@ pub(in crate::local_pool::commands::opencode) fn serialize_config(
 }
 
 struct OrderedJson<'a> {
-    value: &'a Value,
+    json_value: &'a Value,
     parent_key: Option<&'a str>,
 }
 
@@ -35,23 +35,23 @@ impl Serialize for OrderedJson<'_> {
     where
         S: Serializer,
     {
-        match self.value {
+        match self.json_value {
             Value::Null => serializer.serialize_unit(),
-            Value::Bool(value) => serializer.serialize_bool(*value),
-            Value::Number(value) => value.serialize(serializer),
-            Value::String(value) => serializer.serialize_str(value),
-            Value::Array(values) => {
-                let mut array = serializer.serialize_seq(Some(values.len()))?;
-                for value in values {
+            Value::Bool(boolean_value) => serializer.serialize_bool(*boolean_value),
+            Value::Number(number_value) => number_value.serialize(serializer),
+            Value::String(string_value) => serializer.serialize_str(string_value),
+            Value::Array(array_items) => {
+                let mut array = serializer.serialize_seq(Some(array_items.len()))?;
+                for array_value in array_items {
                     array.serialize_element(&Self {
-                        value,
+                        json_value: array_value,
                         parent_key: None,
                     })?;
                 }
                 array.end()
             }
-            Value::Object(object) => OrderedJsonObject {
-                object,
+            Value::Object(object_fields) => OrderedJsonObject {
+                object_fields,
                 parent_key: self.parent_key,
             }
             .serialize(serializer),
@@ -60,7 +60,7 @@ impl Serialize for OrderedJson<'_> {
 }
 
 struct OrderedJsonObject<'a> {
-    object: &'a Map<String, Value>,
+    object_fields: &'a Map<String, Value>,
     parent_key: Option<&'a str>,
 }
 
@@ -70,16 +70,16 @@ impl Serialize for OrderedJsonObject<'_> {
         S: Serializer,
     {
         let keys = if self.parent_key == Some("variants") {
-            ordered_variant_keys(self.object)
+            ordered_variant_keys(self.object_fields)
         } else {
-            self.object.keys().collect()
+            self.object_fields.keys().collect()
         };
         let mut map = serializer.serialize_map(Some(keys.len()))?;
         for key in keys {
             map.serialize_entry(
                 key,
                 &OrderedJson {
-                    value: &self.object[key],
+                    json_value: &self.object_fields[key],
                     parent_key: Some(key.as_str()),
                 },
             )?;
@@ -88,8 +88,8 @@ impl Serialize for OrderedJsonObject<'_> {
     }
 }
 
-fn ordered_variant_keys(object: &Map<String, Value>) -> Vec<&String> {
-    let mut keys: Vec<&String> = object.keys().collect();
+fn ordered_variant_keys(variant_object: &Map<String, Value>) -> Vec<&String> {
+    let mut keys: Vec<&String> = variant_object.keys().collect();
     keys.sort_by(|left, right| {
         zenith_relay_core::reasoning_level_rank(left)
             .cmp(&zenith_relay_core::reasoning_level_rank(right))

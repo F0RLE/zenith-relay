@@ -44,6 +44,87 @@ pub struct ApiModelPriceSources {
 /// user-managed server apply the same pricing policy without sharing a schema.
 pub type SourceModelPriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceSources>>;
 
+/// Which published token schedule applies to a usage group.
+///
+/// `fast` is Priority. Standard, default, auto, and Ultrafast stay on the
+/// base schedule: Ultrafast has no price in this catalog contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UsagePriceClass {
+    #[default]
+    Standard,
+    Flex,
+    Priority,
+}
+
+impl UsagePriceClass {
+    pub fn from_observed(observed_tier: Option<&str>) -> Self {
+        match observed_tier
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "flex" => Self::Flex,
+            "priority" | "fast" => Self::Priority,
+            _ => Self::Standard,
+        }
+    }
+
+    pub fn from_label(price_class_label: &str) -> Self {
+        match price_class_label {
+            "flex" => Self::Flex,
+            "priority" => Self::Priority,
+            _ => Self::Standard,
+        }
+    }
+}
+
+/// Prompt-size band for a single request, or for an aggregate that was grouped
+/// by that band. The summed token count of a mixed group is not a band.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UsageContextBand {
+    #[default]
+    Base,
+    Above200k,
+    Above272k,
+}
+
+impl UsageContextBand {
+    pub const ABOVE_200K_TOKENS: u64 = 200_000;
+    pub const ABOVE_272K_TOKENS: u64 = 272_000;
+
+    pub fn from_input_tokens(input_tokens: Option<u64>) -> Self {
+        match input_tokens.unwrap_or_default() {
+            tokens if tokens > Self::ABOVE_272K_TOKENS => Self::Above272k,
+            tokens if tokens > Self::ABOVE_200K_TOKENS => Self::Above200k,
+            _ => Self::Base,
+        }
+    }
+
+    pub fn from_label(context_band_label: &str) -> Self {
+        match context_band_label {
+            "above_200k" => Self::Above200k,
+            "above_272k" => Self::Above272k,
+            _ => Self::Base,
+        }
+    }
+}
+
+/// SQL expression for [`UsagePriceClass`], shared by desktop and server aggregates.
+pub const USAGE_PRICE_CLASS_SQL: &str = "\
+CASE lower(COALESCE(applied_service_tier, '')) \
+WHEN 'flex' THEN 'flex' \
+WHEN 'priority' THEN 'priority' \
+WHEN 'fast' THEN 'priority' \
+ELSE 'standard' END";
+
+/// SQL expression for [`UsageContextBand`]. NULL input stays in the base band.
+pub const USAGE_CONTEXT_BAND_SQL: &str = "\
+CASE \
+WHEN COALESCE(input_tokens, 0) > 272000 THEN 'above_272k' \
+WHEN COALESCE(input_tokens, 0) > 200000 THEN 'above_200k' \
+ELSE 'base' END";
+
 /// Token measurements required to estimate an API-equivalent value.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ApiEquivalentUsage {
@@ -54,6 +135,8 @@ pub struct ApiEquivalentUsage {
     pub unknown_cache_write_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub price_class: UsagePriceClass,
+    pub context_band: UsageContextBand,
 }
 
 macro_rules! cache_write_ttl_bucket_sums_sql {
@@ -133,10 +216,11 @@ pub const PRICED_AGGREGATE_OUTPUT_SAMPLES: usize = 11;
 pub const PRICED_AGGREGATE_TOTAL_SAMPLES: usize = 12;
 
 /// First token column in a candidate rollup row.
-/// `candidate_kind`, `candidate_id`, and `model` come first. The columns after
-/// them follow [`API_EQUIVALENT_AGGREGATE_SQL`]. Historical rollups do not
-/// store the output and total sample counts at the end of that list.
-pub const CANDIDATE_ROLLUP_TOKEN_OFFSET: usize = 3;
+/// `candidate_kind`, `candidate_id`, `model`, `price_class`, and
+/// `context_band` come first. The columns after them follow
+/// [`API_EQUIVALENT_AGGREGATE_SQL`]. Historical rollups do not store the
+/// output and total sample counts at the end of that list.
+pub const CANDIDATE_ROLLUP_TOKEN_OFFSET: usize = 5;
 
 /// Converted SQL sums plus the sample counts that prove each bucket was observed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -223,7 +307,7 @@ impl ApiEquivalentUsage {
     /// Historical rollups never stored output or total sample counts, so they
     /// leave that flag false and keep those summed values.
     pub fn from_observed_sums(sums: ObservedUsageSums) -> Self {
-        let measured = |samples: u64, tokens: Option<u64>| {
+        let measured_tokens = |samples: u64, tokens: Option<u64>| {
             if sums.gate_measured_buckets {
                 (samples > 0).then_some(tokens).flatten()
             } else {
@@ -231,18 +315,21 @@ impl ApiEquivalentUsage {
             }
         };
         let cache_writes = sums.cache_write_samples > 0;
-        let write = |tokens: Option<u64>| cache_writes.then(|| tokens.unwrap_or_default());
+        let cache_write_tokens =
+            |tokens: Option<u64>| cache_writes.then(|| tokens.unwrap_or_default());
         Self {
-            input_tokens: measured(sums.input_samples, sums.input_tokens),
+            input_tokens: measured_tokens(sums.input_samples, sums.input_tokens),
             cached_input_tokens: (sums.input_samples > 0
                 && sums.cached_samples == sums.input_samples)
                 .then_some(sums.cached_input_tokens)
                 .flatten(),
-            cache_write_5m_tokens: write(sums.cache_write_5m_tokens),
-            cache_write_1h_tokens: write(sums.cache_write_1h_tokens),
-            unknown_cache_write_tokens: write(sums.unknown_cache_write_tokens),
-            output_tokens: measured(sums.output_samples, sums.output_tokens),
-            total_tokens: measured(sums.total_samples, sums.total_tokens),
+            cache_write_5m_tokens: cache_write_tokens(sums.cache_write_5m_tokens),
+            cache_write_1h_tokens: cache_write_tokens(sums.cache_write_1h_tokens),
+            unknown_cache_write_tokens: cache_write_tokens(sums.unknown_cache_write_tokens),
+            output_tokens: measured_tokens(sums.output_samples, sums.output_tokens),
+            total_tokens: measured_tokens(sums.total_samples, sums.total_tokens),
+            price_class: UsagePriceClass::Standard,
+            context_band: UsageContextBand::Base,
         }
     }
 
@@ -256,7 +343,7 @@ impl ApiEquivalentUsage {
         output_tokens: Option<u64>,
         total_tokens: Option<u64>,
     ) -> Self {
-        let (cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens) =
+        let (short_cache_write_tokens, long_cache_write_tokens, unknown_cache_write_tokens) =
             match cache_write_ttl {
                 Some("5m") => (cache_write_input_tokens, Some(0), Some(0)),
                 Some("1h") => (Some(0), cache_write_input_tokens, Some(0)),
@@ -265,12 +352,33 @@ impl ApiEquivalentUsage {
         Self {
             input_tokens,
             cached_input_tokens,
-            cache_write_5m_tokens,
-            cache_write_1h_tokens,
+            cache_write_5m_tokens: short_cache_write_tokens,
+            cache_write_1h_tokens: long_cache_write_tokens,
             unknown_cache_write_tokens,
             output_tokens,
             total_tokens,
+            price_class: UsagePriceClass::Standard,
+            context_band: UsageContextBand::Base,
         }
+    }
+
+    /// Selects the schedule for one observed request.
+    /// The band comes from that request's input count, never from a later sum.
+    pub fn with_observed_rates(
+        mut self,
+        applied_service_tier: Option<&str>,
+        input_tokens: Option<u64>,
+    ) -> Self {
+        self.price_class = UsagePriceClass::from_observed(applied_service_tier);
+        self.context_band = UsageContextBand::from_input_tokens(input_tokens);
+        self
+    }
+
+    /// Selects the schedule for one aggregate group that was already split.
+    pub fn with_aggregate_rates(mut self, price_class: &str, context_band: &str) -> Self {
+        self.price_class = UsagePriceClass::from_label(price_class);
+        self.context_band = UsageContextBand::from_label(context_band);
+        self
     }
 }
 

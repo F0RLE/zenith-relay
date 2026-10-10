@@ -43,39 +43,38 @@ export function ModelRulesView() {
   // cooldowns are runtime state; they must not make a member's model vanish
   // from the policy editor while the relay can still recover or adapt it.
   const models = runtime ? currentPoolModelSummaries(runtime) : [];
-  const poolModels = models;
   const [orderedModels, setOrderedModels] = useState<ModelSummary[]>(models);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
   const [pendingSpeed, setPendingSpeed] = useState<Record<string, DefaultServiceTier>>({});
   const orderMutation = useRef(false);
-  const currentModels = useRef(models);
-  currentModels.current = models;
+  const latestModelsRef = useRef(models);
+  latestModelsRef.current = models;
   const catalogSignature = modelSignature(models);
   useEffect(() => {
     setOrderedModels(models);
   }, [runtime?.configurationRevision, catalogSignature]);
   useEffect(() => {
-    setPendingEnabled((current) => reconcilePendingModelEnabled(current, models));
+    setPendingEnabled((previousPendingEnabled) => reconcilePendingModelEnabled(previousPendingEnabled, models));
   }, [catalogSignature]);
   useEffect(() => {
-    setPendingSpeed((current) => {
+    setPendingSpeed((previousPendingSpeed) => {
       let changed = false;
-      const next = { ...current };
-      for (const model of currentModels.current) {
+      const remainingPendingTiers = { ...previousPendingSpeed };
+      for (const model of latestModelsRef.current) {
         const savedTier = model.speedTier ?? "standard";
-        if (next[model.id] !== undefined && next[model.id] === savedTier) {
-          delete next[model.id];
+        if (remainingPendingTiers[model.id] !== undefined && remainingPendingTiers[model.id] === savedTier) {
+          delete remainingPendingTiers[model.id];
           changed = true;
         }
       }
-      return changed ? next : current;
+      return changed ? remainingPendingTiers : previousPendingSpeed;
     });
   }, [catalogSignature]);
   const modelGroups = groupModelSummaries(orderedModels, runtime?.accounts ?? []);
   const toggleModel = (model: ModelSummary) => {
     const enabled = !pendingModelEnabled(pendingEnabled, model);
-    setPendingEnabled((current) => ({ ...current, [model.id]: enabled }));
+    setPendingEnabled((previousPendingEnabled) => ({ ...previousPendingEnabled, [model.id]: enabled }));
     let saved = false;
     void perform(
       `model-toggle-${model.id}`,
@@ -88,39 +87,39 @@ export function ModelRulesView() {
       { backgroundRefresh: true, uiLock: false },
     ).then((ok) => {
       if (saved || ok) return;
-      setPendingEnabled((current) => clearPendingModelEnabled(current, model.id, enabled));
+      setPendingEnabled((previousPendingEnabled) => clearPendingModelEnabled(previousPendingEnabled, model.id, enabled));
     });
   };
-  const persistModelOrder = (next: ModelSummary[]) => perform(
+  const persistModelOrder = (orderedModelsToSave: ModelSummary[]) => perform(
     "model-order",
     () => mode === "local"
-      ? relayCommands.setModelDisplayOrder(completeModelDisplayOrder(next, poolModels))
+      ? relayCommands.setModelDisplayOrder(completeModelDisplayOrder(orderedModelsToSave, models))
       : relayCommands.remoteAction(
         { type: "set_model_order" },
-        { modelIds: completeModelDisplayOrder(next, poolModels) },
+        { modelIds: completeModelDisplayOrder(orderedModelsToSave, models) },
       ),
     "feedback.saved",
     { backgroundRefresh: true },
   );
-  const saveModelOrder = async (next: ModelSummary[]) => {
+  const saveModelOrder = async (orderedModelsToSave: ModelSummary[]) => {
     if (orderMutation.current) return;
     orderMutation.current = true;
-    setOrderedModels(next);
+    setOrderedModels(orderedModelsToSave);
     try {
-      if (!await persistModelOrder(next)) setOrderedModels(currentModels.current);
+      if (!await persistModelOrder(orderedModelsToSave)) setOrderedModels(latestModelsRef.current);
     } finally {
       orderMutation.current = false;
     }
   };
   const reorderModels = (sourceId: string, targetId: string) => {
-    const next = reorderById(orderedModels, sourceId, targetId);
-    if (!next) return;
-    void saveModelOrder(next);
+    const reorderedModels = reorderById(orderedModels, sourceId, targetId);
+    if (!reorderedModels) return;
+    void saveModelOrder(reorderedModels);
   };
   const reorderGroups = (sourceId: string, targetId: string) => {
-    const next = reorderModelGroups(modelGroups, sourceId, targetId);
-    if (!next) return;
-    void saveModelOrder(next);
+    const reorderedModels = reorderModelGroups(modelGroups, sourceId, targetId);
+    if (!reorderedModels) return;
+    void saveModelOrder(reorderedModels);
   };
   const {
     dragModelId,
@@ -136,9 +135,12 @@ export function ModelRulesView() {
     endModelDrag,
     hoverModel,
     dropModel,
-  } = useModelRuleDrag({ blocked: orderMutation, reorderModels, reorderGroups });
+  } = useModelRuleDrag({ orderMutationRef: orderMutation, reorderModels, reorderGroups });
   const toggleGroup = (groupId: string) => {
-    setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
+    setCollapsedGroups((previousCollapsedGroups) => ({
+      ...previousCollapsedGroups,
+      [groupId]: !previousCollapsedGroups[groupId],
+    }));
   };
   if (!models.length) {
     return <div className="model-rules-empty"><EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
@@ -177,11 +179,11 @@ export function ModelRulesView() {
                     >{groupCollapsed ? <ChevronRight aria-hidden /> : <ChevronDown aria-hidden />}</button>
                     <span className="model-group-drag-handle" data-relay-tooltip={t("models.dragGroup", { group: groupLabel })}><GripVertical aria-hidden /></span>
                     <strong>{groupLabel}</strong>
-                    <small>{t("models.groupCount", { count: group.items.length })}</small>
+                    <small>{t("models.groupCount", { count: group.models.length })}</small>
                   </span>
                 </th>
               </tr>
-              {!groupCollapsed && group.items.map((model) => {
+              {!groupCollapsed && group.models.map((model) => {
                 const enabled = pendingModelEnabled(pendingEnabled, model);
                 const displayName = model.catalogName || model.codexDisplayName || model.id;
                 const toggleLabel = t(enabled ? "models.disable" : "models.enable", { model: model.id });
@@ -231,7 +233,7 @@ export function ModelRulesView() {
                       disabled={false}
                       saving={pendingSpeed[model.id] !== undefined && pendingSpeed[model.id] !== model.speedTier}
                       onChange={(nextTier) => {
-                        setPendingSpeed((current) => ({ ...current, [model.id]: nextTier }));
+                        setPendingSpeed((previousPendingSpeed) => ({ ...previousPendingSpeed, [model.id]: nextTier }));
                         void perform(`model-speed-${model.id}`, () => mode === "local"
                           ? relayCommands.setModelServiceTier(model.id, nextTier)
                           : relayCommands.remoteAction({ type: "set_model_service_tier" }, { modelId: model.id, serviceTier: nextTier }),
@@ -239,11 +241,11 @@ export function ModelRulesView() {
                         { backgroundRefresh: true, uiLock: false },
                         ).then((ok) => {
                           if (ok) return;
-                          setPendingSpeed((current) => {
-                            if (current[model.id] !== nextTier) return current;
-                            const next = { ...current };
-                            delete next[model.id];
-                            return next;
+                          setPendingSpeed((previousPendingSpeed) => {
+                            if (previousPendingSpeed[model.id] !== nextTier) return previousPendingSpeed;
+                            const remainingPendingTiers = { ...previousPendingSpeed };
+                            delete remainingPendingTiers[model.id];
+                            return remainingPendingTiers;
                           });
                         });
                       }} /> : null}
@@ -273,11 +275,11 @@ export function ModelRulesView() {
 }
 
 function useModelRuleDrag({
-  blocked,
+  orderMutationRef,
   reorderModels,
   reorderGroups,
 }: {
-  blocked: { current: boolean };
+  orderMutationRef: { current: boolean };
   reorderModels: (sourceId: string, targetId: string) => void;
   reorderGroups: (sourceId: string, targetId: string) => void;
 }) {
@@ -296,26 +298,26 @@ function useModelRuleDrag({
   const updateModelDragAt = (clientX: number, clientY: number) => {
     const drag = modelDragRef.current;
     if (!drag) return;
-    const target = document.elementFromPoint(clientX, clientY);
+    const targetElement = document.elementFromPoint(clientX, clientY);
     if (drag.kind === "group") {
-      const targetId = target?.closest<HTMLElement>("[data-group-id]")?.dataset["groupId"] ?? null;
+      const targetId = targetElement?.closest<HTMLElement>("[data-group-id]")?.dataset["groupId"] ?? null;
       setDropGroupId(targetId && targetId !== drag.id ? targetId : null);
       setDropModelId(null);
       return;
     }
-    const targetId = target?.closest<HTMLElement>("[data-model-id]")?.dataset["modelId"] ?? null;
+    const targetId = targetElement?.closest<HTMLElement>("[data-model-id]")?.dataset["modelId"] ?? null;
     setDropModelId(targetId && targetId !== drag.id ? targetId : null);
     setDropGroupId(null);
   };
   const finishModelDragAt = (clientX: number, clientY: number) => {
     const drag = modelDragRef.current;
     if (!drag) return;
-    const target = document.elementFromPoint(clientX, clientY);
+    const targetElement = document.elementFromPoint(clientX, clientY);
     if (drag.kind === "group") {
-      const targetId = target?.closest<HTMLElement>("[data-group-id]")?.dataset["groupId"];
+      const targetId = targetElement?.closest<HTMLElement>("[data-group-id]")?.dataset["groupId"];
       if (targetId && targetId !== drag.id) reorderGroups(drag.id, targetId);
     } else {
-      const targetId = target?.closest<HTMLElement>("[data-model-id]")?.dataset["modelId"];
+      const targetId = targetElement?.closest<HTMLElement>("[data-model-id]")?.dataset["modelId"];
       if (targetId && targetId !== drag.id) reorderModels(drag.id, targetId);
     }
     clearModelDrag();
@@ -327,19 +329,19 @@ function useModelRuleDrag({
     onDrop: (_drag, clientX, clientY) => finishModelDragAt(clientX, clientY),
     onCancel: clearModelDrag,
   });
-  const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], id: string) => {
-    if (blocked.current) return;
-    const target = event.target as HTMLElement;
-    if (event.button !== 0 || (target.closest(".pool-speed-control, button, input, textarea, a") && !target.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
+  const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], draggedItemId: string) => {
+    if (orderMutationRef.current) return;
+    const targetElement = event.target as HTMLElement;
+    if (event.button !== 0 || (targetElement.closest(".pool-speed-control, button, input, textarea, a") && !targetElement.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
     event.preventDefault();
-    modelDragRef.current = { kind, id, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
-    setDragModelId(kind === "model" ? id : null);
-    setDragGroupId(kind === "group" ? id : null);
+    modelDragRef.current = { kind, id: draggedItemId, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+    setDragModelId(kind === "model" ? draggedItemId : null);
+    setDragGroupId(kind === "group" ? draggedItemId : null);
     setDropModelId(null);
     setDropGroupId(null);
   };
   const startGroupDrag = (event: React.DragEvent<HTMLTableRowElement>, groupId: string) => {
-    if (blocked.current) {
+    if (orderMutationRef.current) {
       event.preventDefault();
       return;
     }
@@ -351,7 +353,7 @@ function useModelRuleDrag({
   const startModelDrag = (event: React.DragEvent<HTMLTableRowElement>, modelId: string) => {
     // Interactive controls inside a draggable row must keep their normal
     // click/focus behavior; the row itself is the drag surface.
-    if (blocked.current || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
+    if (orderMutationRef.current || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
       event.preventDefault();
       return;
     }
@@ -405,46 +407,46 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
   const queuedLevels = useRef<string[] | null>(null);
   const operation = `model-reasoning-${model.id}`;
   const label = (level: string) => t(`usage.reasoningEfforts.${level}`, { defaultValue: formatReasoningEffort(level) });
-  const updateAllowedLevels = (next: string[]) => {
-    allowedLevelsRef.current = next;
-    setAllowedLevels(next);
+  const updateAllowedLevels = (updatedLevels: string[]) => {
+    allowedLevelsRef.current = updatedLevels;
+    setAllowedLevels(updatedLevels);
   };
-  const runSerialized = async (id: string, work: () => Promise<unknown>, successKey?: string) => {
+  const runSerialized = async (operationId: string, work: () => Promise<unknown>, successKey?: string) => {
     if (mutationLock.current) return false;
     mutationLock.current = true;
     try {
-      return await perform(id, work, successKey, { backgroundRefresh: true, uiLock: false });
+      return await perform(operationId, work, successKey, { backgroundRefresh: true, uiLock: false });
     } finally {
       mutationLock.current = false;
     }
   };
-  const saveLevels = async (next: string[]) => {
-    const normalized = normalizeToSupported(next);
-    const previous = allowedLevelsRef.current;
-    if (normalized.join("\0") === previous.join("\0")) return;
+  const saveLevels = async (levelsToSave: string[]) => {
+    const normalized = normalizeToSupported(levelsToSave);
+    const previousAllowedLevels = allowedLevelsRef.current;
+    if (normalized.join("\0") === previousAllowedLevels.join("\0")) return;
     policyRevision.current += 1;
     updateAllowedLevels(normalized);
     queuedLevels.current = normalized;
     if (mutationLock.current) return;
-    let confirmed = previous;
+    let confirmedAllowedLevels = previousAllowedLevels;
     while (queuedLevels.current) {
-      const target = queuedLevels.current;
-      const targetRevision = policyRevision.current;
+      const queuedLevelsSnapshot = queuedLevels.current;
+      const queuedPolicyRevision = policyRevision.current;
       queuedLevels.current = null;
       const ok = await runSerialized(operation, () => mode === "local"
-        ? relayCommands.setModelReasoning(model.id, target)
-        : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels: target }), "feedback.saved");
-      if (ok) confirmed = target;
-      else if (targetRevision === policyRevision.current && queuedLevels.current === null) {
-        updateAllowedLevels(confirmed);
+        ? relayCommands.setModelReasoning(model.id, queuedLevelsSnapshot)
+        : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels: queuedLevelsSnapshot }), "feedback.saved");
+      if (ok) confirmedAllowedLevels = queuedLevelsSnapshot;
+      else if (queuedPolicyRevision === policyRevision.current && queuedLevels.current === null) {
+        updateAllowedLevels(confirmedAllowedLevels);
         return;
       }
     }
   };
   const toggleAllowedLevel = (level: string) => {
-    const next = normalizeToSupported(toggleReasoningLevel(allowedLevelsRef.current, level));
-    if (next === allowedLevelsRef.current) return;
-    void saveLevels(next);
+    const updatedLevels = normalizeToSupported(toggleReasoningLevel(allowedLevelsRef.current, level));
+    if (updatedLevels === allowedLevelsRef.current) return;
+    void saveLevels(updatedLevels);
   };
   return <Dialog className="model-reasoning-dialog" title={t("models.reasoningTitle")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
     <div className="model-reasoning-form">

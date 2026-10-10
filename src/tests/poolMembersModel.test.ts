@@ -185,7 +185,16 @@ describe("pool members model", () => {
     const window = (availableBasisPoints: number) => ({ availableBasisPoints });
     const members = [
       member("source", "api", { name: "Zenith API" }),
-      member("account", "empty", { label: "Empty", quota: { primary: window(0), providerCreditsAvailable: true } }),
+      member("account", "empty", {
+        label: "Empty",
+        quota: { primary: window(0), providerCreditsAvailable: true, availableCreditsMicroUnits: 40_000_000 },
+        refreshState: { models: "stale", quota: "fresh" },
+      }),
+      member("account", "empty-lower", {
+        label: "Empty lower",
+        quota: { primary: window(0), providerCreditsAvailable: true, availableCreditsMicroUnits: 20_000_000 },
+        refreshState: { models: "stale", quota: "fresh" },
+      }),
       member("account", "lower", { label: "Lower", quota: { primary: window(7_800), secondary: window(9_000) } }),
       member("account", "leader", { label: "Leader", quota: { primary: window(8_300) } }),
     ];
@@ -195,16 +204,18 @@ describe("pool members model", () => {
       candidate("empty"),
       candidate("api"),
     ];
-    const saved = [{ id: "api" }, { id: "empty" }, { id: "lower" }, { id: "leader" }];
+    const saved = [{ id: "api" }, { id: "empty" }, { id: "empty-lower" }, { id: "lower" }, { id: "leader" }];
     expect(orderedPoolMembers(members, live, saved, "automatic").map((item) => item.id)).toEqual([
       "leader",
       "lower",
       "empty",
+      "empty-lower",
       "api",
     ]);
     expect(orderedPoolMembers(members, live, saved, "in_order").map((item) => item.id)).toEqual([
       "api",
       "empty",
+      "empty-lower",
       "lower",
       "leader",
     ]);

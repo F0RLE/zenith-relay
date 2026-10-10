@@ -26,11 +26,11 @@ pub(super) fn validate_endpoint(endpoint: &Url) -> Result<(), WakeExecutionFailu
 }
 
 pub(super) fn validate_secret(
-    value: &str,
+    secret_value: &str,
     max_bytes: usize,
     code: WakeExecutionErrorCode,
 ) -> Result<(), WakeExecutionFailure> {
-    if value.is_empty() || value.len() > max_bytes {
+    if secret_value.is_empty() || secret_value.len() > max_bytes {
         return Err(WakeExecutionFailure::invalid(code));
     }
     Ok(())
@@ -43,10 +43,10 @@ pub(super) fn validate_request(request: &WakeExecutionRequest) -> Result<(), Wak
             WakeExecutionErrorCode::InvalidRequest,
         ));
     }
-    let model = request.model_id.trim();
-    if model.is_empty()
-        || model.len() > MAX_MODEL_ID_BYTES
-        || model.bytes().any(|byte| byte.is_ascii_control())
+    let model_id = request.model_id.trim();
+    if model_id.is_empty()
+        || model_id.len() > MAX_MODEL_ID_BYTES
+        || model_id.bytes().any(|byte| byte.is_ascii_control())
         || !(1..=MAX_OUTPUT_TOKEN_CAP).contains(&request.output_token_cap)
     {
         return Err(WakeExecutionFailure::invalid(

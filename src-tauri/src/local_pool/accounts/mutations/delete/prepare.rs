@@ -88,11 +88,11 @@ pub(super) async fn acquire_delete_credential_guards(
             .map_err(|_| {
                 LocalPoolError::invalid_state("account credential locks are unavailable")
             })?;
-    let mut ids = account_ids.to_vec();
-    ids.sort_unstable();
-    let mut guards = Vec::with_capacity(ids.len());
-    for id in ids {
-        guards.push(locks.acquire(id).await.map_err(|error| {
+    let mut sorted_account_ids = account_ids.to_vec();
+    sorted_account_ids.sort_unstable();
+    let mut guards = Vec::with_capacity(sorted_account_ids.len());
+    for account_id in sorted_account_ids {
+        guards.push(locks.acquire(account_id).await.map_err(|error| {
             let code = if error == ProcessLockError::Timeout {
                 ErrorCode::Conflict
             } else {
@@ -108,7 +108,6 @@ pub(super) async fn acquire_delete_credential_guards(
 }
 
 pub(super) struct PreparedAccountDelete {
-    pub(super) account_id: String,
     pub(super) old_credential: Option<StoredCodexCredentials>,
     pub(super) previous_wake: zenith_relay_core::automations::WakeCoordinator,
     pub(super) old_automations: AutomationRecords,
@@ -162,7 +161,6 @@ pub(super) async fn prepare_delete_local_account(
         return rollback_failed_delete_step(
             state,
             credentials,
-            account_id,
             old_credential.as_ref(),
             previous_wake,
             old_automations,
@@ -173,12 +171,11 @@ pub(super) async fn prepare_delete_local_account(
         .await;
     }
     let previous_proxy_pool = match release_account_proxy(account_id) {
-        Ok(previous) => previous,
+        Ok(previous_account) => previous_account,
         Err(error) => {
             return rollback_failed_delete_step(
                 state,
                 credentials,
-                account_id,
                 old_credential.as_ref(),
                 previous_wake,
                 old_automations,
@@ -196,7 +193,6 @@ pub(super) async fn prepare_delete_local_account(
         return rollback_failed_delete_step(
             state,
             credentials,
-            account_id,
             old_credential.as_ref(),
             previous_wake,
             old_automations,
@@ -207,7 +203,6 @@ pub(super) async fn prepare_delete_local_account(
         .await;
     }
     Ok(PreparedAccountDelete {
-        account_id: account_id.to_string(),
         old_credential,
         previous_wake,
         old_automations,
@@ -233,7 +228,6 @@ pub(super) async fn ensure_delete_rollback_or_fail_closed(
 async fn rollback_failed_delete_step(
     state: &DesktopState,
     credentials: &CredentialStore<NativeSecretBackend>,
-    account_id: &str,
     old_credential: Option<&StoredCodexCredentials>,
     previous_wake: zenith_relay_core::automations::WakeCoordinator,
     old_automations: AutomationRecords,
@@ -246,7 +240,6 @@ async fn rollback_failed_delete_step(
         rollback_deleted_account_side_effects(
             state,
             credentials,
-            account_id,
             old_credential,
             previous_wake,
             old_automations,
@@ -268,7 +261,6 @@ pub(super) fn rollback_prepared_delete(
     rollback_deleted_account_side_effects(
         state,
         credentials,
-        &deleted.account_id,
         deleted.old_credential.as_ref(),
         deleted.previous_wake.clone(),
         deleted.old_automations.clone(),
@@ -289,12 +281,7 @@ pub(super) fn rollback_batch_delete(
     cause: &LocalPoolError,
 ) -> LocalResult<()> {
     for account in deleted.iter().rev() {
-        cleanup::restore_credential_local(
-            credentials,
-            &account.account_id,
-            account.old_credential.as_ref(),
-            cause,
-        )?;
+        cleanup::restore_credential_local(credentials, account.old_credential.as_ref(), cause)?;
         cleanup::reattach_account_profiles(
             state,
             &account.restored_bindings,
@@ -313,14 +300,14 @@ pub(super) fn rollback_batch_delete(
 }
 
 pub(super) fn release_account_proxy(account_id: &str) -> LocalResult<Option<ProxyPool>> {
-    let previous = ProxyPool::load()?;
-    let mut next = previous.clone();
-    next.release(account_id);
-    if next == previous {
+    let previous_proxy_pool = ProxyPool::load()?;
+    let mut updated_proxy_pool = previous_proxy_pool.clone();
+    updated_proxy_pool.release(account_id);
+    if updated_proxy_pool == previous_proxy_pool {
         return Ok(None);
     }
-    next.save()?;
-    Ok(Some(previous))
+    updated_proxy_pool.save()?;
+    Ok(Some(previous_proxy_pool))
 }
 
 pub(super) fn current_account_state(

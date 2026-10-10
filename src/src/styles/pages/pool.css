@@ -88,7 +88,7 @@
   align-items: center;
   gap: 2px;
   padding: 3px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-subtle);
   color: var(--relay-muted);
@@ -147,7 +147,7 @@
   padding: 0 6px;
   background: var(--relay-surface);
   color: var(--pool-speed-color);
-  box-shadow: var(--relay-shadow-soft);
+  box-shadow: none;
 }
 
 .pool-speed-control button.active span {
@@ -264,7 +264,7 @@
   gap: 9px;
   margin: -4px 0 12px;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--relay-danger) 36%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: color-mix(in srgb, var(--relay-danger) 8%, var(--relay-surface));
   color: var(--relay-danger);
@@ -307,7 +307,7 @@
 }
 
 .account-calculation-toggle[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
@@ -318,7 +318,7 @@
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(82px, 1fr) auto auto auto;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-surface);
   box-shadow: var(--relay-shadow-soft);
@@ -355,33 +355,26 @@
 }
 
 .pool-member-card:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
 }
 
 .pool-member-card.selected {
-  border-color: var(--relay-accent);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--relay-accent-soft) 55%, var(--relay-surface));
 }
 
 .pool-member-card.current {
-  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
   box-shadow: var(--relay-shadow-soft);
 }
 
 .pool-member-card.last-used:not(.current) {
-  border-color: color-mix(in srgb, var(--relay-accent) 28%, var(--relay-border));
+  border-color: transparent;
 }
 
 .pool-member-card.current::before {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 3px;
-  background: var(--relay-accent);
-  pointer-events: none;
-  content: "";
+  display: none;
 }
 
 .pool-member-card.next:not(.current)::before {
@@ -420,7 +413,7 @@
   white-space: nowrap;
 }
 
-.pool-member-meta .account-plan-badge {
+.pool-member-meta .account-badges {
   flex: 0 0 auto;
 }
 
@@ -820,7 +813,7 @@
   justify-content: center;
   gap: 8px;
   padding: 14px 12px;
-  border: 1px solid color-mix(in srgb, var(--relay-border) 86%, var(--relay-text));
+  border: 1px solid transparent;
   border-radius: 8px;
   background: var(--relay-surface);
   color: var(--relay-text);
@@ -830,9 +823,9 @@
 
 .pool-connection-option:hover:not(:disabled),
 .pool-connection-option:focus-visible:not(:disabled) {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-accent-soft) 45%, var(--relay-surface));
-  box-shadow: 0 6px 16px rgb(0 0 0 / 10%);
+  box-shadow: none;
   outline: none;
 }
 
@@ -846,7 +839,7 @@
   height: 52px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 10px;
   background: var(--relay-bg);
   color: var(--relay-text);
@@ -878,7 +871,7 @@
   min-height: 42px;
   margin-top: 14px;
   padding: 9px 11px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 8px;
   background: color-mix(in srgb, var(--relay-subtle) 55%, var(--relay-surface));
   color: var(--relay-text);
@@ -897,10 +890,10 @@
 }
 .relay-dialog.wide.pool-routing-dialog { width: min(800px, 100%); }
 .pool-routing-editor { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.pool-routing-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pool-routing-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .pool-routing-modes button { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 40px; padding: 8px; border: 1px solid transparent; border-radius: 6px; color: var(--relay-muted); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
 .pool-routing-modes button[aria-checked="false"]:hover:not(:disabled) { color: var(--relay-text); background: var(--relay-subtle); }
-.pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent); background: var(--relay-accent-soft); border-color: var(--relay-accent); }
+.pool-routing-modes button[aria-checked="true"] { color: var(--relay-accent); background: var(--relay-accent-soft); border-color: transparent; }
 .pool-routing-modes button:disabled { cursor: not-allowed; opacity: .5; }
 .pool-routing-modes svg { width: 16px; height: 16px; flex-shrink: 0; }
 .pool-routing-columns, .pool-routing-member { display: grid; grid-template-columns: minmax(0, 1fr) 104px 156px; gap: 12px; align-items: center; }
@@ -911,7 +904,7 @@
 .pool-routing-member { min-width: 0; padding: 12px 8px; border-bottom: 1px solid var(--relay-border); }
 .pool-routing-member:first-child { border-top: 1px solid var(--relay-border); }
 .pool-routing-member[data-dragging] { background: var(--relay-accent-soft); }
-.pool-routing-member[data-drop-target] { outline: 2px solid var(--relay-accent); outline-offset: -2px; }
+.pool-routing-member[data-drop-target] { outline: none; background: var(--relay-accent-soft); }
 .pool-routing-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pool-routing-identity > svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--relay-muted); }
 .pool-routing-handle { display: grid; place-items: center; width: 24px; height: 32px; flex-shrink: 0; padding: 0; border: 0; background: transparent; color: var(--relay-muted); cursor: grab; touch-action: none; user-select: none; }
@@ -1092,7 +1085,7 @@
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 5px;
   background: var(--relay-surface);
   color: var(--relay-muted);
@@ -1101,36 +1094,36 @@
 }
 
 .pool-picker-health button:hover {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   color: var(--relay-text);
 }
 
 .pool-picker-health button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
+  border-color: transparent;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
 .pool-picker-health button[data-health="cooldown"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-warning) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-warning) 10%, var(--relay-surface));
   color: var(--relay-warning);
 }
 
 .pool-picker-health button[data-health="error"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-error) 9%, var(--relay-surface));
   color: var(--relay-error);
 }
 
 .pool-picker-health button[data-health="disabled"][aria-pressed="true"] {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
 
 .pool-picker-health button[data-health="info"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--relay-info) 55%, var(--relay-border));
+  border-color: transparent;
   background: color-mix(in srgb, var(--relay-info) 10%, var(--relay-surface));
   color: var(--relay-info);
 }
@@ -1283,7 +1276,7 @@
   margin: 0;
 }
 
-.pool-picker-option > .account-plan-badge {
+.pool-picker-option .account-badges > span {
   padding-inline: 6px;
 }
 

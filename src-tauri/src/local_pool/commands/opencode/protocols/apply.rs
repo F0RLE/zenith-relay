@@ -11,9 +11,19 @@ pub(in crate::local_pool::commands::opencode) fn apply(
         .iter()
         .filter(|model| model.enabled && !model.protocol_routes.is_empty())
     {
-        // Keep the old provider/model identifier whenever its route still works.
-        let previous_protocol =
-            existing_protocol(config, &model.id, |protocol| supports(model, protocol));
+        // Keep the old provider/model identifier while it is still a usable
+        // route, but never let a converted route pin a model that has a native
+        // one: the group's own protocol keeps provider semantics and billing.
+        let has_native = WireApi::ALL
+            .into_iter()
+            .any(|protocol| native(model, protocol));
+        let previous_protocol = existing_protocol(config, &model.id, |protocol| {
+            if has_native {
+                native(model, protocol)
+            } else {
+                supports(model, protocol)
+            }
+        });
         groups
             .entry(previous_protocol.unwrap_or_else(|| preferred(model)))
             .or_default()
@@ -72,8 +82,8 @@ pub(in crate::local_pool::commands::opencode) fn apply_source(
         let mut configured = model_config_ids(&models, metadata);
         // Direct connections cannot execute Relay translations. The SDK must
         // speak the exact native protocol declared by this source.
-        for value in configured.values_mut() {
-            set_variants(value, protocol);
+        for provider_model_config in configured.values_mut() {
+            set_variants(provider_model_config, protocol);
         }
         let generated = provider_with_models(&source.base_url, secret, configured, protocol)?;
         generated_groups.push(generated);

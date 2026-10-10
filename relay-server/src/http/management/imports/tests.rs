@@ -14,7 +14,7 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
 
     let root = TempDir::new().unwrap();
     let state = crate::test_fixtures::test_app_state(root.path());
-    let old: ServerAccountRecord = serde_json::from_value(serde_json::json!({
+    let existing_account: ServerAccountRecord = serde_json::from_value(serde_json::json!({
         "id": "synthetic", "label": "Synthetic", "identityHint": "synthetic",
         "enabled": true, "inPool": true, "draining": false,
         "sourceId": "openai_codex", "secretRef": "account:synthetic:old",
@@ -26,6 +26,9 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
     }))
     .unwrap();
     let credential = |access_token: &str, generation| AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: access_token.into(),
         refresh_token: None,
         id_token: None,
@@ -39,20 +42,20 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
         agent_runtime_id: None,
         agent_task_id: None,
     };
-    state.store.save_account(&old).unwrap();
+    state.store.save_account(&existing_account).unwrap();
     state
         .vault
         .save(
-            &old.secret_ref,
+            &existing_account.secret_ref,
             &serde_json::to_string(&credential("old-access", 7)).unwrap(),
         )
         .unwrap();
     state.rebuild_runtime().await.unwrap();
-    let old_runtime = state.runtime().unwrap().unwrap();
+    let existing_runtime = state.runtime().unwrap().unwrap();
     assert_eq!(
         state
             .token_authority
-            .tokens(&old.id)
+            .tokens(&existing_account.id)
             .await
             .unwrap()
             .generation(),
@@ -63,11 +66,12 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
     let new_ref = "account:synthetic:new";
     let preview = AccountImportPreview {
         session_id: session_id.clone(),
-        account_id: old.id.clone(),
-        duplicate_account_id: Some(old.id.clone()),
-        label: old.label.clone(),
-        identity_hint: old.identity_hint.clone(),
-        models: old.models.clone(),
+        oauth_client_kind: Default::default(),
+        account_id: existing_account.id.clone(),
+        duplicate_account_id: Some(existing_account.id.clone()),
+        label: existing_account.label.clone(),
+        identity_hint: existing_account.identity_hint.clone(),
+        models: existing_account.models.clone(),
         auth_state: AccountAuthState::Active,
         expires_at_ms: None,
         plan_type: None,
@@ -95,30 +99,35 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
         })
         .unwrap();
 
-    let old_build = state.lock_runtime_rebuild().await;
+    let previous_build = state.lock_runtime_rebuild().await;
     let worker_state = state.clone();
     let worker = tokio::spawn(async move {
         confirm_one_account_import(&worker_state, &session_id, None, false, false).await
     });
     tokio::task::yield_now().await;
     assert_eq!(
-        state.store.account(&old.id).unwrap().unwrap().secret_ref,
-        old.secret_ref
+        state
+            .store
+            .account(&existing_account.id)
+            .unwrap()
+            .unwrap()
+            .secret_ref,
+        existing_account.secret_ref
     );
     assert!(!worker.is_finished());
     // Complete a build using the old snapshot while the import is queued.
     // Its publication must precede, not follow, the new login's commit.
-    old_build.rebuild(&state).await.unwrap();
+    previous_build.rebuild(&state).await.unwrap();
     assert_eq!(
         state
             .token_authority
-            .tokens(&old.id)
+            .tokens(&existing_account.id)
             .await
             .unwrap()
             .generation(),
         7
     );
-    drop(old_build);
+    drop(previous_build);
 
     let confirmed = tokio::time::timeout(Duration::from_secs(5), worker)
         .await
@@ -127,21 +136,35 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
         .unwrap();
     assert_eq!(confirmed.account.secret_ref, new_ref);
     assert_eq!(
-        state.store.account(&old.id).unwrap().unwrap().secret_ref,
+        state
+            .store
+            .account(&existing_account.id)
+            .unwrap()
+            .unwrap()
+            .secret_ref,
         new_ref
     );
-    assert!(state.vault.load(&old.secret_ref).unwrap().is_none());
+    assert!(state
+        .vault
+        .load(&existing_account.secret_ref)
+        .unwrap()
+        .is_none());
     assert!(!Arc::ptr_eq(
-        &old_runtime,
+        &existing_runtime,
         &state.runtime().unwrap().unwrap()
     ));
-    let current: TokenSet = state.token_authority.tokens(&old.id).await.unwrap();
-    assert_eq!(current.generation(), 0);
+    let current: TokenSet = state
+        .token_authority
+        .tokens(&existing_account.id)
+        .await
+        .unwrap();
+    // A replacement login fences refreshes from the previous generation.
+    assert_eq!(current.generation(), 8);
     assert_eq!(current.access_token(), "new-access");
 
     let active_build = state.lock_runtime_rebuild().await;
     let delete_state = state.clone();
-    let account_id = old.id.clone();
+    let account_id = existing_account.id.clone();
     let deletion = tokio::spawn(async move {
         crate::http::management::accounts::delete_account(
             axum::extract::State(delete_state),
@@ -150,7 +173,7 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
         .await
     });
     tokio::task::yield_now().await;
-    assert!(state.store.account(&old.id).unwrap().is_some());
+    assert!(state.store.account(&existing_account.id).unwrap().is_some());
     assert!(!deletion.is_finished());
     drop(active_build);
     assert_eq!(
@@ -161,8 +184,12 @@ async fn import_and_delete_wait_for_old_build_before_changing_account_incarnatio
             .unwrap(),
         axum::http::StatusCode::NO_CONTENT
     );
-    assert!(state.store.account(&old.id).unwrap().is_none());
-    assert!(state.token_authority.tokens(&old.id).await.is_none());
+    assert!(state.store.account(&existing_account.id).unwrap().is_none());
+    assert!(state
+        .token_authority
+        .tokens(&existing_account.id)
+        .await
+        .is_none());
     assert!(state.runtime().unwrap().is_none());
     state.shutdown_runtime().await.unwrap();
     state.refresh.shutdown().await;

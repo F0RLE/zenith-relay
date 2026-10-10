@@ -310,6 +310,7 @@ fn usage_retention_prunes_old_rows_on_open_and_periodically() {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: zenith_relay_core::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: true,

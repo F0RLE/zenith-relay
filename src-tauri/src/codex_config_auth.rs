@@ -16,23 +16,26 @@ pub(crate) fn load_api_key_for_launch() -> Option<String> {
 
 pub(super) fn load_zenith_auth_key_if_configured() -> Option<String> {
     let config_path = default_codex_home().join(super::CONFIG_FILE);
-    let config = std::fs::read_to_string(config_path).ok()?;
-    zenith_auth_key_if_configured(&config, load_codex_auth_key())
+    let config_text = std::fs::read_to_string(config_path).ok()?;
+    zenith_auth_key_if_configured(&config_text, load_codex_auth_key())
 }
 
-pub(super) fn zenith_auth_key_if_configured(config: &str, key: Option<String>) -> Option<String> {
-    config_uses_zenith_provider(config)
-        .then_some(key)
+pub(super) fn zenith_auth_key_if_configured(
+    config_text: &str,
+    candidate_api_key: Option<String>,
+) -> Option<String> {
+    config_uses_zenith_provider(config_text)
+        .then_some(candidate_api_key)
         .flatten()
         .filter(|key| is_zenith_customer_key(key))
 }
 
 pub(super) fn load_zenith_key_from_codex_config() -> Option<String> {
     let config_path = default_codex_home().join(super::CONFIG_FILE);
-    let content = std::fs::read_to_string(config_path).ok()?;
+    let config_text = std::fs::read_to_string(config_path).ok()?;
     let mut in_zenith = false;
 
-    for line in content.lines() {
+    for line in config_text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             in_zenith = trimmed == format!("[model_providers.{PROVIDER_ID}]")
@@ -40,10 +43,10 @@ pub(super) fn load_zenith_key_from_codex_config() -> Option<String> {
             continue;
         }
         if in_zenith {
-            if let Some(value) = trimmed.strip_prefix("experimental_bearer_token = ") {
-                let key = unquote_toml_string(value.trim())?;
-                if !key.is_empty() {
-                    return Some(key);
+            if let Some(token_text) = trimmed.strip_prefix("experimental_bearer_token = ") {
+                let api_key = unquote_toml_string(token_text.trim())?;
+                if !api_key.is_empty() {
+                    return Some(api_key);
                 }
             }
         }
@@ -54,14 +57,14 @@ pub(super) fn load_zenith_key_from_codex_config() -> Option<String> {
 
 fn load_codex_auth_key() -> Option<String> {
     let auth_path = default_codex_home().join(AUTH_FILE);
-    let content = std::fs::read_to_string(auth_path).ok()?;
-    let auth: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let key = auth
+    let auth_text = std::fs::read_to_string(auth_path).ok()?;
+    let auth: serde_json::Value = serde_json::from_str(&auth_text).ok()?;
+    let api_key = auth
         .get("OPENAI_API_KEY")
         .and_then(serde_json::Value::as_str)?
         .trim()
         .to_string();
-    (!key.is_empty()).then_some(key)
+    (!api_key.is_empty()).then_some(api_key)
 }
 
 #[cfg(test)]
@@ -109,14 +112,14 @@ fn remove_zenith_auth_if_owned(
     saved_key: Option<&str>,
     auth_path: &Path,
 ) -> Result<(), String> {
-    let Some(content) = auth_before_reset else {
+    let Some(auth_text) = auth_before_reset else {
         return Ok(());
     };
-    let Ok(auth) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(auth) = serde_json::from_str::<serde_json::Value>(auth_text) else {
         return Ok(());
     };
     if zenith_auth_is_owned(&auth, saved_key, config_before_reset) {
-        remove_if_unchanged(auth_path, Some(content))?;
+        remove_if_unchanged(auth_path, Some(auth_text))?;
     }
     Ok(())
 }

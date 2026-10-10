@@ -1,6 +1,6 @@
 use super::REDACTED;
 
-pub(super) fn redact_sensitive_keys(mut output: String) -> String {
+pub(super) fn redact_sensitive_keys(mut diagnostic_text: String) -> String {
     for key in [
         "token",
         "access_token",
@@ -59,7 +59,7 @@ pub(super) fn redact_sensitive_keys(mut output: String) -> String {
     ] {
         let mut search_from = 0;
         loop {
-            let lower = output.to_ascii_lowercase();
+            let lower = diagnostic_text.to_ascii_lowercase();
             let Some(relative) = lower[search_from..].find(key) else {
                 break;
             };
@@ -74,35 +74,38 @@ pub(super) fn redact_sensitive_keys(mut output: String) -> String {
                 search_from = key_end;
                 continue;
             }
-            let mut cursor = skip_key_separator(&output, key_end);
-            if cursor >= output.len()
-                || !matches!(output[cursor..].chars().next(), Some(':') | Some('='))
+            let mut cursor = skip_key_separator(&diagnostic_text, key_end);
+            if cursor >= diagnostic_text.len()
+                || !matches!(
+                    diagnostic_text[cursor..].chars().next(),
+                    Some(':') | Some('=')
+                )
             {
                 search_from = key_end;
                 continue;
             }
             cursor += 1;
-            let Some((start, end)) = sensitive_value_range(&output, cursor) else {
+            let Some((start, end)) = sensitive_value_range(&diagnostic_text, cursor) else {
                 search_from = key_end;
                 continue;
             };
             if start < end {
-                output.replace_range(start..end, "[redacted]");
+                diagnostic_text.replace_range(start..end, "[redacted]");
                 search_from = start + REDACTED.len();
             } else {
                 search_from = key_end;
             }
-            if search_from >= output.len() {
+            if search_from >= diagnostic_text.len() {
                 break;
             }
         }
     }
-    output
+    diagnostic_text
 }
 
-fn skip_key_separator(value: &str, mut cursor: usize) -> usize {
-    while cursor < value.len() {
-        let Some(character) = value[cursor..].chars().next() else {
+fn skip_key_separator(diagnostic_text: &str, mut cursor: usize) -> usize {
+    while cursor < diagnostic_text.len() {
+        let Some(character) = diagnostic_text[cursor..].chars().next() else {
             break;
         };
         if !(character.is_ascii_whitespace() || character == '"' || character == '\'') {
@@ -116,24 +119,24 @@ fn skip_key_separator(value: &str, mut cursor: usize) -> usize {
 /// Locate one sensitive value without treating an escaped quote as its end.
 /// Malformed quoted input is redacted through the end of the diagnostic, which
 /// is safer than attempting to preserve a possibly secret suffix.
-fn sensitive_value_range(value: &str, mut cursor: usize) -> Option<(usize, usize)> {
-    while cursor < value.len()
-        && value[cursor..]
+fn sensitive_value_range(diagnostic_text: &str, mut cursor: usize) -> Option<(usize, usize)> {
+    while cursor < diagnostic_text.len()
+        && diagnostic_text[cursor..]
             .chars()
             .next()
             .is_some_and(|character| character.is_ascii_whitespace())
     {
-        cursor += value[cursor..].chars().next()?.len_utf8();
+        cursor += diagnostic_text[cursor..].chars().next()?.len_utf8();
     }
-    if cursor >= value.len() {
+    if cursor >= diagnostic_text.len() {
         return Some((cursor, cursor));
     }
-    let first = value[cursor..].chars().next()?;
+    let first = diagnostic_text[cursor..].chars().next()?;
     if first == '"' || first == '\'' {
         let quote = first;
         let start = cursor + quote.len_utf8();
         let mut escaped = false;
-        for (offset, character) in value[start..].char_indices() {
+        for (offset, character) in diagnostic_text[start..].char_indices() {
             if escaped {
                 escaped = false;
             } else if character == '\\' {
@@ -142,11 +145,11 @@ fn sensitive_value_range(value: &str, mut cursor: usize) -> Option<(usize, usize
                 return Some((start, start + offset));
             }
         }
-        return Some((start, value.len()));
+        return Some((start, diagnostic_text.len()));
     }
-    let end = value[cursor..]
+    let end = diagnostic_text[cursor..]
         .find(|character: char| character.is_ascii_whitespace() || ",;)}\"'&#[".contains(character))
         .map(|offset| cursor + offset)
-        .unwrap_or(value.len());
+        .unwrap_or(diagnostic_text.len());
     Some((cursor, end))
 }

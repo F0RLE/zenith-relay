@@ -10,8 +10,8 @@ impl GatewayRuntime {
         &self,
         callback: impl Fn(RuntimeActivitySnapshot) + Send + Sync + 'static,
     ) {
-        if let Ok(mut current) = self.activity_callback.lock() {
-            *current = Arc::new(callback);
+        if let Ok(mut callback_slot) = self.activity_callback.lock() {
+            *callback_slot = Arc::new(callback);
         }
     }
 
@@ -22,8 +22,8 @@ impl GatewayRuntime {
         &self,
         callback: impl Fn(Vec<String>) + Send + Sync + 'static,
     ) {
-        if let Ok(mut current) = self.chatgpt_team_breaker_callback.lock() {
-            *current = Arc::new(callback);
+        if let Ok(mut callback_slot) = self.chatgpt_team_breaker_callback.lock() {
+            *callback_slot = Arc::new(callback);
         }
     }
 
@@ -106,8 +106,8 @@ impl GatewayRuntime {
         self.control.route_recovery_window_ms()
     }
 
-    pub fn set_route_recovery_window_ms(&self, value: u64) {
-        self.control.set_route_recovery_window_ms(value);
+    pub fn set_route_recovery_window_ms(&self, window_ms: u64) {
+        self.control.set_route_recovery_window_ms(window_ms);
         self.candidate_availability.notify_waiters();
     }
 
@@ -125,6 +125,7 @@ impl GatewayRuntime {
         local_key_id: &str,
         requested_model: &str,
         wire_api: WireApi,
+        transport: crate::UsageTransport,
         origin: &'static str,
     ) {
         self.control.blocked_codex_background_event(
@@ -133,6 +134,7 @@ impl GatewayRuntime {
             local_key_id,
             requested_model,
             wire_api,
+            transport,
             origin,
         );
     }
@@ -188,9 +190,9 @@ impl GatewayRuntime {
         scheduler.set_pool_routing(policy)?;
         self.max_retry_candidates
             .store(usize::from(max_retry_candidates), Ordering::Relaxed);
-        for (key, scope, mut current) in locked {
-            if *current != *scope {
-                *current = scope.clone();
+        for (key, scope, mut existing_scope) in locked {
+            if *existing_scope != *scope {
+                *existing_scope = scope.clone();
                 key.scope_revision.fetch_add(1, Ordering::AcqRel);
             }
         }
@@ -238,19 +240,6 @@ impl GatewayRuntime {
 
     pub fn set_model_display_order(&self, models: Vec<String>) {
         *crate::poison::mutex(&self.model_display_order) = crate::normalize_model_ids(models);
-    }
-
-    /// Switches the explicitly labelled Excel/Basis Points transport for OAuth
-    /// accounts without rebuilding the scheduler. Agent Identity accounts
-    /// cannot use this transport. The account candidate, quota state and
-    /// concurrency reservation remain unchanged.
-    pub fn set_basis_points_enabled(&self, enabled: bool) {
-        for account in self.chatgpt_accounts.values() {
-            let oauth = crate::poison::read(&account.agent_identity).is_none();
-            account
-                .basis_points_enabled
-                .store(enabled && oauth, Ordering::Relaxed);
-        }
     }
 
     /// A host replaces this runtime's routing graph without waiting for

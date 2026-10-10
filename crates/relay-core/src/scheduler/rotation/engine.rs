@@ -80,6 +80,7 @@ pub struct RotationEngine {
     recovery_in_flight: u32,
     successful_requests_since_recovery: u32,
     quota_stale_after_ms: u64,
+    manual_cursor: BTreeMap<String, ManualCursor>,
 }
 
 impl Default for RotationEngine {
@@ -105,6 +106,7 @@ impl Default for RotationEngine {
             successful_requests_since_recovery: 0,
             recovery_policy: policy,
             quota_stale_after_ms: super::super::QUOTA_STALE_AFTER_MS,
+            manual_cursor: BTreeMap::new(),
         }
     }
 }
@@ -119,6 +121,13 @@ struct ReadyCandidate {
     weight: u32,
     recovery: bool,
     due_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct ManualCursor {
+    capacity_key: String,
+    candidate_id: String,
+    priority: i32,
 }
 
 mod admission;

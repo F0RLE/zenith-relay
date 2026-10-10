@@ -6,7 +6,8 @@ use crate::local_pool::{
         },
         proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
         quota_refresh::{
-            register_active_authority, AccountQuotaOutcome, AccountQuotaRefreshResponse,
+            register_active_authority, sync_account_profile_bindings, AccountQuotaOutcome,
+            AccountQuotaRefreshResponse,
         },
         quota_service::{apply_quota_failure, apply_quota_success},
         records::new_account_record,
@@ -22,7 +23,9 @@ use uuid::Uuid;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     accounts::AccountAuthMode,
-    providers::chatgpt::{AgentIdentityCredential, CodexModelsClient, CodexQuotaClient},
+    providers::chatgpt::{
+        AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, OAuthClientKind,
+    },
     quota::QuotaRefreshFailure,
     ProxyConfig,
 };
@@ -43,7 +46,7 @@ struct PreparedOAuthCompletion {
     encoded_checkpoint: String,
     had_existing: bool,
     credentials: StoredCodexCredentials,
-    record: LocalAccountRecord,
+    account_record: LocalAccountRecord,
     local_account_id: String,
     account_hash: String,
     quota_reset_delay: Option<u64>,
@@ -100,14 +103,14 @@ async fn prepare_oauth_completion(
                 "OAuth target account is managed by a remote server",
             ));
         }
-        let stored_provider_id = credential_store
+        let target_credentials = credential_store
             .load(target_account_id)
-            .map_err(credential_error)?
-            .and_then(|credentials| credentials.provider_account_id().map(str::to_string));
-        if stored_provider_id
-            .as_deref()
-            .is_some_and(|provider_id| provider_id != checkpoint.provider_account_id)
-        {
+            .map_err(credential_error)?;
+        let same_connection = target_credentials.as_ref().map_or_else(
+            || target.account.identity.identity_hash == checkpoint.identity_hash(),
+            |credentials| checkpoint.matches_connection(credentials),
+        );
+        if !same_connection {
             return Err(LocalPoolError::new(
                 ErrorCode::Conflict,
                 "OAuth account does not match the selected local account",
@@ -142,8 +145,8 @@ async fn prepare_oauth_completion(
     let mut credentials = checkpoint
         .to_credentials(&local_account_id, generation)
         .map_err(credential_error)?;
-    if let Some(previous) = previous_credentials.as_ref() {
-        credentials = inherit_session_material(credentials, previous)?;
+    if let Some(previous_credentials) = previous_credentials.as_ref() {
+        credentials = inherit_session_material(credentials, previous_credentials)?;
     }
     credentials = with_sign_in_proxy(credentials, sign_in_proxy_url.as_deref())?;
     let proxy = effective_proxy_config(&settings, &credentials)?;
@@ -174,20 +177,23 @@ async fn prepare_oauth_completion(
             ("model_issue", model_issue.is_some().to_string()),
         ],
     );
-    let mut record = new_account_record(
+    let mut account_record = new_account_record(
         &credentials,
         AccountAuthMode::OAuth,
         models,
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
-    if model_issue.is_none() && !record.models.is_empty() {
-        record.discovered_models = Some(record.models.clone());
+    if model_issue.is_none()
+        && (!account_record.models.is_empty()
+            || credentials.oauth_client_kind() == OAuthClientKind::ExcelBps)
+    {
+        account_record.discovered_models = Some(account_record.models.clone());
     }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
-        record.account.subscription = zenith_relay_core::quota::Subscription::normalize(
+        account_record.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
-                plan_type: record.account.subscription.plan_type.clone(),
+                plan_type: account_record.account.subscription.plan_type.clone(),
                 active_until_ms: Some(active_until_ms),
                 forbidden: false,
                 observed_at_ms: now_ms,
@@ -195,10 +201,10 @@ async fn prepare_oauth_completion(
         );
     }
     if let Some(existing) = existing {
-        preserve_existing_settings(&mut record, existing);
+        preserve_existing_settings(&mut account_record, existing);
     }
     let quota_outcome = refresh_sign_in_quota(
-        &mut record,
+        &mut account_record,
         proxy.as_ref(),
         &checkpoint.access_token,
         &checkpoint.provider_account_id,
@@ -207,11 +213,11 @@ async fn prepare_oauth_completion(
     )
     .await;
     if let Some(issue) = model_issue {
-        apply_initial_model_issue(&mut record, issue);
+        apply_initial_model_issue(&mut account_record, issue);
     }
     let quota_reset_delay = crate::local_pool::refresh::reset_due_delay(
         &AccountQuotaRefreshResponse {
-            account: record.clone(),
+            account: account_record.clone(),
             quota: quota_outcome,
             exhaustion_transitions: Vec::new(),
         },
@@ -225,7 +231,7 @@ async fn prepare_oauth_completion(
         encoded_checkpoint,
         had_existing,
         credentials,
-        record,
+        account_record,
         local_account_id,
         account_hash,
         quota_reset_delay,
@@ -238,7 +244,9 @@ async fn register_agent_identity_if_missing(
     access_token: &str,
     account_is_fedramp: bool,
 ) -> StoredCodexCredentials {
-    if credentials.agent_identity().is_some() {
+    if credentials.oauth_client_kind() != OAuthClientKind::Codex
+        || credentials.agent_identity().is_some()
+    {
         return credentials;
     }
     let builder = reqwest::Client::builder()
@@ -273,8 +281,9 @@ async fn discover_sign_in_models(
     previous_models: Vec<String>,
 ) -> LocalResult<(Vec<String>, Option<InitialModelIssue>)> {
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
-    match CodexModelsClient::new_with_proxy(proxy) {
+    match AccountModelsClient::new_with_proxy(proxy) {
         Ok(client) => match client
+            .with_oauth_client_kind(credentials.oauth_client_kind())
             .discover_authorized(
                 credentials
                     .authorization(now_ms)
@@ -292,7 +301,7 @@ async fn discover_sign_in_models(
 }
 
 async fn refresh_sign_in_quota(
-    record: &mut LocalAccountRecord,
+    account_record: &mut LocalAccountRecord,
     proxy: Option<&ProxyConfig>,
     access_token: &str,
     provider_account_id: &str,
@@ -306,7 +315,7 @@ async fn refresh_sign_in_quota(
                     access_token,
                     provider_account_id,
                     now_ms,
-                    &record.account.subscription,
+                    &account_record.account.subscription,
                     true,
                 )
                 .await
@@ -314,14 +323,14 @@ async fn refresh_sign_in_quota(
         Err(error) => Err(error),
     };
     match quota_result {
-        Ok(data) => match apply_quota_success(record, data) {
+        Ok(data) => match apply_quota_success(account_record, data) {
             Ok(applied) => AccountQuotaOutcome::Updated {
                 transitions: applied.transitions,
                 exhaustion_transitions: applied.exhaustion_transitions,
             },
             Err(_) => {
                 let failure = QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false);
-                apply_quota_failure(record, &failure, now_ms);
+                apply_quota_failure(account_record, &failure, now_ms);
                 AccountQuotaOutcome::Failed {
                     code: failure.code,
                     retryable: failure.retryable,
@@ -329,7 +338,7 @@ async fn refresh_sign_in_quota(
             }
         },
         Err(failure) => {
-            apply_quota_failure(record, &failure, now_ms);
+            apply_quota_failure(account_record, &failure, now_ms);
             AccountQuotaOutcome::Failed {
                 code: failure.code,
                 retryable: failure.retryable,
@@ -350,7 +359,7 @@ async fn commit_oauth_completion(
         encoded_checkpoint,
         had_existing,
         credentials,
-        mut record,
+        mut account_record,
         local_account_id,
         account_hash,
         quota_reset_delay,
@@ -382,8 +391,7 @@ async fn commit_oauth_completion(
         .map_err(credential_error)?;
     if commit_previous_credentials
         .as_ref()
-        .and_then(StoredCodexCredentials::provider_account_id)
-        .is_some_and(|provider_id| provider_id != checkpoint.provider_account_id)
+        .is_some_and(|credentials| !checkpoint.matches_connection(credentials))
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -391,6 +399,16 @@ async fn commit_oauth_completion(
         ));
     }
     let commit_previous_account = state.store()?.account(&local_account_id).cloned();
+    if commit_previous_credentials.is_none()
+        && commit_previous_account.as_ref().is_some_and(|account| {
+            account.account.identity.identity_hash != checkpoint.identity_hash()
+        })
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth account identity changed while completing sign-in",
+        ));
+    }
     if had_existing && commit_previous_account.is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -401,20 +419,22 @@ async fn commit_oauth_completion(
         commit_previous_account.as_ref(),
         commit_previous_credentials.as_ref(),
     );
-    let template = commit_previous_credentials.as_ref().unwrap_or(&credentials);
-    let committed_credentials = inherit_session_material(
+    let mut committed_credentials = inherit_session_material(
         checkpoint
             .to_credentials(&local_account_id, generation)
             .map_err(credential_error)?,
-        template,
+        &credentials,
     )?;
+    if let Some(previous) = commit_previous_credentials.as_ref() {
+        committed_credentials = inherit_session_material(committed_credentials, previous)?;
+    }
     let committed_credentials =
         with_sign_in_proxy(committed_credentials, sign_in_proxy_url.as_deref())?;
-    if let Some(current) = commit_previous_account.as_ref() {
-        preserve_existing_settings(&mut record, current);
+    if let Some(previous_account_snapshot) = commit_previous_account.as_ref() {
+        preserve_existing_settings(&mut account_record, previous_account_snapshot);
     }
-    record.account.token_generation = committed_credentials.generation();
-    record.account.token_updated_at_ms = Some(committed_credentials.issued_at_ms());
+    account_record.account.token_generation = committed_credentials.generation();
+    account_record.account.token_updated_at_ms = Some(committed_credentials.issued_at_ms());
     let authority_tokens = committed_credentials
         .to_token_set()
         .map_err(credential_error)?;
@@ -438,7 +458,7 @@ async fn commit_oauth_completion(
         "credentials_committed",
         &[("account", account_hash.clone())],
     );
-    let account_write = state.store()?.upsert_account(record.clone());
+    let account_write = state.store()?.upsert_account(account_record.clone());
     if let Err(error) = account_write {
         let rollback = rollback_completion_before_authority(
             state,
@@ -447,7 +467,7 @@ async fn commit_oauth_completion(
             commit_previous_credentials.as_ref(),
             commit_previous_account.as_ref(),
             &committed_credentials,
-            &record,
+            &account_record,
         );
         drop(commit_guard);
         return Err(match rollback {
@@ -468,13 +488,62 @@ async fn commit_oauth_completion(
             }
         });
     }
+
+    // Keep the managed ChatGPT profile in lockstep with the committed OAuth
+    // snapshot while the account lock is still held. Otherwise the profile
+    // observer can read the old desktop token after re-authentication, assign
+    // it a newer generation, and overwrite the newly committed token.
+    if let Err(error) = sync_account_profile_bindings(
+        state,
+        &local_account_id,
+        &authority_tokens,
+        &checkpoint.provider_account_id,
+    ) {
+        let profiles_restored = match commit_previous_credentials.as_ref() {
+            Some(previous_credentials) => previous_credentials
+                .to_token_set()
+                .map(|tokens| {
+                    sync_account_profile_bindings(
+                        state,
+                        &local_account_id,
+                        &tokens,
+                        &checkpoint.provider_account_id,
+                    )
+                    .is_ok()
+                })
+                .unwrap_or(false),
+            // A newly created account has no managed profile binding yet.
+            None => true,
+        };
+        let rollback = rollback_completion_before_authority(
+            state,
+            &credential_store,
+            &local_account_id,
+            commit_previous_credentials.as_ref(),
+            commit_previous_account.as_ref(),
+            &committed_credentials,
+            &account_record,
+        );
+        drop(commit_guard);
+        return Err(match (profiles_restored, rollback) {
+            (true, Ok(true)) => error,
+            _ => {
+                super::super::fail_closed(
+                    state,
+                    "OAuth completion could not restore the previous account and profile state"
+                        .into(),
+                )
+                .await
+            }
+        });
+    }
     drop(commit_guard);
 
     let registered = register_active_authority(
         state,
         &local_account_id,
         authority_tokens.clone(),
-        record.account.auth_state,
+        account_record.account.auth_state,
         "failed to register OAuth account credentials",
         "OAuth account token state disappeared",
         "OAuth account authentication state disappeared",
@@ -483,12 +552,12 @@ async fn commit_oauth_completion(
     let authoritative_tokens = registered.tokens;
     let authoritative_auth_state = registered.auth_state;
     let authority_state_changed = authoritative_tokens != authority_tokens
-        || authoritative_auth_state != record.account.auth_state;
+        || authoritative_auth_state != account_record.account.auth_state;
     if authority_state_changed
         && reconcile_completion_authority(
             state,
             &local_account_id,
-            &record,
+            &account_record,
             &authoritative_tokens,
             authoritative_auth_state,
         )
@@ -525,20 +594,36 @@ async fn commit_oauth_completion(
         return Err(error);
     }
     crate::diagnostics::record_operation("oauth", "completed", &[("account", account_hash)]);
-    Ok(record)
+    Ok(account_record)
 }
 
 fn inherit_session_material(
     mut credentials: StoredCodexCredentials,
     template: &StoredCodexCredentials,
 ) -> LocalResult<StoredCodexCredentials> {
-    if let Some(proxy_url) = template.proxy_url() {
-        credentials = credentials
-            .with_proxy_url(Some(proxy_url.to_string()))
-            .map_err(credential_error)?;
+    if credentials.oauth_client_kind() != template.oauth_client_kind() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "OAuth client does not match the existing account",
+        ));
     }
+    // Login notes belong to the local account, not to the OAuth token. Keep
+    // them when a re-authentication replaces the token snapshot; otherwise
+    // completing sign-in silently leaves only the provider email behind.
+    credentials = credentials.fill_missing_login_from(template);
+    credentials = credentials
+        .with_proxy_route(
+            template.proxy_url().map(str::to_string),
+            template.bypass_common_proxy(),
+        )
+        .map_err(credential_error)?;
     if let Some(agent_identity) = template.agent_identity() {
         credentials = credentials.with_agent_identity(agent_identity.clone());
+    }
+    if let Some(headers) = template.basis_points_headers() {
+        credentials = credentials
+            .with_basis_points_headers(Some(headers.clone()))
+            .map_err(credential_error)?;
     }
     Ok(credentials)
 }

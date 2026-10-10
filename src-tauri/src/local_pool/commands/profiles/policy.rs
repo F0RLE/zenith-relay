@@ -15,7 +15,7 @@ pub(super) fn gateway_oauth_binding_request(
 ) -> LocalResult<GatewayOAuthBindingRequest<'_>> {
     let requested_account_id = requested_account_id
         .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .filter(|account_id| !account_id.is_empty());
     if disabled && requested_account_id.is_some() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -34,7 +34,7 @@ pub(super) fn gateway_oauth_binding_request(
 pub(super) fn profile_quota_rank(quota: CandidateQuota, allow_quota_wait: bool) -> Option<u64> {
     match quota {
         CandidateQuota::Available(remaining) => Some(remaining),
-        CandidateQuota::Unknown | CandidateQuota::Stale => Some(0),
+        CandidateQuota::Unknown | CandidateQuota::Stale | CandidateQuota::CreditFallback => Some(0),
         CandidateQuota::Exhausted if allow_quota_wait => Some(0),
         CandidateQuota::Exhausted => None,
     }
@@ -118,6 +118,10 @@ mod tests {
         );
         assert_eq!(profile_quota_rank(CandidateQuota::Unknown, false), Some(0));
         assert_eq!(profile_quota_rank(CandidateQuota::Stale, false), Some(0));
+        assert_eq!(
+            profile_quota_rank(CandidateQuota::CreditFallback, false),
+            Some(0)
+        );
         assert_eq!(profile_quota_rank(CandidateQuota::Exhausted, false), None);
         assert_eq!(profile_quota_rank(CandidateQuota::Exhausted, true), Some(0));
     }

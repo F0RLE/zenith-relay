@@ -6,7 +6,7 @@ async fn failed_initial_websocket_response_with_output_is_not_retried() {
         "type": "response.failed",
         "response": {
             "status": "failed",
-            "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+            "error": {"code": "insufficient_quota", "message": "Account: quota exhausted"},
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]
         }
     });
@@ -540,16 +540,18 @@ async fn account_websocket_does_not_commit_on_a_setup_frame_before_disconnect() 
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "setup-primary", "setup-primary-access").await;
     register_ready(&authority, "setup-reserve", "setup-reserve-access").await;
+    let mut reserve = account(
+        "setup-reserve",
+        "provider-setup-reserve",
+        &reserve_upstream,
+        100,
+    );
+    reserve.models = vec!["reserve-only-model".to_string()];
     let (gateway, events, _, _) = spawn_mixed_gateway(
         Vec::new(),
         vec![
             account("setup-primary", "provider-setup-primary", &upstream, 200),
-            account(
-                "setup-reserve",
-                "provider-setup-reserve",
-                &reserve_upstream,
-                100,
-            ),
+            reserve,
         ],
         vec![mixed_key(None, None)],
         authority,

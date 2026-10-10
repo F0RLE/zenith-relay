@@ -2,12 +2,12 @@ use super::endpoint_type;
 use super::*;
 
 pub(crate) fn catalog_capabilities(
-    body: &Value,
+    catalog_response: &Value,
     checked_at_ms: u64,
 ) -> Vec<ModelEndpointCapability> {
-    let Some(models) = body
+    let Some(models) = catalog_response
         .get("data")
-        .or_else(|| body.get("models"))
+        .or_else(|| catalog_response.get("models"))
         .and_then(Value::as_array)
     else {
         return Vec::new();

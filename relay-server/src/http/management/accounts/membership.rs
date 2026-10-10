@@ -37,25 +37,25 @@ pub(super) async fn set_pool_membership(
     let build = state.lock_runtime_rebuild().await;
     let accounts = state.store.accounts().map_err(store_error)?;
     let sources = state.store.sources().map_err(store_error)?;
-    let old_accounts = account_ids
+    let previous_accounts = account_ids
         .iter()
-        .map(|id| {
+        .map(|account_id| {
             accounts
                 .iter()
-                .find(|record| &record.id == id)
-                .map(|record| (id.clone(), record.in_pool))
+                .find(|account_record| &account_record.id == account_id)
+                .map(|account_record| (account_id.clone(), account_record.in_pool))
                 .ok_or_else(|| {
                     ManagementError::not_found(error_codes::ACCOUNT_NOT_FOUND, "account not found")
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let old_sources = source_ids
+    let previous_sources = source_ids
         .iter()
-        .map(|id| {
+        .map(|source_id| {
             sources
                 .iter()
-                .find(|record| &record.id == id)
-                .map(|record| (id.clone(), record.in_pool))
+                .find(|source_record| &source_record.id == source_id)
+                .map(|source_record| (source_id.clone(), source_record.in_pool))
                 .ok_or_else(|| {
                     ManagementError::not_found(error_codes::SOURCE_NOT_FOUND, "source not found")
                 })
@@ -63,11 +63,11 @@ pub(super) async fn set_pool_membership(
         .collect::<Result<Vec<_>, _>>()?;
     if input.in_pool {
         for source_id in &source_ids {
-            let source = sources
+            let source_record = sources
                 .iter()
-                .find(|record| &record.id == source_id)
+                .find(|source_record| &source_record.id == source_id)
                 .expect("source was validated above");
-            if !source.supports_any_wire_api().map_err(|message| {
+            if !source_record.supports_any_wire_api().map_err(|message| {
                 ManagementError::validation(error_codes::SOURCE_PROTOCOL_INVALID, message)
             })? {
                 return Err(ManagementError::new(
@@ -80,31 +80,31 @@ pub(super) async fn set_pool_membership(
             }
         }
     }
-    let next_accounts = account_ids
+    let updated_accounts = account_ids
         .iter()
-        .map(|id| (id.clone(), input.in_pool))
+        .map(|account_id| (account_id.clone(), input.in_pool))
         .collect::<Vec<_>>();
-    let next_sources = source_ids
+    let updated_sources = source_ids
         .iter()
-        .map(|id| (id.clone(), input.in_pool))
+        .map(|source_id| (source_id.clone(), input.in_pool))
         .collect::<Vec<_>>();
     let _dispatch_fences = state.runtime().map_err(runtime_error)?.map(|runtime| {
-        let mut fences = old_accounts
+        let mut fences = previous_accounts
             .iter()
-            .filter(|(_, previous)| *previous != input.in_pool)
-            .filter_map(|(id, _)| runtime.fence_candidate_dispatch(id))
+            .filter(|(_, previous_membership)| *previous_membership != input.in_pool)
+            .filter_map(|(account_id, _)| runtime.fence_candidate_dispatch(account_id))
             .collect::<Vec<_>>();
-        for (id, _) in old_sources
+        for (source_id, _) in previous_sources
             .iter()
-            .filter(|(_, previous)| *previous != input.in_pool)
+            .filter(|(_, previous_membership)| *previous_membership != input.in_pool)
         {
-            fences.extend(runtime.fence_source_dispatch(id));
+            fences.extend(runtime.fence_source_dispatch(source_id));
         }
         fences
     });
     state
         .store
-        .replace_pool_membership(&next_sources, &next_accounts)
+        .replace_pool_membership(&updated_sources, &updated_accounts)
         .map_err(store_error)?;
     let changed_accounts = accounts
         .iter()
@@ -122,7 +122,7 @@ pub(super) async fn set_pool_membership(
                 .rollback_and_rebuild(&state, || {
                     state
                         .store
-                        .replace_pool_membership(&old_sources, &old_accounts)
+                        .replace_pool_membership(&previous_sources, &previous_accounts)
                 })
                 .await
                 .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
@@ -134,7 +134,7 @@ pub(super) async fn set_pool_membership(
             .rebuild_or_rollback(&state, || {
                 state
                     .store
-                    .replace_pool_membership(&old_sources, &old_accounts)
+                    .replace_pool_membership(&previous_sources, &previous_accounts)
             })
             .await
             .map_err(runtime_error)?;

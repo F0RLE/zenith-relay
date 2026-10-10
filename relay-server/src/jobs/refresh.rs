@@ -46,7 +46,7 @@ pub(super) fn account_http_scope(
         state
             .store
             .account_refresh_scope(&fence.account_id)
-            .is_ok_and(|(_, current)| current == fence)
+            .is_ok_and(|(_, stored_fence)| stored_fence == fence)
     })
 }
 
@@ -100,24 +100,28 @@ pub(crate) enum AuthorizationFailure {
     Stale,
 }
 
-pub(crate) fn cache_observation(value: &RefreshReadResult) -> bool {
-    matches!(value, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
+pub(crate) fn cache_observation(refresh_result: &RefreshReadResult) -> bool {
+    matches!(refresh_result, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
 }
 
 pub(super) fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut changes = state.store.refresh_changes();
+        let mut refresh_changes = state.store.refresh_changes();
         loop {
             if *shutdown.borrow() {
                 break;
             }
             // Subscribe before reconciliation so an edit during the scan cannot
             // leave a stale registration asleep until its old periodic timer.
-            changes.borrow_and_update();
+            refresh_changes.borrow_and_update();
             let _ = reconcile(&state);
             tokio::select! {
-                changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
-                changed = changes.changed() => { if changed.is_err() { break; } }
+                shutdown_changed = shutdown.changed() => {
+                    if shutdown_changed.is_err() || *shutdown.borrow() { break; }
+                }
+                refresh_signal = refresh_changes.changed() => {
+                    if refresh_signal.is_err() { break; }
+                }
             }
         }
         state.refresh.shutdown().await;
@@ -127,20 +131,20 @@ pub(super) fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -
 fn reconcile(state: &Arc<AppState>) -> Result<(), String> {
     let accounts = state.store.accounts()?;
     let activity = active_runtime_members(state)?;
-    let mut current_ids = BTreeSet::new();
+    let mut active_refresh_ids = BTreeSet::new();
     for account in accounts {
         let (account, fence) = state.store.account_refresh_scope(&account.id)?;
         let active = recently_used(account.last_used_at_ms)
             || activity.contains(&account_member_key(&account.id));
-        current_ids.insert(fence.identity());
+        active_refresh_ids.insert(fence.identity());
         for kind in [RefreshKind::Auth, RefreshKind::Quota, RefreshKind::Models] {
             register(state, &account, fence.clone(), kind, true, active)?;
         }
     }
-    sources::reconcile(state, &activity, &mut current_ids)?;
+    sources::reconcile(state, &activity, &mut active_refresh_ids)?;
     state
         .refresh
-        .retain(|identity, _| current_ids.contains(identity));
+        .retain(|identity, _| active_refresh_ids.contains(identity));
     Ok(())
 }
 
@@ -166,18 +170,18 @@ pub(super) async fn request(
         false,
         is_active(state, &account)?,
     )?;
-    let result = state
+    let refresh_result = state
         .refresh
         .request(&fence.identity(), kind)
         .await
         .map_err(|_| "account refresh could not complete".to_string())?
         .as_ref()
         .clone()?;
-    let (_, current) = state.store.account_refresh_scope(account_id)?;
-    if current != fence {
+    let (_, stored_fence) = state.store.account_refresh_scope(account_id)?;
+    if stored_fence != fence {
         return Err("account changed during refresh".into());
     }
-    match result {
+    match refresh_result {
         RefreshRead::Account(read) => Ok(*read),
         _ => Err("unexpected account refresh result".into()),
     }
@@ -208,11 +212,11 @@ fn register(
             Box::pin(async move {
                 let Some(state) = weak.upgrade() else {
                     return RefreshResult {
-                        value: Err("refresh owner stopped".into()),
+                        refresh_value: Err("refresh owner stopped".into()),
                         outcome: RefreshOutcome::NoProgress,
                     };
                 };
-                let value = if job.kind == RefreshKind::Auth {
+                let refresh_read = if job.kind == RefreshKind::Auth {
                     Ok(RefreshRead::Authorization(
                         authorization::prepare_authorization(&state, &fence)
                             .await
@@ -223,20 +227,23 @@ fn register(
                         .await
                         .map(|read| RefreshRead::Account(Box::new(read)))
                 };
-                let outcome = match &value {
+                let outcome = match &refresh_read {
                     Ok(RefreshRead::Authorization(Ok(_))) => RefreshOutcome::Success,
                     Ok(RefreshRead::Authorization(Err(_))) => RefreshOutcome::NoProgress,
                     Ok(RefreshRead::Account(read)) if read.succeeded => RefreshOutcome::Success,
                     _ if job.kind == RefreshKind::Auth => RefreshOutcome::NoProgress,
                     _ => {
-                        let delay_ms = match &value {
+                        let delay_ms = match &refresh_read {
                             Ok(RefreshRead::Account(read)) => read.retry_after_ms,
                             _ => None,
                         };
                         RefreshOutcome::retry_after(state.refresh.now_ms(), delay_ms)
                     }
                 };
-                RefreshResult { value, outcome }
+                RefreshResult {
+                    refresh_value: refresh_read,
+                    outcome,
+                }
             })
         })
         .map_err(|_| "account refresh could not be scheduled".to_string())
@@ -273,8 +280,8 @@ async fn execute(
     fence: &AccountRefreshFence,
     job: &RefreshJob,
 ) -> Result<AccountRead, String> {
-    let (account, current) = state.store.account_refresh_scope(&fence.account_id)?;
-    if &current != fence
+    let (account, stored_fence) = state.store.account_refresh_scope(&fence.account_id)?;
+    if &stored_fence != fence
         || (!job.manual
             && !automatic_quota_monitoring_eligible(account.enabled, account.auth_state))
     {
@@ -283,32 +290,48 @@ async fn execute(
     state
         .refresh
         .set_active(&job.identity, is_active(state, &account)?);
-    let mut read = match job.kind {
+    let mut account_read = match job.kind {
         RefreshKind::Quota => quota_refresh::read_one(state, fence, job.manual).await?,
         RefreshKind::Models => account_models::read_models(state, fence).await?,
         _ => return Err("unsupported account refresh kind".into()),
     };
-    if job.kind == RefreshKind::Quota && !read.transitions.is_empty() {
+    if job.kind == RefreshKind::Quota && !account_read.transitions.is_empty() {
         // Reset verification remains inside this same quota job; recursively
         // requesting the single-flight key here would deadlock on itself.
-        if weekly_reset::try_auto_reset_weekly(state, fence, &read.account, &read.transitions)
-            .await
-            .unwrap_or(false)
+        if weekly_reset::try_auto_reset_weekly(
+            state,
+            fence,
+            &account_read.account,
+            &account_read.transitions,
+        )
+        .await
+        .unwrap_or(false)
         {
             let refreshed = quota_refresh::read_one(state, fence, false).await?;
-            read.account = refreshed.account;
-            read.succeeded = refreshed.succeeded;
-            read.retry_after_ms = refreshed.retry_after_ms;
+            account_read.account = refreshed.account;
+            account_read.succeeded = refreshed.succeeded;
+            account_read.retry_after_ms = refreshed.retry_after_ms;
         }
-        if read.succeeded {
-            wake_automation::schedule_transitions(state, &read.account, &read.transitions).await?;
+        if account_read.succeeded {
+            wake_automation::schedule_transitions(
+                state,
+                &account_read.account,
+                &account_read.transitions,
+            )
+            .await?;
         }
     }
-    runtime::synchronize(state, fence, read.models_changed, read.health_changed).await?;
+    runtime::synchronize(
+        state,
+        fence,
+        account_read.models_changed,
+        account_read.health_changed,
+    )
+    .await?;
     if job.kind == RefreshKind::Quota {
-        schedule_quota_reset(state, fence, &read);
+        schedule_quota_reset(state, fence, &account_read);
     }
-    Ok(read)
+    Ok(account_read)
 }
 
 fn schedule_quota_reset(state: &AppState, fence: &AccountRefreshFence, read: &AccountRead) {

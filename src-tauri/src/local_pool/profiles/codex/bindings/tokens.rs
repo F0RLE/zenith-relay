@@ -11,14 +11,16 @@ pub(crate) fn managed_account_token_update(
     let mut update = None;
 
     if backup_root.exists() {
-        for entry in fs::read_dir(backup_root).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with(ACCOUNT_BACKUP_PREFIX) || !name.ends_with(".json") {
+        for directory_entry in fs::read_dir(backup_root).map_err(io_error)? {
+            let directory_entry = directory_entry.map_err(io_error)?;
+            let backup_file_name = directory_entry.file_name();
+            let backup_file_name = backup_file_name.to_string_lossy();
+            if !backup_file_name.starts_with(ACCOUNT_BACKUP_PREFIX)
+                || !backup_file_name.ends_with(".json")
+            {
                 continue;
             }
-            let backup_path = entry.path();
+            let backup_path = directory_entry.path();
             let content = fs::read_to_string(&backup_path)
                 .map_err(|error| io_error_at(&backup_path, error))?;
             let backup = parse_account_backup(&content, &backup_path)?;
@@ -62,13 +64,16 @@ fn read_managed_account_token_update(
     let Some(content) = snapshot_text(&snapshot, &auth_path)? else {
         return Ok(None);
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(auth_document) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(None);
     };
-    if auth_credential_kind(&value) != Some(ProfileCredentialKind::OAuthAccount) {
+    if auth_credential_kind(&auth_document) != Some(ProfileCredentialKind::OAuthAccount) {
         return Ok(None);
     }
-    let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object) else {
+    let Some(tokens) = auth_document
+        .get("tokens")
+        .and_then(serde_json::Value::as_object)
+    else {
         return Ok(None);
     };
     if tokens
@@ -98,7 +103,7 @@ fn read_managed_account_token_update(
     let id_token_changed = update
         .id_token
         .as_deref()
-        .is_some_and(|value| Some(value) != current_tokens.id_token());
+        .is_some_and(|id_token| Some(id_token) != current_tokens.id_token());
     if update.access_token == current_tokens.access_token()
         && update.refresh_token == current_tokens.refresh_token().unwrap_or_default()
         && !id_token_changed
@@ -116,30 +121,30 @@ pub(in crate::local_pool::profiles::codex) fn managed_token<'a>(
         .get(key)
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= MAX_MANAGED_TOKEN_BYTES
-                && !value.bytes().any(|byte| byte.is_ascii_control())
+        .filter(|token_value| {
+            !token_value.is_empty()
+                && token_value.len() <= MAX_MANAGED_TOKEN_BYTES
+                && !token_value.bytes().any(|byte| byte.is_ascii_control())
         })
 }
 
 fn merge_managed_token_update(
-    current: &mut Option<ManagedAccountTokenUpdate>,
-    next: Option<ManagedAccountTokenUpdate>,
+    merged_update: &mut Option<ManagedAccountTokenUpdate>,
+    incoming_update: Option<ManagedAccountTokenUpdate>,
 ) -> Result<()> {
-    let Some(next) = next else {
+    let Some(incoming_update) = incoming_update else {
         return Ok(());
     };
-    if current.as_ref().is_some_and(|current| {
-        current.access_token != next.access_token
-            || current.refresh_token != next.refresh_token
-            || current.id_token != next.id_token
+    if merged_update.as_ref().is_some_and(|existing_update| {
+        existing_update.access_token != incoming_update.access_token
+            || existing_update.refresh_token != incoming_update.refresh_token
+            || existing_update.id_token != incoming_update.id_token
     }) {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "managed ChatGPT profiles contain conflicting token generations",
         ));
     }
-    *current = Some(next);
+    *merged_update = Some(incoming_update);
     Ok(())
 }

@@ -141,6 +141,7 @@ fn gemini_prompt_block_without_candidates_keeps_filtered_terminal_in_json_and_st
             WireApi::Messages,
         ] {
             let request = input(client);
+            let expected_input = (client != WireApi::Responses).then_some(3);
             let completed = prepare(client, WireApi::Gemini, &request, false)
                 .translate_response_bytes(&serde_json::to_vec(&blocked).unwrap())
                 .unwrap()
@@ -151,7 +152,9 @@ fn gemini_prompt_block_without_candidates_keeps_filtered_terminal_in_json_and_st
                 .blocks
                 .iter()
                 .all(|block| matches!(block, Block::Text(text) if text.is_empty())));
-            assert_eq!(decoded.usage.input, Some(3));
+            // A Responses client gets complete usage or null; a prompt-only
+            // count is incomplete, so it stays unknown rather than invented.
+            assert_eq!(decoded.usage.input, expected_input, "{client:?}");
 
             let mut bridge = prepare(client, WireApi::Gemini, &request, true)
                 .into_stream_bridge()
@@ -166,7 +169,7 @@ fn gemini_prompt_block_without_candidates_keeps_filtered_terminal_in_json_and_st
                 .blocks
                 .iter()
                 .all(|block| matches!(block, Block::Text(text) if text.is_empty())));
-            assert_eq!(decoded.usage.input, Some(3));
+            assert_eq!(decoded.usage.input, expected_input, "{client:?}");
             if client == WireApi::Responses {
                 let frames = std::iter::from_fn(|| bridge.pop_output())
                     .map(|frame| String::from_utf8(frame).unwrap())
@@ -195,7 +198,8 @@ fn gemini_prompt_block_without_candidates_keeps_filtered_terminal_in_json_and_st
     bridge.push(b"data: {\"usageMetadata\":{\"promptTokenCount\":7}}\n\n");
     bridge.push(format!("data: {without_candidates}\n\n").as_bytes());
     let completed = bridge.completed().expect("prompt block after usage");
-    assert_eq!(completed.response_body["usage"]["input_tokens"], 7);
+    // Prompt count alone is not complete Responses usage, so it is null.
+    assert!(completed.response_body["usage"].is_null());
 }
 #[test]
 fn gemini_missing_candidates_without_known_prompt_block_never_succeeds() {

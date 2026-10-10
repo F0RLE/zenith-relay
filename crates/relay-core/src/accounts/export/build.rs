@@ -28,32 +28,35 @@ pub fn build_account_export(
     }
     let exported_at_value = timestamp_value(exported_at_ms)?;
     let exported_at = exported_at_value.to_rfc3339_opts(SecondsFormat::Millis, true);
-    let values = accounts
+    let account_exports = accounts
         .iter()
-        .map(|account| formats::account_value(format, account, exported_at_ms, &exported_at))
+        .map(|account| formats::build_account_export(format, account, exported_at_ms, &exported_at))
         .collect::<Result<Vec<_>>>()?;
-    let value = if format == AccountExportFormat::Zenith {
+    let export_payload = if format == AccountExportFormat::Zenith {
         strip_nulls(json!({
             "format": "zenith",
             "version": 1,
             "exportedAt": exported_at,
             "description": description,
-            "accounts": values,
+            "accounts": account_exports,
         }))
     } else if format == AccountExportFormat::Sub2api {
         json!({
             "exported_at": exported_at,
             "proxies": [],
-            "accounts": values,
+            "accounts": account_exports,
             "type": "sub2api-data",
             "version": 1,
         })
-    } else if values.len() == 1 {
-        values.into_iter().next().expect("one export value exists")
+    } else if account_exports.len() == 1 {
+        account_exports
+            .into_iter()
+            .next()
+            .expect("one account export exists")
     } else {
-        Value::Array(values)
+        Value::Array(account_exports)
     };
-    let mut content = serde_json::to_string_pretty(&value)
+    let mut content = serde_json::to_string_pretty(&export_payload)
         .map_err(|_| validation("account export could not be encoded"))?;
     content.push('\n');
     if content.len() > MAX_ACCOUNT_EXPORT_BYTES {
@@ -93,16 +96,16 @@ fn validate_account(account: &AccountExportCredential) -> Result<()> {
         MAX_SECRET_BYTES,
         false,
     )?;
-    for value in [
+    for token_text in [
         account.refresh_token.as_deref(),
         account.id_token.as_deref(),
     ]
     .into_iter()
     .flatten()
     {
-        validate_text(value, "account export token", MAX_SECRET_BYTES, false)?;
+        validate_text(token_text, "account export token", MAX_SECRET_BYTES, false)?;
     }
-    for value in [
+    for metadata_text in [
         account.email.as_deref(),
         account.account_id.as_deref(),
         account.user_id.as_deref(),
@@ -112,22 +115,32 @@ fn validate_account(account: &AccountExportCredential) -> Result<()> {
     .into_iter()
     .flatten()
     {
-        validate_text(value, "account export metadata", MAX_METADATA_BYTES, false)?;
+        validate_text(
+            metadata_text,
+            "account export metadata",
+            MAX_METADATA_BYTES,
+            false,
+        )?;
     }
-    for value in [account.issued_at_ms, account.created_at_ms] {
-        timestamp(value)?;
+    for timestamp_ms in [account.issued_at_ms, account.created_at_ms] {
+        timestamp(timestamp_ms)?;
     }
     optional_timestamp(account.expires_at_ms)?;
     optional_timestamp(account.subscription_active_until_ms)?;
     Ok(())
 }
 
-fn validate_text(value: &str, field: &str, max: usize, allow_empty: bool) -> Result<()> {
-    if (!allow_empty && value.is_empty())
-        || value.len() > max
-        || value.bytes().any(|byte| byte.is_ascii_control())
+fn validate_text(
+    text_value: &str,
+    field_name: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<()> {
+    if (!allow_empty && text_value.is_empty())
+        || text_value.len() > max_bytes
+        || text_value.bytes().any(|byte| byte.is_ascii_control())
     {
-        Err(validation(&format!("{field} is invalid")))
+        Err(validation(&format!("{field_name} is invalid")))
     } else {
         Ok(())
     }
@@ -144,39 +157,43 @@ fn timestamp_value(milliseconds: u64) -> Result<DateTime<Utc>> {
         .ok_or_else(|| validation("account export timestamp is invalid"))
 }
 
-pub fn normalize_account_export_description(value: Option<&str>) -> Result<Option<&str>> {
-    let value = crate::omit_blank(value);
-    if value.is_some_and(|value| {
-        value.chars().count() > MAX_ACCOUNT_EXPORT_DESCRIPTION_CHARS
-            || value
+pub fn normalize_account_export_description(description: Option<&str>) -> Result<Option<&str>> {
+    let trimmed_description = crate::omit_blank(description);
+    if trimmed_description.is_some_and(|description_text| {
+        description_text.chars().count() > MAX_ACCOUNT_EXPORT_DESCRIPTION_CHARS
+            || description_text
                 .chars()
                 .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
     }) {
         return Err(validation("account export description is invalid"));
     }
-    Ok(value)
+    Ok(trimmed_description)
 }
 
 pub(super) fn optional_timestamp(milliseconds: Option<u64>) -> Result<Option<String>> {
     milliseconds.map(timestamp).transpose()
 }
 
-pub(super) fn strip_nulls(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(strip_nulls).collect()),
-        Value::Object(values) => Value::Object(
-            values
+pub(super) fn strip_nulls(json_value: Value) -> Value {
+    match json_value {
+        Value::Array(array_values) => {
+            Value::Array(array_values.into_iter().map(strip_nulls).collect())
+        }
+        Value::Object(object_values) => Value::Object(
+            object_values
                 .into_iter()
-                .filter_map(|(key, value)| (!value.is_null()).then(|| (key, strip_nulls(value))))
+                .filter_map(|(key, field_value)| {
+                    (!field_value.is_null()).then(|| (key, strip_nulls(field_value)))
+                })
                 .collect(),
         ),
-        value => value,
+        other_value => other_value,
     }
 }
 
-pub(super) fn object(value: Value) -> Map<String, Value> {
-    match strip_nulls(value) {
-        Value::Object(value) => value,
+pub(super) fn object(json_value: Value) -> Map<String, Value> {
+    match strip_nulls(json_value) {
+        Value::Object(object_values) => object_values,
         _ => unreachable!("static account export value is an object"),
     }
 }

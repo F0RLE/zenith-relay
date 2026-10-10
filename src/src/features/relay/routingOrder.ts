@@ -30,18 +30,22 @@ function sameCounts(
   left: CandidateRuntimeSnapshot["activeModels"],
   right: CandidateRuntimeSnapshot["activeModels"],
 ) {
-  const current = left ?? [];
-  const next = right ?? [];
-  return current.length === next.length && current.every((item, index) => item.model === next[index]?.model && item.requestCount === next[index]?.requestCount);
+  const leftModels = left ?? [];
+  const rightModels = right ?? [];
+  return leftModels.length === rightModels.length
+    && leftModels.every((leftModel, index) => leftModel.model === rightModels[index]?.model
+      && leftModel.requestCount === rightModels[index]?.requestCount);
 }
 
 function sameRetries(
   left: CandidateRuntimeSnapshot["modelRetries"],
   right: CandidateRuntimeSnapshot["modelRetries"],
 ) {
-  const current = left ?? [];
-  const next = right ?? [];
-  return current.length === next.length && current.every((item, index) => item.model === next[index]?.model && item.retryAtMs === next[index]?.retryAtMs);
+  const leftRetries = left ?? [];
+  const rightRetries = right ?? [];
+  return leftRetries.length === rightRetries.length
+    && leftRetries.every((leftRetry, index) => leftRetry.model === rightRetries[index]?.model
+      && leftRetry.retryAtMs === rightRetries[index]?.retryAtMs);
 }
 
 export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
@@ -59,8 +63,10 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
       // protocol source card aligned with the active route instead of pinning
       // it to whichever binding happened to be serialized first.
       const active = activeRequestCount(candidate) > 0;
-      const previous = sourcePositions.get(sourceId);
-      if (!previous || (active && !previous.active) || (active === previous.active && index < previous.index)) {
+      const previousSourcePosition = sourcePositions.get(sourceId);
+      if (!previousSourcePosition
+        || (active && !previousSourcePosition.active)
+        || (active === previousSourcePosition.active && index < previousSourcePosition.index)) {
         sourcePositions.set(sourceId, { index, active });
       }
     }
@@ -116,18 +122,18 @@ function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" |
 }
 
 function aggregateModelRetries(candidates: CandidateRuntimeSnapshot[]) {
-  const retries = new Map<string, { model: string; retryAtMs: number }>();
+  const earliestRetryByModel = new Map<string, { model: string; retryAtMs: number }>();
   for (const candidate of candidates) {
     for (const retry of candidate.modelRetries ?? []) {
       if (!retry.model || !Number.isFinite(retry.retryAtMs)) continue;
       const key = modelIdKey(retry.model);
-      const current = retries.get(key);
-      if (!current || retry.retryAtMs < current.retryAtMs) {
-        retries.set(key, { model: retry.model, retryAtMs: retry.retryAtMs });
+      const earliestRetry = earliestRetryByModel.get(key);
+      if (!earliestRetry || retry.retryAtMs < earliestRetry.retryAtMs) {
+        earliestRetryByModel.set(key, { model: retry.model, retryAtMs: retry.retryAtMs });
       }
     }
   }
-  return [...retries.values()].sort((left, right) => left.retryAtMs - right.retryAtMs || left.model.localeCompare(right.model));
+  return [...earliestRetryByModel.values()].sort((left, right) => left.retryAtMs - right.retryAtMs || left.model.localeCompare(right.model));
 }
 
 export function compareRoutingOrder(leftId: string, rightId: string, order: ReadonlyMap<string, number>, fallback?: ReadonlyMap<string, number>) {
@@ -172,58 +178,60 @@ export function currentRuntimeActivities(
 }
 
 /** A late poll must not resurrect activity already retired by a newer snapshot. */
-export function preferNewerRuntimeOrder(current: CandidateRuntimeSnapshot[], incoming: CandidateRuntimeSnapshot[]) {
-  const previous = current[0];
-  const next = incoming[0];
-  if (previous?.runtimeId == null || previous.activityRevision == null
-    || next?.runtimeId == null || next.activityRevision == null) return incoming;
+export function preferNewerRuntimeOrder(currentOrder: CandidateRuntimeSnapshot[], incomingOrder: CandidateRuntimeSnapshot[]) {
+  const currentSnapshot = currentOrder[0];
+  const incomingSnapshot = incomingOrder[0];
+  if (currentSnapshot?.runtimeId == null || currentSnapshot.activityRevision == null
+    || incomingSnapshot?.runtimeId == null || incomingSnapshot.activityRevision == null) return incomingOrder;
   return compareRuntimeActivity(
-    { runtimeId: previous.runtimeId, revision: previous.activityRevision },
-    { runtimeId: next.runtimeId, revision: next.activityRevision },
-  ) > 0 ? current : incoming;
+    { runtimeId: currentSnapshot.runtimeId, revision: currentSnapshot.activityRevision },
+    { runtimeId: incomingSnapshot.runtimeId, revision: incomingSnapshot.activityRevision },
+  ) > 0 ? currentOrder : incomingOrder;
 }
 
 export function applyRuntimeActivities(
   order: CandidateRuntimeSnapshot[],
   activities: Iterable<RuntimeActivitySnapshot>,
 ) {
-  const updates = new Map<string, RuntimeActivitySnapshot>();
+  const latestActivityByCandidate = new Map<string, RuntimeActivitySnapshot>();
   for (const activity of currentRuntimeActivities(order, activities)) {
-    const previous = updates.get(activity.candidateId);
-    if (!previous || compareRuntimeActivity(activity, previous) > 0) {
-      updates.set(activity.candidateId, activity);
+    const previousActivity = latestActivityByCandidate.get(activity.candidateId);
+    if (!previousActivity || compareRuntimeActivity(activity, previousActivity) > 0) {
+      latestActivityByCandidate.set(activity.candidateId, activity);
     }
   }
-  if (!updates.size) return order;
+  if (!latestActivityByCandidate.size) return order;
 
   const snapshotRevision = order.reduce((revision, candidate) => Math.min(revision, candidate.activityRevision ?? 0), Infinity);
-  const previewStale = [...updates.values()].some((activity) =>
+  const activityAheadOfSnapshot = [...latestActivityByCandidate.values()].some((activity) =>
     (activity.runtimeId ?? 0) > (order[0]?.runtimeId ?? 0) || activity.revision > snapshotRevision);
-  let changed = false;
-  const next = order.map((candidate) => {
-    const activity = updates.get(candidate.candidateId);
-    const base = previewStale && candidate.nextForNewRequest ? { ...candidate, nextForNewRequest: false } : candidate;
-    changed ||= base !== candidate;
-    if (!activity || compareRuntimeActivity(activity, { runtimeId: candidate.runtimeId, revision: candidate.activityRevision ?? -1 }) <= 0) return base;
-    changed = true;
+  let orderChanged = false;
+  const updatedOrder = order.map((candidate) => {
+    const activity = latestActivityByCandidate.get(candidate.candidateId);
+    const candidateWithReset = activityAheadOfSnapshot && candidate.nextForNewRequest
+      ? { ...candidate, nextForNewRequest: false }
+      : candidate;
+    orderChanged ||= candidateWithReset !== candidate;
+    if (!activity || compareRuntimeActivity(activity, { runtimeId: candidate.runtimeId, revision: candidate.activityRevision ?? -1 }) <= 0) return candidateWithReset;
+    orderChanged = true;
     return {
-      ...base,
+      ...candidateWithReset,
       inFlight: activity.inFlight,
       activeRequestCount: activity.activeRequestCount,
       activeModels: activity.activeModels,
     };
   });
-  if (!changed) return order;
+  if (!orderChanged) return order;
 
   // `PoolScheduler::runtime_order` puts leased candidates first. Apply the
   // whole burst before sorting once; this keeps activity updates linear in the
   // number of candidates instead of sorting the complete order per event.
-  return next
-    .map((candidate, index) => ({ candidate, index }))
+  return updatedOrder
+    .map((candidate, index) => ({ candidate, originalIndex: index }))
     .sort((left, right) => {
       const leftActive = activeRequestCount(left.candidate) > 0;
       const rightActive = activeRequestCount(right.candidate) > 0;
-      return Number(rightActive) - Number(leftActive) || left.index - right.index;
+      return Number(rightActive) - Number(leftActive) || left.originalIndex - right.originalIndex;
     })
     .map(({ candidate }) => candidate);
 }
@@ -258,17 +266,17 @@ export function reconcileRuntimeActivityOverlay(
 }
 
 export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {
-  const counts = new Map<string, { model: string; requestCount: number }>();
+  const requestCountsByModel = new Map<string, { model: string; requestCount: number }>();
   for (const candidate of candidates) {
     for (const activeModel of candidate.activeModels ?? []) {
       if (!activeModel.model || activeModel.requestCount <= 0) continue;
       const key = modelIdKey(activeModel.model);
-      const current = counts.get(key);
-      if (current) current.requestCount += activeModel.requestCount;
-      else counts.set(key, { model: activeModel.model, requestCount: activeModel.requestCount });
+      const existingModel = requestCountsByModel.get(key);
+      if (existingModel) existingModel.requestCount += activeModel.requestCount;
+      else requestCountsByModel.set(key, { model: activeModel.model, requestCount: activeModel.requestCount });
     }
   }
-  return [...counts.values()].sort((left, right) =>
+  return [...requestCountsByModel.values()].sort((left, right) =>
     right.requestCount - left.requestCount || left.model.localeCompare(right.model),
   );
 }

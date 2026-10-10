@@ -21,18 +21,18 @@ pub(super) struct Reservations {
 impl Reservations {
     pub(super) fn remove_candidate(&mut self, candidate_id: &str) {
         self.active
-            .retain(|_, request| request.candidate_id != candidate_id);
+            .retain(|_, reservation| reservation.candidate_id != candidate_id);
     }
 
     fn reserve(&mut self, reservation: Reservation) -> Option<ReservationId> {
         self.next_id = self.next_id.checked_add(1)?;
-        let id = ReservationId(self.next_id);
-        self.active.insert(id, reservation);
-        Some(id)
+        let reservation_id = ReservationId(self.next_id);
+        self.active.insert(reservation_id, reservation);
+        Some(reservation_id)
     }
 
-    fn release(&mut self, id: ReservationId) -> Option<Reservation> {
-        self.active.remove(&id)
+    fn release(&mut self, reservation_id: ReservationId) -> Option<Reservation> {
+        self.active.remove(&reservation_id)
     }
 }
 
@@ -85,7 +85,7 @@ impl PoolScheduler {
             return None;
         }
         self.sync_all_rotation_candidates();
-        let mut request = rotation_request.cloned().unwrap_or_else(|| {
+        let mut prepared_rotation_request = rotation_request.cloned().unwrap_or_else(|| {
             self.rotation_request(
                 request_id,
                 Some(candidate_id),
@@ -95,9 +95,12 @@ impl PoolScheduler {
             )
         });
         if let Some(request_id) = request_id {
-            request.request_id = request_id;
+            prepared_rotation_request.request_id = request_id;
         }
-        let rotation_lease = self.rotation.reserve(&request, now_ms).ok()?;
+        let rotation_lease = self
+            .rotation
+            .reserve(&prepared_rotation_request, now_ms)
+            .ok()?;
         if rotation_lease.candidate_id != candidate_id {
             self.rotation.release_unstarted(rotation_lease.lease_id);
             return None;
@@ -118,8 +121,8 @@ impl PoolScheduler {
         Some(reservation)
     }
 
-    pub(super) fn record_reservation_dispatch(&mut self, id: ReservationId) {
-        if let Some(reservation) = self.reservations.active.get(&id) {
+    pub(super) fn record_reservation_dispatch(&mut self, reservation_id: ReservationId) {
+        if let Some(reservation) = self.reservations.active.get(&reservation_id) {
             self.activity
                 .record_dispatch(&reservation.candidate_id, reservation.lane);
             self.member_activity
@@ -130,11 +133,13 @@ impl PoolScheduler {
         }
     }
 
-    pub(crate) fn release_reservation(&mut self, id: ReservationId) -> bool {
-        if self.rotation_leases.contains_key(&id) && !self.release_rotation_unstarted(id) {
+    pub(crate) fn release_reservation(&mut self, reservation_id: ReservationId) -> bool {
+        if self.rotation_leases.contains_key(&reservation_id)
+            && !self.release_rotation_unstarted(reservation_id)
+        {
             return false;
         }
-        let Some(reservation) = self.reservations.release(id) else {
+        let Some(reservation) = self.reservations.release(reservation_id) else {
             return false;
         };
         self.activity.release(
@@ -199,13 +204,17 @@ impl PoolScheduler {
         model: Option<&str>,
         lane: InFlightLane,
     ) -> bool {
-        let id = self.reservations.active.iter().find_map(|(id, request)| {
-            (request.candidate_id == candidate_id
-                && request.lane == lane
-                && model.is_none_or(|model| request.model.eq_ignore_ascii_case(model)))
-            .then_some(*id)
-        });
-        id.is_some_and(|id| self.release_reservation(id))
+        let reservation_id =
+            self.reservations
+                .active
+                .iter()
+                .find_map(|(reservation_id, reservation)| {
+                    (reservation.candidate_id == candidate_id
+                        && reservation.lane == lane
+                        && model.is_none_or(|model| reservation.model.eq_ignore_ascii_case(model)))
+                    .then_some(*reservation_id)
+                });
+        reservation_id.is_some_and(|reservation_id| self.release_reservation(reservation_id))
     }
 }
 

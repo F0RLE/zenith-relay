@@ -17,14 +17,15 @@ const MAX_VAULT_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Default, Deserialize, Serialize)]
 struct VaultData {
-    values: BTreeMap<String, String>,
+    #[serde(rename = "values")]
+    secrets_by_ref: BTreeMap<String, String>,
 }
 
 pub struct Vault {
     path: PathBuf,
     backup_path: PathBuf,
     key: [u8; 32],
-    data: Mutex<VaultData>,
+    vault_data: Mutex<VaultData>,
 }
 
 impl Vault {
@@ -35,7 +36,7 @@ impl Vault {
         if !path.exists() && backup_path.exists() {
             fs::rename(&backup_path, &path).map_err(io_error)?;
         }
-        let data = if path.exists() {
+        let vault_data = if path.exists() {
             decrypt_file(&path, &key)?
         } else {
             VaultData::default()
@@ -44,26 +45,28 @@ impl Vault {
             path,
             backup_path,
             key,
-            data: Mutex::new(data),
+            vault_data: Mutex::new(vault_data),
         })
     }
 
-    pub fn save(&self, secret_ref: &str, value: &str) -> Result<(), String> {
+    pub fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), String> {
         validate_ref(secret_ref)?;
-        if value.is_empty() || value.len() > 1024 * 1024 {
+        if secret_value.is_empty() || secret_value.len() > 1024 * 1024 {
             return Err("secret value is empty or too large".to_string());
         }
-        let mut data = self.lock()?;
-        let previous = data
-            .values
-            .insert(secret_ref.to_string(), value.to_string());
-        if let Err(error) = self.persist(&data) {
-            match previous {
-                Some(value) => {
-                    data.values.insert(secret_ref.to_string(), value);
+        let mut vault_data = self.lock()?;
+        let previous_secret = vault_data
+            .secrets_by_ref
+            .insert(secret_ref.to_string(), secret_value.to_string());
+        if let Err(error) = self.persist(&vault_data) {
+            match previous_secret {
+                Some(previous_value) => {
+                    vault_data
+                        .secrets_by_ref
+                        .insert(secret_ref.to_string(), previous_value);
                 }
                 None => {
-                    data.values.remove(secret_ref);
+                    vault_data.secrets_by_ref.remove(secret_ref);
                 }
             }
             return Err(error);
@@ -73,24 +76,26 @@ impl Vault {
 
     pub fn load(&self, secret_ref: &str) -> Result<Option<String>, String> {
         validate_ref(secret_ref)?;
-        Ok(self.lock()?.values.get(secret_ref).cloned())
+        Ok(self.lock()?.secrets_by_ref.get(secret_ref).cloned())
     }
 
     pub fn delete(&self, secret_ref: &str) -> Result<bool, String> {
         validate_ref(secret_ref)?;
-        let mut data = self.lock()?;
-        let Some(previous) = data.values.remove(secret_ref) else {
+        let mut vault_data = self.lock()?;
+        let Some(previous_secret) = vault_data.secrets_by_ref.remove(secret_ref) else {
             return Ok(false);
         };
-        if let Err(error) = self.persist(&data) {
-            data.values.insert(secret_ref.to_string(), previous);
+        if let Err(error) = self.persist(&vault_data) {
+            vault_data
+                .secrets_by_ref
+                .insert(secret_ref.to_string(), previous_secret);
             return Err(error);
         }
         Ok(true)
     }
 
-    fn persist(&self, data: &VaultData) -> Result<(), String> {
-        let plaintext = serde_json::to_vec(data).map_err(|_| "vault serialization failed")?;
+    fn persist(&self, vault_data: &VaultData) -> Result<(), String> {
+        let plaintext = serde_json::to_vec(vault_data).map_err(|_| "vault serialization failed")?;
         let cipher = ChaCha20Poly1305::new((&self.key).into());
         let mut nonce_bytes = [0_u8; NONCE_BYTES];
         rand::rng().fill_bytes(&mut nonce_bytes);
@@ -106,7 +111,7 @@ impl Vault {
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, VaultData>, String> {
-        self.data
+        self.vault_data
             .lock()
             .map_err(|_| "vault lock poisoned".to_string())
     }
@@ -155,8 +160,8 @@ fn atomic_replace(path: &Path, backup: &Path, bytes: &[u8]) -> Result<(), String
     Ok(())
 }
 
-fn validate_ref(value: &str) -> Result<(), String> {
-    if !zenith_relay_core::is_ascii_ref(value, 256) {
+fn validate_ref(secret_ref: &str) -> Result<(), String> {
+    if !zenith_relay_core::is_ascii_ref(secret_ref, 256) {
         Err("secret reference is invalid".to_string())
     } else {
         Ok(())

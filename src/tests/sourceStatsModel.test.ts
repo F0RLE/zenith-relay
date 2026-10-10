@@ -6,9 +6,9 @@ const legacy: SourceStats = { provider: "zenith", balanceMicroUsd: 0, spentMicro
 
 describe("provider statistics presentation", () => {
   test("cached snapshots update the value without settling a pending manual read", () => {
-    const current = { value: { ...legacy, asOfMs: 20 }, loading: true, failed: false };
+    const current = { stats: { ...legacy, asOfMs: 20 }, loading: true, failed: false };
     const newer = { ...legacy, balanceMicroUsd: 17_000_000, asOfMs: 30 };
-    expect(projectedSourceStats(current, newer)).toEqual({ value: newer, loading: true, failed: false });
+    expect(projectedSourceStats(current, newer)).toEqual({ stats: newer, loading: true, failed: false });
     expect(projectedSourceStats(current, { ...legacy, asOfMs: 10 })).toBe(current);
   });
   test("old servers retain real zero balances", () => {
@@ -23,23 +23,23 @@ describe("provider statistics presentation", () => {
   });
   test("refresh failure retains successful values and marks them stale", () => {
     const failure: SourceStats = { ...legacy, balanceMicroUsd: null, status: "rate_limited" };
-    expect(settledSourceStats(legacy, failure)).toEqual({ value: { ...legacy, stale: true, refreshError: "rate_limited" }, loading: false, failed: true, error: "rate_limited" });
+    expect(settledSourceStats(legacy, failure)).toEqual({ stats: { ...legacy, stale: true, refreshError: "rate_limited" }, loading: false, failed: true, error: "rate_limited" });
     expect(sourceStatsAmounts(failure)).toEqual([]);
   });
   test("server-retained last success remains stale after remount without a new provider read", () => {
     const retained: SourceStats = { ...legacy, asOfMs: 123, stale: true, refreshError: "unavailable" };
-    expect(settledSourceStats(null, retained)).toEqual({ value: retained, loading: false, failed: true, error: "unavailable" });
+    expect(settledSourceStats(null, retained)).toEqual({ stats: retained, loading: false, failed: true, error: "unavailable" });
   });
   test("unsupported response clears previous values", () => {
     const unsupported: SourceStats = { ...legacy, provider: "unsupported" };
     expect(sourceStatsStatus(unsupported)).toBe("unsupported");
-    expect(settledSourceStats(legacy, unsupported)).toEqual({ value: unsupported, loading: false, failed: false });
+    expect(settledSourceStats(legacy, unsupported)).toEqual({ stats: unsupported, loading: false, failed: false });
   });
   test("desktop defaults for old unsupported responses retain their meaning", () => {
     const unsupported: SourceStats = { ...legacy, provider: "unsupported", status: "available" };
     expect(sourceStatsStatus(unsupported)).toBe("unsupported");
     expect(sourceStatsAmounts(unsupported)).toEqual([]);
-    expect(settledSourceStats(legacy, unsupported)).toEqual({ value: unsupported, loading: false, failed: false });
+    expect(settledSourceStats(legacy, unsupported)).toEqual({ stats: unsupported, loading: false, failed: false });
     expect(sourceStatsStatus({ ...unsupported, status: "unauthorized" })).toBe("unauthorized");
   });
 });

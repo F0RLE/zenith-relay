@@ -41,9 +41,9 @@ async function writeClipboard(text: string) {
 }
 
 function replaceSelection(field: TextField, start: number, end: number, value: string) {
-  const next = `${field.value.slice(0, start)}${value}${field.value.slice(end)}`;
+  const updatedText = `${field.value.slice(0, start)}${value}${field.value.slice(end)}`;
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), "value")?.set;
-  setter?.call(field, next);
+  setter?.call(field, updatedText);
   const caret = start + value.length;
   field.focus();
   field.setSelectionRange(caret, caret);
@@ -132,15 +132,15 @@ export function AppContextMenu() {
   if (!context) return null;
   const hasSelection = Boolean(context.text);
   const focusMenuItem = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    const menuItems = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    const activeIndex = menuItems.indexOf(document.activeElement as HTMLButtonElement);
     const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;
+    const targetIndex = event.key === "Home" ? 0 : event.key === "End" ? menuItems.length - 1 : direction ? (activeIndex + direction + menuItems.length) % menuItems.length : -1;
     if (event.key === "Tab") {
       close();
-    } else if (next >= 0) {
+    } else if (targetIndex >= 0) {
       event.preventDefault();
-      items[next]?.focus();
+      menuItems[targetIndex]?.focus();
     }
   };
 

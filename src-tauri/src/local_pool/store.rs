@@ -200,18 +200,18 @@ impl LocalPoolStore {
         self.ownership_operation.as_ref()
     }
 
-    pub fn source(&self, id: &str) -> Option<&ProviderSourceRecord> {
-        self.sources.iter().find(|source| source.id == id)
+    pub fn source(&self, source_id: &str) -> Option<&ProviderSourceRecord> {
+        self.sources.iter().find(|source| source.id == source_id)
     }
 
-    pub fn key(&self, id: &str) -> Option<&LocalGatewayKeyRecord> {
-        self.keys.iter().find(|key| key.id == id)
+    pub fn key(&self, gateway_key_id: &str) -> Option<&LocalGatewayKeyRecord> {
+        self.keys.iter().find(|key| key.id == gateway_key_id)
     }
 
-    pub fn account(&self, id: &str) -> Option<&LocalAccountRecord> {
+    pub fn account(&self, account_id: &str) -> Option<&LocalAccountRecord> {
         self.accounts
             .iter()
-            .find(|account| account.account.id == id)
+            .find(|account| account.account.id == account_id)
     }
 
     pub fn update_client_auth_observation(
@@ -220,18 +220,18 @@ impl LocalPoolStore {
         status: Option<String>,
         login_redirect_at_ms: Option<u64>,
     ) -> Result<bool> {
-        let Some(current) = self.account(account_id).cloned() else {
+        let Some(stored_account) = self.account(account_id).cloned() else {
             return Ok(false);
         };
-        if current.client_auth_status == status
-            && current.last_client_login_redirect_at_ms == login_redirect_at_ms
+        if stored_account.client_auth_status == status
+            && stored_account.last_client_login_redirect_at_ms == login_redirect_at_ms
         {
             return Ok(false);
         }
-        let mut updated = current;
-        updated.client_auth_status = status;
-        updated.last_client_login_redirect_at_ms = login_redirect_at_ms;
-        self.upsert_account(updated)?;
+        let mut updated_account = stored_account;
+        updated_account.client_auth_status = status;
+        updated_account.last_client_login_redirect_at_ms = login_redirect_at_ms;
+        self.upsert_account(updated_account)?;
         Ok(true)
     }
 }
@@ -246,18 +246,22 @@ fn upgrade_saved_gateway(
     // older build. Remove them on disk without changing any active controls.
     let remove_v1_scalars = database
         .state_json(STATE_GATEWAY)?
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .is_some_and(|value| {
-            value.as_object().is_some_and(|fields| {
-                [
-                    "cooldownAfterFailures",
-                    "keepLastCandidateAvailable",
-                    "routingStrategy",
-                    "subscriptionPlanOrder",
-                ]
-                .iter()
-                .any(|key| fields.contains_key(*key))
-            })
+        .and_then(|gateway_state_text| {
+            serde_json::from_str::<serde_json::Value>(&gateway_state_text).ok()
+        })
+        .is_some_and(|gateway_state_json| {
+            gateway_state_json
+                .as_object()
+                .is_some_and(|gateway_state_fields| {
+                    [
+                        "cooldownAfterFailures",
+                        "keepLastCandidateAvailable",
+                        "routingStrategy",
+                        "subscriptionPlanOrder",
+                    ]
+                    .iter()
+                    .any(|key| gateway_state_fields.contains_key(*key))
+                })
         });
     let upgrade_policy = !gateway
         .pool_routing

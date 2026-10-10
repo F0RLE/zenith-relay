@@ -22,6 +22,7 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -249,9 +250,24 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
                  ALTER TABLE request_logs DROP COLUMN client_context_id;
                  ALTER TABLE request_logs DROP COLUMN upstream_error_json;
-                 ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_5m_tokens;
-                 ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_1h_tokens;
-                 ALTER TABLE usage_candidate_rollups DROP COLUMN unknown_cache_write_tokens;",
+                 ALTER TABLE request_logs DROP COLUMN transport;
+                 DROP TABLE usage_candidate_rollups;
+                 CREATE TABLE usage_candidate_rollups (
+                     candidate_kind TEXT NOT NULL,
+                     candidate_id TEXT NOT NULL,
+                     model TEXT NOT NULL,
+                     input_tokens INTEGER NOT NULL DEFAULT 0,
+                     input_samples INTEGER NOT NULL DEFAULT 0,
+                     cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                     cached_input_samples INTEGER NOT NULL DEFAULT 0,
+                     cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
+                     cache_write_input_samples INTEGER NOT NULL DEFAULT 0,
+                     output_tokens INTEGER NOT NULL DEFAULT 0,
+                     output_samples INTEGER NOT NULL DEFAULT 0,
+                     total_tokens INTEGER NOT NULL DEFAULT 0,
+                     total_samples INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY(candidate_kind, candidate_id, model)
+                 ) WITHOUT ROWID;",
         )
         .unwrap();
     database

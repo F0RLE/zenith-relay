@@ -11,7 +11,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("checkbox")).toHaveCount(0);
     await expect(dialog.getByText(/migration|rollback|confirmation/i)).toHaveCount(0);
-    await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+    await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
     await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
     const saved = await page.evaluate(async (mode) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } }).__TAURI_INTERNALS__.invoke(mode === "local" ? "get_local_runtime_state" : "get_remote_server_state"), mode);
     expect(saved.gateway).toMatchObject({ poolRouting: { version: 2, mode: "in_order" }, running: true, chatgptRetryUntilAvailable: true });

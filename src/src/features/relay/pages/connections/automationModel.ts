@@ -19,8 +19,8 @@ export function automationType(triggerKind: AutomationTriggerKind) {
 
 const defaultNames = new Set<string>(Object.values(automationDefaultNames).flatMap(Object.values));
 
-export function customAutomationName(name?: string): string | null {
-  return name === undefined || defaultNames.has(name.trim()) ? null : name;
+export function customAutomationName(automationName?: string): string | null {
+  return automationName === undefined || defaultNames.has(automationName.trim()) ? null : automationName;
 }
 
 export function defaultAutomationName(triggerKind: AutomationTriggerKind, t: TFunction): string {
@@ -89,8 +89,13 @@ export function resolveAutomationModel(availableModels: readonly string[], reque
     ?? "";
 }
 
-export function automationFormValid(name: string, accountsValid: boolean, requiresModel: boolean, selectedModel: string) {
-  return Boolean(name.trim() && accountsValid && (!requiresModel || selectedModel));
+export function automationFormValid(
+  automationName: string,
+  accountsValid: boolean,
+  requiresModel: boolean,
+  selectedModel: string,
+) {
+  return Boolean(automationName.trim() && accountsValid && (!requiresModel || selectedModel));
 }
 
 export type AutomationSubmission = {
@@ -101,14 +106,22 @@ export type AutomationSubmission = {
 
 export function buildAutomationSubmission(input: {
   task: WakeTask | null;
-  name: string;
+  automationName: string;
   triggerKind: AutomationTriggerKind;
   selectorKind: AutomationSelectorKind;
   accountIds: readonly string[];
   selectedModel: string;
   nowMs: number;
 }): AutomationSubmission {
-  const { task, name, triggerKind, selectorKind, accountIds, selectedModel, nowMs } = input;
+  const {
+    task,
+    automationName,
+    triggerKind,
+    selectorKind,
+    accountIds,
+    selectedModel,
+    nowMs,
+  } = input;
   const weeklyReset = triggerKind === "weekly";
   const accountSelector = selectorKind === "account_ids"
     ? { kind: selectorKind, values: [...accountIds] }
@@ -117,7 +130,7 @@ export function buildAutomationSubmission(input: {
     ? { kind: "lightest_supported" as const }
     : { kind: "explicit" as const, value: selectedModel };
   const base = {
-    ...defaultWakeInput(name),
+    ...defaultWakeInput(automationName),
     enabled: task?.enabled ?? true,
     accountSelector,
     windowKinds: weeklyReset ? ["secondary" as const] : ["primary" as const],

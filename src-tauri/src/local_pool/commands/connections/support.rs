@@ -32,35 +32,38 @@ pub(super) fn empty_source_discovery(
 
 pub(super) fn source_probe_matches(
     before: &ProviderSourceRecord,
-    current: &ProviderSourceRecord,
+    updated_source: &ProviderSourceRecord,
 ) -> bool {
-    before.transport_identity() == current.transport_identity()
+    before.transport_identity() == updated_source.transport_identity()
 }
 
 pub(super) fn source_dispatch_configuration_changed(
-    previous: &ProviderSourceRecord,
-    next: &ProviderSourceRecord,
+    previous_source: &ProviderSourceRecord,
+    updated_source: &ProviderSourceRecord,
 ) -> bool {
-    !source_probe_matches(previous, next)
+    !source_probe_matches(previous_source, updated_source)
         || zenith_relay_core::pool_dispatch_permission_changed(
-            previous.pool_access(),
-            next.pool_access(),
+            previous_source.pool_access(),
+            updated_source.pool_access(),
         )
 }
 
 pub(super) fn source_runtime_policy_compatible(
-    previous: &[ProviderSourceRecord],
-    next: &[ProviderSourceRecord],
+    previous_sources: &[ProviderSourceRecord],
+    updated_sources: &[ProviderSourceRecord],
 ) -> bool {
-    zenith_relay_core::source_runtime_policy_compatible(previous, next)
+    zenith_relay_core::source_runtime_policy_compatible(previous_sources, updated_sources)
 }
 
 pub(super) fn source_catalog_visibility_changed(
-    previous: &[ProviderSourceRecord],
-    next: &[ProviderSourceRecord],
+    previous_sources: &[ProviderSourceRecord],
+    updated_sources: &[ProviderSourceRecord],
 ) -> bool {
-    previous.iter().any(|source| {
-        let Some(candidate) = next.iter().find(|candidate| candidate.id == source.id) else {
+    previous_sources.iter().any(|source| {
+        let Some(candidate) = updated_sources
+            .iter()
+            .find(|candidate| candidate.id == source.id)
+        else {
             return source.in_pool;
         };
         zenith_relay_core::pool_catalog_visibility_changed(
@@ -145,8 +148,10 @@ pub(super) fn default_weight() -> u32 {
     1
 }
 
-pub(super) fn normalize_pricing_identity(value: Option<String>) -> LocalResult<Option<String>> {
-    zenith_relay_core::normalize_pricing_identity(value).map_err(|_| {
+pub(super) fn normalize_pricing_identity(
+    pricing_identity: Option<String>,
+) -> LocalResult<Option<String>> {
+    zenith_relay_core::normalize_pricing_identity(pricing_identity).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             "pricing identity contains unsupported characters",

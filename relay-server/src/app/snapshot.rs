@@ -37,7 +37,6 @@ struct AccountSnapshotInputs<'a> {
     equivalents: &'a HashMap<String, ApiEquivalentSummary>,
     pricing_catalog: &'a PricingCatalog,
     pricing_context: &'a PricingContext,
-    basis_points_enabled: bool,
 }
 
 pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
@@ -83,6 +82,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         running,
         &routing_order,
         &equivalents,
+        &model_metadata,
         &mut warnings,
     )?;
     let mut account_summaries = accounts::account_summaries(
@@ -93,7 +93,6 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             equivalents: &equivalents,
             pricing_catalog: &pricing_catalog,
             pricing_context: &pricing_context,
-            basis_points_enabled: routing_policy.basis_points_enabled,
         },
         &mut warnings,
     )?;
@@ -147,7 +146,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         ),
         equivalents
             .values()
-            .map(|value| value.unpriced_tokens)
+            .map(|equivalent_summary| equivalent_summary.unpriced_tokens)
             .sum(),
     );
 
@@ -163,7 +162,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         },
         gateway: GatewaySummary {
             tool_policy: routing_policy.tool_policy.unwrap_or_default(),
-            basis_points_enabled: routing_policy.basis_points_enabled,
+            basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 routing_policy.pool_routing.as_ref(),
                 &source_summaries,
@@ -229,30 +228,32 @@ fn source_summaries(
     running: bool,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &HashMap<String, ApiEquivalentSummary>,
+    model_metadata: &zenith_relay_core::model_metadata::ModelMetadataCatalog,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<SourceSummary>, String> {
     records
         .iter()
-        .map(|(record, fence)| {
-            let secret_available = state.vault.load(&record.secret_ref)?.is_some();
+        .map(|(source_record, fence)| {
+            let secret_available = state.vault.load(&source_record.secret_ref)?.is_some();
             if !secret_available {
-                warnings.push(format!("source_secret_missing:{}", record.id));
+                warnings.push(format!("source_secret_missing:{}", source_record.id));
             }
-            let runtime_available = (running && record.enabled).then(|| {
-                if record.in_pool {
-                    pooled_source_runtime_available(routing_order, &record.id)
+            let runtime_available = (running && source_record.enabled).then(|| {
+                if source_record.in_pool {
+                    pooled_source_runtime_available(routing_order, &source_record.id)
                 } else {
-                    source_runtime_available(routing_order, &record.id)
+                    source_runtime_available(routing_order, &source_record.id)
                 }
             });
             let mut summary = source_summary(
-                record,
+                source_record,
                 secret_available,
                 runtime_available,
                 equivalents
-                    .get(&identity_hint(&record.id))
+                    .get(&identity_hint(&source_record.id))
                     .copied()
                     .unwrap_or_default(),
+                model_metadata,
             );
             summary.refresh_revision = Some(fence.revision());
             summary.refresh_state = SourceRefreshState {
@@ -260,7 +261,7 @@ fn source_summaries(
                     state
                         .refresh
                         .freshness(&fence.identity(), RefreshKind::Models),
-                    !record.models.is_empty(),
+                    !source_record.models.is_empty(),
                 ),
                 balance: RefreshStatus::from_evidence(
                     state
@@ -271,7 +272,7 @@ fn source_summaries(
             };
             if secret_available {
                 summary.provider_stats =
-                    crate::jobs::cached_source_stats(state, fence, &record.base_url);
+                    crate::jobs::cached_source_stats(state, fence, &source_record.base_url);
             }
             Ok(summary)
         })

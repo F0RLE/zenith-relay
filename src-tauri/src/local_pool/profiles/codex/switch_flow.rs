@@ -13,15 +13,16 @@ pub(super) fn switch_to_local_with(
     ensure_single_profile_backup(codex_home, backup_root)?;
     switch_transaction::run(codex_home, secrets, |secrets| {
         let detached_account_backup = match account_backup_for_profile(codex_home, backup_root)? {
-            Some(path) if external_account_provider_took_over(codex_home)? => {
-                let bytes = read_optional_bytes(&path)?;
-                let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
-                    LocalPoolError::new(
-                        ErrorCode::RecoveryRequired,
-                        "ChatGPT account profile backup disappeared during the switch",
-                    )
-                })?;
-                remove_if_unchanged(&path, &bytes)?;
+            Some(account_backup_path) if external_account_provider_took_over(codex_home)? => {
+                let backup_bytes = read_optional_bytes(&account_backup_path)?;
+                let backup = parse_account_backup_snapshot(&backup_bytes, &account_backup_path)?
+                    .ok_or_else(|| {
+                        LocalPoolError::new(
+                            ErrorCode::RecoveryRequired,
+                            "ChatGPT account profile backup disappeared during the switch",
+                        )
+                    })?;
+                remove_if_unchanged(&account_backup_path, &backup_bytes)?;
                 Some(backup)
             }
             Some(_) => {
@@ -106,24 +107,26 @@ pub(super) fn switch_to_account_with_intent(
     ensure_single_profile_backup(codex_home, backup_root)?;
     switch_transaction::run(codex_home, secrets, |secrets| {
         if rebase_newer_login {
-            if let Some(path) = account_backup_for_profile(codex_home, backup_root)? {
-                let bytes = read_optional_bytes(&path)?;
-                let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
-                    LocalPoolError::new(
-                        ErrorCode::RecoveryRequired,
-                        "ChatGPT account profile backup disappeared during activation",
-                    )
-                })?;
+            if let Some(account_backup_path) = account_backup_for_profile(codex_home, backup_root)?
+            {
+                let backup_bytes = read_optional_bytes(&account_backup_path)?;
+                let backup = parse_account_backup_snapshot(&backup_bytes, &account_backup_path)?
+                    .ok_or_else(|| {
+                        LocalPoolError::new(
+                            ErrorCode::RecoveryRequired,
+                            "ChatGPT account profile backup disappeared during activation",
+                        )
+                    })?;
                 let profile_dir = canonical_profile_dir(codex_home)?;
                 let auth_path = profile_dir.join(AUTH_FILE);
-                let auth = read_optional_bytes(&auth_path)?;
+                let auth_bytes = read_optional_bytes(&auth_path)?;
                 let config_path = profile_dir.join(CONFIG_FILE);
-                let config = read_optional_bytes(&config_path)?;
-                let document =
-                    parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-                if !account_managed_config_matches(&document)
+                let config_bytes = read_optional_bytes(&config_path)?;
+                let config_document =
+                    parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
+                if !account_managed_config_matches(&config_document)
                     || !account_auth_matches_snapshot(
-                        &auth,
+                        &auth_bytes,
                         &auth_path,
                         &backup.managed_access_hash,
                     )?
@@ -157,7 +160,12 @@ pub(super) fn ensure_test_native_catalog(home: &Path) {
     let has_compatible_native = fs::read_to_string(&path)
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-        .and_then(|value| value.get("models").and_then(Value::as_array).cloned())
+        .and_then(|catalog_document| {
+            catalog_document
+                .get("models")
+                .and_then(Value::as_array)
+                .cloned()
+        })
         .is_some_and(|models| {
             models.iter().any(|model| {
                 catalog::is_native_catalog_entry(model) && codex_catalog_entry_is_compatible(model)
@@ -166,20 +174,20 @@ pub(super) fn ensure_test_native_catalog(home: &Path) {
     if has_compatible_native {
         return;
     }
-    let mut entry = routed_codex_catalog_entry(None, "gpt-5.6-sol", 1, None);
-    entry["slug"] = Value::String("gpt-5.6-sol".into());
-    entry["display_name"] = Value::String("GPT-5.6 Sol".into());
-    entry["description"] = Value::String("Native test model".into());
-    entry["comp_hash"] = Value::String("official".into());
-    entry["default_reasoning_level"] = Value::String("low".into());
-    entry["supported_reasoning_levels"] = json!([
+    let mut catalog_entry = routed_codex_catalog_entry(None, "gpt-5.6-sol", 1, None);
+    catalog_entry["slug"] = Value::String("gpt-5.6-sol".into());
+    catalog_entry["display_name"] = Value::String("GPT-5.6 Sol".into());
+    catalog_entry["description"] = Value::String("Native test model".into());
+    catalog_entry["comp_hash"] = Value::String("official".into());
+    catalog_entry["default_reasoning_level"] = Value::String("low".into());
+    catalog_entry["supported_reasoning_levels"] = json!([
         {"effort": "low", "description": "Low"},
         {"effort": "medium", "description": "Medium"}
     ]);
-    entry["input_modalities"] = json!(["text", "image"]);
+    catalog_entry["input_modalities"] = json!(["text", "image"]);
     let _ = fs::write(
         path,
-        serde_json::to_string_pretty(&json!({"models": [entry]})).unwrap(),
+        serde_json::to_string_pretty(&json!({"models": [catalog_entry]})).unwrap(),
     );
 }
 

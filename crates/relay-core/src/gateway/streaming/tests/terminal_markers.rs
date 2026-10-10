@@ -78,7 +78,7 @@ async fn native_responses_done_marker_without_terminal_is_not_success() {
     let terminal = parse_sse_event(&failure);
     assert_eq!(terminal.outcome, Some(TerminalOutcome::Failure));
     assert_eq!(
-        terminal.payload.as_ref().unwrap()["response"]["error"]["code"],
+        terminal.event_payload.as_ref().unwrap()["response"]["error"]["code"],
         error_codes::STREAM_INCOMPLETE
     );
     assert!(stream.next().await.is_none());

@@ -3,6 +3,7 @@ mod connector;
 mod discovery;
 mod observations;
 mod probe;
+mod services;
 pub use observations::SourceRead;
 mod stats;
 
@@ -85,14 +86,15 @@ impl SourceTransportRecord for SourceTransportIdentity<'_> {
 
 /// A hot policy update is safe only when every source keeps the same runtime.
 pub fn source_runtime_policy_compatible<T: SourceTransportRecord>(
-    previous: &[T],
-    next: &[T],
+    previous_sources: &[T],
+    updated_sources: &[T],
 ) -> bool {
-    previous.len() == next.len()
-        && previous.iter().all(|source| {
-            let source = source.transport_identity();
-            next.iter()
-                .any(|candidate| candidate.transport_identity() == source)
+    previous_sources.len() == updated_sources.len()
+        && previous_sources.iter().all(|source| {
+            let transport_identity = source.transport_identity();
+            updated_sources
+                .iter()
+                .any(|candidate| candidate.transport_identity() == transport_identity)
         })
 }
 

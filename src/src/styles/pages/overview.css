@@ -263,7 +263,7 @@
   align-items: center;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-subtle);
 }
@@ -278,7 +278,7 @@
 .overview-analytics-header .relay-tabs button.active {
   background: var(--relay-surface);
   color: var(--relay-accent-hover);
-  box-shadow: var(--relay-shadow-soft);
+  box-shadow: none;
 }
 
 .overview-analytics-message {

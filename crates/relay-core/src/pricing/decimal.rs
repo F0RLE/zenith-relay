@@ -8,37 +8,37 @@ use super::PricingError;
 /// provider can send either a JSON number or a string, including scientific
 /// notation. Values are rounded to the nearest micro-unit, with halves away
 /// from zero (negative values are rejected before rounding).
-pub fn usd_to_micro(value: &Value, unit_scale: u128) -> Result<u64, PricingError> {
+pub fn usd_to_micro(price_value: &Value, unit_scale: u128) -> Result<u64, PricingError> {
     if decimal_digits(unit_scale).is_none() {
         // Prices are scaled in base ten. Reject arbitrary caller-provided
         // scales instead of silently applying a binary or mixed scale.
         return Err(PricingError::InvalidAmount);
     }
-    let text = value
+    let price_text = price_value
         .as_str()
         .map(str::to_owned)
-        .or_else(|| value.as_number().map(ToString::to_string))
+        .or_else(|| price_value.as_number().map(ToString::to_string))
         .ok_or(PricingError::InvalidAmount)?;
-    parse_decimal_to_scaled(&text, unit_scale, false)
+    parse_decimal_to_scaled(&price_text, unit_scale, false)
 }
 
 /// Converts USD/token into microUSD per million tokens.
-pub fn usd_per_token_to_micro_usd_per_million(value: &Value) -> Result<u64, PricingError> {
-    parse_decimal_value(value, 1_000_000_000_000)
+pub fn usd_per_token_to_micro_usd_per_million(price_value: &Value) -> Result<u64, PricingError> {
+    parse_decimal_value(price_value, 1_000_000_000_000)
 }
 
 /// Converts USD/request into microUSD per request.
-pub fn usd_per_request_to_micro_usd(value: &Value) -> Result<u64, PricingError> {
-    parse_decimal_value(value, 1_000_000)
+pub fn usd_per_request_to_micro_usd(price_value: &Value) -> Result<u64, PricingError> {
+    parse_decimal_value(price_value, 1_000_000)
 }
 
-fn parse_decimal_value(value: &Value, scale: u128) -> Result<u64, PricingError> {
-    let text = value
+fn parse_decimal_value(price_value: &Value, scale: u128) -> Result<u64, PricingError> {
+    let price_text = price_value
         .as_str()
         .map(str::to_owned)
-        .or_else(|| value.as_number().map(ToString::to_string))
+        .or_else(|| price_value.as_number().map(ToString::to_string))
         .ok_or(PricingError::InvalidAmount)?;
-    parse_decimal_to_scaled(&text, scale, false)
+    parse_decimal_to_scaled(&price_text, scale, false)
 }
 
 pub(crate) fn decimal_to_scaled_allow_zero(text: &str, scale: u128) -> Result<u64, PricingError> {
@@ -94,10 +94,10 @@ fn parse_decimal_to_scaled(text: &str, scale: u128, allow_zero: bool) -> Result<
         i64::try_from(fractional.len()).map_err(|_| PricingError::InvalidAmount)?;
     let shift = i64::from(exponent)
         .checked_add(scale_digits)
-        .and_then(|value| value.checked_sub(fractional_digits))
+        .and_then(|shift| shift.checked_sub(fractional_digits))
         .ok_or(PricingError::Overflow)?;
 
-    let result = if shift >= 0 {
+    let scaled_amount = if shift >= 0 {
         let power = u32::try_from(shift).map_err(|_| PricingError::Overflow)?;
         if power > 38 {
             return Err(PricingError::Overflow);
@@ -120,23 +120,23 @@ fn parse_decimal_to_scaled(text: &str, scale: u128, allow_zero: bool) -> Result<
             .ok_or(PricingError::Overflow)?
     };
 
-    let result = u64::try_from(result).map_err(|_| PricingError::Overflow)?;
-    (result > 0 || allow_zero)
-        .then_some(result)
+    let scaled_amount = u64::try_from(scaled_amount).map_err(|_| PricingError::Overflow)?;
+    (scaled_amount > 0 || allow_zero)
+        .then_some(scaled_amount)
         .ok_or(PricingError::InvalidAmount)
 }
 
-fn decimal_digits(value: u128) -> Option<i64> {
-    if value == 0 {
+fn decimal_digits(decimal_value: u128) -> Option<i64> {
+    if decimal_value == 0 {
         return None;
     }
-    let mut value = value;
+    let mut remaining_digits = decimal_value;
     let mut digits = 0_i64;
-    while value.is_multiple_of(10) {
-        value /= 10;
+    while remaining_digits.is_multiple_of(10) {
+        remaining_digits /= 10;
         digits += 1;
     }
-    (value == 1).then_some(digits)
+    (remaining_digits == 1).then_some(digits)
 }
 
 #[cfg(test)]

@@ -34,13 +34,14 @@ mod snapshot;
 
 pub use context::PricingContext;
 pub use quote::{
-    ImageModelPrice, ImageRequestPrice, PriceEvidence, PriceSource, PricingMetadata,
-    PricingSourceSummary, ResolvedPrice, SourcePricingMetadata, TokenPrice,
+    ImageModelPrice, ImageRequestPrice, LongContextRates, PriceEvidence, PriceSource,
+    PricingMetadata, PricingSourceSummary, ResolvedPrice, SourcePricingMetadata, TokenPrice,
+    TokenRateSet,
 };
 pub use snapshot::{CatalogEntry, PricingCatalog, PricingCatalogHandle, PricingError};
 
-fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
+fn normalize(text: &str) -> String {
+    text.trim().to_ascii_lowercase()
 }
 
 /// Rejected operator pricing provider or official family.
@@ -53,27 +54,28 @@ pub struct InvalidPricingIdentity;
 /// It may contain only ASCII letters, digits, `.`, `-`, and `_`, and must
 /// be at most 128 characters. Whitespace-only input is invalid, not absent.
 pub fn normalize_pricing_identity(
-    value: Option<String>,
+    pricing_identity: Option<String>,
 ) -> Result<Option<String>, InvalidPricingIdentity> {
-    let Some(value) = value else {
+    let Some(pricing_identity) = pricing_identity else {
         return Ok(None);
     };
-    let value = normalize(&value);
-    if value.is_empty()
-        || value.len() > 128
-        || !value
+    let pricing_identity = normalize(&pricing_identity);
+    if pricing_identity.is_empty()
+        || pricing_identity.len() > 128
+        || !pricing_identity
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
     {
         return Err(InvalidPricingIdentity);
     }
-    Ok(Some(value))
+    Ok(Some(pricing_identity))
 }
 
-fn unqualified(value: &str) -> String {
-    value
-        .rsplit_once('/')
-        .map_or_else(|| normalize(value), |(_, model)| normalize(model))
+fn unqualified(model_id: &str) -> String {
+    model_id.rsplit_once('/').map_or_else(
+        || normalize(model_id),
+        |(_, model_name)| normalize(model_name),
+    )
 }
 
 #[cfg(test)]

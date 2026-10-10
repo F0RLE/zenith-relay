@@ -1,8 +1,8 @@
 //! Responses tool definitions translated into Anthropic tool blocks.
 
 use super::{
-    bridged_namespace_tool_name, AdapterError, AdapterResult, ClientToolTarget,
-    MessagesBridgeState, ResponsesToolKind, TranslatedTools,
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, ResponsesToolKind,
+    TranslatedTools,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +23,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|namespace_name| !namespace_name.is_empty())
                 else {
                     continue;
                 };
@@ -31,7 +31,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
                     .get("description")
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|value| !value.is_empty());
+                    .filter(|description_text| !description_text.is_empty());
                 let Some(children) = tool.get("tools").and_then(Value::as_array) else {
                     continue;
                 };
@@ -56,7 +56,8 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
                     // Messages source advertise them under a fake contract.
                 }
             }
-            _ => return Err(AdapterError::unsupported_tool()),
+            // Hosted tools have no Messages equivalent; leave them out.
+            _ => {}
         }
     }
     Ok(TranslatedTools {
@@ -72,23 +73,15 @@ fn translate_client_tool(
     namespace: Option<&str>,
     namespace_description: Option<&str>,
 ) -> AdapterResult<()> {
-    let kind = ResponsesToolKind::from_definition(tool)?;
-    let name = tool
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(AdapterError::unsupported_tool)?;
-    let upstream_name = namespace
-        .map(|namespace| bridged_namespace_tool_name(namespace, name))
-        .unwrap_or_else(|| name.to_string());
+    let target = ClientToolTarget::from_definition(tool, namespace)?;
+    let upstream_name = target.upstream_name();
     if client_tools.contains_key(&upstream_name) {
         return Err(AdapterError::unsupported_tool());
     }
 
     let mut translated =
         Map::from_iter([("name".to_string(), Value::String(upstream_name.clone()))]);
-    match kind {
+    match target.kind {
         ResponsesToolKind::Function => {
             let mut schema = tool
                 .get("parameters")
@@ -106,7 +99,10 @@ fn translate_client_tool(
                 _ => return Err(AdapterError::unsupported_tool()),
             }
             translated.insert("input_schema".to_string(), Value::Object(schema.clone()));
-            if let Some(strict) = tool.get("strict").filter(|value| !value.is_null()) {
+            if let Some(strict) = tool
+                .get("strict")
+                .filter(|strict_value| !strict_value.is_null())
+            {
                 if !strict.is_boolean() {
                     return Err(AdapterError::invalid_request());
                 }
@@ -114,47 +110,18 @@ fn translate_client_tool(
             }
         }
         ResponsesToolKind::Custom => {
-            if tool
-                .get("defer_loading")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || tool
-                    .get("allowed_callers")
-                    .is_some_and(|callers| !callers.is_null())
-            {
-                return Err(AdapterError::unsupported_tool());
-            }
             translated.insert("input_schema".to_string(), custom_tool_input_schema(tool)?);
         }
     }
-    let tool_description = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(namespace) = namespace {
-        let mut description = format!("Codex namespace `{namespace}` tool `{name}`.");
-        if let Some(namespace_description) = namespace_description {
-            description.push_str(&format!(" {namespace_description}"));
-        }
-        if let Some(tool_description) = tool_description {
-            description.push_str(&format!(" {tool_description}"));
-        }
+    if let Some(description) = super::super::super::contracts::bridged_tool_description(
+        tool,
+        namespace,
+        namespace_description,
+        &target.name,
+    ) {
         translated.insert("description".to_string(), Value::String(description));
-    } else if let Some(description) = tool_description {
-        translated.insert(
-            "description".to_string(),
-            Value::String(description.to_string()),
-        );
     }
-    client_tools.insert(
-        upstream_name,
-        ClientToolTarget {
-            kind,
-            name: name.to_string(),
-            namespace: namespace.map(str::to_string),
-        },
-    );
+    client_tools.insert(upstream_name, target);
     upstream.push(Value::Object(translated));
     Ok(())
 }
@@ -162,26 +129,27 @@ fn translate_client_tool(
 pub(in crate::protocol::adapter) fn custom_tool_input_schema(
     tool: &Map<String, Value>,
 ) -> AdapterResult<Value> {
-    let mut input = Map::from_iter([("type".to_string(), Value::String("string".to_string()))]);
-    if let Some(format) = tool.get("format") {
-        let format = format
+    let mut input_schema =
+        Map::from_iter([("type".to_string(), Value::String("string".to_string()))]);
+    if let Some(format_value) = tool.get("format") {
+        let format_object = format_value
             .as_object()
             .ok_or_else(AdapterError::unsupported_tool)?;
-        match format.get("type").and_then(Value::as_str) {
+        match format_object.get("type").and_then(Value::as_str) {
             Some("text") => {}
             Some("grammar") => {
-                let syntax = format
+                let syntax = format_object
                     .get("syntax")
                     .and_then(Value::as_str)
                     .filter(|syntax| matches!(*syntax, "lark" | "regex"))
                     .ok_or_else(AdapterError::unsupported_tool)?;
-                let definition = format
+                let definition = format_object
                     .get("definition")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|definition| !definition.is_empty())
                     .ok_or_else(AdapterError::unsupported_tool)?;
-                input.insert(
+                input_schema.insert(
                     "description".to_string(),
                     Value::String(format!(
                         "Raw tool input. It must satisfy this {syntax} grammar:\n{definition}"
@@ -193,7 +161,7 @@ pub(in crate::protocol::adapter) fn custom_tool_input_schema(
     }
     Ok(json!({
         "type": "object",
-        "properties": {"input": Value::Object(input)},
+        "properties": {"input": Value::Object(input_schema)},
         "required": ["input"],
         "additionalProperties": false,
     }))
@@ -201,7 +169,7 @@ pub(in crate::protocol::adapter) fn custom_tool_input_schema(
 
 #[derive(Debug)]
 pub(super) struct TranslatedToolChoice {
-    pub(super) value: Option<Value>,
+    pub(super) translated_choice: Option<Value>,
     pub(super) allowed_names: Option<BTreeSet<String>>,
 }
 

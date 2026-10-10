@@ -30,6 +30,12 @@ pub(super) fn gateway_error_event(
     stream_id: Option<&str>,
 ) -> Value {
     let code = super::super::errors::api_error_code(failure.category);
+    let origin = failure.origin.for_category(failure.category);
+    let message = failure
+        .upstream_error
+        .as_ref()
+        .and_then(|details| details.message.as_deref())
+        .unwrap_or(failure.message);
     let mut event = json!({
         "type": "error",
         "status": failure.status.as_u16(),
@@ -39,10 +45,10 @@ pub(super) fn gateway_error_event(
                 code,
             ),
             "code": code,
-            "message": failure.upstream_error.as_ref().and_then(|details| details.message.as_deref()).unwrap_or(failure.message),
+            "message": origin.prefix_message(message),
             "param": null,
             "zenith_relay": {
-                "origin": failure.origin.for_category(failure.category).as_str(),
+                "origin": origin.as_str(),
                 "category": failure.category,
                 "request_id": request_id,
             },
@@ -220,13 +226,17 @@ impl GatewayFailure {
 
     pub(super) fn upstream_status(
         status: StatusCode,
-        body: Option<&[u8]>,
+        upstream_error_body: Option<&[u8]>,
         origin: ErrorOrigin,
     ) -> Self {
-        let classification = super::super::errors::classify_upstream_error(status, body);
+        let classification =
+            super::super::errors::classify_upstream_error(status, upstream_error_body);
         Self::classified(status, classification.category, origin).with_upstream_error(
-            body.map(|body| {
-                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), body)
+            upstream_error_body.map(|error_body| {
+                crate::usage::UpstreamErrorDetails::from_response_body(
+                    Some(status.as_u16()),
+                    error_body,
+                )
             }),
         )
     }

@@ -212,11 +212,11 @@ pub(super) async fn reconcile_remote_account_ids(
 }
 
 pub(super) fn reconciled_remote_error(
-    current: Option<&str>,
+    stored_error_code: Option<&str>,
     remote_exists: bool,
 ) -> Option<String> {
     if remote_exists {
-        current
+        stored_error_code
             .filter(|code| *code != REMOTE_MISSING_ERROR)
             .map(str::to_string)
     } else {

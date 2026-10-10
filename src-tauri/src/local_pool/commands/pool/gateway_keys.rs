@@ -48,10 +48,10 @@ pub(in crate::local_pool::commands) fn ensure_system_gateway_key(
         return Ok(key);
     }
 
-    let id = SYSTEM_GATEWAY_KEY_ID.to_string();
+    let system_key_id = SYSTEM_GATEWAY_KEY_ID.to_string();
     let key = LocalGatewayKeyRecord {
-        secret_ref: system_gateway_secret_ref(&id),
-        id,
+        secret_ref: system_gateway_secret_ref(&system_key_id),
+        id: system_key_id,
         label: SYSTEM_GATEWAY_KEY_LABEL.into(),
         enabled: true,
         system: true,
@@ -66,14 +66,14 @@ pub(in crate::local_pool::commands) fn ensure_system_gateway_key(
     Ok(key)
 }
 
-fn system_gateway_secret_ref(id: &str) -> String {
+fn system_gateway_secret_ref(system_key_id: &str) -> String {
     #[cfg(test)]
     {
-        format!("key:{id}:test_{}", Uuid::new_v4().simple())
+        format!("key:{system_key_id}:test_{}", Uuid::new_v4().simple())
     }
     #[cfg(not(test))]
     {
-        format!("key:{id}")
+        format!("key:{system_key_id}")
     }
 }
 
@@ -164,7 +164,10 @@ fn rollback_gateway_key_cleanup(
         failures.push(format!("state restore failed: {error}"));
     }
     for (secret_ref, secret) in retired_secrets {
-        if !attempted_refs.iter().any(|value| value == secret_ref) {
+        if !attempted_refs
+            .iter()
+            .any(|attempted_secret_ref| attempted_secret_ref == secret_ref)
+        {
             continue;
         }
         if let Some(secret) = secret {

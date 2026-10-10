@@ -47,7 +47,6 @@ pub(super) struct AccountPrepareInput<'a> {
     pub(super) half_open_probe: bool,
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) basis_points_relay_retry_parameter: Option<&'static str>,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_adapter_error: &'a mut Option<crate::protocol::AdapterError>,
 }
@@ -55,7 +54,9 @@ pub(super) struct AccountPrepareInput<'a> {
 /// Turn one reserved account into a serialized upstream attempt. A route that
 /// cannot carry this endpoint continues the loop; a client-shaped body returns
 /// immediately.
-pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> AccountPrepare {
+pub(super) fn prepare_account_attempt(
+    account_prepare_input: AccountPrepareInput<'_>,
+) -> AccountPrepare {
     let AccountPrepareInput {
         runtime,
         key,
@@ -71,11 +72,10 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         half_open_probe,
         diagnostics,
         client_context_id,
-        basis_points_relay_retry_parameter,
         last_failure,
         last_adapter_error,
         ..
-    } = input;
+    } = account_prepare_input;
     let Some(mut route) = runtime.executor_route(
         candidate_id,
         resolved_model,
@@ -102,7 +102,6 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         selected_service_tier,
         crate::WireApi::Responses,
     );
-    runtime.use_native_responses_when_speed_requested(&mut route);
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
     if basis_points_route {
         if let Some(step) = reject_account_basis_points(
@@ -137,7 +136,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         route_responses_lite.is_some(),
         basis_points_route,
     ) {
-        Ok(body) => body,
+        Ok(upstream_response_body) => upstream_response_body,
         Err(step) => return step,
     };
     // Saved tool optimization is not applied. Wake, compact, and alpha/search
@@ -146,11 +145,7 @@ pub(super) fn prepare_account_attempt(input: AccountPrepareInput<'_>) -> Account
         return step;
     }
     if basis_points_route {
-        match rewrite_account_basis_points_body(
-            &upstream_body,
-            basis_points_relay_retry_parameter,
-            last_adapter_error,
-        ) {
+        match rewrite_account_basis_points_body(&upstream_body, last_adapter_error) {
             Ok(prepared) => upstream_body = prepared,
             Err(step) => return step,
         }
@@ -270,10 +265,9 @@ fn apply_account_tool_policy(
 #[allow(clippy::result_large_err)]
 fn rewrite_account_basis_points_body(
     upstream_body: &Value,
-    retry_parameter: Option<&'static str>,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<Value, AccountPrepare> {
-    match super::super::basis_points::prepare_upstream(upstream_body, retry_parameter) {
+    match super::super::basis_points::prepare_request(upstream_body) {
         Ok(prepared) => Ok(prepared),
         Err(error) if error.is_route_incompatible() => {
             *last_adapter_error = Some(error);

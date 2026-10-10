@@ -22,11 +22,11 @@ export type UsageLoadOptions = {
 // in the same short burst.
 const USAGE_REVALIDATION_COOLDOWN_MS = 1_000;
 
-type UsageCacheEntry<T> = { value: T; updatedAt: number };
+type UsageCacheEntry<T> = { data: T; updatedAt: number };
 
-function rememberUsage<T>(cache: Map<string, UsageCacheEntry<T>>, key: string, value: T) {
+function rememberUsage<T>(cache: Map<string, UsageCacheEntry<T>>, key: string, usageData: T) {
   cache.delete(key);
-  cache.set(key, { value, updatedAt: Date.now() });
+  cache.set(key, { data: usageData, updatedAt: Date.now() });
   while (cache.size > 8) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
@@ -63,9 +63,9 @@ export function useRelayUsage(commands: RelayUsageCommands) {
     }
     const cached = localCache.current.get(key);
     if (cached) {
-      setLocalUsagePage(cached.value);
+      setLocalUsagePage(cached.data);
       if (!options.force && Date.now() - cached.updatedAt < USAGE_REVALIDATION_COOLDOWN_MS) {
-        return Promise.resolve(cached.value);
+        return Promise.resolve(cached.data);
       }
     } else if (queryChanged) {
       // A new filter must not show the previous report while it is loading.
@@ -76,27 +76,27 @@ export function useRelayUsage(commands: RelayUsageCommands) {
       // Re-adopt a deduplicated query after another filter was selected. Its
       // original completion was intentionally invalidated above, so this
       // current gate owns the visible result instead.
-      return localRequest.current.run(() => existing, (value) => {
-        rememberUsage(localCache.current, key, value);
+      return localRequest.current.run(() => existing, (usagePage) => {
+        rememberUsage(localCache.current, key, usagePage);
         displayedLocalQueryKey.current = key;
-        setLocalUsagePage(value);
+        setLocalUsagePage(usagePage);
       });
     }
-    const request = localRequest.current.run(
+    const localUsageRequest = localRequest.current.run(
       () => commands.localUsagePage(query),
-      (value) => {
-        rememberUsage(localCache.current, key, value);
+      (usagePage) => {
+        rememberUsage(localCache.current, key, usagePage);
         displayedLocalQueryKey.current = key;
-        setLocalUsagePage(value);
+        setLocalUsagePage(usagePage);
       },
     );
-    localInFlight.current.set(key, request);
-    void request.then(() => {
-      if (localInFlight.current.get(key) === request) localInFlight.current.delete(key);
+    localInFlight.current.set(key, localUsageRequest);
+    void localUsageRequest.then(() => {
+      if (localInFlight.current.get(key) === localUsageRequest) localInFlight.current.delete(key);
     }, () => {
-      if (localInFlight.current.get(key) === request) localInFlight.current.delete(key);
+      if (localInFlight.current.get(key) === localUsageRequest) localInFlight.current.delete(key);
     });
-    return request;
+    return localUsageRequest;
   }, [commands]);
 
   const loadRemoteUsage = useCallback((query: RemoteUsageQuery, options: UsageLoadOptions = {}) => {
@@ -110,10 +110,10 @@ export function useRelayUsage(commands: RelayUsageCommands) {
     }
     const cached = remoteCache.current.get(key);
     if (cached !== undefined) {
-      setRemoteUsage(cached.value?.events ?? []);
-      setRemoteUsagePage(cached.value);
+      setRemoteUsage(cached.data?.events ?? []);
+      setRemoteUsagePage(cached.data);
       if (!options.force && Date.now() - cached.updatedAt < USAGE_REVALIDATION_COOLDOWN_MS) {
-        return Promise.resolve(cached.value);
+        return Promise.resolve(cached.data);
       }
     } else if (queryChanged) {
       // A new filter must not show the previous report while it is loading.
@@ -122,29 +122,29 @@ export function useRelayUsage(commands: RelayUsageCommands) {
     }
     const existing = remoteInFlight.current.get(key);
     if (existing) {
-      return remoteRequest.current.run(() => existing, (usage) => {
-        rememberUsage(remoteCache.current, key, usage);
+      return remoteRequest.current.run(() => existing, (usagePage) => {
+        rememberUsage(remoteCache.current, key, usagePage);
         displayedRemoteQueryKey.current = key;
-        setRemoteUsage(usage?.events ?? []);
-        setRemoteUsagePage(usage);
+        setRemoteUsage(usagePage?.events ?? []);
+        setRemoteUsagePage(usagePage);
       });
     }
-    const request = remoteRequest.current.run(
+    const remoteUsageRequest = remoteRequest.current.run(
       () => commands.remoteUsage(query),
-      (usage) => {
-        rememberUsage(remoteCache.current, key, usage);
+      (usagePage) => {
+        rememberUsage(remoteCache.current, key, usagePage);
         displayedRemoteQueryKey.current = key;
-        setRemoteUsage(usage?.events ?? []);
-        setRemoteUsagePage(usage);
+        setRemoteUsage(usagePage?.events ?? []);
+        setRemoteUsagePage(usagePage);
       },
     );
-    remoteInFlight.current.set(key, request);
-    void request.then(() => {
-      if (remoteInFlight.current.get(key) === request) remoteInFlight.current.delete(key);
+    remoteInFlight.current.set(key, remoteUsageRequest);
+    void remoteUsageRequest.then(() => {
+      if (remoteInFlight.current.get(key) === remoteUsageRequest) remoteInFlight.current.delete(key);
     }, () => {
-      if (remoteInFlight.current.get(key) === request) remoteInFlight.current.delete(key);
+      if (remoteInFlight.current.get(key) === remoteUsageRequest) remoteInFlight.current.delete(key);
     });
-    return request;
+    return remoteUsageRequest;
   }, [commands]);
 
   const resetUsage = useCallback(() => {

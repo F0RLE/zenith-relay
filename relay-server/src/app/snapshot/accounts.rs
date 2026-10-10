@@ -8,11 +8,12 @@ pub(super) fn account_summaries(
 ) -> Result<Vec<AccountSummary>, String> {
     let quota_windows = records
         .iter()
-        .filter_map(|(record, _)| {
-            let window =
-                zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)?;
+        .filter_map(|(account_record, _)| {
+            let window = zenith_relay_core::protocol::api_equivalent_projection_window(
+                &account_record.quota,
+            )?;
             Some((
-                identity_hint(&record.id),
+                identity_hint(&account_record.id),
                 window.window_start_ms.unwrap_or_default(),
                 window.observed_at_ms,
             ))
@@ -25,24 +26,27 @@ pub(super) fn account_summaries(
     )?;
     records
         .iter()
-        .map(|(record, fence)| {
-            let secret = state.vault.load(&record.secret_ref)?;
+        .map(|(account_record, fence)| {
+            let secret = state.vault.load(&account_record.secret_ref)?;
             let secret_available = secret.is_some();
             if !secret_available {
-                warnings.push(format!("account_secret_missing:{}", record.id));
+                warnings.push(format!("account_secret_missing:{}", account_record.id));
             }
-            let credential = secret
-                .as_deref()
-                .and_then(|value| serde_json::from_str::<AccountCredential>(value).ok());
-            let basis_points_available = credential
-                .as_ref()
-                .is_some_and(|value| value.has_oauth() && !value.is_agent_identity());
+            let credential = secret.as_deref().and_then(|credential_json| {
+                serde_json::from_str::<AccountCredential>(credential_json).ok()
+            });
+            let basis_points_available = credential.as_ref().is_some_and(|account_credential| {
+                account_credential.has_oauth()
+                    && !account_credential.is_agent_identity()
+                    && account_credential.oauth_client_kind
+                        == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
+            });
             let (proxy_mode, proxy_available) = credential
                 .as_ref()
                 .map(|credential| {
                     account_proxy_status(
                         state,
-                        record,
+                        account_record,
                         credential,
                         inputs.proxy_settings.common_configured,
                         inputs.proxy_settings.common_available,
@@ -50,18 +54,21 @@ pub(super) fn account_summaries(
                     )
                 })
                 .unwrap_or((ProxyMode::Direct, false));
-            let quota_window_usage = quota_window_usage(record, &quota_equivalents);
+            let quota_window_usage = quota_window_usage(account_record, &quota_equivalents);
             let mut summary = account_summary(
-                record,
+                account_record,
                 AccountSummaryInputs {
+                    oauth_client_kind: credential
+                        .as_ref()
+                        .map(|credential| credential.oauth_client_kind)
+                        .unwrap_or_default(),
                     secret_available,
                     basis_points_available,
-                    basis_points_enabled: inputs.basis_points_enabled,
                     proxy_mode,
                     proxy_available,
                     api_equivalent: inputs
                         .equivalents
-                        .get(&identity_hint(&record.id))
+                        .get(&identity_hint(&account_record.id))
                         .copied()
                         .unwrap_or_default(),
                     quota_window_usage,
@@ -73,26 +80,35 @@ pub(super) fn account_summaries(
                     state
                         .refresh
                         .freshness(&fence.identity(), RefreshKind::Models),
-                    !record.models.is_empty(),
+                    !account_record.models.is_empty(),
                 ),
                 quota: RefreshStatus::from_evidence(
                     state
                         .refresh
                         .freshness(&fence.identity(), RefreshKind::Quota),
-                    record.quota.updated_at_ms.is_some(),
+                    account_record.quota.updated_at_ms.is_some(),
                 ),
             };
+            summary.credit_balance_key = credential
+                .as_ref()
+                .and_then(|credential| {
+                    zenith_relay_core::providers::chatgpt::credit_balance_key(
+                        &credential.chatgpt_account_id,
+                    )
+                })
+                .map(hex::encode);
             Ok(summary)
         })
         .collect()
 }
 
 fn quota_window_usage(
-    record: &ServerAccountRecord,
+    account_record: &ServerAccountRecord,
     equivalents: &HashMap<String, ApiEquivalentSummary>,
 ) -> Option<QuotaWindowUsage> {
-    let window = zenith_relay_core::protocol::api_equivalent_projection_window(&record.quota)?;
-    let hint = identity_hint(&record.id);
+    let window =
+        zenith_relay_core::protocol::api_equivalent_projection_window(&account_record.quota)?;
+    let hint = identity_hint(&account_record.id);
     Some(QuotaWindowUsage {
         kind: window.kind,
         window_start_ms: window.window_start_ms.unwrap_or_default(),

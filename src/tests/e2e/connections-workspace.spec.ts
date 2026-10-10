@@ -110,6 +110,30 @@ test("proxy import can skip checks and complete without diagnostic requests", as
   expect((await commands(page)).some((call) => call.command === "check_local_stored_proxy")).toBe(false);
 });
 
+for (const mode of ["local", "remote"] as const) {
+  test(`sources retain hidden selections and change only selected pool members in ${mode}`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, sourceCount: 3 });
+    await openConnections(page);
+    await page.getByRole("tab", { name: "Sources", exact: true }).click();
+    const cards = page.locator(".source-card");
+    await expect(cards).toHaveCount(3);
+    await cards.nth(0).getByRole("checkbox").check();
+    await cards.nth(1).getByRole("checkbox").check();
+    await expect(page.locator(".sources-selection-toolbar")).toContainText("Selected: 2");
+    await page.getByRole("textbox", { name: "Search", exact: true }).fill("Backup API 2");
+    await expect(cards).toHaveCount(1);
+    await expect(page.locator(".sources-selection-toolbar")).toContainText("Selected: 2");
+    await page.getByRole("button", { name: "Remove from pool", exact: true }).click();
+    await page.getByRole("textbox", { name: "Search", exact: true }).fill("");
+    await expect(cards).toHaveCount(3);
+    await expect(cards.filter({ hasText: "Example compatible API" })).toContainText("Outside pool");
+    await expect(cards.filter({ hasText: "Backup API 1" })).toContainText("Outside pool");
+    await expect(cards.filter({ hasText: "Backup API 2" })).toContainText("In pool");
+    await page.getByRole("button", { name: "Clear selection", exact: true }).click();
+    await expect(page.locator(".sources-selection-toolbar")).toHaveCount(0);
+  });
+}
+
 async function expectDialogFits(page: Page) {
   const dialog = page.getByRole("dialog");
   expect(await dialog.evaluate((element) => {
@@ -140,16 +164,16 @@ for (const theme of ["light", "dark"] as const) {
       await capture("proxy-account");
       await page.getByRole("dialog").getByRole("button", { name: "Отмена", exact: true }).click();
       await page.getByRole("tab", { name: "Источники API", exact: true }).click();
-      expect(await page.locator(".connection-list-wrap").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await page.locator(".source-cards").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       await capture("sources");
-      await page.locator(".source-table tbody tr").first().getByRole("button", { name: "Изменить", exact: true }).click();
+      await page.locator(".source-card").first().getByRole("button", { name: "Изменить", exact: true }).click();
       await expectDialogFits(page);
       await capture("source-editor");
       await page.getByRole("dialog").getByRole("tab").nth(1).click();
       await page.locator(".source-price-group > summary").first().click();
       await expectDialogFits(page);
       await capture("source-prices");
-      await page.getByRole("dialog").getByRole("button", { name: "Отмена", exact: true }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "Закрыть", exact: true }).click();
       await page.getByRole("tab", { name: "Прокси", exact: true }).click();
       await page.locator(".proxy-storage-row").first().getByRole("button", { name: "Проверить прокси", exact: true }).click();
       await expect(page.locator(".proxy-storage-row").first()).toContainText("203.0.113.42");

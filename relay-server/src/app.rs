@@ -93,30 +93,37 @@ impl AppState {
         self: &Arc<Self>,
         expected: &ServerAccountRecord,
     ) -> Result<TokenSet, String> {
-        // Import holds this lock through the new record commit and slot
+        // Import holds this lock through the new account commit and slot
         // removal. A late preparation cannot register an old login afterward.
         let configuration = self.configuration_lock.lock().await;
-        let record = find_account(self, &expected.id)?;
-        if record.secret_ref != expected.secret_ref {
+        let account_record = find_account(self, &expected.id)?;
+        if account_record.secret_ref != expected.secret_ref {
             return Err("account login changed during authorization".into());
         }
         let secret = self
             .vault
-            .load(&record.secret_ref)?
+            .load(&account_record.secret_ref)?
             .ok_or_else(|| "stored account credential is missing".to_string())?;
         let credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
         self.token_authority
-            .register_if_absent(&record.id, credential.tokens()?, record.auth_state)
+            .register_if_absent(
+                &account_record.id,
+                credential.tokens()?,
+                account_record.auth_state,
+            )
             .map_err(|error| error.to_string())?;
-        let proxy = account_proxy_config(self, &record, &credential)?;
-        let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
-        let persistence = ServerTokenPersistence::for_account(self.clone(), &record);
+        let proxy = account_proxy_config(self, &account_record, &credential)?;
+        let refresh = CodexRefreshClient::new_with_proxy_for_kind(
+            credential.oauth_client_kind,
+            proxy.as_ref(),
+        )?;
+        let persistence = ServerTokenPersistence::for_account(self.clone(), &account_record);
         drop(configuration);
         let tokens = self
             .token_authority
             .prepare_and_persist(
-                &record.id,
+                &account_record.id,
                 now_ms(),
                 zenith_relay_core::accounts::TOKEN_REFRESH_SKEW_MS,
                 &refresh,
@@ -126,7 +133,7 @@ impl AppState {
             .map(|prepared| prepared.tokens)
             .map_err(|error| error.to_string())?;
         let _configuration = self.configuration_lock.lock().await;
-        if find_account(self, &record.id)?.secret_ref != record.secret_ref {
+        if find_account(self, &account_record.id)?.secret_ref != account_record.secret_ref {
             return Err("account login changed during authorization".into());
         }
         Ok(tokens)

@@ -41,7 +41,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 }
 
 #[tokio::test]
-async fn public_models_preserve_the_provider_model_order() {
+async fn public_models_group_providers_and_preserve_order_inside_each_group() {
     let (upstream, _) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway(
         vec![source(
@@ -70,14 +70,14 @@ async fn public_models_preserve_the_provider_model_order() {
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
         [
-            "private-second",
-            "vendor/grok-4.5",
-            "vendor/glm-4.7",
-            "vendor/gemini-3.6-flash-low",
-            "vendor/claude-haiku-4-5",
             "gpt-image-2",
             "gpt-5.4-mini",
             "gpt-5.6-sol",
+            "vendor/claude-haiku-4-5",
+            "vendor/gemini-3.6-flash-low",
+            "vendor/grok-4.5",
+            "private-second",
+            "vendor/glm-4.7",
             "vendor/glm-5.2",
             "private-first",
         ]

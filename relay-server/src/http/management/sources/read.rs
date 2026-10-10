@@ -10,9 +10,9 @@ pub async fn test_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<SourceSummary>, ManagementError> {
-    let record = find_source(&state, &id)?;
-    ensure_not_server_self_source(&state, &record.base_url)?;
-    let record = crate::jobs::request_source_models(&state, &id)
+    let source_record = find_source(&state, &id)?;
+    ensure_not_server_self_source(&state, &source_record.base_url)?;
+    let source_record = crate::jobs::request_source_models(&state, &id)
         .await
         .map_err(|error| {
             if error.contains("changed during refresh") {
@@ -32,7 +32,7 @@ pub async fn test_source(
                 )
             }
         })?;
-    Ok(Json(source_summary(&state, &record)?))
+    Ok(Json(source_summary(&state, &source_record)?))
 }
 
 fn stale_probe_error() -> ManagementError {
@@ -50,25 +50,25 @@ pub async fn probe_source(
     Path(id): Path<String>,
     Json(input): Json<zenith_relay_core::SourceProbeInput>,
 ) -> Result<Json<zenith_relay_core::SourceProbeResult>, ManagementError> {
-    let record = find_source(&state, &id)?;
-    if record.protocol_config.revision != input.expected_revision {
+    let source_record = find_source(&state, &id)?;
+    if source_record.protocol_config.revision != input.expected_revision {
         return Err(stale_probe_error());
     }
-    ensure_not_server_self_source(&state, &record.base_url)?;
+    ensure_not_server_self_source(&state, &source_record.base_url)?;
     let api_key = state
         .vault
-        .load(&record.secret_ref)
+        .load(&source_record.secret_ref)
         .map_err(vault_error)?
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::SOURCE_SECRET_MISSING, "source secret missing")
         })?;
-    let source = ProviderSource {
-        id: record.id.clone(),
-        name: record.name.clone(),
-        base_url: record.base_url.clone(),
+    let provider_source = ProviderSource {
+        id: source_record.id.clone(),
+        name: source_record.name.clone(),
+        base_url: source_record.base_url.clone(),
         api_key: api_key.clone(),
-        wire_api: record.wire_api,
-        models: record.models.clone(),
+        wire_api: source_record.wire_api,
+        models: source_record.models.clone(),
     };
     let (_, refresh_fence) = state.store.source_refresh_scope(&id).map_err(store_error)?;
     let refresh_state = state.clone();
@@ -78,40 +78,44 @@ pub async fn probe_source(
             refresh_state
                 .store
                 .source_refresh_scope(&refresh_fence_for_http.source_id)
-                .is_ok_and(|(_, current)| current == refresh_fence_for_http)
+                .is_ok_and(|(_, stored_fence)| stored_fence == refresh_fence_for_http)
         });
-    let result = zenith_relay_core::probe_source_generation_with_scope(&source, &input, http_scope)
-        .await
-        .map_err(source_discovery_error)?;
+    let probe_result =
+        zenith_relay_core::probe_source_generation_with_scope(&provider_source, &input, http_scope)
+            .await
+            .map_err(source_discovery_error)?;
     let _configuration = state.configuration_lock.lock().await;
-    let mut current = find_source(&state, &id)?;
-    let previous = current.clone();
+    let mut current_source_record = find_source(&state, &id)?;
+    let previous_source_record = current_source_record.clone();
     let (_, current_fence) = state.store.source_refresh_scope(&id).map_err(store_error)?;
     // Comparing visible fields alone accepts a delete/re-add with the same
     // source ID and configuration. The durable incarnation must still match.
     if current_fence != refresh_fence
-        || current.base_url != record.base_url
-        || current.models != record.models
-        || current.protocol_config != record.protocol_config
+        || current_source_record.base_url != source_record.base_url
+        || current_source_record.models != source_record.models
+        || current_source_record.protocol_config != source_record.protocol_config
         || state
             .vault
-            .load(&current.secret_ref)
+            .load(&current_source_record.secret_ref)
             .map_err(vault_error)?
             .as_deref()
             != Some(api_key.as_str())
-        || !current
+        || !current_source_record
             .protocol_config
-            .apply_probe(input.expected_revision, result.capability.clone())
+            .apply_probe(input.expected_revision, probe_result.capability.clone())
     {
         return Err(stale_probe_error());
     }
-    normalize_record_protocol_bindings(&mut current)?;
-    state.store.save_source(&current).map_err(store_error)?;
+    normalize_record_protocol_bindings(&mut current_source_record)?;
     state
-        .rebuild_runtime_or_rollback(|| state.store.save_source(&previous))
+        .store
+        .save_source(&current_source_record)
+        .map_err(store_error)?;
+    state
+        .rebuild_runtime_or_rollback(|| state.store.save_source(&previous_source_record))
         .await
         .map_err(runtime_error)?;
-    Ok(Json(result))
+    Ok(Json(probe_result))
 }
 
 pub async fn source_stats(
@@ -119,8 +123,8 @@ pub async fn source_stats(
     Path(id): Path<String>,
     Query(query): Query<SourceStatsQuery>,
 ) -> Result<Json<zenith_relay_core::SourceProviderStats>, ManagementError> {
-    let record = find_source(&state, &id)?;
-    ensure_not_server_self_source(&state, &record.base_url)?;
+    let source_record = find_source(&state, &id)?;
+    ensure_not_server_self_source(&state, &source_record.base_url)?;
     crate::jobs::request_source_stats(&state, &id, query.force)
         .await
         .map(Json)
@@ -145,21 +149,21 @@ pub async fn source_stats(
 }
 
 pub(super) async fn discover_models(
-    record: &SourceRecord,
+    source_record: &SourceRecord,
     api_key: &str,
 ) -> Result<SourceDiscovery, ManagementError> {
-    let source = ProviderSource {
-        id: record.id.clone(),
-        name: record.name.clone(),
-        base_url: record.base_url.clone(),
+    let provider_source = ProviderSource {
+        id: source_record.id.clone(),
+        name: source_record.name.clone(),
+        base_url: source_record.base_url.clone(),
         api_key: api_key.to_string(),
-        wire_api: record.wire_api,
-        models: record.models.clone(),
+        wire_api: source_record.wire_api,
+        models: source_record.models.clone(),
     };
     let discovery = discover_source_with_protocol_config(
-        &source,
-        &record.protocol_bindings,
-        &record.protocol_config,
+        &provider_source,
+        &source_record.protocol_bindings,
+        &source_record.protocol_config,
     )
     .await
     .map_err(source_discovery_error)?;

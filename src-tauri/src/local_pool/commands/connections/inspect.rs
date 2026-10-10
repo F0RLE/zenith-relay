@@ -16,28 +16,28 @@ pub async fn probe_local_source(
     input: zenith_relay_core::SourceProbeInput,
     state: State<'_, DesktopState>,
 ) -> CommandResult<zenith_relay_core::SourceProbeResult> {
-    let source = state
+    let source_snapshot = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    if input.expected_revision != source.protocol_config.revision {
+    if input.expected_revision != source_snapshot.protocol_config.revision {
         return Err(LocalPoolError::new(
             ErrorCode::SourceProbeStale,
             "source configuration changed; refresh before checking",
         )
         .into());
     }
-    let api_key = secret_store::load(&source.secret_ref)?
+    let api_key = secret_store::load(&source_snapshot.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    ensure_not_gateway_self_source(&state, &source.base_url)?;
+    ensure_not_gateway_self_source(&state, &source_snapshot.base_url)?;
     let runtime_source = ProviderSource {
-        id: source.id.clone(),
-        name: source.name.clone(),
-        base_url: source.base_url.clone(),
+        id: source_snapshot.id.clone(),
+        name: source_snapshot.name.clone(),
+        base_url: source_snapshot.base_url.clone(),
         api_key: api_key.clone(),
-        wire_api: source.wire_api,
-        models: source.models.clone(),
+        wire_api: source_snapshot.wire_api,
+        models: source_snapshot.models.clone(),
     };
     let (_, refresh_fence) = state.store()?.source_refresh_scope(&source_id)?;
     let refresh_state = state.inner().clone();
@@ -50,30 +50,30 @@ pub async fn probe_local_source(
                     .is_ok()
             })
         });
-    let result =
+    let probe_result =
         zenith_relay_core::probe_source_generation_with_scope(&runtime_source, &input, http_scope)
             .await
             .map_err(core_error)?;
     let _mutation = state.setup_guard().await;
-    let (mut current, same_incarnation) = {
+    let (mut source_record, same_incarnation) = {
         let store = state.store()?;
-        let current = store
+        let source_record = store
             .source(&source_id)
             .cloned()
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
         (
-            current,
+            source_record,
             store.ensure_source_refresh_current(&refresh_fence).is_ok(),
         )
     };
     // Visible configuration can be identical after delete/re-add. The probe
     // still belongs to the prior durable source incarnation in that case.
     if !same_incarnation
-        || !source_probe_matches(&source, &current)
-        || secret_store::load(&current.secret_ref)?.as_deref() != Some(api_key.as_str())
-        || !current
+        || !source_probe_matches(&source_snapshot, &source_record)
+        || secret_store::load(&source_record.secret_ref)?.as_deref() != Some(api_key.as_str())
+        || !source_record
             .protocol_config
-            .apply_probe(input.expected_revision, result.capability.clone())
+            .apply_probe(input.expected_revision, probe_result.capability.clone())
     {
         return Err(LocalPoolError::new(
             ErrorCode::SourceProbeStale,
@@ -82,15 +82,15 @@ pub async fn probe_local_source(
         .into());
     }
     let (old_sources, old_keys) = current_records(&state)?;
-    current
+    source_record
         .validate_protocol_bindings()
         .map_err(LocalPoolError::invalid_state)?;
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences =
         fence_runtime_candidates(runtime.as_deref(), &[], std::slice::from_ref(&source_id));
-    state.store()?.upsert_source(current)?;
+    state.store()?.upsert_source(source_record)?;
     sync_records_or_rollback(&state, old_sources, old_keys).await?;
-    Ok(result)
+    Ok(probe_result)
 }
 
 /// Refresh the source model catalog from the management view without

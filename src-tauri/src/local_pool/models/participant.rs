@@ -133,8 +133,8 @@ impl LocalAccountRecord {
         self.provider_family = self
             .provider_family
             .take()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
+            .map(|provider_name| provider_name.trim().to_ascii_lowercase())
+            .filter(|provider_name| !provider_name.is_empty());
     }
 }
 zenith_relay_core::impl_effective_models!(LocalAccountRecord);
@@ -208,13 +208,13 @@ impl ProviderSourceRecord {
         self.pricing_provider = self
             .pricing_provider
             .take()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
+            .map(|pricing_provider| pricing_provider.trim().to_ascii_lowercase())
+            .filter(|pricing_provider| !pricing_provider.is_empty());
         self.official_provider_family = self
             .official_provider_family
             .take()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
+            .map(|provider_family| provider_family.trim().to_ascii_lowercase())
+            .filter(|provider_family| !provider_family.is_empty());
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));

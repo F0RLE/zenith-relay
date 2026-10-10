@@ -6,7 +6,7 @@ pub(super) fn source_record(
     input: SourceInput,
 ) -> Result<SourceRecord, ManagementError> {
     let protocol_config = SourceProtocolConfig::automatic(&input.base_url);
-    let mut record = SourceRecord {
+    let mut source_record = SourceRecord {
         id,
         name: clean_label(&input.name, "source name")?,
         enabled: true,
@@ -32,41 +32,41 @@ pub(super) fn source_record(
         detected_model_prices: BTreeMap::new(),
         last_error_code: None,
     };
-    normalize_record_protocol_bindings(&mut record)?;
-    validate_source_record(&record, &input.api_key)?;
-    Ok(record)
+    normalize_record_protocol_bindings(&mut source_record)?;
+    validate_source_record(&source_record, &input.api_key)?;
+    Ok(source_record)
 }
 
 pub(super) fn validate_source_record(
-    record: &SourceRecord,
+    source_record: &SourceRecord,
     api_key: &str,
 ) -> Result<(), ManagementError> {
-    normalize_pricing_identity(record.pricing_provider.clone(), "pricing provider")?;
+    normalize_pricing_identity(source_record.pricing_provider.clone(), "pricing provider")?;
     normalize_pricing_identity(
-        record.official_provider_family.clone(),
+        source_record.official_provider_family.clone(),
         "official provider family",
     )?;
-    valid_recovery_delay(record.recovery_delay_seconds)?;
-    normalize_source_prices(record.model_price_overrides.clone())?;
-    normalize_source_prices(record.detected_model_prices.clone())?;
-    validate_record_protocol_bindings(record)?;
+    valid_recovery_delay(source_record.recovery_delay_seconds)?;
+    normalize_source_prices(source_record.model_price_overrides.clone())?;
+    normalize_source_prices(source_record.detected_model_prices.clone())?;
+    validate_record_protocol_bindings(source_record)?;
     ProviderSource {
-        id: record.id.clone(),
-        name: record.name.clone(),
-        base_url: record.base_url.clone(),
+        id: source_record.id.clone(),
+        name: source_record.name.clone(),
+        base_url: source_record.base_url.clone(),
         api_key: api_key.to_string(),
-        wire_api: record.wire_api,
-        models: record.models.clone(),
+        wire_api: source_record.wire_api,
+        models: source_record.models.clone(),
     }
     .validate()
     .map_err(|error| validation_error(error.to_string()))
 }
 
 pub(super) fn normalize_pricing_identity(
-    value: Option<String>,
+    pricing_identity: Option<String>,
     label: &str,
 ) -> Result<Option<String>, ManagementError> {
-    zenith_relay_core::normalize_pricing_identity(value).map_err(|_| {
+    zenith_relay_core::normalize_pricing_identity(pricing_identity).map_err(|_| {
         ManagementError::validation(
             error_codes::SOURCE_PRICING_IDENTITY_INVALID,
             format!("{label} contains unsupported characters"),
@@ -74,20 +74,20 @@ pub(super) fn normalize_pricing_identity(
     })
 }
 
-fn validate_record_protocol_bindings(record: &SourceRecord) -> Result<(), ManagementError> {
-    if record.protocol_bindings.is_empty() {
+fn validate_record_protocol_bindings(source_record: &SourceRecord) -> Result<(), ManagementError> {
+    if source_record.protocol_bindings.is_empty() {
         return Ok(());
     }
-    record
+    source_record
         .effective_protocol_bindings()
         .map(drop)
         .map_err(|error| validation_error(error.to_string()))
 }
 
 pub(super) fn normalize_record_protocol_bindings(
-    record: &mut SourceRecord,
+    source_record: &mut SourceRecord,
 ) -> Result<(), ManagementError> {
-    record
+    source_record
         .effective_protocol_bindings()
         .map(drop)
         .map_err(validation_error)
@@ -99,15 +99,15 @@ fn clear_source_binding_models(bindings: &mut [SourceProtocolBinding]) {
     }
 }
 
-pub(super) fn clear_source_catalog(record: &mut SourceRecord) {
-    record.models.clear();
-    record.detected_model_prices.clear();
-    clear_source_binding_models(&mut record.protocol_bindings);
+pub(super) fn clear_source_catalog(source_record: &mut SourceRecord) {
+    source_record.models.clear();
+    source_record.detected_model_prices.clear();
+    clear_source_binding_models(&mut source_record.protocol_bindings);
 }
 
-pub(super) fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
-    (value <= zenith_relay_core::MAX_SOURCE_RECOVERY_DELAY_SECONDS)
-        .then_some(value)
+pub(super) fn valid_recovery_delay(delay_seconds: u64) -> Result<u64, ManagementError> {
+    (delay_seconds <= zenith_relay_core::MAX_SOURCE_RECOVERY_DELAY_SECONDS)
+        .then_some(delay_seconds)
         .ok_or_else(|| {
             ManagementError::validation(
                 error_codes::SOURCE_RECOVERY_DELAY_INVALID,
@@ -124,13 +124,16 @@ pub(super) fn normalize_source_prices(
     })
 }
 
-pub(super) fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementError> {
+pub(super) fn find_source(
+    state: &AppState,
+    source_id: &str,
+) -> Result<SourceRecord, ManagementError> {
     state
         .store
         .sources()
         .map_err(store_error)?
         .into_iter()
-        .find(|record| record.id == id)
+        .find(|source_record| source_record.id == source_id)
         .ok_or_else(|| {
             ManagementError::not_found(error_codes::SOURCE_NOT_FOUND, "source not found")
         })
@@ -138,14 +141,14 @@ pub(super) fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, Ma
 
 pub(super) fn source_summary(
     state: &AppState,
-    record: &SourceRecord,
+    source_record: &SourceRecord,
 ) -> Result<SourceSummary, ManagementError> {
     state
         .snapshot()
         .map_err(store_error)?
         .sources
         .into_iter()
-        .find(|value| value.id == record.id)
+        .find(|source_summary| source_summary.id == source_record.id)
         .ok_or_else(|| {
             ManagementError::internal(error_codes::SNAPSHOT_MISSING, "source snapshot missing")
         })

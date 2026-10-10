@@ -29,10 +29,10 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn codex_model_responses_lite_candidates(&self, model: &str) -> Vec<String> {
-        let model = crate::model_id_key(model);
+        let model_id = crate::model_id_key(model);
         crate::poison::mutex(&self.codex_responses_lite_models)
             .iter()
-            .filter(|(_, candidate_model)| candidate_model == &model)
+            .filter(|(_, candidate_model)| candidate_model == &model_id)
             .map(|(candidate_id, _)| candidate_id.clone())
             .collect()
     }
@@ -40,15 +40,17 @@ impl GatewayRuntime {
     pub(crate) fn remember_codex_model_manifest(
         &self,
         candidate_id: &str,
-        value: Value,
+        manifest_payload: Value,
         _observed_at_ms: u64,
     ) {
         let scheduler = self.lock_scheduler();
         if scheduler.candidate(candidate_id).is_none() {
             return;
         }
-        crate::poison::mutex(&self.model_metadata.codex_manifests)
-            .insert(candidate_id.to_string(), CachedModelManifest { value });
+        crate::poison::mutex(&self.model_metadata.codex_manifests).insert(
+            candidate_id.to_string(),
+            CachedModelManifest { manifest_payload },
+        );
     }
 
     pub(crate) fn stale_codex_model_manifests<'a>(
@@ -61,7 +63,7 @@ impl GatewayRuntime {
             .filter_map(|candidate_id| {
                 manifests
                     .get(candidate_id)
-                    .map(|manifest| (candidate_id.to_string(), manifest.value.clone()))
+                    .map(|manifest| (candidate_id.to_string(), manifest.manifest_payload.clone()))
             })
             .collect()
     }

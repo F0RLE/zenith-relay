@@ -2,6 +2,100 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn relay_attach_clears_native_selection_and_named_profile_overrides() {
+    let (root, home, backups) = profile_dirs("relay-clears-native-routing");
+    let previous_config = r#"model_provider = "openai"
+model = "gpt-native"
+review_model = "gpt-native-review"
+model_catalog_json = "native-catalog.json"
+chatgpt_base_url = "https://chatgpt.example.com/v1"
+openai_base_url = "https://openai.example.com/v1"
+model_reasoning_effort = "high"
+
+[profiles.work]
+model_provider = "openai"
+model = "profile-native"
+model_catalog_json = "profile-native-catalog.json"
+openai_base_url = "https://profile.example.com/v1"
+"#;
+    fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"vendor/relay-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+
+    let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    assert_eq!(root_model_provider(&attached).as_deref(), Some(PROVIDER_ID));
+    assert!(root_model(&attached).is_none());
+    assert!(root_review_model(&attached).is_none());
+    assert!(root_chatgpt_base_url(&attached).is_none());
+    assert!(root_openai_base_url(&attached).is_none());
+    assert!(attached["profiles"]["work"].get("model").is_none());
+    assert!(attached["profiles"]["work"].get("model_provider").is_none());
+    assert!(attached["profiles"]["work"]
+        .get("model_catalog_json")
+        .is_none());
+    assert!(attached["profiles"]["work"]
+        .get("openai_base_url")
+        .is_none());
+    let providers = attached["model_providers"].as_table_like().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert!(providers.get(PROVIDER_ID).is_some());
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        previous_config
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn relay_attach_deactivates_external_provider_but_keeps_its_definition() {
+    let (root, home, backups) = profile_dirs("relay-clears-active-external-provider");
+    let previous_config = r#"model_provider = "external_provider"
+model = "external-model"
+
+[model_providers.external_provider]
+name = "External Provider"
+base_url = "https://provider.example.com/v1"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://custom.example.com/v1"
+"#;
+    fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
+    let secrets = MemorySecrets::default();
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"vendor/relay-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+
+    let attached = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(attached.contains("[model_providers.external_provider]"));
+    assert!(attached.contains("[model_providers.custom]"));
+    assert!(attached.contains("[model_providers.zenith_relay_local]"));
+
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        previous_config
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
     let (root, home, backups) = profile_dirs("model-catalog-restore");
     let previous_catalog_path = root.join("previous-codex-models.json");
@@ -323,6 +417,14 @@ fn managed_catalog_does_not_add_context_to_an_incomplete_native_row() {
 #[test]
 fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     let (root, home, backups) = profile_dirs("model-catalog-refresh");
+    let user_config = concat!(
+        "model_context_window = 200000\n",
+        "model_auto_compact_token_limit = 190000\n",
+        "\n[profiles.short]\n",
+        "model_context_window = 128000\n",
+        "model_auto_compact_token_limit = 110000\n",
+    );
+    fs::write(home.join(CONFIG_FILE), user_config).unwrap();
     let cache_path = home.join(MODELS_CACHE_FILE);
     fs::write(
         &cache_path,
@@ -340,6 +442,22 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     )
     .unwrap();
 
+    let attached_config = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let attached_auth = fs::read(home.join(AUTH_FILE)).unwrap();
+    let attached = parse_config(std::str::from_utf8(&attached_config).unwrap()).unwrap();
+    assert_eq!(attached["model_context_window"].as_integer(), Some(200_000));
+    assert_eq!(
+        attached["model_auto_compact_token_limit"].as_integer(),
+        Some(190_000)
+    );
+    assert_eq!(
+        attached["profiles"]["short"]["model_context_window"].as_integer(),
+        Some(128_000)
+    );
+    assert_eq!(
+        attached["profiles"]["short"]["model_auto_compact_token_limit"].as_integer(),
+        Some(110_000)
+    );
     assert!(refresh_managed_model_catalog(
         &home,
         &backups,
@@ -347,6 +465,8 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
         None
     )
     .unwrap());
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), attached_config);
+    assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), attached_auth);
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let catalog: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
@@ -363,6 +483,11 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
         None,
     )
     .unwrap());
+    restore_with(&home, &backups, &secrets).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+        user_config
+    );
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -878,7 +1003,7 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
     }
 }
 #[test]
-fn account_switch_keeps_the_current_catalog_unless_it_belongs_to_relay() {
+fn account_switch_clears_the_current_catalog_for_native_codex_models() {
     let (root, home, backups) = profile_dirs("oauth-account-native-catalog");
     let secrets = MemorySecrets::default();
     let tokens = TokenSet::new("access", Some("refresh".into()), None, None, 1, 1).unwrap();
@@ -899,16 +1024,13 @@ fn account_switch_keeps_the_current_catalog_unless_it_belongs_to_relay() {
     .unwrap();
 
     let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(attached["model"].as_str(), Some("gpt-5.6-sol"));
+    assert!(attached.get("model").is_none());
     assert_eq!(root_model_provider(&attached).as_deref(), Some("openai"));
-    assert_eq!(
-        root_model_catalog_json(&attached).as_deref(),
-        Some("official-catalog.json")
-    );
+    assert!(root_model_catalog_json(&attached).is_none());
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context() {
+fn direct_source_catalog_publishes_known_limits_without_client_context_policy() {
     let (root, home, _backups) = profile_dirs("direct-source-models-dev");
     ensure_test_native_catalog(&home);
     let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{
@@ -928,12 +1050,18 @@ fn direct_source_catalog_uses_models_dev_capabilities_without_overriding_context
     assert_eq!(value["models"][1]["display_name"], "Unknown");
     assert_eq!(value["models"][0]["input_modalities"], json!(["text"]));
     assert!(value["models"][0].get("context_window").is_none());
+    assert_eq!(value["models"][0]["max_context_window"], 64_000);
+    assert!(value["models"][0].get("auto_compact_token_limit").is_none());
+    assert!(value["models"][0]
+        .get("effective_context_window_percent")
+        .is_none());
     assert_eq!(
         value["models"][1]["input_modalities"],
         json!(["text", "image"])
     );
     assert_eq!(value["models"][1]["supported_reasoning_levels"], json!([]));
     assert!(value["models"][1].get("context_window").is_none());
+    assert!(value["models"][1].get("auto_compact_token_limit").is_none());
     let image = direct_source_model_catalog(
         &home,
         &["gpt-image-2".into(), "vendor/degrade2-model".into()],

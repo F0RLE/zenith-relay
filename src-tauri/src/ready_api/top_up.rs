@@ -11,8 +11,8 @@ pub(super) const BOT_DOMAIN: &str = "zenith_service_bot";
 pub(super) const MAX_AMOUNT_CENTS: i64 = 1_000_000;
 
 #[tauri::command]
-pub(super) fn prepare_top_up_amount(value: String) -> PreparedTopUpAmount {
-    match parse_usd_amount(&value) {
+pub(super) fn prepare_top_up_amount(amount_text: String) -> PreparedTopUpAmount {
+    match parse_usd_amount(&amount_text) {
         Some(amount_usd) => PreparedTopUpAmount {
             amount_cents: (amount_usd * 100.0).round() as i64,
             amount_usd,
@@ -51,21 +51,21 @@ async fn create_top_up_intent(
     app: AppHandle,
 ) -> Result<(), String> {
     validate_top_up_amount_cents(amount_cents)?;
-    let response = reqwest::Client::new()
+    let top_up_response = reqwest::Client::new()
         .post(api_url("/desktop/top-up-intents"))
         .bearer_auth(api_key)
         .json(&serde_json::json!({ "amountCents": amount_cents }))
         .send()
         .await
         .map_err(|err| format!("Could not create a top-up intent: {err}"))?;
-    if !response.status().is_success() {
-        return Err(api_error_message(response, "Could not create a top-up intent.").await);
+    if !top_up_response.status().is_success() {
+        return Err(api_error_message(top_up_response, "Could not create a top-up intent.").await);
     }
-    let payload = response
+    let top_up_envelope = top_up_response
         .json::<ApiEnvelope<TopUpIntentData>>()
         .await
         .map_err(|err| format!("Top-up intent response is invalid: {err}"))?;
-    let start = extract_top_up_start(payload.data)
+    let start = extract_top_up_start(top_up_envelope.data)
         .ok_or_else(|| "Top-up intent response is missing a start payload.".to_string())?;
     open_top_up_url(telegram_start_url(&start), app)
 }
@@ -80,28 +80,28 @@ pub(super) fn open_top_up_url(url: String, app: AppHandle) -> Result<(), String>
         .map_err(|err| err.to_string())
 }
 
-pub(super) fn is_allowed_top_up_url(value: &str) -> bool {
-    let Ok(input) = Url::parse(value) else {
+pub(super) fn is_allowed_top_up_url(url_text: &str) -> bool {
+    let Ok(parsed_url) = Url::parse(url_text) else {
         return false;
     };
-    if input.scheme() != "tg" || input.host_str() != Some("resolve") {
+    if parsed_url.scheme() != "tg" || parsed_url.host_str() != Some("resolve") {
         return false;
     }
     let mut has_start = false;
     let mut has_domain = false;
-    for (key, value) in input.query_pairs() {
-        if key == "domain" && value == BOT_DOMAIN {
+    for (query_key, query_value) in parsed_url.query_pairs() {
+        if query_key == "domain" && query_value == BOT_DOMAIN {
             has_domain = true;
         }
-        if key == "start" && !value.is_empty() {
+        if query_key == "start" && !query_value.is_empty() {
             has_start = true;
         }
     }
-    has_domain && has_start && input.fragment().is_none()
+    has_domain && has_start && parsed_url.fragment().is_none()
 }
 
-fn parse_usd_amount(value: &str) -> Option<f64> {
-    let trimmed = value.trim();
+fn parse_usd_amount(amount_text: &str) -> Option<f64> {
+    let trimmed = amount_text.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -128,21 +128,21 @@ pub(super) fn validate_top_up_amount_cents(amount_cents: i64) -> Result<(), Stri
     Ok(())
 }
 
-fn looks_like_grouped_decimal(value: &str) -> bool {
-    value
+fn looks_like_grouped_decimal(amount_text: &str) -> bool {
+    amount_text
         .split_once(',')
         .map(|(_, tail)| tail.chars().take_while(|ch| ch.is_ascii_digit()).count() == 3)
         .unwrap_or(false)
 }
 
-pub(super) fn extract_top_up_start(data: TopUpIntentData) -> Option<String> {
+pub(super) fn extract_top_up_start(intent_data: TopUpIntentData) -> Option<String> {
     let TopUpIntentData {
         bot_url,
         url,
         start_parameter,
         start_payload,
         code,
-    } = data;
+    } = intent_data;
     bot_url
         .as_deref()
         .and_then(extract_top_up_start_from_url)
@@ -152,27 +152,27 @@ pub(super) fn extract_top_up_start(data: TopUpIntentData) -> Option<String> {
         .or_else(|| code.filter(|start| is_valid_top_up_start(start)))
 }
 
-pub(super) fn extract_top_up_start_from_url(value: &str) -> Option<String> {
-    let input = Url::parse(value).ok()?;
-    if input.scheme() == "tg"
-        && input.host_str() == Some("resolve")
-        && input
+pub(super) fn extract_top_up_start_from_url(url_text: &str) -> Option<String> {
+    let parsed_url = Url::parse(url_text).ok()?;
+    if parsed_url.scheme() == "tg"
+        && parsed_url.host_str() == Some("resolve")
+        && parsed_url
             .query_pairs()
-            .any(|(key, value)| key == "domain" && value == BOT_DOMAIN)
+            .any(|(key, query_value)| key == "domain" && query_value == BOT_DOMAIN)
     {
-        return input
+        return parsed_url
             .query_pairs()
-            .find_map(|(key, value)| (key == "start").then(|| value.to_string()))
+            .find_map(|(key, query_value)| (key == "start").then(|| query_value.to_string()))
             .filter(|start| is_valid_top_up_start(start));
     }
     let base = Url::parse(BOT_URL).ok()?;
-    if input.scheme() == base.scheme()
-        && input.host_str() == base.host_str()
-        && input.path() == base.path()
+    if parsed_url.scheme() == base.scheme()
+        && parsed_url.host_str() == base.host_str()
+        && parsed_url.path() == base.path()
     {
-        return input
+        return parsed_url
             .query_pairs()
-            .find_map(|(key, value)| (key == "start").then(|| value.to_string()))
+            .find_map(|(key, query_value)| (key == "start").then(|| query_value.to_string()))
             .filter(|start| is_valid_top_up_start(start));
     }
     None

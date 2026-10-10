@@ -13,7 +13,7 @@ pub(super) struct ClientRequest {
     pub(super) tool_policy: RequestToolPolicy,
     pub(super) request_id: String,
     pub(super) budget: SharedRequestBudget,
-    value: Value,
+    request_body: Value,
     pub(super) requested_model: String,
     pub(super) resolved_model: String,
     pub(super) stream_id: Option<String>,
@@ -31,7 +31,7 @@ impl ClientRequest {
     pub(super) fn account_retained_input(&self) {
         self.budget
             .retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
-                &self.value,
+                &self.request_body,
             ));
     }
 
@@ -41,7 +41,7 @@ impl ClientRequest {
         route: &ExecutorRoute,
     ) {
         self.service_tier_policy.prepare_for_candidate(
-            &mut self.value,
+            &mut self.request_body,
             self.service_tier_policy
                 .select_for_model(runtime, &route.source_model),
             WireApi::Responses,
@@ -54,72 +54,86 @@ impl ClientRequest {
         route: &ExecutorRoute,
     ) -> DefaultServiceTier {
         self.service_tier_policy.effective_tier(
-            &self.value,
+            &self.request_body,
             self.service_tier_policy
                 .select_for_model(runtime, &route.source_model),
             WireApi::Responses,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
-        let (value, _) = self.filtered_value_for(route)?;
-        serde_json::to_string(&value)
+        let (filtered_request, _) = self.filtered_value_for(route)?;
+        serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    pub(super) fn observed_payload_for(
+        &self,
+        runtime: &GatewayRuntime,
+        route: &mut ExecutorRoute,
+    ) -> Result<String, GatewayFailure> {
+        let (filtered_request, _) = self.filtered_value_for(route)?;
+        let payload = serde_json::to_string(&filtered_request)
+            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
+        self.tool_policy
+            .observe_cache_context(runtime, route, &filtered_request);
+        Ok(payload)
     }
 
     fn filtered_value_for(
         &self,
         route: &ExecutorRoute,
     ) -> Result<(Value, ToolUseDiagnostics), GatewayFailure> {
-        let mut value = self.value_for(route);
+        let mut filtered_request = self.request_for_route(route);
         let mut policy = self.tool_policy.clone();
         policy
-            .apply(&mut value)
+            .apply(&mut filtered_request)
             .map_err(GatewayFailure::invalid_request)?;
-        Ok((value, policy.diagnostics))
+        Ok((filtered_request, policy.diagnostics))
     }
 
     pub(super) fn http_payload(&self) -> Result<Vec<u8>, GatewayFailure> {
-        let mut value = self.value.clone();
-        let object = value
+        let mut request_body = self.request_body.clone();
+        let request_object = request_body
             .as_object_mut()
             .expect("request object was validated before routing");
-        object.remove("type");
-        object.remove("stream_id");
-        object.insert("stream".to_string(), Value::Bool(true));
-        serde_json::to_vec(&value)
+        request_object.remove("type");
+        request_object.remove("stream_id");
+        request_object.insert("stream".to_string(), Value::Bool(true));
+        serde_json::to_vec(&request_body)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
     }
 
     pub(super) fn reasoning_effort_for(&self, route: &ExecutorRoute) -> ReasoningEffortDiagnostics {
         ReasoningEffortDiagnostics::from_bodies(
-            &self.value,
-            &self.value_for(route),
+            &self.request_body,
+            &self.request_for_route(route),
             WireApi::Responses,
         )
     }
 
-    fn value_for(&self, route: &ExecutorRoute) -> Value {
-        let mut value = self.value.clone();
-        let object = value
+    fn request_for_route(&self, route: &ExecutorRoute) -> Value {
+        let mut routed_request = self.request_body.clone();
+        let routed_object = routed_request
             .as_object_mut()
             .expect("request object was validated before routing");
-        object.insert(
+        routed_object.insert(
             "type".to_string(),
             Value::String("response.create".to_string()),
         );
-        object.insert(
+        routed_object.insert(
             "model".to_string(),
             Value::String(route.source_model.clone()),
         );
         let responses_lite = self.responses_lite_for(route);
         if responses_lite {
-            crate::gateway::request::normalize_responses_lite_request(object);
+            crate::gateway::request::normalize_responses_lite_request(routed_object);
         }
         if route.account_id.is_some() {
-            crate::gateway::request::normalize_account_request(object, responses_lite);
+            crate::gateway::request::normalize_account_request(routed_object, responses_lite);
         }
-        value
+        routed_request
     }
 
     pub(super) fn responses_lite_for(&self, route: &ExecutorRoute) -> bool {
@@ -127,7 +141,7 @@ impl ClientRequest {
             || route.account_id.as_deref().is_some_and(|candidate_id| {
                 self.responses_lite_candidates
                     .iter()
-                    .any(|id| id == candidate_id)
+                    .any(|candidate_model_id| candidate_model_id == candidate_id)
             })
     }
 

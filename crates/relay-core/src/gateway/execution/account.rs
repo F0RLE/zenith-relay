@@ -1,4 +1,9 @@
+//! Account-only request execution for Responses, compact, search, and wake.
+//! Account-specific encrypted-history recovery lives in `encrypted_context`;
+//! the Basis Points transport adapter remains isolated in `basis_points`.
+
 mod dispatch;
+mod encrypted_context;
 mod failure;
 mod prepare;
 mod selection;
@@ -17,7 +22,10 @@ use super::super::request::{
 use super::request::adapter_error_response;
 use super::AttemptRepairs;
 use super::CandidateRetryContext;
-use super::{finish_request_failure, RequestFailureInput};
+use super::{
+    detach_encrypted_context_repair_owner, finish_request_failure,
+    release_encrypted_context_repair_owner, RequestFailureInput,
+};
 use crate::runtime::AuthenticatedKey;
 use crate::scheduler::rotation::{RotationOperation, SharedRequestBudget};
 use crate::{GatewayRuntime, WireApi};
@@ -33,7 +41,9 @@ use prepare::{
 use selection::{handle_account_selection_miss, AccountSelectionMiss, AccountSelectionMissInput};
 use serde_json::Value;
 use std::sync::Arc;
-use success::{complete_account_response, AccountSuccess, AccountSuccessInput};
+use success::{complete_account_response, AccountSuccessInput};
+
+pub(in crate::gateway::execution) use encrypted_context::drop_rejected_encrypted_context;
 
 pub(in crate::gateway) struct AccountExecution {
     pub(in crate::gateway) runtime: Arc<GatewayRuntime>,
@@ -105,8 +115,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut tried = account_only_exclusions.clone();
     let budget = SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget());
     let mut repairs = AttemptRepairs::default();
-    let mut basis_points_relay_retry_attempted = false;
-    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -149,7 +157,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             repairs.quota_yield = true;
             if endpoint != AccountEndpoint::Wake {
                 if let Some(affinity_key) = response_affinity_key.clone() {
-                    if runtime.automatic_response_owner_should_yield_for_quota(
+                    if runtime.automatic_response_owner_should_yield(
                         &key,
                         &affinity_key,
                         &resolved_model,
@@ -181,7 +189,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         let retry_until_available = runtime.route_recovery_enabled();
         let wait_for_candidate_availability =
             wait_for_candidate_availability && retry_until_available;
-        let Some((selected, lease)) = runtime
+        let Some((selected_candidate, lease)) = runtime
             .select_and_reserve_operation_with_budget(
                 &key,
                 &resolved_model,
@@ -197,6 +205,12 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             )
             .await
         else {
+            release_encrypted_context_repair_owner(
+                &mut repairs,
+                &mut response_affinity_key,
+                &mut requires_affinity_owner,
+                &runtime,
+            );
             match handle_account_selection_miss(AccountSelectionMissInput {
                 budget: &budget,
                 runtime: &runtime,
@@ -225,9 +239,14 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 AccountSelectionMiss::Respond(response) => return response,
             }
         };
-        tried.insert(selected.candidate_id.clone());
-        let response_affinity_hit = selected.response_affinity_hit;
-        let prepared = match prepare_account_attempt(AccountPrepareInput {
+        detach_encrypted_context_repair_owner(
+            &repairs,
+            &mut response_affinity_key,
+            &mut requires_affinity_owner,
+        );
+        tried.insert(selected_candidate.candidate_id.clone());
+        let response_affinity_hit = selected_candidate.response_affinity_hit;
+        let prepared_attempt = match prepare_account_attempt(AccountPrepareInput {
             runtime: &runtime,
             key: &key,
             request: &mut request,
@@ -238,16 +257,31 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             automatic_responses_lite,
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
-            candidate_id: &selected.candidate_id,
-            half_open_probe: selected.half_open_probe,
-            diagnostics: selected.diagnostics,
+            candidate_id: &selected_candidate.candidate_id,
+            half_open_probe: selected_candidate.half_open_probe,
+            diagnostics: selected_candidate.diagnostics,
             client_context_id: &client_context_id,
-            basis_points_relay_retry_parameter,
             last_failure: &mut last_failure,
             last_adapter_error: &mut last_adapter_error,
         }) {
-            AccountPrepare::Continue => continue,
-            AccountPrepare::Respond(response) => return response,
+            AccountPrepare::Continue => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                continue;
+            }
+            AccountPrepare::Respond(response) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                return response;
+            }
             AccountPrepare::Ready(prepared) => *prepared,
         };
         let PreparedAccountAttempt {
@@ -260,9 +294,9 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             request_body,
             reasoning_effort,
             tool_use,
-        } = prepared;
+        } = prepared_attempt;
 
-        let dispatched = match dispatch_account_attempt(AccountDispatchInput {
+        let dispatched_attempt = match dispatch_account_attempt(AccountDispatchInput {
             runtime: &runtime,
             key: &key,
             lease: &lease,
@@ -289,8 +323,24 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         })
         .await
         {
-            AccountDispatch::Continue => continue,
-            AccountDispatch::Respond(response) => return response,
+            AccountDispatch::Continue => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                continue;
+            }
+            AccountDispatch::Respond(response) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                return response;
+            }
             AccountDispatch::Ready(dispatched) => *dispatched,
         };
         let DispatchedAccountAttempt {
@@ -304,11 +354,12 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             tool_use,
             selected_error_origin,
             basis_points_route,
-        } = dispatched;
+        } = dispatched_attempt;
         if !status.is_success() {
             match handle_account_status_failure(AccountStatusFailureInput {
                 status,
                 bytes,
+                endpoint,
                 response_headers: &response_headers,
                 runtime: &runtime,
                 lease: &lease,
@@ -337,10 +388,18 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 last_preserved_upstream_error: &mut last_preserved_upstream_error,
             }) {
                 AccountStatusFailure::Continue => continue,
-                AccountStatusFailure::Respond(response) => return response,
+                AccountStatusFailure::Respond(response) => {
+                    release_encrypted_context_repair_owner(
+                        &mut repairs,
+                        &mut response_affinity_key,
+                        &mut requires_affinity_owner,
+                        &runtime,
+                    );
+                    return response;
+                }
             }
         }
-        match complete_account_response(AccountSuccessInput {
+        let response = complete_account_response(AccountSuccessInput {
             status,
             bytes,
             response_headers: &response_headers,
@@ -359,15 +418,22 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             selected_error_origin,
             basis_points_route,
             prompt_affinity_key: &prompt_affinity_key,
-            tried: &mut tried,
-            basis_points_relay_retry_attempted: &mut basis_points_relay_retry_attempted,
-            basis_points_relay_retry_parameter: &mut basis_points_relay_retry_parameter,
-            last_adapter_error: &mut last_adapter_error,
-        }) {
-            AccountSuccess::Continue => continue,
-            AccountSuccess::Respond(response) => return response,
-        }
+        });
+        release_encrypted_context_repair_owner(
+            &mut repairs,
+            &mut response_affinity_key,
+            &mut requires_affinity_owner,
+            &runtime,
+        );
+        return response;
     }
+
+    release_encrypted_context_repair_owner(
+        &mut repairs,
+        &mut response_affinity_key,
+        &mut requires_affinity_owner,
+        &runtime,
+    );
 
     if let Some(error) = crate::gateway::errors::admission_error(&budget) {
         return error;

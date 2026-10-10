@@ -9,42 +9,43 @@ export type ModelGroup<T> = {
   id: string;
   provider: string;
   label: string;
-  items: T[];
+  models: T[];
 };
 
 type GroupModelsOptions<T> = {
-  metadata?: (item: T) => ModelCatalogIdentity | null | undefined;
-  isNativeChatGpt?: (item: T) => boolean;
+  metadata?: (model: T) => ModelCatalogIdentity | null | undefined;
+  isNativeChatGpt?: (model: T) => boolean;
 };
 
 const OTHER_PROVIDER = "other";
 
 /** Model ids compare trimmed and case-insensitively. Callers keep the original spelling. */
-export function modelIdKey(value: string) {
-  return value.trim().toLowerCase();
+export function modelIdKey(modelId: string) {
+  return modelId.trim().toLowerCase();
 }
 
 /** Older servers expose metadata only on operational model rows. */
 export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefined) {
   return new Map<string, ModelCatalogIdentity>([
     ...(gateway?.models ?? []).map((model): [string, ModelCatalogIdentity] => [modelIdKey(model.id), model]),
-    ...Object.entries(gateway?.modelCatalog ?? {}).map(([id, identity]): [string, ModelCatalogIdentity] => [modelIdKey(id), identity]),
+    ...Object.entries(gateway?.modelCatalog ?? {}).map(([modelId, identity]): [string, ModelCatalogIdentity] => [modelIdKey(modelId), identity]),
   ]);
 }
 
 /**
- * Group models by provider. Within each provider, preserve the snapshot order;
- * catalog families do not create a second presentation order.
+ * Group models by provider. The runtime snapshot already carries the
+ * provider-block order from the backend; preserve it, including an explicit
+ * manual order, and keep the source order inside each block.
  */
 export function groupModels<T>(
-  items: readonly T[],
+  models: readonly T[],
   options: GroupModelsOptions<T> = {},
 ): ModelGroup<T>[] {
   const groups = new Map<string, ModelGroup<T>>();
-  for (const item of items) {
-    const metadata = options.metadata?.(item);
+  for (const model of models) {
+    const metadata = options.metadata?.(model);
     const provider = normalizeCatalogValue(
-      options.isNativeChatGpt?.(item) ? "openai" : metadata?.catalogProvider,
+      options.isNativeChatGpt?.(model) ? "openai" : metadata?.catalogProvider,
     ) ?? OTHER_PROVIDER;
     const key = provider;
     let group = groups.get(key);
@@ -53,59 +54,51 @@ export function groupModels<T>(
         id: `catalog-${encodeURIComponent(provider)}`,
         provider,
         label: provider === OTHER_PROVIDER ? "Other" : displayCatalogValue(provider),
-        items: [],
+        models: [],
       };
       groups.set(key, group);
     }
-    group.items.push(item);
+    group.models.push(model);
   }
   return [...groups.values()];
 }
 
 /** Deduplicate model IDs without applying a second presentation order. */
 export function uniqueModelIds(models: readonly string[]) {
-  const seen = new Set<string>();
+  const seenModelIds = new Set<string>();
   return models.filter((model) => {
     const key = modelIdKey(model);
-    return Boolean(key) && !seen.has(key) && seen.add(key);
+    return Boolean(key) && !seenModelIds.has(key) && seenModelIds.add(key);
   });
 }
 
 /**
- * Put IDs known by the current snapshot in backend order. IDs found only in
- * usage history follow in their first-seen order.
+ * Put IDs known by the current snapshot in backend order. IDs found only in a
+ * member or usage inventory follow that inventory's first-seen order.
  */
 export function orderModelIdsBySnapshot(
   models: readonly string[],
   summaries: readonly ModelSummary[],
-  options: { unknownOrder?: "first-seen" | "stable-id" } = {},
 ) {
   const unique = uniqueModelIds(models);
   const byId = new Map(unique.map((model) => [modelIdKey(model), model]));
-  const ordered = summaries
-    .map((model) => byId.get(modelIdKey(model.id)))
-    .filter((model): model is string => Boolean(model));
-  const known = new Set(ordered.map((model) => modelIdKey(model)));
-  const unknown = unique.filter((model) => !known.has(modelIdKey(model)));
-  if (options.unknownOrder === "stable-id") {
-    unknown.sort(compareModelIds);
-  }
-  return [...ordered, ...unknown];
+  const ordered = uniqueModelIds(summaries.map((model) => model.id))
+    .map((modelId) => byId.get(modelIdKey(modelId)))
+    .filter((model): model is string => model !== undefined);
+  const knownModelIds = new Set(ordered.map((model) => modelIdKey(model)));
+  const unknownModels = unique.filter((model) => !knownModelIds.has(modelIdKey(model)));
+  return [...ordered, ...unknownModels];
 }
 
-function compareModelIds(left: string, right: string) {
-  const leftKey = modelIdKey(left);
-  const rightKey = modelIdKey(right);
-  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : left < right ? -1 : left > right ? 1 : 0;
+function normalizeCatalogValue(catalogValue: string | null | undefined) {
+  const normalizedProvider = catalogValue?.trim().toLowerCase();
+  if (!normalizedProvider) return null;
+  if (normalizedProvider === "x-ai" || normalizedProvider === "x_ai") return "xai";
+  return normalizedProvider;
 }
 
-function normalizeCatalogValue(value: string | null | undefined) {
-  const normalized = value?.trim().toLowerCase();
-  return normalized || null;
-}
-
-function displayCatalogValue(value: string) {
-  return value
+function displayCatalogValue(providerId: string) {
+  return providerId
     .split(/[-_]+/)
     .filter(Boolean)
     .map(displayCatalogPart)

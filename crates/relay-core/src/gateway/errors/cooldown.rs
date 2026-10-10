@@ -18,9 +18,9 @@ pub(crate) fn settle_status_failure(
     status: StatusCode,
     category: &'static str,
     headers: &reqwest::header::HeaderMap,
-    body: Option<&[u8]>,
+    response_body: Option<&[u8]>,
 ) -> FailureState {
-    let hint = body.map(rate_limit_body_hint).unwrap_or_default();
+    let hint = response_body.map(rate_limit_body_hint).unwrap_or_default();
     settle_classified_failure(runtime, lease, model, status, category, headers, hint)
 }
 
@@ -47,6 +47,16 @@ pub(crate) fn settle_attempt_failure(
     current_failure_state(runtime, lease.candidate_id(), model)
 }
 
+pub(crate) fn settle_route_failure(
+    runtime: &GatewayRuntime,
+    lease: &crate::runtime::CandidateLease,
+    route: &ExecutorRoute,
+    failure: &AttemptFailure,
+    headers: &reqwest::header::HeaderMap,
+) -> FailureState {
+    settle_attempt_failure(runtime, lease, &route.source_model, failure, headers)
+}
+
 /// Compute a provider-scoped block without mutating admission state. The
 /// caller must install it in the same critical section as lease settlement.
 pub(crate) struct CooldownInput<'a> {
@@ -60,7 +70,7 @@ pub(crate) struct CooldownInput<'a> {
     pub(crate) now: SystemTime,
 }
 
-pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownRequest<'_>> {
+pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<CooldownRequest<'_>> {
     let CooldownInput {
         runtime,
         candidate_id,
@@ -70,7 +80,7 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
         headers,
         hint,
         now: now_system,
-    } = input;
+    } = cooldown_input;
     if !failure_category_requires_cooldown(category) {
         return None;
     }

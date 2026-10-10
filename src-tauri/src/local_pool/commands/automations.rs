@@ -44,10 +44,10 @@ pub async fn create_quota_wake_automation(
         now_ms,
         now_ms,
     )?;
-    let mut records = state.store()?.automations().clone();
+    let mut automation_records = state.store()?.automations().clone();
     validate_automation_targets(&task, &state)?;
-    records.tasks.push(task);
-    state.store()?.replace_automations(records)?;
+    automation_records.tasks.push(task);
+    state.store()?.replace_automations(automation_records)?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -58,7 +58,7 @@ pub async fn update_quota_wake_automation(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let current = state
+    let existing_task = state
         .store()?
         .automations()
         .tasks
@@ -67,15 +67,15 @@ pub async fn update_quota_wake_automation(
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "automation not found"))?;
     let updated = build_task(
-        current.id.clone(),
+        existing_task.id.clone(),
         input,
-        current.created_at_ms,
+        existing_task.created_at_ms,
         current_time_ms(),
     )?;
     validate_automation_targets(&updated, &state)?;
     state.remove_pending_wakes_for_task(&updated.id)?;
-    let records = state.store()?.automations().clone();
-    let tasks = records
+    let automation_records = state.store()?.automations().clone();
+    let tasks = automation_records
         .tasks
         .into_iter()
         .map(|task| {
@@ -88,8 +88,8 @@ pub async fn update_quota_wake_automation(
         .collect();
     state.store()?.replace_automations(AutomationRecords {
         tasks,
-        state: records.state,
-        weekly_reset_fingerprints: records.weekly_reset_fingerprints,
+        state: automation_records.state,
+        weekly_reset_fingerprints: automation_records.weekly_reset_fingerprints,
     })?;
     state.snapshot().await.map_err(Into::into)
 }
@@ -101,7 +101,7 @@ pub async fn set_quota_wake_automation_enabled(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let current = state
+    let existing_task = state
         .store()?
         .automations()
         .tasks
@@ -109,21 +109,21 @@ pub async fn set_quota_wake_automation_enabled(
         .find(|task| task.id == task_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "automation not found"))?;
-    if current.enabled == enabled {
+    if existing_task.enabled == enabled {
         return state.snapshot().await.map_err(Into::into);
     }
     if !enabled {
         state.remove_pending_wakes_for_task(&task_id)?;
     }
-    let mut records = state.store()?.automations().clone();
-    let task = records
+    let mut automation_records = state.store()?.automations().clone();
+    let task = automation_records
         .tasks
         .iter_mut()
         .find(|task| task.id == task_id)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "automation not found"))?;
     task.enabled = enabled;
     task.updated_at_ms = current_time_ms();
-    state.store()?.replace_automations(records)?;
+    state.store()?.replace_automations(automation_records)?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -143,11 +143,11 @@ pub async fn delete_quota_wake_automation(
         return Err(LocalPoolError::new(ErrorCode::NotFound, "automation not found").into());
     }
     state.remove_pending_wakes_for_task(&task_id)?;
-    let mut records = state.store()?.automations().clone();
-    let before = records.tasks.len();
-    records.tasks.retain(|task| task.id != task_id);
-    debug_assert!(records.tasks.len() < before);
-    state.store()?.replace_automations(records)?;
+    let mut automation_records = state.store()?.automations().clone();
+    let task_count_before_delete = automation_records.tasks.len();
+    automation_records.tasks.retain(|task| task.id != task_id);
+    debug_assert!(automation_records.tasks.len() < task_count_before_delete);
+    state.store()?.replace_automations(automation_records)?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -273,10 +273,10 @@ fn selected_automation_accounts(
     let store = state.store()?;
     let mut selected = match &task.account_selector {
         AccountSelector::AllEligible => store.accounts().to_vec(),
-        AccountSelector::AccountIds(ids) => ids
+        AccountSelector::AccountIds(account_ids) => account_ids
             .iter()
-            .map(|id| {
-                store.account(id).cloned().ok_or_else(|| {
+            .map(|account_id| {
+                store.account(account_id).cloned().ok_or_else(|| {
                     LocalPoolError::new(
                         ErrorCode::InvalidState,
                         "automation contains an unknown account",

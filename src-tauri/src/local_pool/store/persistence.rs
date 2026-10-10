@@ -58,27 +58,30 @@ pub(super) fn load_or_initialize_state(
     root: &Path,
     database: &TelemetryDb,
 ) -> Result<PersistedState> {
-    let values = database.state_json_values()?;
-    if values.is_empty() {
+    let state_entries = database.state_json_entries()?;
+    if state_entries.is_empty() {
         let state = layout::load_legacy_state(root)?.unwrap_or_default();
         persist_state(database, &state)?;
         return Ok(state);
     }
     Ok(PersistedState {
-        gateway: load_state_from_values(&values, STATE_GATEWAY)?,
-        sources: load_state_from_values(&values, STATE_SOURCES)?,
-        accounts: load_state_from_values(&values, STATE_ACCOUNTS)?,
-        keys: load_state_from_values(&values, STATE_KEYS)?,
-        automations: load_state_from_values(&values, STATE_AUTOMATIONS)?,
-        remote_target: load_optional_state_from_values(&values, STATE_REMOTE_TARGET)?,
-        ownership_operation: load_optional_state_from_values(&values, STATE_OWNERSHIP_OPERATION)?,
-        source_refresh_revisions: values
+        gateway: load_state_from_entries(&state_entries, STATE_GATEWAY)?,
+        sources: load_state_from_entries(&state_entries, STATE_SOURCES)?,
+        accounts: load_state_from_entries(&state_entries, STATE_ACCOUNTS)?,
+        keys: load_state_from_entries(&state_entries, STATE_KEYS)?,
+        automations: load_state_from_entries(&state_entries, STATE_AUTOMATIONS)?,
+        remote_target: load_optional_state_from_entries(&state_entries, STATE_REMOTE_TARGET)?,
+        ownership_operation: load_optional_state_from_entries(
+            &state_entries,
+            STATE_OWNERSHIP_OPERATION,
+        )?,
+        source_refresh_revisions: state_entries
             .contains_key(STATE_SOURCE_REVISIONS)
-            .then(|| load_state_from_values(&values, STATE_SOURCE_REVISIONS))
+            .then(|| load_state_from_entries(&state_entries, STATE_SOURCE_REVISIONS))
             .transpose()?,
-        refresh_revisions: values
+        refresh_revisions: state_entries
             .contains_key(STATE_REFRESH_REVISIONS)
-            .then(|| load_state_from_values(&values, STATE_REFRESH_REVISIONS))
+            .then(|| load_state_from_entries(&state_entries, STATE_REFRESH_REVISIONS))
             .transpose()?,
     })
 }
@@ -98,11 +101,11 @@ fn persist_state(database: &TelemetryDb, state: &PersistedState) -> Result<()> {
     ])
 }
 
-fn load_optional_state_from_values<T: DeserializeOwned>(
-    values: &std::collections::HashMap<String, String>,
+fn load_optional_state_from_entries<T: DeserializeOwned>(
+    state_entries: &std::collections::HashMap<String, String>,
     key: &str,
 ) -> Result<Option<T>> {
-    let Some(content) = values.get(key) else {
+    let Some(content) = state_entries.get(key) else {
         return Ok(None);
     };
     serde_json::from_str(content).map_err(|error| {
@@ -113,11 +116,11 @@ fn load_optional_state_from_values<T: DeserializeOwned>(
     })
 }
 
-fn load_state_from_values<T: DeserializeOwned>(
-    values: &std::collections::HashMap<String, String>,
+fn load_state_from_entries<T: DeserializeOwned>(
+    state_entries: &std::collections::HashMap<String, String>,
     key: &str,
 ) -> Result<T> {
-    load_optional_state_from_values(values, key)?.ok_or_else(|| {
+    load_optional_state_from_entries(state_entries, key)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("local database state '{key}' is missing"),
@@ -125,8 +128,8 @@ fn load_state_from_values<T: DeserializeOwned>(
     })
 }
 
-pub(super) fn serialize_state<T: Serialize>(value: &T) -> Result<String> {
-    serde_json::to_string(value).map_err(|error| {
+pub(super) fn serialize_state<T: Serialize>(state: &T) -> Result<String> {
+    serde_json::to_string(state).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             format!("local state serialization failed: {error}"),

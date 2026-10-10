@@ -51,9 +51,9 @@ export function useRelayPreferences({
     setPage("overview");
   }, [setPage]);
 
-  const setTheme = useCallback((next: "system" | "light" | "dark") => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.theme, next);
-    setThemeState(next);
+  const setTheme = useCallback((themeMode: "system" | "light" | "dark") => {
+    writeRelayPreference(RELAY_STORAGE_KEYS.theme, themeMode);
+    setThemeState(themeMode);
   }, []);
 
   const setProfileSwitchBackupPrompt = useCallback((enabled: boolean) => {

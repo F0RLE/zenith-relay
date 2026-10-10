@@ -36,12 +36,14 @@ fn codex_transport_controls_do_not_block_inference_or_leak_to_upstream() {
     });
     for adapter in BRIDGES {
         let prepared = prepare(adapter, &request).unwrap();
-        let body = prepared.upstream_body();
+        let upstream_body = prepared.upstream_body();
         for field in ["include", "prompt_cache_key", "client_metadata"] {
-            assert!(body.get(field).is_none(), "{adapter:?}: {field}");
+            assert!(upstream_body.get(field).is_none(), "{adapter:?}: {field}");
         }
-        assert!(body.to_string().contains("Synthetic compacted summary"));
-        assert!(!body.to_string().contains("encrypted_content"));
+        assert!(upstream_body
+            .to_string()
+            .contains("Synthetic compacted summary"));
+        assert!(!upstream_body.to_string().contains("encrypted_content"));
     }
     let native = prepare(SourceAdapter::Native, &request).unwrap();
     for field in [

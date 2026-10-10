@@ -69,10 +69,10 @@ pub async fn connect_remote_server(
     } else {
         None
     };
-    let previous = state.store()?.remote_target().cloned();
-    if previous.as_ref().is_some_and(|record| {
+    let previous_target = state.store()?.remote_target().cloned();
+    if previous_target.as_ref().is_some_and(|stored_target| {
         same_origin_identity_changed(
-            record,
+            stored_target,
             client.origin(),
             &negotiated.server_id,
             &negotiated.identity_fingerprint,
@@ -96,10 +96,10 @@ pub async fn connect_remote_server(
         secret_ref,
         connected_at_ms: now_ms(),
     };
-    let previous_same_secret = previous
+    let previous_same_secret = previous_target
         .as_ref()
-        .filter(|record| record.secret_ref == target.secret_ref)
-        .and_then(|record| remote::load_token(record).ok().flatten());
+        .filter(|stored_target| stored_target.secret_ref == target.secret_ref)
+        .and_then(|stored_target| remote::load_token(stored_target).ok().flatten());
     remote::save_token(&target, &input.management_token)?;
     if let Err(error) = state.store()?.replace_remote_target(Some(target.clone())) {
         match previous_same_secret {
@@ -112,9 +112,9 @@ pub async fn connect_remote_server(
         }
         return Err(error.into());
     }
-    if let Some(previous) = previous {
-        if previous.secret_ref != target.secret_ref {
-            let _ = remote::delete_token(&previous);
+    if let Some(previous_target) = previous_target {
+        if previous_target.secret_ref != target.secret_ref {
+            let _ = remote::delete_token(&previous_target);
         }
     }
     if let Some(snapshot) = &remote_snapshot {
@@ -246,14 +246,14 @@ fn remote_secret_ref(origin: &str) -> String {
 }
 
 fn same_origin_identity_changed(
-    previous: &RemoteTargetRecord,
+    previous_target: &RemoteTargetRecord,
     origin: &str,
     server_id: &str,
     identity_fingerprint: &str,
 ) -> bool {
-    previous.origin == origin
-        && (previous.server_id != server_id
-            || previous.identity_fingerprint != identity_fingerprint)
+    previous_target.origin == origin
+        && (previous_target.server_id != server_id
+            || previous_target.identity_fingerprint != identity_fingerprint)
 }
 
 pub(in crate::local_pool::commands) fn remote_error(error: impl std::fmt::Display) -> CommandError {

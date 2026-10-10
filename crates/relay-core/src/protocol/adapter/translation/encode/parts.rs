@@ -53,41 +53,41 @@ pub(super) fn tool_choice(choice: &ToolChoice, protocol: WireApi) -> Value {
 }
 
 pub(super) fn output_format(
-    body: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     generation: &mut Map<String, Value>,
     format: &OutputFormat,
     protocol: WireApi,
 ) -> AdapterResult<()> {
-    let mut value = match format {
+    let mut format_value = match format {
         OutputFormat::JsonObject => json!({"type":"json_object"}),
         OutputFormat::JsonSchema {
             name,
             schema,
             strict,
         } => {
-            let mut value = json!({"type":"json_schema","name":name,"schema":schema});
+            let mut schema_value = json!({"type":"json_schema","name":name,"schema":schema});
             if let Some(strict) = strict {
-                value["strict"] = (*strict).into();
+                schema_value["strict"] = (*strict).into();
             }
-            value
+            schema_value
         }
     };
     match protocol {
         WireApi::Responses => {
-            body.insert("text".into(), json!({"format":value}));
+            request_fields.insert("text".into(), json!({"format":format_value}));
         }
         WireApi::ChatCompletions => {
             if matches!(format, OutputFormat::JsonSchema { .. }) {
-                value.as_object_mut().unwrap().remove("type");
-                value = json!({"type":"json_schema","json_schema":value});
+                format_value.as_object_mut().unwrap().remove("type");
+                format_value = json!({"type":"json_schema","json_schema":format_value});
             }
-            body.insert("response_format".into(), value);
+            request_fields.insert("response_format".into(), format_value);
         }
         WireApi::Messages => {
             let OutputFormat::JsonSchema { schema, .. } = format else {
                 return Err(AdapterError::parameter_unsupported());
             };
-            body.insert(
+            request_fields.insert(
                 "output_config".into(),
                 json!({"format":{"type":"json_schema","schema":schema}}),
             );
@@ -112,17 +112,17 @@ pub(super) fn output_format(
 }
 
 pub(super) fn thinking(
-    body: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     generation: &mut Map<String, Value>,
     reasoning: &Reasoning,
     protocol: WireApi,
 ) -> AdapterResult<()> {
     match (protocol, reasoning) {
         (WireApi::Responses, Reasoning::Effort(effort)) => {
-            body.insert("reasoning".into(), json!({"effort":effort}));
+            request_fields.insert("reasoning".into(), json!({"effort":effort}));
         }
         (WireApi::ChatCompletions, Reasoning::Effort(effort)) => {
-            body.insert("reasoning_effort".into(), effort.clone().into());
+            request_fields.insert("reasoning_effort".into(), effort.clone().into());
         }
         (WireApi::Gemini, Reasoning::Effort(effort))
             if matches!(effort.as_str(), "minimal" | "low" | "medium" | "high") =>
@@ -133,20 +133,21 @@ pub(super) fn thinking(
             generation.insert("thinkingConfig".into(), json!({"thinkingBudget":budget}));
         }
         (WireApi::Messages, Reasoning::Budget(budget)) if *budget >= 1024 => {
-            body.insert(
+            request_fields.insert(
                 "thinking".into(),
                 json!({"type":"enabled","budget_tokens":budget}),
             );
         }
         (WireApi::Messages, Reasoning::Effort(effort)) if effort == "none" => {
-            body.insert("thinking".into(), json!({"type":"disabled"}));
+            request_fields.insert("thinking".into(), json!({"type":"disabled"}));
         }
         (WireApi::Messages, Reasoning::Effort(effort))
             if matches!(effort.as_str(), "low" | "medium" | "high" | "max") =>
         {
-            body.insert("thinking".into(), json!({"type":"adaptive"}));
-            body.entry("output_config").or_insert_with(|| json!({}))["effort"] =
-                effort.clone().into();
+            request_fields.insert("thinking".into(), json!({"type":"adaptive"}));
+            request_fields
+                .entry("output_config")
+                .or_insert_with(|| json!({}))["effort"] = effort.clone().into();
         }
         _ => return Err(AdapterError::reasoning_unsupported()),
     }
@@ -159,7 +160,7 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
         Role::Assistant => "assistant",
         Role::System => "system",
     };
-    let mut values = Vec::new();
+    let mut encoded_items = Vec::new();
     let mut content = Vec::new();
     let mut calls = Vec::new();
     let mut reasoning = String::new();
@@ -174,8 +175,8 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                     arguments,
                 },
             ) => {
-                flush_responses_content(&mut values, &mut content, role);
-                values.push(
+                flush_responses_content(&mut encoded_items, &mut content, role);
+                encoded_items.push(
                     json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments}),
                 );
             }
@@ -188,8 +189,8 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                     ..
                 },
             ) => {
-                flush_responses_content(&mut values, &mut content, role);
-                values.push(json!({"type":"function_call_output","call_id":id,"output":tool_output(output, *is_error)}));
+                flush_responses_content(&mut encoded_items, &mut content, role);
+                encoded_items.push(json!({"type":"function_call_output","call_id":id,"output":tool_output(output, *is_error)}));
             }
             (
                 WireApi::ChatCompletions,
@@ -213,24 +214,24 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                 if !content.is_empty() || !calls.is_empty() {
                     return Err(AdapterError::parameter_unsupported());
                 }
-                values.push(json!({"role":"tool","tool_call_id":id,"content":tool_output(output, *is_error)}));
+                encoded_items.push(json!({"role":"tool","tool_call_id":id,"content":tool_output(output, *is_error)}));
             }
             _ => content.push(content_block(block, protocol, message.role)?),
         }
     }
     match protocol {
-        WireApi::Responses => flush_responses_content(&mut values, &mut content, role),
+        WireApi::Responses => flush_responses_content(&mut encoded_items, &mut content, role),
         WireApi::ChatCompletions if !content.is_empty() || !calls.is_empty() || !reasoning.is_empty() => {
-            let mut value = json!({"role":role,"content":if content.is_empty() { Value::Null } else { content.into() }});
-            if !calls.is_empty() { value["tool_calls"] = calls.into(); }
-            if !reasoning.is_empty() { value["reasoning_content"] = reasoning.into(); }
-            values.push(value);
+            let mut message_value = json!({"role":role,"content":if content.is_empty() { Value::Null } else { content.into() }});
+            if !calls.is_empty() { message_value["tool_calls"] = calls.into(); }
+            if !reasoning.is_empty() { message_value["reasoning_content"] = reasoning.into(); }
+            encoded_items.push(message_value);
         }
-        WireApi::Messages => values.push(json!({"role":role,"content":content})),
-        WireApi::Gemini => values.push(json!({"role":if message.role == Role::Assistant { "model" } else { "user" },"parts":content})),
+        WireApi::Messages => encoded_items.push(json!({"role":role,"content":content})),
+        WireApi::Gemini => encoded_items.push(json!({"role":if message.role == Role::Assistant { "model" } else { "user" },"parts":content})),
         _ => {}
     }
-    Ok(values)
+    Ok(encoded_items)
 }
 
 pub(super) fn tool_output(content: &str, is_error: bool) -> String {
@@ -242,12 +243,12 @@ pub(super) fn tool_output(content: &str, is_error: bool) -> String {
 }
 
 pub(super) fn flush_responses_content(
-    values: &mut Vec<Value>,
+    response_items: &mut Vec<Value>,
     content: &mut Vec<Value>,
     role: &str,
 ) {
     if !content.is_empty() {
-        values.push(json!({"role":role,"content":std::mem::take(content)}));
+        response_items.push(json!({"role":role,"content":std::mem::take(content)}));
     }
 }
 
@@ -262,31 +263,31 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
         },
         Block::Image { url, detail } => match protocol {
             WireApi::Responses => {
-                let mut value = json!({"type":"input_image","image_url":url});
+                let mut responses_image = json!({"type":"input_image","image_url":url});
                 if let Some(detail) = detail {
-                    value["detail"] = detail.clone().into();
+                    responses_image["detail"] = detail.clone().into();
                 }
-                value
+                responses_image
             }
             WireApi::ChatCompletions => {
-                let mut value = json!({"type":"image_url","image_url":{"url":url}});
+                let mut chat_image = json!({"type":"image_url","image_url":{"url":url}});
                 if let Some(detail) = detail {
-                    value["image_url"]["detail"] = detail.clone().into();
+                    chat_image["image_url"]["detail"] = detail.clone().into();
                 }
-                value
+                chat_image
             }
             WireApi::Messages | WireApi::Gemini => {
                 if detail.as_deref().is_some_and(|detail| detail != "auto") {
                     return Err(AdapterError::parameter_unsupported());
                 }
-                if let Some((mime, data)) = url
+                if let Some((mime, encoded_image)) = url
                     .strip_prefix("data:")
-                    .and_then(|data| data.split_once(";base64,"))
+                    .and_then(|data_url| data_url.split_once(";base64,"))
                 {
                     if protocol == WireApi::Messages {
-                        json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}})
+                        json!({"type":"image","source":{"type":"base64","media_type":mime,"data":encoded_image}})
                     } else {
-                        json!({"inlineData":{"mimeType":mime,"data":data}})
+                        json!({"inlineData":{"mimeType":mime,"data":encoded_image}})
                     }
                 } else if protocol == WireApi::Messages {
                     json!({"type":"image","source":{"type":"url","url":url}})
@@ -300,14 +301,16 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             name,
             arguments,
         } => {
-            let input: Value =
+            let tool_input: Value =
                 serde_json::from_str(arguments).map_err(|_| AdapterError::invalid_request())?;
-            if !input.is_object() {
+            if !tool_input.is_object() {
                 return Err(AdapterError::invalid_request());
             }
             match protocol {
-                WireApi::Messages => json!({"type":"tool_use","id":id,"name":name,"input":input}),
-                WireApi::Gemini => json!({"functionCall":{"id":id,"name":name,"args":input}}),
+                WireApi::Messages => {
+                    json!({"type":"tool_use","id":id,"name":name,"input":tool_input})
+                }
+                WireApi::Gemini => json!({"functionCall":{"id":id,"name":name,"args":tool_input}}),
                 _ => return Err(AdapterError::unsupported_binding()),
             }
         }
@@ -321,7 +324,7 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                 json!({"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error})
             }
             WireApi::Gemini => {
-                let response = serde_json::from_str::<Value>(content)
+                let tool_response = serde_json::from_str::<Value>(content)
                     .ok()
                     .filter(Value::is_object)
                     .unwrap_or_else(|| {
@@ -331,7 +334,7 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                             json!({"result":content})
                         }
                     });
-                json!({"functionResponse":{"id":id,"name":name,"response":response}})
+                json!({"functionResponse":{"id":id,"name":name,"response":tool_response}})
             }
             _ => return Err(AdapterError::unsupported_binding()),
         },

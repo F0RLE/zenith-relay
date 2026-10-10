@@ -57,7 +57,7 @@ fn cockpit_export_carries_safe_name_and_tags() {
     let parsed = crate::accounts::parse_import(&document.content, None, &[]).unwrap();
     assert_eq!(
         parsed.items[0].tags,
-        BTreeSet::from(["team".to_string(), "work".to_string()])
+        std::collections::BTreeSet::from(["team".to_string(), "work".to_string()])
     );
 }
 
@@ -230,6 +230,8 @@ fn request_rejects_duplicates_and_unsafe_account_ids() {
 
 fn fixture() -> AccountExportCredential {
     AccountExportCredential {
+        oauth_client_kind: Default::default(),
+        basis_points_headers: None,
         label: "Synthetic Plus".into(),
         email: Some("person@example.test".into()),
         phone: None,

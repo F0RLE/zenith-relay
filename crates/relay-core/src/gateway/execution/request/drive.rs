@@ -36,15 +36,15 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) runtime: &'a Arc<GatewayRuntime>,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) budget: &'a SharedRequestBudget,
+    pub(super) transport: crate::UsageTransport,
     pub(super) resolved_model: &'a str,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
     pub(super) responses_lite: &'a Option<HeaderValue>,
     pub(super) automatic_responses_lite: bool,
     pub(super) service_tier_policy: &'a ServiceTierPolicy,
     pub(super) tool_policy: &'a mut RequestToolPolicy,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) basis_points_relay_retry_parameter: &'a mut Option<&'static str>,
     pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) forwarded_headers: &'a HeaderMap,
     pub(super) attempt: &'a mut u16,
@@ -59,7 +59,6 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) allow_previous_response_reset: bool,
     pub(super) confirmed_response_missing: &'a mut bool,
-    pub(super) basis_points_relay_retry_attempted: &'a mut bool,
 }
 
 fn carry(
@@ -78,7 +77,7 @@ fn carry(
 
 /// Drive one reserved candidate from preparation through a client response.
 /// Continue and break return the same request identity the loop still owns.
-pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> DrivenAttempt {
+pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -> DrivenAttempt {
     let DriveAttemptInput {
         selected,
         lease,
@@ -89,15 +88,15 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         runtime,
         key,
         budget,
+        transport,
         resolved_model,
-        wire_api,
+        client_wire_api,
         stream,
         responses_lite,
         automatic_responses_lite,
         service_tier_policy,
         tool_policy,
         client_context_id,
-        basis_points_relay_retry_parameter,
         last_adapter_error,
         forwarded_headers,
         attempt,
@@ -112,8 +111,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         response_affinity_key,
         allow_previous_response_reset,
         confirmed_response_missing,
-        basis_points_relay_retry_attempted,
-    } = input;
+    } = drive_input;
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
     let prepared = match prepare_request_attempt(RequestPrepareInput {
@@ -122,7 +120,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         request: &mut request,
         resolved_model,
         request_id: &request_id,
-        wire_api,
+        client_wire_api,
         stream,
         responses_lite,
         automatic_responses_lite,
@@ -132,7 +130,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         half_open_probe: selected.half_open_probe,
         diagnostics: selected.diagnostics,
         client_context_id,
-        basis_points_relay_retry_parameter: *basis_points_relay_retry_parameter,
+        client_transport: transport,
         last_adapter_error,
     }) {
         RequestPrepare::Continue => {
@@ -169,7 +167,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         lease: &lease,
         budget,
         route,
-        wire_api,
+        client_wire_api,
         stream,
         account_route,
         basis_points_route,
@@ -178,7 +176,6 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         request_body,
         reasoning_effort: &reasoning_effort,
         tool_use: &tool_use,
-        source_model: &source_model,
         request_id: &request_id,
         requested_model: &requested_model,
         forwarded_headers,
@@ -224,7 +221,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
             tool_use: &tool_use,
             started,
             carry: RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request: &mut request,
                 adapter_is_passthrough,
                 has_previous_response_id,
@@ -291,25 +288,20 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
             status,
             response_headers: &response_headers,
             account_route,
-            wire_api,
+            client_wire_api,
             request: &mut request,
             adapter_is_passthrough,
             repairs,
-            response_affinity_key,
             requires_affinity_owner,
             has_unpaired_tool_output,
             last_failure,
             last_failure_origin,
             last_preserved_upstream_error,
             has_previous_response_id,
-            basis_points_route,
             basis_points_request: &basis_points_request,
             stream,
             adapter_request,
-            basis_points_relay_retry_attempted,
-            basis_points_relay_retry_parameter,
             tried,
-            last_adapter_error,
             selected_error_origin,
             response_affinity_hit,
             prompt_affinity_key: &prompt_affinity_key,
@@ -345,7 +337,7 @@ pub(super) async fn drive_selected_attempt(input: DriveAttemptInput<'_>) -> Driv
         requested_model,
         source_model,
         prompt_affinity_key,
-        wire_api,
+        client_wire_api,
         reasoning_effort,
         tool_use,
         attempt: *attempt,

@@ -37,7 +37,7 @@ pub(super) async fn connect_upstream(
         if !repairs.quota_yield {
             repairs.quota_yield = true;
             if let Some(affinity_key) = request.response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield_for_quota(
+                if runtime.automatic_response_owner_should_yield(
                     key,
                     &affinity_key,
                     &request.resolved_model,
@@ -67,7 +67,7 @@ pub(super) async fn connect_upstream(
             let mut gap = SelectionGap {
                 runtime,
                 key,
-                request: &mut request,
+                client_request: &mut request,
                 tried: &mut tried,
                 last_failure: &last_failure,
                 http_fallback_origin: &websocket_http_fallback_origin,
@@ -180,13 +180,16 @@ pub(super) fn upstream_headers(
 }
 
 fn ensure_websocket_beta(headers: &mut HeaderMap) {
-    let name = HeaderName::from_static("openai-beta");
+    let header_name = HeaderName::from_static("openai-beta");
     let present = headers
-        .get_all(&name)
+        .get_all(&header_name)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| value.contains("responses_websockets="));
+        .filter_map(|header_value| header_value.to_str().ok())
+        .any(|header_value| header_value.contains("responses_websockets="));
     if !present {
-        headers.append(name, HeaderValue::from_static(RESPONSES_WEBSOCKET_BETA));
+        headers.append(
+            header_name,
+            HeaderValue::from_static(RESPONSES_WEBSOCKET_BETA),
+        );
     }
 }

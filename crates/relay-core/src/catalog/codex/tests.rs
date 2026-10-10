@@ -92,26 +92,26 @@ fn routed_models_strip_native_only_selectors_from_template() {
         "web_search_tool_type": "text_and_image",
         "use_responses_lite": true,
     });
-    let entry =
+    let catalog_entry =
         routed_codex_catalog_entry(template.as_object(), "vendor/claude-fable-5", 1_000, None);
 
-    let instructions = entry["base_instructions"].as_str().unwrap();
+    let instructions = catalog_entry["base_instructions"].as_str().unwrap();
     assert_eq!(instructions, super::entry::ROUTED_CODEX_BASE_INSTRUCTIONS);
     assert!(instructions.contains("apply_patch"));
     assert!(instructions.contains("PowerShell"));
     assert!(instructions.contains("macOS and Linux"));
     assert!(!instructions.contains("native Codex instructions"));
-    assert!(entry.get("model_messages").is_none());
-    assert!(entry.get("tool_mode").is_none());
-    assert!(entry.get("multi_agent_version").is_none());
-    assert!(entry.get("default_reasoning_level").is_none());
-    assert_eq!(entry["supported_reasoning_levels"], json!([]));
-    assert_eq!(entry["web_search_tool_type"], "text");
-    assert!(entry.get("use_responses_lite").is_none());
-    assert!(entry.get("service_tiers").is_none());
-    assert_eq!(entry["supports_reasoning_summaries"], false);
-    assert_eq!(entry["supports_parallel_tool_calls"], false);
-    assert_eq!(entry["input_modalities"], json!(["text", "image"]));
+    assert!(catalog_entry.get("model_messages").is_none());
+    assert!(catalog_entry.get("tool_mode").is_none());
+    assert!(catalog_entry.get("multi_agent_version").is_none());
+    assert!(catalog_entry.get("default_reasoning_level").is_none());
+    assert_eq!(catalog_entry["supported_reasoning_levels"], json!([]));
+    assert_eq!(catalog_entry["web_search_tool_type"], "text");
+    assert!(catalog_entry.get("use_responses_lite").is_none());
+    assert!(catalog_entry.get("service_tiers").is_none());
+    assert_eq!(catalog_entry["supports_reasoning_summaries"], false);
+    assert_eq!(catalog_entry["supports_parallel_tool_calls"], false);
+    assert_eq!(catalog_entry["input_modalities"], json!(["text", "image"]));
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn api_models_use_medium_when_provider_default_is_ultra() {
         ]
     });
 
-    let entry = normalize_upstream_codex_catalog_entry(
+    let catalog_entry = normalize_upstream_codex_catalog_entry(
         template.as_object().unwrap(),
         "vendor/model",
         1_000,
@@ -133,16 +133,16 @@ fn api_models_use_medium_when_provider_default_is_ultra() {
     )
     .expect("API catalog entry");
 
-    assert_eq!(entry["default_reasoning_level"], "medium");
+    assert_eq!(catalog_entry["default_reasoning_level"], "medium");
     assert_eq!(
-        entry["supported_reasoning_levels"]
+        catalog_entry["supported_reasoning_levels"]
             .as_array()
             .unwrap()
             .len(),
         3
     );
     assert_eq!(
-        entry["supported_reasoning_levels"][2]["description"],
+        catalog_entry["supported_reasoning_levels"][2]["description"],
         "ultra"
     );
 }
@@ -158,7 +158,7 @@ fn api_models_do_not_inherit_ultra_when_medium_is_unavailable() {
         ]
     });
 
-    let entry = normalize_upstream_codex_catalog_entry(
+    let catalog_entry = normalize_upstream_codex_catalog_entry(
         template.as_object().unwrap(),
         "vendor/model",
         1_000,
@@ -166,7 +166,7 @@ fn api_models_do_not_inherit_ultra_when_medium_is_unavailable() {
     )
     .expect("API catalog entry");
 
-    assert!(entry.get("default_reasoning_level").is_none());
+    assert!(catalog_entry.get("default_reasoning_level").is_none());
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn native_models_keep_bare_slug_and_upstream_capabilities() {
         "auto_compact_token_limit": 110000,
         "native_setting": "keep-me",
     });
-    let entry = normalize_native_codex_catalog_entry(
+    let catalog_entry = normalize_native_codex_catalog_entry(
         template.as_object().unwrap(),
         "gpt-5.6-sol",
         1_000,
@@ -214,16 +214,16 @@ fn native_models_keep_bare_slug_and_upstream_capabilities() {
     )
     .unwrap();
 
-    assert_eq!(entry["slug"], "gpt-5.6-sol");
-    assert_eq!(entry["default_reasoning_level"], "high");
-    assert_eq!(entry["service_tiers"][0]["id"], "priority");
-    assert_eq!(entry["supports_parallel_tool_calls"], true);
-    assert_eq!(entry["use_responses_lite"], true);
-    assert_eq!(entry["input_modalities"], json!(["text"]));
-    assert_eq!(entry["context_window"], 128_000);
-    assert_eq!(entry["max_context_window"], 120_000);
-    assert_eq!(entry["auto_compact_token_limit"], 110_000);
-    assert_eq!(entry["native_setting"], "keep-me");
+    assert_eq!(catalog_entry["slug"], "gpt-5.6-sol");
+    assert_eq!(catalog_entry["default_reasoning_level"], "high");
+    assert_eq!(catalog_entry["service_tiers"][0]["id"], "priority");
+    assert_eq!(catalog_entry["supports_parallel_tool_calls"], true);
+    assert_eq!(catalog_entry["use_responses_lite"], true);
+    assert_eq!(catalog_entry["input_modalities"], json!(["text"]));
+    assert_eq!(catalog_entry["context_window"], 128_000);
+    assert_eq!(catalog_entry["max_context_window"], 120_000);
+    assert_eq!(catalog_entry["auto_compact_token_limit"], 110_000);
+    assert_eq!(catalog_entry["native_setting"], "keep-me");
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn native_models_do_not_inherit_routed_image_defaults() {
         "display_name": "GPT Native",
     });
 
-    let entry = normalize_native_codex_catalog_entry(
+    let catalog_entry = normalize_native_codex_catalog_entry(
         template.as_object().unwrap(),
         "gpt-native",
         1_000,
@@ -241,10 +241,10 @@ fn native_models_do_not_inherit_routed_image_defaults() {
     )
     .unwrap();
 
-    assert!(entry.get("input_modalities").is_none());
-    assert!(entry.get("context_window").is_none());
-    assert!(entry.get("max_context_window").is_none());
-    assert!(entry.get("auto_compact_token_limit").is_none());
+    assert!(catalog_entry.get("input_modalities").is_none());
+    assert!(catalog_entry.get("context_window").is_none());
+    assert!(catalog_entry.get("max_context_window").is_none());
+    assert!(catalog_entry.get("auto_compact_token_limit").is_none());
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn native_models_do_not_synthesize_missing_context_fields() {
         "context_window": 128_000,
     });
 
-    let entry = normalize_native_codex_catalog_entry(
+    let catalog_entry = normalize_native_codex_catalog_entry(
         template.as_object().unwrap(),
         "gpt-native",
         1_000,
@@ -263,10 +263,12 @@ fn native_models_do_not_synthesize_missing_context_fields() {
     )
     .unwrap();
 
-    assert_eq!(entry["context_window"], 128_000);
-    assert!(entry.get("max_context_window").is_none());
-    assert!(entry.get("auto_compact_token_limit").is_none());
-    assert!(entry.get("effective_context_window_percent").is_none());
+    assert_eq!(catalog_entry["context_window"], 128_000);
+    assert!(catalog_entry.get("max_context_window").is_none());
+    assert!(catalog_entry.get("auto_compact_token_limit").is_none());
+    assert!(catalog_entry
+        .get("effective_context_window_percent")
+        .is_none());
 }
 
 #[test]
@@ -276,7 +278,7 @@ fn native_models_keep_an_arbitrary_upstream_slug_over_the_routing_name() {
         "display_name": "Future upstream name"
     });
 
-    let entry = normalize_native_codex_catalog_entry(
+    let catalog_entry = normalize_native_codex_catalog_entry(
         template.as_object().unwrap(),
         "configured-alias",
         1_000,
@@ -284,40 +286,65 @@ fn native_models_keep_an_arbitrary_upstream_slug_over_the_routing_name() {
     )
     .unwrap();
 
-    assert_eq!(entry["slug"], "vendor/future-model-2026-08");
-    assert_eq!(entry["display_name"], "Future upstream name");
-    assert!(!entry["slug"].as_str().unwrap().starts_with("zenith/"));
+    assert_eq!(catalog_entry["slug"], "vendor/future-model-2026-08");
+    assert_eq!(catalog_entry["display_name"], "Future upstream name");
+    assert!(!catalog_entry["slug"]
+        .as_str()
+        .unwrap()
+        .starts_with("zenith/"));
 }
 
 #[test]
-fn routed_models_use_advertised_context_and_do_not_clamp_unknown_overrides() {
+fn routed_models_publish_known_limits_without_inheriting_template_context_policy() {
     let template = json!({
         "context_window": 272_000,
         "max_context_window": 272_000,
         "auto_compact_token_limit": 244_800,
+        "effective_context_window_percent": 90,
     });
 
     let advertised =
         routed_codex_catalog_entry(template.as_object(), "vendor/large", 1_000, Some(1_000_000));
-    assert_eq!(advertised["context_window"], 1_000_000);
+    assert!(advertised.get("context_window").is_none());
     assert_eq!(advertised["max_context_window"], 1_000_000);
     assert!(advertised.get("auto_compact_token_limit").is_none());
+    assert!(advertised.get("effective_context_window_percent").is_none());
 
     let unknown = routed_codex_catalog_entry(template.as_object(), "vendor/unknown", 1_001, None);
-    assert_eq!(unknown["context_window"], 272_000);
+    assert!(unknown.get("context_window").is_none());
     assert!(unknown.get("max_context_window").is_none());
     assert!(unknown.get("auto_compact_token_limit").is_none());
+    assert!(unknown.get("effective_context_window_percent").is_none());
+}
+
+#[test]
+fn api_maximum_does_not_replace_codex_default_context_window() {
+    let mut model = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+    publish_routed_codex_context(&mut model, Some(1_050_000), Some(272_000));
+    assert_eq!(model["context_window"], 272_000);
+    assert_eq!(model["max_context_window"], 1_050_000);
+    assert!(model.get("auto_compact_token_limit").is_none());
+    assert!(model.get("effective_context_window_percent").is_none());
+
+    publish_routed_codex_context(&mut model, Some(128_000), Some(272_000));
+    assert_eq!(model["context_window"], 128_000);
+    assert_eq!(model["max_context_window"], 128_000);
+
+    publish_routed_codex_context(&mut model, Some(1_050_000), None);
+    assert!(model.get("context_window").is_none());
+    assert_eq!(model["max_context_window"], 1_050_000);
 }
 
 #[test]
 fn routed_models_publish_codex_required_truncation_policy() {
-    let entry = routed_codex_catalog_entry(None, "vendor/large", 1_000, Some(1_000_000));
+    let catalog_entry = routed_codex_catalog_entry(None, "vendor/large", 1_000, Some(1_000_000));
 
     assert_eq!(
-        entry.get("truncation_policy"),
+        catalog_entry.get("truncation_policy"),
         Some(&json!({"mode": "tokens", "limit": 10000}))
     );
-    assert_eq!(entry["context_window"], 1_000_000);
+    assert!(catalog_entry.get("context_window").is_none());
+    assert_eq!(catalog_entry["max_context_window"], 1_000_000);
 }
 
 #[test]
@@ -346,31 +373,34 @@ fn official_codex_ultra_requires_exact_identity_and_routable_child_effort() {
         "multi_agent_reasoning_effort": "xhigh",
         "base_instructions": "never inherit this"
     });
-    let mut entry = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
-    entry["supported_reasoning_levels"] = json!([
+    let mut catalog_entry = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
+    catalog_entry["supported_reasoning_levels"] = json!([
         {"effort": "xhigh", "description": "xhigh"},
         {"effort": "max", "description": "max"}
     ]);
     assert!(!apply_codex_ultra_from_official_model(
-        &mut entry,
+        &mut catalog_entry,
         &official,
         "gpt-other"
     ));
     assert!(!apply_codex_ultra_from_official_model(
-        &mut entry,
+        &mut catalog_entry,
         &official,
         "gpt-future-other"
     ));
     assert!(apply_codex_ultra_from_official_model(
-        &mut entry,
+        &mut catalog_entry,
         &official,
         "gpt-future"
     ));
-    assert_eq!(entry["supported_reasoning_levels"][2]["effort"], "ultra");
-    assert_eq!(entry["multi_agent_version"], "v2");
-    assert_eq!(entry["multi_agent_reasoning_effort"], "xhigh");
-    assert_ne!(entry["base_instructions"], "never inherit this");
-    assert!(codex_catalog_entry_is_compatible(&entry));
+    assert_eq!(
+        catalog_entry["supported_reasoning_levels"][2]["effort"],
+        "ultra"
+    );
+    assert_eq!(catalog_entry["multi_agent_version"], "v2");
+    assert_eq!(catalog_entry["multi_agent_reasoning_effort"], "xhigh");
+    assert_ne!(catalog_entry["base_instructions"], "never inherit this");
+    assert!(codex_catalog_entry_is_compatible(&catalog_entry));
 
     let mut missing_child = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
     missing_child["supported_reasoning_levels"] = json!([{"effort": "max"}]);

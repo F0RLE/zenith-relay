@@ -60,7 +60,7 @@ fn saved_order_can_place_apis_before_accounts_without_type_gates() {
 }
 
 #[test]
-fn round_robin_weights_count_physical_members_once() {
+fn legacy_round_robin_cycles_saved_members_and_ignores_weights() {
     let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     let mut alias = candidate("api-a::chat");
     alias.source_id = "api-a".into();
@@ -80,14 +80,14 @@ fn round_robin_weights_count_physical_members_once() {
         let member = super::super::members::member_key(&scheduler.candidates[&id]);
         *counts.entry(member).or_insert(0) += 1;
     }
-    assert_eq!(counts["account:account"], 20);
-    assert_eq!(counts["source:api-a"], 20);
-    assert_eq!(counts["source:api-b"], 60);
+    assert_eq!(counts["account:account"], 34);
+    assert_eq!(counts["source:api-a"], 33);
+    assert_eq!(counts["source:api-b"], 33);
 }
 
 #[test]
-fn previews_do_not_advance_rotation_and_hot_updates_keep_active_leases() {
-    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
+fn previews_do_not_advance_manual_cursor_and_hot_updates_keep_active_leases() {
+    let mut scheduler = mixed(PoolRoutingMode::InOrder);
     for _ in 0..10 {
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
@@ -107,7 +107,7 @@ fn previews_do_not_advance_rotation_and_hot_updates_keep_active_leases() {
     assert_eq!(scheduler.active_request_count("api-a"), 1);
     assert_eq!(dispatch(&mut scheduler), "api-b");
     assert!(scheduler.release_for("api-a", Some("gpt-5")));
-    assert_eq!(dispatch(&mut scheduler), "api-a");
+    assert_eq!(dispatch(&mut scheduler), "account");
 }
 
 #[test]

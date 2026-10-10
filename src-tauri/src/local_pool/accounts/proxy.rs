@@ -12,8 +12,8 @@ pub const PROXY_POOL_SECRET_REF: &str = "proxy:pool";
 const PROXY_POOL_VERSION: u32 = 2;
 const MAX_PROXY_POOL_ENTRIES: usize = 1_000;
 
-pub(crate) fn is_proxy_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
+pub(crate) fn is_proxy_id(proxy_id: &str) -> bool {
+    let bytes = proxy_id.as_bytes();
     (1..=80).contains(&bytes.len())
         && bytes
             .iter()
@@ -78,11 +78,11 @@ mod tests {
     #[test]
     fn stored_proxy_is_deduplicated_redacted_and_automatically_shared() {
         let mut pool = ProxyPool::default();
-        let values = vec![
+        let proxy_inputs = vec![
             "host.example:8080:user:secret".to_string(),
             "http://user:secret@host.example:8080".to_string(),
         ];
-        assert_eq!(pool.import(&values, 1).unwrap(), (1, 1));
+        assert_eq!(pool.import(&proxy_inputs, 1).unwrap(), (1, 1));
 
         assert!(pool.assign_automatic("account-a").is_some());
         assert!(pool.assign_automatic("account-b").is_some());

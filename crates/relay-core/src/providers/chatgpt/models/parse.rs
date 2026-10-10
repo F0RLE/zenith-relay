@@ -17,18 +17,27 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     slug: String,
+    #[serde(default)]
+    priority: Option<i32>,
 }
 
-pub(super) fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
-    let response: ModelsResponse = serde_json::from_slice(body)
+pub(super) fn parse_models(
+    models_response_body: &[u8],
+) -> Result<Vec<String>, ModelDiscoveryFailure> {
+    let mut models_response: ModelsResponse = serde_json::from_slice(models_response_body)
         .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidResponse))?;
-    if response.models.len() > MAX_MODELS {
+    if models_response.models.len() > MAX_MODELS {
         return Err(ModelDiscoveryFailure::new(
             ModelDiscoveryFailureCode::InvalidResponse,
         ));
     }
+    // ChatGPT's array position is not its picker order. Lower official
+    // priorities come first; ties and models without one retain array order.
+    models_response
+        .models
+        .sort_by_key(|model| (model.priority.is_none(), model.priority.unwrap_or_default()));
     let mut seen = HashSet::new();
-    Ok(response
+    Ok(models_response
         .models
         .into_iter()
         // This endpoint is the account's authoritative model inventory.
@@ -40,7 +49,7 @@ pub(super) fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFai
             (!slug.is_empty()
                 && slug.len() <= MAX_MODEL_SLUG_BYTES
                 && !slug.chars().any(char::is_control)
-                && seen.insert(slug.to_string()))
+                && seen.insert(crate::model_id_key(slug)))
             .then(|| slug.to_string())
         })
         .collect())

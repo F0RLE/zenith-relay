@@ -15,7 +15,7 @@ pub(super) fn record_connect_failure_with_hint(
     headers: Option<&HeaderMap>,
     hint: RateLimitBodyHint,
 ) {
-    let state = match headers {
+    let failure_state = match headers {
         Some(headers) => settle_classified_failure(
             trace.runtime,
             trace.lease,
@@ -40,7 +40,7 @@ pub(super) fn record_connect_failure_with_hint(
         failure.status.as_u16(),
         Some(failure.category.to_string()),
     );
-    apply_failure_state(&mut event, state);
+    apply_failure_state(&mut event, failure_state);
     event.upstream_error = failure.upstream_error.as_deref().cloned();
     emit_usage(trace.runtime, event);
 }

@@ -11,9 +11,9 @@ pub fn normalize_model_reasoning_allowed_levels(
     allowed_levels: BTreeMap<String, Vec<String>>,
 ) -> Result<BTreeMap<String, Vec<String>>, &'static str> {
     let mut normalized = BTreeMap::new();
-    for (model, levels) in allowed_levels {
-        let model = model.trim();
-        if !is_valid_model_id(model) {
+    for (model_id, levels) in allowed_levels {
+        let model_id = model_id.trim();
+        if !is_valid_model_id(model_id) {
             return Err("model reasoning allowed levels are invalid");
         }
         if levels.len() > MAX_MODEL_REASONING_LEVELS {
@@ -30,7 +30,7 @@ pub fn normalize_model_reasoning_allowed_levels(
         // An explicit empty list is meaningful: it is the user's override
         // that disables every provider-reported mode for this model.
         normalized.insert(
-            crate::model_id_key(model),
+            crate::model_id_key(model_id),
             crate::canonicalize_reasoning_levels(model_levels),
         );
     }
@@ -52,8 +52,8 @@ where
         LegacyDefault(String),
     }
 
-    let raw = BTreeMap::<String, RawLevels>::deserialize(deserializer)?;
-    let allowed_levels = raw
+    let raw_levels_by_model = BTreeMap::<String, RawLevels>::deserialize(deserializer)?;
+    let allowed_levels = raw_levels_by_model
         .into_iter()
         .filter_map(|(model, levels)| match levels {
             RawLevels::Levels(levels) => Some((model, levels)),
@@ -64,22 +64,25 @@ where
     normalize_model_reasoning_allowed_levels(allowed_levels).map_err(D::Error::custom)
 }
 
-pub(crate) fn context_window(value: &Value) -> Option<u64> {
-    value
+pub(crate) fn context_window(limit_value: &Value) -> Option<u64> {
+    limit_value
         .as_u64()
-        .or_else(|| value.as_str()?.parse().ok())
+        .or_else(|| limit_value.as_str()?.parse().ok())
         .filter(|window| (1..=MAX_ADVERTISED_CONTEXT_WINDOW).contains(window))
 }
 
-fn valid_reasoning_effort(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REASONING_EFFORT_LENGTH
-        && !value.chars().any(char::is_control)
+fn valid_reasoning_effort(effort_text: &str) -> bool {
+    !effort_text.is_empty()
+        && effort_text.len() <= MAX_REASONING_EFFORT_LENGTH
+        && !effort_text.chars().any(char::is_control)
 }
 
-pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<bool> {
-    if let Some(input) = model.get("modalities").and_then(|value| value.get("input")) {
-        return Some(array_contains_image(input));
+pub fn source_model_declares_image_input(model_record: &Map<String, Value>) -> Option<bool> {
+    if let Some(input_modalities) = model_record
+        .get("modalities")
+        .and_then(|modalities| modalities.get("input"))
+    {
+        return Some(array_contains_image(input_modalities));
     }
     for key in [
         "input_modalities",
@@ -87,8 +90,8 @@ pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<b
         "input_types",
         "inputTypes",
     ] {
-        if let Some(value) = model.get(key) {
-            return Some(array_contains_image(value));
+        if let Some(modality_value) = model_record.get(key) {
+            return Some(array_contains_image(modality_value));
         }
     }
     for key in [
@@ -99,22 +102,22 @@ pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<b
         "image_input",
         "imageInput",
     ] {
-        if let Some(value) = model.get(key).and_then(Value::as_bool) {
-            return Some(value);
+        if let Some(supports_image) = model_record.get(key).and_then(Value::as_bool) {
+            return Some(supports_image);
         }
     }
-    model
+    model_record
         .get("capabilities")
         .and_then(Value::as_object)
         .and_then(source_model_declares_image_input)
 }
 
-fn array_contains_image(value: &Value) -> bool {
-    value.as_array().is_some_and(|values| {
-        values.iter().any(|value| {
-            value.as_str().is_some_and(|value| {
+fn array_contains_image(modality_value: &Value) -> bool {
+    modality_value.as_array().is_some_and(|modality_values| {
+        modality_values.iter().any(|modality_value| {
+            modality_value.as_str().is_some_and(|modality_name| {
                 matches!(
-                    value.to_ascii_lowercase().as_str(),
+                    modality_name.to_ascii_lowercase().as_str(),
                     "image" | "image_url" | "vision"
                 )
             })

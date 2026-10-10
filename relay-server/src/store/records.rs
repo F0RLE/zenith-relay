@@ -7,7 +7,7 @@ mod accounts;
 trait BatchRecord: Serialize {
     const UPSERT_SQL: &'static str;
 
-    fn id(&self) -> &str;
+    fn record_id(&self) -> &str;
     fn secret_ref(&self) -> &str;
 }
 
@@ -15,7 +15,7 @@ impl BatchRecord for SourceRecord {
     const UPSERT_SQL: &'static str =
         "INSERT INTO sources(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref";
 
-    fn id(&self) -> &str {
+    fn record_id(&self) -> &str {
         &self.id
     }
 
@@ -28,7 +28,7 @@ impl BatchRecord for ServerAccountRecord {
     const UPSERT_SQL: &'static str =
         "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref";
 
-    fn id(&self) -> &str {
+    fn record_id(&self) -> &str {
         &self.id
     }
 
@@ -41,7 +41,7 @@ impl Store {
     fn save_batch_records<T: BatchRecord>(&self, records: &[T]) -> Result<(), String> {
         let encoded = records
             .iter()
-            .map(|record| Ok((record, to_json(record)?)))
+            .map(|stored_record| Ok((stored_record, to_json(stored_record)?)))
             .collect::<Result<Vec<_>, String>>()?;
         let mut connection = self.lock()?;
         let transaction = connection
@@ -49,9 +49,13 @@ impl Store {
             .map_err(db_error)?;
         {
             let mut statement = transaction.prepare(T::UPSERT_SQL).map_err(db_error)?;
-            for (record, data_json) in encoded {
+            for (stored_record, data_json) in encoded {
                 statement
-                    .execute(params![record.id(), data_json, record.secret_ref()])
+                    .execute(params![
+                        stored_record.record_id(),
+                        data_json,
+                        stored_record.secret_ref()
+                    ])
                     .map_err(db_error)?;
             }
         }
@@ -66,25 +70,30 @@ impl Store {
         self.list_records("gateway_keys")
     }
 
-    pub fn save_key(&self, record: &GatewayKeyRecord) -> Result<(), String> {
-        self.save_record("gateway_keys", &record.id, &record.secret_ref, record)
+    pub fn save_key(&self, key_record: &GatewayKeyRecord) -> Result<(), String> {
+        self.save_record(
+            "gateway_keys",
+            &key_record.id,
+            &key_record.secret_ref,
+            key_record,
+        )
     }
 
-    pub fn delete_key(&self, id: &str) -> Result<Option<GatewayKeyRecord>, String> {
-        self.delete_record("gateway_keys", id)
+    pub fn delete_key(&self, key_id: &str) -> Result<Option<GatewayKeyRecord>, String> {
+        self.delete_record("gateway_keys", key_id)
     }
 
-    pub fn delete_keys(&self, ids: &[String]) -> Result<(), String> {
-        if ids.is_empty() {
+    pub fn delete_keys(&self, key_ids: &[String]) -> Result<(), String> {
+        if key_ids.is_empty() {
             return Ok(());
         }
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        for id in ids {
+        for key_id in key_ids {
             transaction
-                .execute("DELETE FROM gateway_keys WHERE id = ?1", [id])
+                .execute("DELETE FROM gateway_keys WHERE id = ?1", [key_id])
                 .map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
@@ -96,19 +105,26 @@ impl Store {
         self.list_records("proxies")
     }
 
-    pub fn proxy(&self, id: &str) -> Result<Option<ServerProxyRecord>, String> {
+    pub fn proxy(&self, proxy_id: &str) -> Result<Option<ServerProxyRecord>, String> {
         self.lock()?
-            .query_row("SELECT data_json FROM proxies WHERE id = ?1", [id], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT data_json FROM proxies WHERE id = ?1",
+                [proxy_id],
+                |row| row.get::<_, String>(0),
+            )
             .optional()
             .map_err(db_error)?
-            .map(|value| parse_json(&value))
+            .map(|record_json| parse_json(&record_json))
             .transpose()
     }
 
-    pub fn save_proxy(&self, record: &ServerProxyRecord) -> Result<(), String> {
-        self.save_record("proxies", &record.id, &record.secret_ref, record)
+    pub fn save_proxy(&self, proxy_record: &ServerProxyRecord) -> Result<(), String> {
+        self.save_record(
+            "proxies",
+            &proxy_record.id,
+            &proxy_record.secret_ref,
+            proxy_record,
+        )
     }
 
     pub fn replace_pool_membership(
@@ -120,22 +136,22 @@ impl Store {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        for (id, in_pool) in sources {
+        for (source_id, in_pool) in sources {
             let changed = transaction
                 .execute(
                     "UPDATE sources SET data_json = json_set(data_json, '$.inPool', json(?1)) WHERE id = ?2",
-                    params![if *in_pool { "true" } else { "false" }, id],
+                    params![if *in_pool { "true" } else { "false" }, source_id],
                 )
                 .map_err(db_error)?;
             if changed != 1 {
                 return Err("pool source not found".to_string());
             }
         }
-        for (id, in_pool) in accounts {
+        for (account_id, in_pool) in accounts {
             let changed = transaction
                 .execute(
                     "UPDATE accounts SET data_json = json_set(data_json, '$.inPool', json(?1)) WHERE id = ?2",
-                    params![if *in_pool { "true" } else { "false" }, id],
+                    params![if *in_pool { "true" } else { "false" }, account_id],
                 )
                 .map_err(db_error)?;
             if changed != 1 {
@@ -151,16 +167,21 @@ impl Store {
         self.list_records("sources")
     }
 
-    pub fn save_source(&self, record: &SourceRecord) -> Result<(), String> {
-        self.save_record("sources", &record.id, &record.secret_ref, record)
+    pub fn save_source(&self, source_record: &SourceRecord) -> Result<(), String> {
+        self.save_record(
+            "sources",
+            &source_record.id,
+            &source_record.secret_ref,
+            source_record,
+        )
     }
 
     pub fn save_sources(&self, records: &[SourceRecord]) -> Result<(), String> {
         self.save_batch_records(records)
     }
 
-    pub fn delete_source(&self, id: &str) -> Result<Option<SourceRecord>, String> {
-        self.delete_record("sources", id)
+    pub fn delete_source(&self, source_id: &str) -> Result<Option<SourceRecord>, String> {
+        self.delete_record("sources", source_id)
     }
 
     pub fn weekly_reset_was_applied(
@@ -169,7 +190,9 @@ impl Store {
         fingerprint: &str,
     ) -> Result<bool, String> {
         let key = format!("weekly_reset:{account_id}:{fingerprint}");
-        Ok(self.metadata(&key)?.is_some_and(|value| value == "1"))
+        Ok(self
+            .metadata(&key)?
+            .is_some_and(|stored_flag| stored_flag == "1"))
     }
 
     pub fn mark_weekly_reset_applied(

@@ -157,7 +157,12 @@ async fn exhausted_quota_survives_the_cooldown_response_shape() {
         StatusCode::TOO_MANY_REQUESTS,
         Some(br#"{"error":{"type":"insufficient_quota"}}"#),
     );
-    let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), true);
+    let response = cooldown_error(
+        now_ms().saturating_add(60_000),
+        Some(&failure),
+        true,
+        crate::ErrorOrigin::Relay,
+    );
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.headers().contains_key(RETRY_AFTER));
 
@@ -176,7 +181,12 @@ async fn transient_cooldown_is_not_reported_as_rate_limit() {
         StatusCode::BAD_GATEWAY,
         Some(br#"{"error":{"message":"upstream unavailable"}}"#),
     );
-    let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), false);
+    let response = cooldown_error(
+        now_ms().saturating_add(60_000),
+        Some(&failure),
+        false,
+        crate::ErrorOrigin::Relay,
+    );
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()[RETRY_AFTER], "60");
 
@@ -193,7 +203,12 @@ async fn transient_cooldown_is_not_reported_as_rate_limit() {
 #[tokio::test]
 async fn mixed_cooldowns_are_not_reported_as_rate_limit() {
     let failure = AttemptFailure::status_with_body(StatusCode::TOO_MANY_REQUESTS, None);
-    let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), false);
+    let response = cooldown_error(
+        now_ms().saturating_add(60_000),
+        Some(&failure),
+        false,
+        crate::ErrorOrigin::Relay,
+    );
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let body = axum::body::to_bytes(response.into_body(), 64 * 1024)

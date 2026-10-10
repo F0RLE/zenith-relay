@@ -35,8 +35,8 @@ impl GatewayManager {
     pub async fn start(&self, runtime: Arc<GatewayRuntime>, port: u16) -> Result<SocketAddr> {
         let mut running = self.running.lock().await;
         prune_finished(&mut running);
-        if let Some(current) = running.as_ref() {
-            return Ok(current.address);
+        if let Some(running_host) = running.as_ref() {
+            return Ok(running_host.address);
         }
         let listener = bind_loopback_listener(port).await?;
         let address = listener.local_addr().map_err(|error| {
@@ -121,6 +121,18 @@ mod tests {
     use tokio::net::TcpStream;
     use zenith_relay_core::{CandidateScope, LocalGatewayKey, ProviderSource, WireApi};
 
+    async fn models_response(client: &reqwest::Client, url: &str, key: &str) -> String {
+        client
+            .get(url)
+            .bearer_auth(key)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn stop_waits_until_the_same_port_can_be_rebound() {
         let runtime = Arc::new(
@@ -167,15 +179,7 @@ mod tests {
             .unwrap();
         let client = reqwest::Client::new();
         let models_url = format!("http://{first}/v1/models");
-        let first_models = client
-            .get(&models_url)
-            .bearer_auth("key-one")
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
+        let first_models = models_response(&client, &models_url, "key-one").await;
         assert!(first_models.contains("model-one"));
 
         manager.stop().await;
@@ -197,15 +201,7 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        let second_models = restarted_client
-            .get(&models_url)
-            .bearer_auth("key-two")
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
+        let second_models = models_response(&restarted_client, &models_url, "key-two").await;
         assert!(second_models.contains("model-two"));
         assert!(!second_models.contains("model-one"));
         manager.stop().await;
@@ -218,15 +214,8 @@ mod tests {
         let address = manager.start(runtime.clone(), 0).await.unwrap();
         let models_url = format!("http://{address}/v1/models");
         let client = reqwest::Client::new();
-        assert!(client
-            .get(&models_url)
-            .bearer_auth("key")
-            .send()
+        assert!(models_response(&client, &models_url, "key")
             .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
             .contains("model"));
 
         let running_runtime = manager.runtime().await.unwrap();
@@ -244,15 +233,8 @@ mod tests {
             0,
         ));
         assert_eq!(manager.address().await, Some(address));
-        assert!(!client
-            .get(&models_url)
-            .bearer_auth("key")
-            .send()
+        assert!(!models_response(&client, &models_url, "key")
             .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
             .contains("model"));
         manager.stop().await;
     }
@@ -284,15 +266,8 @@ mod tests {
         let address = manager.start(runtime.clone(), 0).await.unwrap();
         let models_url = format!("http://{address}/v1/models");
         let client = reqwest::Client::new();
-        assert!(client
-            .get(&models_url)
-            .bearer_auth("key")
-            .send()
+        assert!(models_response(&client, &models_url, "key")
             .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
             .contains("model"));
 
         assert!(runtime.update_key_scope(
@@ -304,15 +279,8 @@ mod tests {
             },
         ));
         assert_eq!(manager.address().await, Some(address));
-        assert!(!client
-            .get(&models_url)
-            .bearer_auth("key")
-            .send()
+        assert!(!models_response(&client, &models_url, "key")
             .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
             .contains("model"));
         manager.stop().await;
     }

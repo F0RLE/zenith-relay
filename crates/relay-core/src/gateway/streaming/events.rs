@@ -8,18 +8,20 @@ pub(in crate::gateway) use output::{
     is_known_non_output_event, is_responses_output_delta_type,
 };
 
-pub(in crate::gateway) fn preserved_stream_error(value: &Value) -> Option<PreservedUpstreamError> {
-    let event_type = value.get("type").and_then(Value::as_str);
-    let category = upstream_event_failure_category(event_type, value)?;
-    let status = upstream_status_from_value(value)
+pub(in crate::gateway) fn preserved_stream_error(
+    event_payload: &Value,
+) -> Option<PreservedUpstreamError> {
+    let event_type = event_payload.get("type").and_then(Value::as_str);
+    let category = upstream_event_failure_category(event_type, event_payload)?;
+    let status = upstream_status_from_value(event_payload)
         .filter(|status| !status.is_success())
         .unwrap_or_else(|| upstream_failure_status(category));
     let failure = AttemptFailure::classified_with_hint(
         canonical_upstream_status(status, category),
         category,
-        rate_limit_body_hint_value(value, SystemTime::now()),
+        rate_limit_body_hint_value(event_payload, SystemTime::now()),
     );
-    preserved_upstream_error_value(&failure, value)
+    preserved_upstream_error_value(&failure, event_payload)
 }
 
 pub(in crate::gateway) fn rewrite_bridge_failure(
@@ -34,13 +36,13 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
         return bytes;
     }
     let Some(error) = terminal
-        .payload
+        .event_payload
         .as_mut()
-        .and_then(|payload| {
-            if payload.pointer("/response/error").is_some() {
-                payload.pointer_mut("/response/error")
+        .and_then(|terminal_payload| {
+            if terminal_payload.pointer("/response/error").is_some() {
+                terminal_payload.pointer_mut("/response/error")
             } else {
-                payload.get_mut("error")
+                terminal_payload.get_mut("error")
             }
         })
         .and_then(Value::as_object_mut)
@@ -62,21 +64,21 @@ pub(in crate::gateway) fn rewrite_bridge_failure(
                 .to_string(),
         ),
     );
-    let Some(payload) = terminal.payload else {
+    let Some(response_event) = terminal.event_payload else {
         return bytes;
     };
-    let event_name = payload.get("type").and_then(Value::as_str);
-    let Ok(payload) = serde_json::to_vec(&payload) else {
+    let event_name = response_event.get("type").and_then(Value::as_str);
+    let Ok(encoded_payload) = serde_json::to_vec(&response_event) else {
         return bytes;
     };
-    let mut frame = Vec::with_capacity(payload.len() + event_name.map_or(0, str::len) + 16);
+    let mut frame = Vec::with_capacity(encoded_payload.len() + event_name.map_or(0, str::len) + 16);
     if let Some(event_name) = event_name {
         frame.extend_from_slice(b"event: ");
         frame.extend_from_slice(event_name.as_bytes());
         frame.push(b'\n');
     }
     frame.extend_from_slice(b"data: ");
-    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&encoded_payload);
     frame.extend_from_slice(b"\n\n");
     frame
 }
@@ -102,7 +104,7 @@ pub(in crate::gateway) struct TerminalEvent {
     pub(in crate::gateway) response_id: Option<String>,
     pub(in crate::gateway) response: Option<Value>,
     pub(in crate::gateway) output_item: Option<Value>,
-    pub(in crate::gateway) payload: Option<Value>,
+    pub(in crate::gateway) event_payload: Option<Value>,
     /// The SSE data payload for an opaque Responses compaction event.
     ///
     /// Compaction data is provider-owned and may be encrypted or otherwise
@@ -120,57 +122,73 @@ pub(in crate::gateway) enum TerminalOutcome {
 
 /// OpenAI names the model it actually served on `model` or `response.model`.
 /// Only those fields count: a `degradeN` token anywhere else can be user text.
-pub(in crate::gateway) fn served_model_is_degraded(value: &Value) -> bool {
-    [value.get("model"), value.pointer("/response/model")]
-        .into_iter()
-        .filter_map(|model| model.and_then(Value::as_str))
-        .any(crate::is_degraded_route_model)
+pub(in crate::gateway) fn served_model_is_degraded(event_payload: &Value) -> bool {
+    [
+        event_payload.get("model"),
+        event_payload.pointer("/response/model"),
+    ]
+    .into_iter()
+    .filter_map(|model| model.and_then(Value::as_str))
+    .any(crate::is_degraded_route_model)
 }
 
 /// Compare upstream identity, never the public alias or text inside the output.
 /// Provider qualification and dated snapshots do not change model identity.
-pub(in crate::gateway) fn served_model_is_rejected(value: &Value, expected: &str) -> bool {
+pub(in crate::gateway) fn served_model_is_rejected(event_payload: &Value, expected: &str) -> bool {
     // A provider rejection owns its meaning. In particular, a policy 403
     // must not become a model mismatch that permits account rotation.
-    if upstream_event_failure_category(value.get("type").and_then(Value::as_str), value).is_some() {
+    if upstream_event_failure_category(
+        event_payload.get("type").and_then(Value::as_str),
+        event_payload,
+    )
+    .is_some()
+    {
         return false;
     }
-    if served_model_is_degraded(value) {
+    if served_model_is_degraded(event_payload) {
         return true;
     }
     let expected = model_identity(expected);
     !expected.is_empty()
-        && [value.get("model"), value.pointer("/response/model")]
-            .into_iter()
-            .filter_map(|model| model.and_then(Value::as_str))
-            .map(model_identity)
-            .any(|served| !served.is_empty() && served != expected)
+        && [
+            event_payload.get("model"),
+            event_payload.pointer("/response/model"),
+        ]
+        .into_iter()
+        .filter_map(|model| model.and_then(Value::as_str))
+        .map(model_identity)
+        .any(|served| !served.is_empty() && served != expected)
 }
 
-fn model_identity(model: &str) -> String {
-    let model = model.trim().rsplit('/').next().unwrap_or_default().trim();
+fn model_identity(model_id: &str) -> String {
+    let model_leaf = model_id
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim();
     let suffix_start = [11, 9].into_iter().find_map(|length| {
-        let start = model.len().checked_sub(length)?;
-        let suffix = model.get(start..)?;
+        let start = model_leaf.len().checked_sub(length)?;
+        let suffix = model_leaf.get(start..)?;
         let digits = suffix.strip_prefix('-')?.replace('-', "");
         let valid_shape =
             length == 9 || (suffix.as_bytes()[5] == b'-' && suffix.as_bytes()[8] == b'-');
         (valid_shape && digits.len() == 8 && digits.bytes().all(|byte| byte.is_ascii_digit()))
             .then_some(start)
     });
-    model[..suffix_start.unwrap_or(model.len())].to_ascii_lowercase()
+    model_leaf[..suffix_start.unwrap_or(model_leaf.len())].to_ascii_lowercase()
 }
 
 pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
-    let data = crate::protocol::sse_data(event);
+    let sse_payload = crate::protocol::sse_data(event);
     let event_name = crate::protocol::sse_lines(event)
         .filter_map(|line| line.strip_prefix(b"event:"))
         .last()
-        .and_then(|value| std::str::from_utf8(value.trim_ascii()).ok());
-    if data.is_empty() {
+        .and_then(|event_name_bytes| std::str::from_utf8(event_name_bytes.trim_ascii()).ok());
+    if sse_payload.is_empty() {
         return TerminalEvent::default();
     }
-    if data == b"[DONE]" {
+    if sse_payload == b"[DONE]" {
         return TerminalEvent {
             has_data: true,
             valid: true,
@@ -188,12 +206,12 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             response_id: None,
             response: None,
             output_item: None,
-            payload: None,
+            event_payload: None,
             raw_data: None,
         };
     }
-    let value = match serde_json::from_slice::<Value>(&data) {
-        Ok(value) => value,
+    let event_json = match serde_json::from_slice::<Value>(&sse_payload) {
+        Ok(parsed_event) => parsed_event,
         Err(error) => {
             // Responses context compaction is an opaque provider-owned stream. A
             // few upstream implementations send its delta as a raw/encrypted
@@ -205,21 +223,39 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
                     has_data: true,
                     valid: true,
                     is_compaction: true,
-                    raw_data: Some(data),
+                    raw_data: Some(sse_payload),
                     ..TerminalEvent::default()
                 };
             }
             return TerminalEvent {
                 has_data: true,
-                upstream_error: Some(super::diagnostics::invalid_event(event, &data, &error)),
+                upstream_error: Some(super::diagnostics::invalid_event(
+                    event,
+                    &sse_payload,
+                    &error,
+                )),
                 ..TerminalEvent::default()
             };
         }
     };
-    let event_type = value.get("type").and_then(Value::as_str);
+    let event_type = event_json.get("type").and_then(Value::as_str).or_else(|| {
+        event_name.filter(|event_name_value| {
+            matches!(
+                *event_name_value,
+                "error"
+                    | "response.failed"
+                    | "response.incomplete"
+                    | "response.cancelled"
+                    | "response.canceled"
+                    | "response.completed"
+                    | "response.done"
+                    | "message_stop"
+            )
+        })
+    });
     let is_compaction = event_name.is_some_and(is_opaque_compaction_event)
-        || is_compaction_payload(&value, event_type);
-    let upstream_error_category = upstream_event_failure_category(event_type, &value);
+        || is_compaction_payload(&event_json, event_type);
+    let upstream_error_category = upstream_event_failure_category(event_type, &event_json);
     let mut outcome = match event_type {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
@@ -228,7 +264,9 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             Some(TerminalOutcome::Failure)
         }
         Some("response.incomplete") => Some(TerminalOutcome::Incomplete),
-        None if upstream_error_category.is_none() && crate::protocol::gemini_incomplete(&value) => {
+        None if upstream_error_category.is_none()
+            && crate::protocol::gemini_incomplete(&event_json) =>
+        {
             Some(TerminalOutcome::Incomplete)
         }
         _ => None,
@@ -239,7 +277,10 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     if let Some(category) = error_category {
         let explicitly_incomplete = outcome == Some(TerminalOutcome::Incomplete)
             || matches!(event_type, Some("response.completed" | "response.done"))
-                && value.pointer("/response/status").and_then(Value::as_str) == Some("incomplete");
+                && event_json
+                    .pointer("/response/status")
+                    .and_then(Value::as_str)
+                    == Some("incomplete");
         outcome = Some(
             if category == error_codes::RESPONSE_INCOMPLETE && explicitly_incomplete {
                 TerminalOutcome::Incomplete
@@ -249,26 +290,26 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         );
     }
     let error_status = error_category.map(|category| {
-        let status = upstream_status_from_value(&value)
+        let status = upstream_status_from_value(&event_json)
             .filter(|status| !status.is_success())
             .unwrap_or_else(|| upstream_failure_status(category));
         canonical_upstream_status(status, category)
     });
-    let cooldown_hint = rate_limit_body_hint_value(&value, SystemTime::now());
-    let preserved_error = preserved_stream_error(&value);
-    let has_output_delta = has_output_delta(&value, event_type);
-    let semantic_output = has_semantic_output(&value, event_type);
-    let usage = find_usage(&value).cloned();
-    let applied_service_tier = response_service_tier(&value);
-    let response_id = response_id(&value).map(str::to_string);
-    let response = value.get("response").cloned();
-    let output_item = (value.get("type").and_then(Value::as_str)
+    let cooldown_hint = rate_limit_body_hint_value(&event_json, SystemTime::now());
+    let preserved_error = preserved_stream_error(&event_json);
+    let has_output_delta = has_output_delta(&event_json, event_type);
+    let semantic_output = has_semantic_output(&event_json, event_type);
+    let usage = find_usage(&event_json).cloned();
+    let applied_service_tier = response_service_tier(&event_json);
+    let response_id = response_id(&event_json).map(str::to_string);
+    let response_payload = event_json.get("response").cloned();
+    let output_item = (event_json.get("type").and_then(Value::as_str)
         == Some("response.output_item.done"))
-    .then(|| value.get("item").cloned())
+    .then(|| event_json.get("item").cloned())
     .flatten();
     TerminalEvent {
         upstream_error: error_category
-            .map(|_| crate::usage::UpstreamErrorDetails::from_value(None, &value)),
+            .map(|_| crate::usage::UpstreamErrorDetails::from_value(None, &event_json)),
         has_data: true,
         valid: true,
         has_output_delta,
@@ -282,13 +323,13 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         usage,
         applied_service_tier,
         response_id,
-        response,
+        response: response_payload,
         output_item,
-        payload: Some(value),
+        event_payload: Some(event_json),
         // Preserve the exact provider payload for all compaction forms. The
         // output-item envelope is still useful to SSE clients, but an HTTP to
         // WebSocket bridge must not reserialize the opaque encrypted item.
-        raw_data: is_compaction.then_some(data),
+        raw_data: is_compaction.then_some(sse_payload),
     }
 }
 

@@ -22,8 +22,8 @@ use crate::local_pool::{
 };
 use std::collections::BTreeMap;
 use zenith_relay_core::{
-    cache_write_model_ids, model_id_key, PriceEvidence, PricingContext, SourcePricingMetadata,
-    TokenPrice,
+    cache_write_model_ids, model_id_key, model_metadata::ModelMetadataCatalog, PriceEvidence,
+    PricingContext, SourcePricingMetadata, SourceProtocolResolution, TokenPrice,
 };
 
 pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
@@ -45,6 +45,7 @@ pub(super) fn pricing_context(
     gateway: &GatewaySettings,
     sources: &[ProviderSourceRecord],
     accounts: &[LocalAccountRecord],
+    reference_catalog: &ModelMetadataCatalog,
 ) -> PricingContext {
     let account_provider_families = accounts
         .iter()
@@ -67,7 +68,11 @@ pub(super) fn pricing_context(
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
                 cache_write_models: cache_write_model_ids(
-                    source.effective_protocol_bindings().unwrap_or_default(),
+                    SourceProtocolResolution::resolved_protocol_bindings_with_catalog(
+                        source,
+                        Some(reference_catalog),
+                    )
+                    .unwrap_or_default(),
                 ),
             },
         );

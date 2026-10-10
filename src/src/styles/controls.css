@@ -48,7 +48,7 @@ input[type="checkbox"]::before {
 }
 
 input[type="checkbox"]:checked {
-  border-color: var(--relay-accent-hover);
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
@@ -59,9 +59,9 @@ input[type="checkbox"]:checked::before {
 /* Menus and other transient surfaces share one visual language. Individual
    components only add their placement and layout rules. */
 .relay-popover-panel {
-  border: 1px solid var(--relay-border-strong);
+  border: 0;
   border-radius: var(--relay-popover-radius);
-  background: var(--relay-surface);
+  background: color-mix(in srgb, var(--relay-text) 3%, var(--relay-surface));
   box-shadow: var(--relay-popover-shadow);
   color: var(--relay-text);
 }
@@ -85,7 +85,7 @@ input[type="checkbox"]:checked::before {
 }
 
 input[type="checkbox"]:indeterminate {
-  border-color: var(--relay-accent-hover);
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
@@ -184,7 +184,7 @@ input[type="radio"]::before {
 }
 
 input[type="radio"]:checked {
-  border-color: var(--relay-accent-hover);
+  border-color: transparent;
 }
 
 input[type="radio"]:checked::before {

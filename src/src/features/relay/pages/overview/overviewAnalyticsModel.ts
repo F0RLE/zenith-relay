@@ -58,9 +58,9 @@ export function bucketsFromSamples(windows: WindowBucket[], samples: UsageSample
   // avoids scanning the complete sample list once for every bucket.
   const bucketMs = firstWindow.endMs - firstWindow.startMs + 1;
   const fixedWindows = bucketMs > 0 && windows.every((window, index) => {
-    const previous = windows[index - 1];
+    const previousWindow = windows[index - 1];
     return window.endMs === window.startMs + bucketMs - 1
-      && (index === 0 || (previous !== undefined && window.startMs === previous.startMs + bucketMs));
+      && (index === 0 || (previousWindow !== undefined && window.startMs === previousWindow.startMs + bucketMs));
   });
   if (fixedWindows) {
     const samplesByBucket = windows.map(() => [] as UsageSample[]);
@@ -87,11 +87,11 @@ export function totalsFromSamples(samples: UsageSample[]) {
 }
 
 export function localSamples(events: LocalUsage[]): UsageSample[] {
-  return events.map((item) => ({ ...item, createdAtMs: Date.parse(item.createdAt) }));
+  return events.map((usageEvent) => ({ ...usageEvent, createdAtMs: Date.parse(usageEvent.createdAt) }));
 }
 
 export function remoteSamples(events: RemoteUsage[]): UsageSample[] {
-  return events.map((item) => ({ ...item, ttftMs: item.ttftMs ?? null, generationMs: item.generationMs ?? null }));
+  return events.map((usageEvent) => ({ ...usageEvent, ttftMs: usageEvent.ttftMs ?? null, generationMs: usageEvent.generationMs ?? null }));
 }
 
 export function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {
@@ -99,19 +99,19 @@ export function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {
   return windows.map((window) => byStart.get(window.startMs) ?? emptyUsageTotals());
 }
 
-export function lineSegments(values: Array<number | null>, max: number) {
+export function lineSegments(points: Array<number | null>, max: number) {
   const segments: string[] = [];
-  let current = "";
-  values.forEach((value, index) => {
-    if (value == null) {
-      if (current) segments.push(current);
-      current = "";
+  let pathSegment = "";
+  points.forEach((pointValue, index) => {
+    if (pointValue == null) {
+      if (pathSegment) segments.push(pathSegment);
+      pathSegment = "";
       return;
     }
-    const x = (index + 0.5) / values.length * 100;
-    const y = (1 - value / max) * 100;
-    current += `${current ? " L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`;
+    const xPercent = (index + 0.5) / points.length * 100;
+    const yPercent = (1 - pointValue / max) * 100;
+    pathSegment += `${pathSegment ? " L" : "M"}${xPercent.toFixed(2)} ${yPercent.toFixed(2)}`;
   });
-  if (current) segments.push(current);
+  if (pathSegment) segments.push(pathSegment);
   return segments;
 }

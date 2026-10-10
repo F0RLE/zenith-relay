@@ -20,6 +20,7 @@ fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Fast,
         applied_service_tier: Some("priority".into()),
         success: true,
@@ -162,6 +163,7 @@ fn source_prices_revalue_raw_and_archived_usage_per_provider() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -230,7 +232,27 @@ fn usage_filters_paginate_escape_wildcards_and_clear() {
     use zenith_relay_core::protocol::UsageRange;
 
     let root = test_root("usage-query");
-    let store = Store::open(root.join("relay.sqlite")).unwrap();
+    let path = root.join("relay.sqlite");
+    let store = Store::open(path.clone()).unwrap();
+    let comparison: zenith_relay_core::usage::CacheContextDiagnostics =
+        serde_json::from_value(serde_json::json!({
+            "baseline": "completed_request", "scope": "cache_key",
+            "clientChanges": [], "upstreamChanges": [], "relayChanges": [],
+            "candidateChanged": true, "previousCompletedAgeMs": 25_000,
+            "clientHistory": {
+                "comparison": "rewritten", "inputItems": 2, "inputBytes": 100,
+                "sharedPrefixItems": 0, "firstChangedItemKind": "developer"
+            },
+            "upstreamHistory": {
+                "comparison": "rewritten", "inputItems": 2, "inputBytes": 100,
+                "sharedPrefixItems": 0, "firstChangedItemKind": "developer"
+            },
+            "relayHistory": {
+                "comparison": "unchanged", "inputItems": 2, "inputBytes": 100,
+                "sharedPrefixItems": 2, "firstChangedItemKind": null
+            }
+        }))
+        .unwrap();
     for (index, success, model, error) in [
         (1, true, "gpt-5.4", None),
         (2, false, "gpt%literal", Some("quota_exhausted")),
@@ -254,12 +276,14 @@ fn usage_filters_paginate_escape_wildcards_and_clear() {
                         in_flight_before: 0,
                         dispatches_before: index - 1,
                         endpoint_kind: None,
+                        cache_context: (index == 2).then(|| comparison.clone()),
                     }),
                     requested_model: Some(model.to_string()),
                     resolved_model: Some(model.to_string()),
                     requested_reasoning_effort: None,
                     effective_reasoning_effort: None,
                     wire_api: WireApi::Responses,
+                    transport: zenith_relay_core::UsageTransport::Http,
                     service_tier: DefaultServiceTier::Standard,
                     applied_service_tier: None,
                     success,
@@ -287,6 +311,8 @@ fn usage_filters_paginate_escape_wildcards_and_clear() {
             .unwrap();
     }
 
+    drop(store);
+    let store = Store::open(path).unwrap();
     let page = store
         .usage_page(&UsageQuery {
             page: 1,
@@ -317,6 +343,15 @@ fn usage_filters_paginate_escape_wildcards_and_clear() {
         page.totals.api_equivalent
     );
     assert_eq!(page.events[0].request_id, "req_2");
+    assert_eq!(
+        page.events[0]
+            .routing
+            .as_ref()
+            .unwrap()
+            .cache_context
+            .as_ref(),
+        Some(&comparison)
+    );
     assert_eq!(page.events[0].ttft_ms, Some(4));
     assert_eq!(page.events[0].tokens.cache_write_input_tokens, Some(1));
     assert_eq!(page.events[0].api_equivalent, page.totals.api_equivalent);

@@ -21,7 +21,7 @@ use zenith_relay_core::{
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 39;
+pub const SERVER_SCHEMA_VERSION: u32 = 41;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -152,13 +152,14 @@ impl AppState {
             account_provider_families.insert(identity_hint(&account.id), family.clone());
             account_provider_families.insert(account.id, family);
         }
+        let reference_catalog = self.model_metadata_catalog();
         let mut source_metadata = BTreeMap::new();
         let mut source_evidence = BTreeMap::new();
         for source in sources {
             let metadata = SourcePricingMetadata {
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
-                cache_write_models: source.models_with_cache_write_pricing(),
+                cache_write_models: source.models_with_cache_write_pricing(&reference_catalog),
             };
             let key = identity_hint(&source.id);
             source_metadata.insert(key.clone(), metadata.clone());
@@ -207,12 +208,11 @@ impl AppState {
             .runtime
             .write()
             .map_err(|_| "runtime lock poisoned".to_string())?;
-        if let Some(previous) = active.as_ref() {
-            if runtime
-                .as_ref()
-                .is_none_or(|next| !Arc::ptr_eq(previous, next))
-            {
-                previous.retire_for_replacement();
+        if let Some(previous_runtime) = active.as_ref() {
+            if runtime.as_ref().is_none_or(|replacement_runtime| {
+                !Arc::ptr_eq(previous_runtime, replacement_runtime)
+            }) {
+                previous_runtime.retire_for_replacement();
             }
         }
         *active = runtime;
@@ -234,6 +234,9 @@ mod tests {
     #[test]
     fn account_credential_keeps_oauth_as_agent_identity_fallback() {
         let credential = AccountCredential {
+            oauth_client_kind: Default::default(),
+            chatgpt_user_id: None,
+            basis_points_headers: None,
             access_token: "oauth-access".into(),
             refresh_token: Some("oauth-refresh".into()),
             id_token: None,

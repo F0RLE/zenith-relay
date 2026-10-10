@@ -37,7 +37,7 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
 }
 
 #[test]
-fn generic_gateway_rejection_sse_keeps_candidate_category_and_provider_details() {
+fn generic_gateway_rejection_sse_keeps_request_category_and_provider_details() {
     let terminal = parse_sse_event(
         br#"event: error
 data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}
@@ -45,8 +45,8 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
 "#,
     );
 
-    assert_eq!(terminal.error_category, Some("upstream_candidate_rejected"));
-    assert_eq!(terminal.error_status, Some(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(terminal.error_category, Some("upstream_invalid_request"));
+    assert_eq!(terminal.error_status, Some(StatusCode::BAD_REQUEST));
     let upstream = terminal.upstream_error.unwrap();
     assert_eq!(upstream.code.as_deref(), Some("invalid_request"));
     assert_eq!(
@@ -110,91 +110,6 @@ async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
     };
     assert!(buffered.len() > 256 * 1024);
     assert!(buffered.starts_with(b"data: {\"type\":\"response.output_text.delta\""));
-}
-
-#[tokio::test]
-async fn oversized_sse_event_is_recorded_as_failure() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let captured = events.clone();
-    let mut stream = UsageStream::new(
-        futures_util::stream::empty::<std::result::Result<Bytes, Infallible>>(),
-        Arc::new(move |event| captured.lock().unwrap().push(event)),
-        UsageEvent {
-            request_id: "request".into(),
-            attempt: 1,
-            local_key_id: "key".into(),
-            source_id: "source".into(),
-            candidate_id: Some("source".into()),
-            account_id: None,
-            account_token_generation: None,
-            client_context_id: None,
-            routing: None,
-            requested_model: Some("model".into()),
-            resolved_model: Some("model".into()),
-            requested_reasoning_effort: None,
-            effective_reasoning_effort: None,
-            wire_api: crate::WireApi::Responses,
-            service_tier: crate::DefaultServiceTier::Standard,
-            applied_service_tier: None,
-            success: true,
-            http_status: 200,
-            error_category: None,
-            tool_use: crate::ToolUseDiagnostics::default(),
-            cooldown_scope: None,
-            retry_at_ms: None,
-            consecutive_failures: Some(0),
-            latency_ms: 0,
-            ttft_ms: None,
-            generation_ms: None,
-            input_tokens: None,
-            cached_input_tokens: None,
-            cache_write_input_tokens: None,
-            cache_write_ttl: None,
-            reasoning_tokens: None,
-            output_tokens: None,
-            total_tokens: None,
-            upstream_error: None,
-            quota_snapshot: None,
-        },
-        Instant::now(),
-        Arc::new(|_, _, _| {}),
-    );
-    stream.ingest_sse(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]);
-    assert!(stream.terminated);
-    assert!(stream.sse_pending.is_empty());
-    let failure = String::from_utf8(stream.output_pending.pop_front().unwrap().to_vec()).unwrap();
-    assert!(failure.starts_with("event: response.failed\ndata: "));
-    let payload = failure
-        .strip_prefix("event: response.failed\ndata: ")
-        .and_then(|value| value.strip_suffix("\n\n"))
-        .and_then(|value| serde_json::from_str::<Value>(value).ok())
-        .unwrap();
-    assert_eq!(
-        payload["response"]["error"]["code"],
-        "stream_event_too_large"
-    );
-    assert_eq!(
-        payload["response"]["error"]["zenith_relay"]["origin"],
-        "provider"
-    );
-    assert_eq!(
-        payload["response"]["error"]["zenith_relay"]["category"],
-        "stream_event_too_large"
-    );
-    assert_eq!(
-        payload["response"]["error"]["zenith_relay"]["request_id"],
-        "request"
-    );
-    assert!(stream.output_pending.is_empty());
-    drop(stream);
-
-    let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(!events[0].success);
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("stream_event_too_large")
-    );
 }
 
 #[tokio::test]

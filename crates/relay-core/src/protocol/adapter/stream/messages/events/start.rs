@@ -5,9 +5,9 @@ use serde_json::{json, Map, Value};
 impl MessagesStreamBridge {
     pub(in crate::protocol::adapter::stream::messages::events) fn handle_block_start(
         &mut self,
-        value: &Value,
+        block_start_event: &Value,
     ) {
-        let Some(index) = value
+        let Some(index) = block_start_event
             .get("index")
             .and_then(Value::as_u64)
             .map(|index| index as usize)
@@ -15,7 +15,10 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
-        let Some(block) = value.get("content_block").and_then(Value::as_object) else {
+        let Some(content_block) = block_start_event
+            .get("content_block")
+            .and_then(Value::as_object)
+        else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
@@ -26,11 +29,11 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        match block.get("type").and_then(Value::as_str) {
-            Some("text") => self.start_text_block(index, block),
-            Some("tool_use") => self.start_tool_use_block(index, block),
-            Some("thinking") => self.start_thinking_block(index, block),
-            Some("redacted_thinking") => self.start_redacted_thinking_block(index, block),
+        match content_block.get("type").and_then(Value::as_str) {
+            Some("text") => self.start_text_block(index, content_block),
+            Some("tool_use") => self.start_tool_use_block(index, content_block),
+            Some("thinking") => self.start_thinking_block(index, content_block),
+            Some("redacted_thinking") => self.start_redacted_thinking_block(index, content_block),
             _ => self.fail(AdapterError::upstream_stream_invalid()),
         }
     }
@@ -68,20 +71,20 @@ impl MessagesStreamBridge {
         if !self.finish_active_text_output() {
             return;
         }
-        let Some(id) = block
+        let Some(call_id) = block
             .get("id")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|id| !id.is_empty())
+            .filter(|call_id| !call_id.is_empty())
         else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
-        let Some(name) = block
+        let Some(upstream_tool_name) = block
             .get("name")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|name| !name.is_empty())
+            .filter(|tool_name| !tool_name.is_empty())
         else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -89,7 +92,7 @@ impl MessagesStreamBridge {
         let Some(target) = self
             .request
             .as_ref()
-            .and_then(|request| request.state.client_tool(name))
+            .and_then(|request| request.bridge_state.client_tool(upstream_tool_name))
             .cloned()
         else {
             self.fail(AdapterError::upstream_stream_invalid());
@@ -99,42 +102,50 @@ impl MessagesStreamBridge {
         let client_name = target.name;
         let client_namespace = target.namespace;
         if self.assistant_blocks.values().any(|existing| {
-            matches!(existing, StreamBlock::Tool { id: existing_id, .. } if existing_id == id)
+            matches!(existing, StreamBlock::Tool { id: existing_id, .. } if existing_id == call_id)
         }) {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        if block.get("input").is_some_and(|input| !input.is_object()) {
+        if block
+            .get("input")
+            .is_some_and(|tool_input| !tool_input.is_object())
+        {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
         let initial_arguments = block
             .get("input")
-            .filter(|input| input.as_object().is_some_and(|object| !object.is_empty()))
-            .and_then(|input| serde_json::to_string(input).ok())
+            .filter(|tool_input| {
+                tool_input
+                    .as_object()
+                    .is_some_and(|tool_input_fields| !tool_input_fields.is_empty())
+            })
+            .and_then(|tool_input| serde_json::to_string(tool_input).ok())
             .unwrap_or_default();
         let output_index = self.next_output_index;
         self.next_output_index = self.next_output_index.saturating_add(1);
-        let mut item = match tool_kind {
+        let mut output_item = match tool_kind {
             ResponsesToolKind::Function => json!({
-                "id": id,
+                "id": call_id,
                 "type": tool_kind.response_item_type(),
                 "status": "in_progress",
-                "call_id": id,
+                "call_id": call_id,
                 "name": client_name,
                 "arguments": "",
             }),
             ResponsesToolKind::Custom => json!({
-                "id": custom_tool_item_id(id),
+                "id": custom_tool_item_id(call_id),
                 "type": tool_kind.response_item_type(),
                 "status": "in_progress",
-                "call_id": id,
+                "call_id": call_id,
                 "name": client_name,
                 "input": "",
             }),
         };
         if let Some(namespace) = client_namespace.as_ref() {
-            item.as_object_mut()
+            output_item
+                .as_object_mut()
                 .expect("Responses stream item is an object")
                 .insert("namespace".to_string(), Value::String(namespace.clone()));
         }
@@ -143,19 +154,19 @@ impl MessagesStreamBridge {
             json!({
                 "type": "response.output_item.added",
                 "output_index": output_index,
-                "item": item,
+                "item": output_item,
             }),
         );
         self.assistant_blocks.insert(
             index,
             StreamBlock::Tool {
-                id: id.to_string(),
+                id: call_id.to_string(),
                 item_id: if tool_kind == ResponsesToolKind::Custom {
-                    custom_tool_item_id(id)
+                    custom_tool_item_id(call_id)
                 } else {
-                    id.to_string()
+                    call_id.to_string()
                 },
-                upstream_name: name.to_string(),
+                upstream_name: upstream_tool_name.to_string(),
                 name: client_name,
                 namespace: client_namespace,
                 kind: tool_kind,
@@ -169,7 +180,7 @@ impl MessagesStreamBridge {
                 json!({
                     "type": "response.function_call_arguments.delta",
                     "response_id": self.response_id.clone(),
-                    "item_id": id,
+                    "item_id": call_id,
                     "output_index": output_index,
                     "delta": initial_arguments,
                 }),
@@ -198,14 +209,14 @@ impl MessagesStreamBridge {
     }
 
     fn start_redacted_thinking_block(&mut self, index: usize, block: &Map<String, Value>) {
-        let Some(data) = block.get("data").and_then(Value::as_str) else {
+        let Some(redacted_data) = block.get("data").and_then(Value::as_str) else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
         self.assistant_blocks.insert(
             index,
             StreamBlock::RedactedThinking {
-                data: data.to_string(),
+                data: redacted_data.to_string(),
             },
         );
     }

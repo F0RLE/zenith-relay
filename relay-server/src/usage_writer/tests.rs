@@ -33,6 +33,7 @@ fn usage_event(request_id: &str, account_id: &str) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -70,6 +71,9 @@ fn missing_account_does_not_block_other_usage_updates_or_count_as_a_write_failur
             .save(
                 &account.secret_ref,
                 &serde_json::to_string(&AccountCredential {
+                    oauth_client_kind: Default::default(),
+                    chatgpt_user_id: None,
+                    basis_points_headers: None,
                     access_token: "test-token".to_string(),
                     refresh_token: None,
                     id_token: None,
@@ -150,7 +154,7 @@ fn persisted_passive_quota_is_fresh_for_the_registered_account_only() {
             |_| {
                 Box::pin(async {
                     RefreshResult {
-                        value: Err("synthetic read".into()),
+                        refresh_value: Err("synthetic read".into()),
                         outcome: RefreshOutcome::Success,
                     }
                 })

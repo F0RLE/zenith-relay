@@ -4,12 +4,13 @@ mod late;
 pub(super) use early::*;
 pub(super) use late::*;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 29;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 31;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"
 INSERT INTO usage_candidate_rollups(
     candidate_kind, candidate_id, model,
+    price_class, context_band,
     input_tokens, input_samples, cached_input_tokens, cached_input_samples,
     cache_write_input_tokens, cache_write_input_samples,
     cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
@@ -17,6 +18,15 @@ INSERT INTO usage_candidate_rollups(
 )
 SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
     COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
+    CASE lower(COALESCE(applied_service_tier, ''))
+        WHEN 'flex' THEN 'flex'
+        WHEN 'priority' THEN 'priority'
+        WHEN 'fast' THEN 'priority'
+        ELSE 'standard' END,
+    CASE
+        WHEN COALESCE(input_tokens, 0) > 272000 THEN 'above_272k'
+        WHEN COALESCE(input_tokens, 0) > 200000 THEN 'above_200k'
+        ELSE 'base' END,
     COALESCE(SUM(input_tokens), 0), COUNT(input_tokens),
     COALESCE(SUM(cached_input_tokens), 0), COUNT(cached_input_tokens),
     COALESCE(SUM(cache_write_input_tokens), 0), COUNT(cache_write_input_tokens),
@@ -29,8 +39,8 @@ SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
 FROM request_logs
 WHERE created_at < datetime('now', '-30 days')
     AND usage_aggregate_recorded = 0
-GROUP BY 1, 2, 3
-ON CONFLICT(candidate_kind, candidate_id, model) DO UPDATE SET
+GROUP BY 1, 2, 3, 4, 5
+ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO UPDATE SET
     input_tokens = input_tokens + excluded.input_tokens,
     input_samples = input_samples + excluded.input_samples,
     cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,

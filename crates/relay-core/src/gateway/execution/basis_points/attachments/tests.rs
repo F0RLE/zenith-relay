@@ -89,7 +89,7 @@ fn image_url_object_and_supported_signatures_decode() {
     };
     assert_eq!(image.media_type, "image/png");
     assert_eq!(image.filename, "image.png");
-    assert_eq!(image.data, png);
+    assert_eq!(image.bytes, png);
 
     let jpeg = expect_image(decode_inline_image("data:image/jpg;base64,/9j/AA=="));
     assert_eq!(jpeg.filename, "image.jpeg");
@@ -186,6 +186,7 @@ fn attachment_cache_reuses_the_file_id_without_storing_bytes() {
     let key = attachment_key(
         "https://bps.openai.com/attachments",
         "account",
+        &[0; 32],
         "image/png",
         b"png-bytes",
     );

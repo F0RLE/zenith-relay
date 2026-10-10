@@ -4,7 +4,7 @@ import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode } from "
 import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { AccountPlanBadge, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
+import { AccountBadges, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
 import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
@@ -97,10 +97,10 @@ export function PoolMemberCard({
       : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
       ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
       : undefined;
-  const parallelRequests = activeRequestCount(runtimeState);
-  const name = member.kind === "source" ? member.name : member.label;
-  const editLabel = `${t("pool.editMember")}: ${name}`;
-  const removeLabel = `${t("pool.removeMember")}: ${name}`;
+  const activeRequests = activeRequestCount(runtimeState);
+  const memberName = member.kind === "source" ? member.name : member.label;
+  const editLabel = `${t("pool.editMember")}: ${memberName}`;
+  const removeLabel = `${t("pool.removeMember")}: ${memberName}`;
   const removing = busy === `pool-remove-${member.id}`;
   const statusLabel = t(`pool.memberStatus.${statusKey}`);
   const indicatorLabel = visibleMemberErrorCode
@@ -114,7 +114,7 @@ export function PoolMemberCard({
     <article
       className={`pool-member-card${selected ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
       role="listitem"
-      data-member-label={name}
+      data-member-label={memberName}
       data-current={isCurrent ? "true" : "false"}
       data-next={isNext ? "true" : "false"}
       data-last-used={isLastUsed ? "true" : "false"}
@@ -150,7 +150,7 @@ export function PoolMemberCard({
           </strong>
           <div className="pool-member-meta">
             {member.kind === "account"
-              ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} />
+              ? <AccountBadges planType={member.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")} />
               : <small data-relay-tooltip={detail}>{detail}</small>}
           </div>
         </div>
@@ -174,8 +174,8 @@ export function PoolMemberCard({
       ) : (
         <div className="pool-member-context" data-kind="source">
           <div className="pool-member-runtime-meta">
-            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode}`)}</strong></div> : null}
-            <div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div>
+            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode === "automatic" ? "automatic" : "manual"}`)}</strong></div> : null}
+            <div><span>{t("pool.activeRequestCount")}</span><strong>{activeRequests}</strong></div>
           </div>
         </div>
       )}

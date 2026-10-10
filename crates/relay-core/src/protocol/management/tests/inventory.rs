@@ -105,7 +105,14 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
     );
     apply_model_display_order_with_catalog(&mut models, &[], &metadata);
     assert_eq!(models.len(), 5);
-    let future = models.iter().find(|model| model.id == "future").unwrap();
+    let future = models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case("future"))
+        .unwrap();
+    assert_eq!(
+        future.id, "FUTURE",
+        "native account inventory owns shared IDs"
+    );
     assert_eq!(future.member_count, 2);
     assert!(!future.enabled);
     assert_eq!(future.catalog_name.as_deref(), Some("Future Model"));
@@ -119,7 +126,10 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
         .iter()
         .all(|model| model.protocol_routes.is_empty() && !model.codex_visible));
     assert!(
-        models.iter().position(|m| m.id == "future") < models.iter().position(|m| m.id == "older")
+        models
+            .iter()
+            .position(|m| m.id.eq_ignore_ascii_case("future"))
+            < models.iter().position(|m| m.id == "older")
     );
     assert!(models
         .iter()
@@ -176,7 +186,7 @@ fn member_model_order_uses_complete_inventory_independently_of_rules() {
     let original_account = accounts[0].clone();
 
     apply_member_model_display_order(&mut sources, &mut accounts, &[], &metadata);
-    let expected = ["newer", "older", "unknown-a", "unknown-z"];
+    let expected = ["older", "newer", "unknown-z", "unknown-a"];
     assert_eq!(sources[0].models, expected);
     assert_eq!(accounts[0].models, expected);
     let mut expected_source = original_source;
@@ -206,7 +216,7 @@ fn member_model_order_uses_complete_inventory_independently_of_rules() {
     );
     assert_eq!(
         sources[0].models,
-        ["older", "newer", "unknown-a", "unknown-z"]
+        ["older", "newer", "unknown-z", "unknown-a"]
     );
     assert_eq!(accounts[0].models, sources[0].models);
 }
@@ -237,6 +247,10 @@ fn advisory_metadata_changes_only_presentation_fields_and_order() {
                     "reasoning":true,
                     "reasoning_effort_levels":["low","high"],
                     "default_reasoning_effort":"low",
+                    "reasoning_method":"budget_tokens",
+                    "reasoning_budget_min_tokens":1024,
+                    "reasoning_budget_max_tokens":32000,
+                    "reasoning_budget_default_tokens":8192,
                     "tool_call":true,
                     "structured_output":true,
                     "attachment":true,
@@ -257,24 +271,28 @@ fn advisory_metadata_changes_only_presentation_fields_and_order() {
             .iter()
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>(),
-        ["newer", "older"]
+        ["older", "newer"]
     );
-    assert_eq!(models[0].catalog_name.as_deref(), Some("Newer"));
-    assert_eq!(models[0].catalog_reasoning, Some(true));
-    assert_eq!(models[0].catalog_reasoning_effort_levels, ["low", "high"]);
+    let newer = models.iter().find(|model| model.id == "newer").unwrap();
+    assert_eq!(newer.catalog_name.as_deref(), Some("Newer"));
+    assert_eq!(newer.catalog_reasoning, Some(true));
+    assert_eq!(newer.catalog_reasoning_effort_levels, ["low", "high"]);
     assert_eq!(
-        models[0].catalog_default_reasoning_effort.as_deref(),
+        newer.catalog_default_reasoning_effort.as_deref(),
         Some("low")
     );
-    assert_eq!(models[0].catalog_tool_call, Some(true));
-    assert_eq!(models[0].catalog_structured_output, Some(true));
-    assert_eq!(models[0].catalog_attachment, Some(true));
-    assert_eq!(models[0].catalog_open_weights, Some(false));
-    assert_eq!(models[0].catalog_input_modalities, ["text", "image"]);
-    assert_eq!(models[0].catalog_output_modalities, ["text"]);
-    assert_eq!(models[0].catalog_context_limit, Some(128_000));
-    assert_eq!(models[0].catalog_input_limit, Some(120_000));
-    assert_eq!(models[0].catalog_output_limit, Some(8_000));
+    assert_eq!(newer.catalog_reasoning_budget_min_tokens, Some(1024));
+    assert_eq!(newer.catalog_reasoning_budget_max_tokens, Some(32_000));
+    assert_eq!(newer.catalog_reasoning_budget_default_tokens, Some(8_192));
+    assert_eq!(newer.catalog_tool_call, Some(true));
+    assert_eq!(newer.catalog_structured_output, Some(true));
+    assert_eq!(newer.catalog_attachment, Some(true));
+    assert_eq!(newer.catalog_open_weights, Some(false));
+    assert_eq!(newer.catalog_input_modalities, ["text", "image"]);
+    assert_eq!(newer.catalog_output_modalities, ["text"]);
+    assert_eq!(newer.catalog_context_limit, Some(128_000));
+    assert_eq!(newer.catalog_input_limit, Some(120_000));
+    assert_eq!(newer.catalog_output_limit, Some(8_000));
     assert_eq!(
         models
             .iter()

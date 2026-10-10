@@ -5,48 +5,57 @@ impl RefreshCoordinator {
         let key = self
             .entries
             .iter()
-            .filter(|(key, entry)| {
-                entry.in_flight.is_none()
-                    && !entry.unsupported
-                    && self.capacity_available(entry, key.kind)
-                    && self.eligible_at(entry).is_some_and(|at| at <= now_ms)
+            .filter(|(key, refresh_entry)| {
+                refresh_entry.in_flight.is_none()
+                    && !refresh_entry.unsupported
+                    && self.capacity_available(refresh_entry, key.kind)
+                    && self
+                        .eligible_at(refresh_entry)
+                        .is_some_and(|at| at <= now_ms)
             })
-            .min_by_key(|(key, entry)| (self.class_distance(key.kind), entry.next_due_ms, *key))
+            .min_by_key(|(key, refresh_entry)| {
+                (
+                    self.class_distance(key.kind),
+                    refresh_entry.next_due_ms,
+                    *key,
+                )
+            })
             .map(|(key, _)| key.clone())?;
         self.next_job_id = self.next_job_id.checked_add(1)?;
         self.advance_class(key.kind);
-        let id = RefreshJobId(self.next_job_id);
-        let entry = self.entries.get_mut(&key)?;
-        let due_at_ms = entry
+        let refresh_job_id = RefreshJobId(self.next_job_id);
+        let refresh_entry = self.entries.get_mut(&key)?;
+        let due_at_ms = refresh_entry
             .next_due_ms
             .take()
             .unwrap_or(now_ms)
-            .max(entry.not_before_ms);
-        if entry.event_due_ms.is_some_and(|at| at <= now_ms) {
-            entry.event_due_ms = None;
+            .max(refresh_entry.not_before_ms);
+        if refresh_entry.event_due_ms.is_some_and(|at| at <= now_ms) {
+            refresh_entry.event_due_ms = None;
         } else {
-            entry.reschedule_due_ms = earliest(entry.reschedule_due_ms, entry.event_due_ms);
+            refresh_entry.reschedule_due_ms =
+                earliest(refresh_entry.reschedule_due_ms, refresh_entry.event_due_ms);
         }
-        entry.dirty = false;
-        entry.in_flight = Some(id);
+        refresh_entry.dirty = false;
+        refresh_entry.in_flight = Some(refresh_job_id);
         self.next_start_ms = now_ms.saturating_add(self.limits.start_spacing_ms);
         self.origin_next_start.insert(
-            entry.origin.clone(),
+            refresh_entry.origin.clone(),
             now_ms.saturating_add(self.limits.origin_spacing_ms),
         );
         self.jobs.insert(
-            id,
+            refresh_job_id,
             RunningJob {
                 key: key.clone(),
-                origin: entry.origin.clone(),
+                origin: refresh_entry.origin.clone(),
             },
         );
         Some(RefreshJob {
-            id,
+            id: refresh_job_id,
             identity: key.identity,
             kind: key.kind,
             due_at_ms,
-            manual: std::mem::take(&mut entry.manual),
+            manual: std::mem::take(&mut refresh_entry.manual),
         })
     }
 
@@ -65,82 +74,86 @@ impl RefreshCoordinator {
         }
         let key = self.jobs.remove(&job.id).expect("known job").key;
         self.prune_origins(now_ms);
-        let Some(entry) = self.entries.get_mut(&key) else {
+        let Some(refresh_entry) = self.entries.get_mut(&key) else {
             return RefreshCompletion::Stale;
         };
-        if entry.in_flight != Some(job.id) {
+        if refresh_entry.in_flight != Some(job.id) {
             return RefreshCompletion::Stale;
         }
-        entry.in_flight = None;
-        let rescheduled = entry.reschedule_due_ms.take();
-        let passive_due = entry.passive_during_job_due_ms.take();
+        refresh_entry.in_flight = None;
+        let rescheduled = refresh_entry.reschedule_due_ms.take();
+        let passive_due = refresh_entry.passive_during_job_due_ms.take();
         let passive_replaced_failure = passive_due.is_some()
-            && !entry.dirty
+            && !refresh_entry.dirty
             && !matches!(
                 outcome,
                 RefreshOutcome::Success | RefreshOutcome::Unsupported
             );
-        entry.not_before_ms = entry
+        refresh_entry.not_before_ms = refresh_entry
             .not_before_ms
             .max(now_ms.saturating_add(self.limits.minimum_interval_ms));
-        entry.failed = outcome != RefreshOutcome::Success && !passive_replaced_failure;
-        let next = match outcome {
+        refresh_entry.failed = outcome != RefreshOutcome::Success && !passive_replaced_failure;
+        let next_due_at_ms = match outcome {
             RefreshOutcome::Success => {
-                entry.no_progress_count = 0;
+                refresh_entry.no_progress_count = 0;
                 let periodic = if let Some(due) = passive_due {
                     // A read started before this newer persisted inference
                     // header. Host reducers will discard that older HTTP
                     // result; do not shift the quota due time to job end.
                     Some(due)
                 } else {
-                    entry.last_success_ms = Some(now_ms);
-                    entry.passive_age_at_receive = None;
-                    entry.passive_fresh_until_ms = None;
+                    refresh_entry.last_success_ms = Some(now_ms);
+                    refresh_entry.passive_age_at_receive = None;
+                    refresh_entry.passive_fresh_until_ms = None;
                     key.kind
-                        .interval_ms(entry.active)
+                        .interval_ms(refresh_entry.active)
                         .map(|i| now_ms.saturating_add(i))
                 }
-                .filter(|_| entry.automatic);
+                .filter(|_| refresh_entry.automatic);
                 let scheduled = earliest(periodic, rescheduled);
-                if entry.dirty {
+                if refresh_entry.dirty {
                     earliest(scheduled, Some(now_ms))
                 } else {
                     scheduled
                 }
             }
             RefreshOutcome::FailedRetryAt(at) => {
-                entry.not_before_ms = entry.not_before_ms.max(at);
+                refresh_entry.not_before_ms = refresh_entry.not_before_ms.max(at);
                 if passive_replaced_failure {
-                    entry.no_progress_count = 0;
+                    refresh_entry.no_progress_count = 0;
                     earliest(passive_due, rescheduled)
                 } else {
-                    Some(entry.not_before_ms)
+                    Some(refresh_entry.not_before_ms)
                 }
             }
             RefreshOutcome::NoProgress => {
                 if passive_replaced_failure {
-                    entry.no_progress_count = 0;
+                    refresh_entry.no_progress_count = 0;
                     earliest(passive_due, rescheduled)
                 } else {
-                    entry.no_progress_count = entry.no_progress_count.saturating_add(1);
-                    let delay =
-                        (5_000u64 << entry.no_progress_count.saturating_sub(1).min(6)).min(300_000);
-                    entry.not_before_ms = entry.not_before_ms.max(now_ms.saturating_add(delay));
-                    Some(entry.not_before_ms)
+                    refresh_entry.no_progress_count =
+                        refresh_entry.no_progress_count.saturating_add(1);
+                    let delay = (5_000u64
+                        << refresh_entry.no_progress_count.saturating_sub(1).min(6))
+                    .min(300_000);
+                    refresh_entry.not_before_ms = refresh_entry
+                        .not_before_ms
+                        .max(now_ms.saturating_add(delay));
+                    Some(refresh_entry.not_before_ms)
                 }
             }
             RefreshOutcome::Unsupported => {
-                entry.unsupported = true;
-                entry.event_due_ms = None;
+                refresh_entry.unsupported = true;
+                refresh_entry.event_due_ms = None;
                 None
             }
         };
-        entry.dirty = false;
-        entry.next_due_ms = next
-            .filter(|_| entry.automatic)
-            .map(|at| at.max(entry.not_before_ms));
+        refresh_entry.dirty = false;
+        refresh_entry.next_due_ms = next_due_at_ms
+            .filter(|_| refresh_entry.automatic)
+            .map(|at| at.max(refresh_entry.not_before_ms));
         RefreshCompletion::Applied {
-            next_due_ms: entry.next_due_ms,
+            next_due_ms: refresh_entry.next_due_ms,
         }
     }
 
@@ -166,16 +179,16 @@ impl RefreshCoordinator {
         kind: RefreshKind,
         automatic: bool,
     ) -> bool {
-        if let Some(entry) = self.entries.get_mut(&RefreshKey {
+        if let Some(refresh_entry) = self.entries.get_mut(&RefreshKey {
             identity: identity.clone(),
             kind,
         }) {
-            let activated = !entry.automatic && automatic;
-            entry.automatic = automatic;
+            let activated = !refresh_entry.automatic && automatic;
+            refresh_entry.automatic = automatic;
             if !automatic {
-                entry.event_due_ms = None;
-                if entry.in_flight.is_none() {
-                    entry.next_due_ms = None;
+                refresh_entry.event_due_ms = None;
+                if refresh_entry.in_flight.is_none() {
+                    refresh_entry.next_due_ms = None;
                 }
             }
             activated
@@ -190,7 +203,7 @@ impl RefreshCoordinator {
                 identity: identity.clone(),
                 kind,
             })
-            .is_some_and(|entry| entry.in_flight.is_some())
+            .is_some_and(|refresh_entry| refresh_entry.in_flight.is_some())
     }
 
     pub fn schedule_event(
@@ -199,17 +212,17 @@ impl RefreshCoordinator {
         kind: RefreshKind,
         at_ms: u64,
     ) -> bool {
-        let Some(entry) = self.entries.get_mut(&RefreshKey {
+        let Some(refresh_entry) = self.entries.get_mut(&RefreshKey {
             identity: identity.clone(),
             kind,
         }) else {
             return false;
         };
-        if !entry.automatic || entry.unsupported {
+        if !refresh_entry.automatic || refresh_entry.unsupported {
             return false;
         }
-        entry.event_due_ms = earliest(entry.event_due_ms, Some(at_ms));
-        entry.schedule(Some(at_ms));
+        refresh_entry.event_due_ms = earliest(refresh_entry.event_due_ms, Some(at_ms));
+        refresh_entry.schedule(Some(at_ms));
         true
     }
 
@@ -223,7 +236,11 @@ impl RefreshCoordinator {
                 identity: identity.clone(),
                 kind,
             })
-            .and_then(|entry| entry.next_due_ms.map(|due| due.max(entry.not_before_ms)))
+            .and_then(|refresh_entry| {
+                refresh_entry
+                    .next_due_ms
+                    .map(|due| due.max(refresh_entry.not_before_ms))
+            })
     }
 
     /// None when only a running job can unblock dispatch. Callers must wait on
@@ -231,12 +248,12 @@ impl RefreshCoordinator {
     pub fn next_wake(&self) -> Option<u64> {
         self.entries
             .iter()
-            .filter(|(key, entry)| {
-                entry.in_flight.is_none()
-                    && !entry.unsupported
-                    && self.capacity_available(entry, key.kind)
+            .filter(|(key, refresh_entry)| {
+                refresh_entry.in_flight.is_none()
+                    && !refresh_entry.unsupported
+                    && self.capacity_available(refresh_entry, key.kind)
             })
-            .filter_map(|(_, entry)| self.eligible_at(entry))
+            .filter_map(|(_, refresh_entry)| self.eligible_at(refresh_entry))
             .min()
     }
 
@@ -246,24 +263,24 @@ impl RefreshCoordinator {
         kind: RefreshKind,
         now_ms: u64,
     ) -> RefreshFreshness {
-        let Some(entry) = self.entries.get(&RefreshKey {
+        let Some(refresh_entry) = self.entries.get(&RefreshKey {
             identity: identity.clone(),
             kind,
         }) else {
             return RefreshFreshness::Unknown;
         };
-        if entry.unsupported {
+        if refresh_entry.unsupported {
             return RefreshFreshness::Unsupported;
         }
-        let Some(as_of_ms) = entry.last_success_ms else {
+        let Some(as_of_ms) = refresh_entry.last_success_ms else {
             return RefreshFreshness::Unknown;
         };
-        if entry.failed
-            || entry
+        if refresh_entry.failed
+            || refresh_entry
                 .passive_fresh_until_ms
                 .is_some_and(|until| now_ms >= until)
             || kind
-                .interval_ms(entry.active)
+                .interval_ms(refresh_entry.active)
                 .is_some_and(|i| now_ms >= as_of_ms.saturating_add(i))
         {
             RefreshFreshness::Stale { as_of_ms }
@@ -276,7 +293,7 @@ impl RefreshCoordinator {
         let retained = self
             .entries
             .values()
-            .map(|entry| entry.origin.as_str())
+            .map(|refresh_entry| refresh_entry.origin.as_str())
             .chain(self.jobs.values().map(|job| job.origin.as_str()))
             .collect::<std::collections::BTreeSet<_>>();
         self.origin_next_start

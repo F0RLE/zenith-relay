@@ -128,7 +128,7 @@ fn matching_history_does_not_consume_the_rewrite_budget() {
         manifest
             .entries
             .iter()
-            .filter(|entry| !entry.sqlite)
+            .filter(|backup_entry| !backup_entry.sqlite)
             .count(),
         1
     );

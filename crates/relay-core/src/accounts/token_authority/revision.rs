@@ -6,12 +6,12 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 #[derive(Clone)]
 pub struct TokenDispatchRevision {
     pub(in crate::accounts::token_authority) state: Arc<RwLock<DispatchRevisionState>>,
-    pub(in crate::accounts::token_authority) expected: u64,
+    pub(in crate::accounts::token_authority) expected_revision: u64,
 }
 
 impl PartialEq for TokenDispatchRevision {
     fn eq(&self, other: &Self) -> bool {
-        self.expected == other.expected && Arc::ptr_eq(&self.state, &other.state)
+        self.expected_revision == other.expected_revision && Arc::ptr_eq(&self.state, &other.state)
     }
 }
 
@@ -25,7 +25,7 @@ impl fmt::Debug for TokenDispatchRevision {
 }
 
 pub(in crate::accounts::token_authority) struct DispatchRevisionState {
-    pub(in crate::accounts::token_authority) value: u64,
+    pub(in crate::accounts::token_authority) revision_number: u64,
     pub(in crate::accounts::token_authority) active: bool,
 }
 
@@ -39,7 +39,7 @@ impl TokenDispatchRevision {
     /// dropped. Do not hold this synchronous guard across an async wait.
     pub fn guard(&self) -> Option<TokenDispatchRevisionGuard<'_>> {
         let guard = crate::poison::read(&self.state);
-        (guard.active && guard.value == self.expected)
+        (guard.active && guard.revision_number == self.expected_revision)
             .then_some(TokenDispatchRevisionGuard { _guard: guard })
     }
 }

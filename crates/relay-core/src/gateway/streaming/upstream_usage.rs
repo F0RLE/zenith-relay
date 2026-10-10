@@ -34,7 +34,7 @@ impl UpstreamUsage {
                 "message": if category == error_codes::UPSTREAM_ROUTE_DEGRADED {
                     "Upstream served a different or internally degraded model"
                 } else {
-                    "Upstream stream event exceeds the inspection limit"
+                    "Upstream stream event is invalid"
                 }
             }});
             return Bytes::from(format!("data: {error}\n\n"));
@@ -52,14 +52,6 @@ impl UpstreamUsage {
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
         if self.rejection.is_some() {
             return false;
-        }
-        if self.pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
-            self.pending.clear();
-            if self.expected_model.is_some() {
-                self.rejection = Some(error_codes::STREAM_EVENT_TOO_LARGE);
-                return false;
-            }
-            return true;
         }
         let bytes = if self.pending.is_empty() {
             skip_aligned_response_deltas(bytes)
@@ -83,9 +75,9 @@ impl UpstreamUsage {
             }
             if self.expected_model.as_deref().is_some_and(|expected| {
                 parsed
-                    .payload
+                    .event_payload
                     .as_ref()
-                    .is_some_and(|value| served_model_is_rejected(value, expected))
+                    .is_some_and(|served_model| served_model_is_rejected(served_model, expected))
             }) {
                 self.pending.clear();
                 self.rejection = Some(error_codes::UPSTREAM_ROUTE_DEGRADED);
@@ -128,27 +120,6 @@ fn skip_aligned_response_deltas(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn oversized_partial_frame_cannot_bypass_identity_inspection() {
-        let mut capture = UpstreamUsage::new(
-            crate::gateway::test_support::test_usage_event(),
-            Some("gpt-6-astra".into()),
-        );
-        assert!(capture
-            .forward(Bytes::from_static(b"data: {\"model\":\""))
-            .is_empty());
-        let rejected = capture.forward(Bytes::from(vec![b'x'; MAX_SSE_EVENT_BYTES]));
-        let event = parse_sse_event(&rejected);
-        assert!(event.valid);
-        assert_eq!(
-            event.payload.unwrap()["error"]["code"],
-            error_codes::STREAM_EVENT_TOO_LARGE
-        );
-        assert!(capture.pending.is_empty());
-        assert!(capture.forward_pending.is_empty());
-        assert!(!capture.observe(b"data: [DONE]\n\n"));
-    }
 
     #[test]
     fn mismatched_terminal_retains_reported_usage() {

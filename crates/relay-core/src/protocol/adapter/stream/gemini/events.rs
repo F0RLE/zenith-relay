@@ -18,23 +18,23 @@ impl GeminiStreamBridge {
             }
             return;
         }
-        let Some(value) = parse_sse_data(event) else {
+        let Some(event_payload) = parse_sse_data(event) else {
             if sse_event_has_data(event) {
                 self.fail(AdapterError::upstream_stream_invalid());
             }
             return;
         };
-        if value.get("error").is_some() {
-            self.upstream_error = Some(value);
+        if event_payload.get("error").is_some() {
+            self.upstream_error = Some(event_payload);
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        if let Some(usage) = value.get("usageMetadata") {
+        if let Some(usage) = event_payload.get("usageMetadata") {
             self.usage = Some(usage.clone());
         }
-        match super::super::super::gemini::prompt_blocked(&value) {
+        match super::super::super::gemini::prompt_blocked(&event_payload) {
             Ok(true) => {
-                self.complete_prompt_block(&value);
+                self.complete_prompt_block(&event_payload);
                 return;
             }
             Err(()) => {
@@ -43,7 +43,7 @@ impl GeminiStreamBridge {
             }
             Ok(false) => {}
         }
-        let Some(candidate) = value
+        let Some(candidate) = event_payload
             .get("candidates")
             .and_then(Value::as_array)
             .and_then(|candidates| candidates.first())
@@ -68,11 +68,11 @@ impl GeminiStreamBridge {
                 self.fail(AdapterError::upstream_stream_invalid());
                 return;
             };
-            if let Some(value) = part.get("text").and_then(Value::as_str) {
+            if let Some(text_delta) = part.get("text").and_then(Value::as_str) {
                 if part.get("thought").and_then(Value::as_bool) == Some(true) {
-                    self.append_thought_text(value);
+                    self.append_thought_text(text_delta);
                 } else {
-                    self.append_output_text(value);
+                    self.append_output_text(text_delta);
                 }
                 if self.terminal {
                     return;
@@ -112,7 +112,7 @@ impl GeminiStreamBridge {
         }
     }
 
-    fn complete_prompt_block(&mut self, upstream: &Value) {
+    fn complete_prompt_block(&mut self, upstream_event: &Value) {
         // A blocked prompt has no model output. Do not turn a partial stream
         // that already emitted data into a successful filtered response.
         if self.started
@@ -123,15 +123,15 @@ impl GeminiStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
-        let mut upstream = upstream.clone();
-        if upstream.get("usageMetadata").is_none() {
+        let mut prompt_response_payload = upstream_event.clone();
+        if prompt_response_payload.get("usageMetadata").is_none() {
             if let Some(usage) = &self.usage {
-                upstream["usageMetadata"] = usage.clone();
+                prompt_response_payload["usageMetadata"] = usage.clone();
             }
         }
-        let response = match super::super::super::gemini::translate_gemini_response(
+        let translated_response = match super::super::super::gemini::translate_gemini_response(
             self.request.clone(),
-            &upstream,
+            &prompt_response_payload,
         ) {
             Ok(response) => response,
             Err(error) => {
@@ -142,22 +142,22 @@ impl GeminiStreamBridge {
         self.ensure_started();
         self.frame(
             "response.incomplete",
-            json!({"type":"response.incomplete","response":response.response_body}),
+            json!({"type":"response.incomplete","response":translated_response.response_body}),
         );
         self.completed = Some(MessagesBridgeResponse {
-            response_body: response.response_body,
-            response_id: response.response_id,
-            continuation: response.continuation,
+            response_body: translated_response.response_body,
+            response_id: translated_response.response_id,
+            continuation: translated_response.continuation,
         });
         self.terminal = true;
     }
 
-    fn append_thought_text(&mut self, value: &str) {
+    fn append_thought_text(&mut self, text_delta: &str) {
         self.ensure_started();
         if self.terminal {
             return;
         }
-        let delta = incremental_delta(&self.thinking, value);
+        let delta = incremental_delta(&self.thinking, text_delta);
         if !delta.is_empty() {
             if self.thinking.is_empty() {
                 self.order.push(GeminiStreamOutput::Thinking);
@@ -181,12 +181,12 @@ impl GeminiStreamBridge {
         }
     }
 
-    fn append_output_text(&mut self, value: &str) {
+    fn append_output_text(&mut self, text_delta: &str) {
         self.ensure_started();
         if self.terminal {
             return;
         }
-        let delta = incremental_delta(&self.text, value);
+        let delta = incremental_delta(&self.text, text_delta);
         if !delta.is_empty() {
             if self.text.is_empty() {
                 self.order.push(GeminiStreamOutput::Text);
@@ -256,8 +256,8 @@ impl GeminiStreamBridge {
         );
     }
 
-    fn frame(&mut self, event: &str, payload: Value) {
-        if !push_sse_frame(&mut self.output, event, &payload) {
+    fn frame(&mut self, event: &str, event_payload: Value) {
+        if !push_sse_frame(&mut self.output, event, &event_payload) {
             self.terminal = true;
         }
     }
@@ -282,8 +282,8 @@ impl GeminiStreamBridge {
         }
         self.ensure_started();
         let mut parts = Vec::new();
-        for item in &self.order {
-            match item {
+        for output_order_item in &self.order {
+            match output_order_item {
                 GeminiStreamOutput::Thinking if !self.thinking.is_empty() => {
                     parts.push(json!({"thought":true,"text":self.thinking}));
                 }
@@ -303,10 +303,10 @@ impl GeminiStreamBridge {
                 _ => {}
             }
         }
-        let upstream = json!({"candidates":[{"content":{"parts":parts},"finishReason":self.finish_reason}],"usageMetadata":self.usage.clone()});
-        let response = match super::super::super::gemini::translate_gemini_response(
+        let upstream_response = json!({"candidates":[{"content":{"parts":parts},"finishReason":self.finish_reason}],"usageMetadata":self.usage.clone()});
+        let translated_response = match super::super::super::gemini::translate_gemini_response(
             self.request.clone(),
-            &upstream,
+            &upstream_response,
         ) {
             Ok(response) => response,
             Err(error) => {
@@ -314,39 +314,39 @@ impl GeminiStreamBridge {
                 return;
             }
         };
-        for (output_index, item) in response.response_body["output"]
+        for (output_index, output_item) in translated_response.response_body["output"]
             .as_array()
             .into_iter()
             .flatten()
             .enumerate()
         {
-            match item.get("type").and_then(Value::as_str) {
+            match output_item.get("type").and_then(Value::as_str) {
                 Some("function_call") => self.frame(
                     "response.function_call_arguments.done",
-                    json!({"type":"response.function_call_arguments.done","response_id":self.request.response_id(),"item_id":item["id"],"call_id":item["call_id"],"name":item["name"],"output_index":output_index,"arguments":item["arguments"]}),
+                    json!({"type":"response.function_call_arguments.done","response_id":self.request.response_id(),"item_id":output_item["id"],"call_id":output_item["call_id"],"name":output_item["name"],"output_index":output_index,"arguments":output_item["arguments"]}),
                 ),
                 Some("custom_tool_call") => self.frame(
                     "response.custom_tool_call_input.done",
-                    json!({"type":"response.custom_tool_call_input.done","response_id":self.request.response_id(),"item_id":item["id"],"output_index":output_index,"input":item["input"]}),
+                    json!({"type":"response.custom_tool_call_input.done","response_id":self.request.response_id(),"item_id":output_item["id"],"output_index":output_index,"input":output_item["input"]}),
                 ),
                 Some("message") => {
                     self.frame(
                         "response.output_text.done",
-                        json!({"type":"response.output_text.done","response_id":self.request.response_id(),"item_id":item["id"],"output_index":output_index,"content_index":0,"text":item["content"][0]["text"]}),
+                        json!({"type":"response.output_text.done","response_id":self.request.response_id(),"item_id":output_item["id"],"output_index":output_index,"content_index":0,"text":output_item["content"][0]["text"]}),
                     );
                     self.frame(
                         "response.content_part.done",
-                        json!({"type":"response.content_part.done","response_id":self.request.response_id(),"item_id":item["id"],"output_index":output_index,"content_index":0}),
+                        json!({"type":"response.content_part.done","response_id":self.request.response_id(),"item_id":output_item["id"],"output_index":output_index,"content_index":0}),
                     );
                 }
                 _ => {}
             }
-            self.frame("response.output_item.done", json!({"type":"response.output_item.done","response_id":self.request.response_id(),"output_index":output_index,"item":item}));
+            self.frame("response.output_item.done", json!({"type":"response.output_item.done","response_id":self.request.response_id(),"output_index":output_index,"item":output_item}));
         }
         self.completed = Some(MessagesBridgeResponse {
-            response_body: response.response_body.clone(),
-            response_id: response.response_id.clone(),
-            continuation: response.continuation,
+            response_body: translated_response.response_body.clone(),
+            response_id: translated_response.response_id.clone(),
+            continuation: translated_response.continuation,
         });
         let kind = if incomplete {
             "response.incomplete"
@@ -355,7 +355,7 @@ impl GeminiStreamBridge {
         };
         self.frame(
             kind,
-            json!({"type": kind, "response": response.response_body}),
+            json!({"type": kind, "response": translated_response.response_body}),
         );
         self.terminal = true;
     }

@@ -19,7 +19,7 @@ import AnalyticsPanel from "./OverviewAnalytics";
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, setPage, perform, busy } = useRelayState();
-  const { revision: usageRevision } = useRelayUsageContext();
+  const { usageRevision } = useRelayUsageContext();
   const [applicationDialog, setApplicationDialog] = useState(false);
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
@@ -48,16 +48,16 @@ export function OverviewPage() {
     : undefined;
   const analyticsScopeOptions = useMemo(() => [
     { value: "", label: t("overview.scopeAll") },
-    ...(runtime?.sources ?? []).map((source) => ({ value: `source:${source.id}`, label: `${t("overview.scopeApi")} · ${source.name}` })),
+    ...(runtime?.sources ?? []).map((apiSource) => ({ value: `source:${apiSource.id}`, label: `${t("overview.scopeApi")} · ${apiSource.name}` })),
     ...(runtime?.accounts ?? []).map((account) => ({ value: `account:${account.id}`, label: `${t("overview.scopeAccount")} · ${account.label}` })),
   ], [runtime?.accounts, runtime?.sources, t]);
   const analytics = overviewData;
   const gatewayRunning = useSavedChoice(Boolean(runtime?.gateway.running));
   const running = gatewayRunning.value;
-  const setAnalyticsScope = useCallback((value: string) => {
-    const next = value as AnalyticsScope;
-    setAnalyticsScopeSelection(next);
-    localStorage.setItem("relay.overviewAnalyticsScope", next);
+  const setAnalyticsScope = useCallback((scopeValue: string) => {
+    const selectedScope = scopeValue as AnalyticsScope;
+    setAnalyticsScopeSelection(selectedScope);
+    localStorage.setItem("relay.overviewAnalyticsScope", selectedScope);
   }, []);
   const connectOpenCode = async (launchAfterConnect: boolean) => {
     const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
@@ -111,7 +111,7 @@ export function OverviewPage() {
       return () => { active = false; };
     }
     setAnalyticsLoading(true);
-    const input = {
+    const usageQuery = {
       page: 1,
       pageSize: 1,
       range: "custom" as const,
@@ -124,16 +124,16 @@ export function OverviewPage() {
       ...(analyticsScopeQuery ? { sourceOrAccountQuery: analyticsScopeQuery } : {}),
     };
     const load = () => mode === "local"
-      ? relayCommands.localUsagePage(input).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
-      : relayCommands.remoteUsage(input).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
+      ? relayCommands.localUsagePage(usageQuery).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
+      : relayCommands.remoteUsage(usageQuery).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
     loadOverviewAnalytics(usageScope, load)
-      .then((result) => {
-        if (!result) {
+      .then((analyticsResult) => {
+        if (!analyticsResult) {
           if (active) setAnalyticsError(true);
           return;
         }
         if (!active) return;
-        startTransition(() => setOverviewData(result));
+        startTransition(() => setOverviewData(analyticsResult));
       })
       .catch(() => active && setAnalyticsError(true))
       .finally(() => {
@@ -148,7 +148,7 @@ export function OverviewPage() {
   const totals = analytics?.totals ?? emptyUsageTotals();
   const requests = totals.requests;
   const models = runtime?.gateway.visibleModelIds.length ?? 0;
-  const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
+  const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((poolMember) => poolMember.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
 
   const primary = mode === "local" ? <>
@@ -157,12 +157,12 @@ export function OverviewPage() {
       busy={busy === "gateway"}
       icon={running ? <Square aria-hidden /> : <Play aria-hidden />}
       onClick={() => {
-        const next = !running;
+        const shouldRunGateway = !running;
         void perform("gateway", async () => {
-          if (next) await relayCommands.startGateway();
+          if (shouldRunGateway) await relayCommands.startGateway();
           else await relayCommands.stopGateway();
-          gatewayRunning.confirm(next);
-        }, next ? "feedback.started" : "feedback.stopped", { backgroundRefresh: true });
+          gatewayRunning.confirm(shouldRunGateway);
+        }, shouldRunGateway ? "feedback.started" : "feedback.stopped", { backgroundRefresh: true });
       }}
     >
       {running ? t("gateway.stop") : t("gateway.start")}
@@ -220,22 +220,22 @@ export function OverviewPage() {
     ) : null}
   </section>;
 }
-function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string, options?: { backgroundRefresh?: boolean }) => Promise<boolean> }) {
+function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (operationId: string, work: () => Promise<unknown>, successKey?: string, options?: { backgroundRefresh?: boolean }) => Promise<boolean> }) {
   const { t } = useTranslation();
   const { busy } = useRelayState();
   const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
-  const source = sources.find((item) => item.id === selection) ?? sources[0] ?? null;
-  const { stats: sourceStats, refresh: readSourceStats } = useSourceStats("zenith", source ? [source] : []);
-  const stats = source ? sourceStats[source.id] : undefined;
+  const selectedSource = sources.find((candidateSource) => candidateSource.id === selection) ?? sources[0] ?? null;
+  const { stats: sourceStats, refresh: readSourceStats } = useSourceStats("zenith", selectedSource ? [selectedSource] : []);
+  const stats = selectedSource ? sourceStats[selectedSource.id] : undefined;
 
   const select = (sourceId: string) => {
     localStorage.setItem("relay.directSourceId", sourceId);
     setSelection(sourceId);
   };
   const refreshSourceData = async () => {
-    if (!source) return;
-    await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed", { backgroundRefresh: true });
-    await readSourceStats(source.id, true);
+    if (!selectedSource) return;
+    await perform("source-data-refresh", () => relayCommands.refreshSourceData(selectedSource.id), "feedback.refreshed", { backgroundRefresh: true });
+    await readSourceStats(selectedSource.id, true);
   };
   const sourceRefreshBusy = busy === "source-data-refresh";
   const actions = (
@@ -244,7 +244,7 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
         variant="secondary"
         icon={<RefreshCw aria-hidden />}
         busy={stats?.loading || sourceRefreshBusy}
-        disabled={!source || sourceRefreshBusy}
+        disabled={!selectedSource || sourceRefreshBusy}
         onClick={() => void refreshSourceData()}
       >
         {t("common.refresh")}
@@ -254,7 +254,7 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
   );
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
-    {!source ? (
+    {!selectedSource ? (
       <EmptyState
         title={t("sources.emptyTitle")}
         description={t("sources.emptyDescription")}
@@ -262,25 +262,25 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
       />
     ) : <div className="direct-api-overview">
       <div className="direct-api-toolbar">
-        <div><strong>{source.name}</strong><code>{source.baseUrl}</code></div>
+        <div><strong>{selectedSource.name}</strong><code>{selectedSource.baseUrl}</code></div>
         <OptionMenu
           className="direct-api-source-menu"
           label={t("overview.selectedSource")}
-          value={source.id}
+          value={selectedSource.id}
           onChange={select}
-          options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))}
+          options={sources.map((apiSource) => ({ value: apiSource.id, label: `${apiSource.name} · ${sourceHost(apiSource.baseUrl)}` }))}
         />
       </div>
-      <SourceStatsPanel source={source} {...(stats ? { state: stats } : {})} overview />
+      <SourceStatsPanel source={selectedSource} {...(stats ? { state: stats } : {})} overview />
       <section className="direct-api-models">
         <header>
           <div>
             <h2>{t("overview.availableModels")}</h2>
             <p>{t("overview.availableModelsHint")}</p>
           </div>
-          <strong>{source.models.length}</strong>
+          <strong>{selectedSource.models.length}</strong>
         </header>
-        <ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul>
+        <ul>{selectedSource.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul>
       </section>
     </div>}
   </section>;

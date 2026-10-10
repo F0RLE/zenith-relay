@@ -41,9 +41,12 @@ pub(in crate::local_pool) use sync::{
 
 pub(in crate::local_pool) fn record_catalog_refresh_result(
     state: &DesktopState,
-    result: &std::result::Result<profiles::CodexCatalogRefreshStatus, LocalPoolError>,
+    refresh_status_result: &std::result::Result<
+        profiles::CodexCatalogRefreshStatus,
+        LocalPoolError,
+    >,
 ) {
-    match result {
+    match refresh_status_result {
         Ok(profiles::CodexCatalogRefreshStatus::Deferred) => {
             state.record_catalog_refresh_deferred()
         }
@@ -67,21 +70,21 @@ pub(in crate::local_pool) fn runtime_account_operational_state(
 
 pub(in crate::local_pool) async fn apply_source_policy_if_running(
     state: &DesktopState,
-    previous: &[ProviderSourceRecord],
+    previous_sources: &[ProviderSourceRecord],
     source: &ProviderSourceRecord,
 ) -> bool {
-    apply_source_policies_if_running(state, previous, std::slice::from_ref(source)).await
+    apply_source_policies_if_running(state, previous_sources, std::slice::from_ref(source)).await
 }
 
 pub(in crate::local_pool) async fn apply_source_policies_if_running(
     state: &DesktopState,
-    previous: &[ProviderSourceRecord],
+    previous_sources: &[ProviderSourceRecord],
     sources: &[ProviderSourceRecord],
 ) -> bool {
     let Some(runtime) = state.gateway.runtime().await else {
         return true;
     };
-    let updates = changed_runtime_source_policy_updates(previous, sources);
+    let updates = changed_runtime_source_policy_updates(previous_sources, sources);
     updates.is_empty() || runtime.update_source_policies(&updates)
 }
 
@@ -113,7 +116,7 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
         )
     };
     let (source_ids, mut account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
-    account_ids.retain(|id| !pending_move_ids.contains(id));
+    account_ids.retain(|account_id| !pending_move_ids.contains(account_id));
     // Authorization follows configured membership. Temporary auth failures,
     // cooldowns and disables are enforced by the scheduler and must recover
     // without a second membership edit.
@@ -153,10 +156,10 @@ pub(in crate::local_pool) fn fence_runtime_candidates(
     };
     let mut fences = account_ids
         .iter()
-        .filter_map(|id| runtime.fence_candidate_dispatch(id))
+        .filter_map(|account_id| runtime.fence_candidate_dispatch(account_id))
         .collect::<Vec<_>>();
-    for id in source_ids {
-        fences.extend(runtime.fence_source_dispatch(id));
+    for source_id in source_ids {
+        fences.extend(runtime.fence_source_dispatch(source_id));
     }
     fences
 }

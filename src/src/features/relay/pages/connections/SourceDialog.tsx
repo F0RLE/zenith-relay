@@ -10,16 +10,17 @@ import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } fro
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
+import { selectApiProvider } from "../../components/apiProviderModel";
 
 type SourceEditTab = "main" | "prices";
 export function SourceDialog({ source: initialSource, onClose, addToPool = false, modeOverride, onCreated }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean; modeOverride?: RelayMode; onCreated?: () => void }) {
   const { t } = useTranslation();
   const { mode: currentMode, runtime, perform, busy } = useRelayState();
-  const mode = modeOverride ?? currentMode;
+  const relayMode = modeOverride ?? currentMode;
   const [savedSource, setSavedSource] = useState(initialSource);
   const createdSourceId = useRef<string | null>(null);
-  const source = mode === currentMode ? runtime?.sources.find((value) => value.id === savedSource?.id) ?? savedSource : savedSource;
-  const [provider, setProvider] = useState(defaultApiProviderValue);
+  const source = relayMode === currentMode ? runtime?.sources.find((sourceOption) => sourceOption.id === savedSource?.id) ?? savedSource : savedSource;
+  const [provider, setProvider] = useState(() => selectApiProvider(defaultApiProviderValue(), "custom"));
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
@@ -39,25 +40,25 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
     const ok = await perform("source-save", async () => {
       if (!source) {
         if (!createdSourceId.current) {
-          const payload = apiProviderSourceInput(provider);
-          const created = mode !== "remote"
-            ? await relayCommands.createSource(payload) as { id: string }
-            : await relayCommands.remoteAction({ type: "create_source" }, payload) as { id: string };
+          const sourceInput = apiProviderSourceInput(provider);
+          const created = relayMode !== "remote"
+            ? await relayCommands.createSource(sourceInput) as { id: string }
+            : await relayCommands.remoteAction({ type: "create_source" }, sourceInput) as { id: string };
           // Creation has committed even if the following snapshot or membership
           // operation fails. A retry must continue with this source's identity.
           createdSourceId.current = created.id;
         }
-        const latest = (mode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((value) => value.id === createdSourceId.current);
-        if (latest) {
-          setSavedSource(latest);
-          setName(latest.name);
-          setBaseUrl(latest.baseUrl);
-          setPriceDrafts(sourcePriceDrafts(latest.modelPriceOverrides ?? {}));
+        const latestSource = (relayMode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((sourceOption) => sourceOption.id === createdSourceId.current);
+        if (latestSource) {
+          setSavedSource(latestSource);
+          setName(latestSource.name);
+          setBaseUrl(latestSource.baseUrl);
+          setPriceDrafts(sourcePriceDrafts(latestSource.modelPriceOverrides ?? {}));
           setProvider(defaultApiProviderValue());
         }
         // Membership depends on the saved source, not generation evidence.
-        if (addToPool && !latest?.inPool) {
-          await updatePoolMembership(mode, { accountIds: [], sourceIds: [createdSourceId.current], inPool: true });
+        if (addToPool && !latestSource?.inPool) {
+          await updatePoolMembership(relayMode, { accountIds: [], sourceIds: [createdSourceId.current], inPool: true });
         }
         return;
       }
@@ -77,16 +78,16 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         recoveryDelaySeconds: source.recoveryDelaySeconds,
         modelPriceOverrides,
       };
-      if (mode !== "remote") {
+      if (relayMode !== "remote") {
         await relayCommands.updateSource({ sourceId: source.id, ...update });
         if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
       } else {
         await relayCommands.remoteAction({ type: "update_source", id: source.id }, { ...update, ...(apiKey ? { apiKey } : {}) });
       }
       if (addToPool && !initialSource && !source.inPool) {
-        const latest = (mode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((value) => value.id === source.id);
-        if (latest && !latest.inPool) {
-          await updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool: true });
+        const latestSource = (relayMode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((sourceOption) => sourceOption.id === source.id);
+        if (latestSource && !latestSource.inPool) {
+          await updatePoolMembership(relayMode, { accountIds: [], sourceIds: [source.id], inPool: true });
         }
       }
     }, source ? "feedback.saved" : "feedback.sourceAdded", {
@@ -99,18 +100,17 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
       onClose();
     }
   };
-  const dialogClassName = source ? `source-edit-dialog connection-dialog${activeTab === "prices" ? " source-prices-dialog" : ""}` : "source-add-dialog";
+  const dialogClassName = source ? "source-edit-dialog connection-dialog" : "source-add-dialog";
   const submitSourceForm = () => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit();
   const footer = (
     <>
-      <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
       <Button
         variant="primary"
         busy={busy === "source-save"}
         disabled={source ? !modelPriceOverrides : !apiProviderReady(provider)}
         onClick={submitSourceForm}
       >
-        {t("common.save")}
+        {t(source ? "common.save" : "sources.add")}
       </Button>
     </>
   );
@@ -121,14 +121,17 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         className={dialogClassName}
         title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")}
         onClose={onClose}
-        footer={footer}
+        footer={source || provider.kind ? footer : undefined}
       >
         <form id="source-form" className="relay-form source-form" onSubmit={submit}>
           {source ? (
             <>
-              <div className="connection-dialog-context">
-                <Link2 aria-hidden />
-                <strong>{source.name}</strong>
+              <div className="connection-dialog-context source-editor-context">
+                <div className="source-editor-icon"><Link2 aria-hidden /></div>
+                <div className="source-editor-identity">
+                  <strong>{source.name}</strong>
+                  <small>{source.baseUrl}</small>
+                </div>
                 <span>{t("sources.groupModelsCount", { count: source.models.length })}</span>
               </div>
               <Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />

@@ -72,11 +72,11 @@ export function useRelayRuntime({
   const runtimeRoutingSupported = mode !== "remote"
     || Boolean(runtime?.capabilities.features.includes("runtime_routing"));
 
-  const setPage = useCallback((next: PageId) => {
-    if (pageRef.current === next) return;
-    pageRef.current = next;
-    pageOpenStartedAt.current = { page: next, startedAt: performance.now() };
-    setPageState(next);
+  const setPage = useCallback((targetPage: PageId) => {
+    if (pageRef.current === targetPage) return;
+    pageRef.current = targetPage;
+    pageOpenStartedAt.current = { page: targetPage, startedAt: performance.now() };
+    setPageState(targetPage);
   }, []);
 
   const invalidateRefreshes = useCallback(() => {
@@ -88,24 +88,24 @@ export function useRelayRuntime({
     }
   }, []);
 
-  const setMode = useCallback((next: RelayMode) => {
-    if (modeRef.current === next) return;
+  const setMode = useCallback((targetMode: RelayMode) => {
+    if (modeRef.current === targetMode) return;
     if (visibleRuntimeRef.current) snapshotsByMode.current[modeRef.current] = visibleRuntimeRef.current;
-    const cached = snapshotsByMode.current[next] ?? null;
+    const cached = snapshotsByMode.current[targetMode] ?? null;
     invalidateRefreshes();
-    modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
-    modeRef.current = next;
+    modeSwitchStartedAt.current = { mode: targetMode, startedAt: performance.now() };
+    modeRef.current = targetMode;
     stateRevision.current += 1;
     runtimeActivityOverlay.current.clear();
     runtimeActivityRuntimeId.current = 0;
     runtimeRoutingOrderBase.current = [];
     runtimeSnapshotRef.current = cached;
     setRuntimeActivity({ revision: 0, lastCandidateId: null, candidates: {} });
-    writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
+    writeRelayPreference(RELAY_STORAGE_KEYS.mode, targetMode);
     setRuntime(cached);
     setLoading(cached === null);
     resetUsage();
-    setModeState(next);
+    setModeState(targetMode);
     setPage("overview");
     cancelOperations();
   }, [cancelOperations, invalidateRefreshes, resetUsage, setPage]);
@@ -142,7 +142,7 @@ export function useRelayRuntime({
         setRuntime(snapshot);
         clearInactiveUsage(requestedMode);
         refreshedRevision.current = requestedRevision;
-        setRuntimeRevision((current) => current + 1);
+        setRuntimeRevision((previousRevision) => previousRevision + 1);
       },
     );
   }, [clearInactiveUsage, mode]);
@@ -163,14 +163,14 @@ export function useRelayRuntime({
       || backgroundRefreshRetryTimer.current !== undefined
       || modeRef.current !== refreshMode
     ) return;
-    const request = Symbol();
-    backgroundRefreshPending.current = request;
+    const refreshRequestToken = Symbol();
+    backgroundRefreshPending.current = refreshRequestToken;
     void (async () => {
       try {
         await loadSnapshot(force);
         // A previous visit to this mode must not schedule retries or release
         // the pending marker belonging to the current visit.
-        if (backgroundRefreshPending.current !== request) return;
+        if (backgroundRefreshPending.current !== refreshRequestToken) return;
         // A state event may arrive while the snapshot is in flight. Keep one
         // trailing retry, but let a short settling window coalesce a burst of
         // writes instead of spinning through full snapshots back-to-back.
@@ -195,7 +195,7 @@ export function useRelayRuntime({
       } catch {
         // The next state event, focus, or periodic refresh retries the snapshot.
       } finally {
-        if (backgroundRefreshPending.current === request) backgroundRefreshPending.current = null;
+        if (backgroundRefreshPending.current === refreshRequestToken) backgroundRefreshPending.current = null;
       }
     })();
   }, [loadSnapshot, mode]);

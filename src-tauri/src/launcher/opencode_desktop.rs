@@ -31,7 +31,9 @@ pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
 
 pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(configured) = env::var_os("OPENCODE_BIN").filter(|value| !value.is_empty()) {
+    if let Some(configured) =
+        env::var_os("OPENCODE_BIN").filter(|configured_binary| !configured_binary.is_empty())
+    {
         candidates.push(PathBuf::from(configured));
     }
     let home = env::var_os("HOME")
@@ -162,9 +164,9 @@ pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
 
     // Homebrew exposes the desktop app as `opencode-desktop`, while the
     // terminal package and all distro packages expose `opencode`.
-    for name in ["opencode", "opencode-desktop", "ai.opencode.desktop"] {
-        if let Some(path) = find_command_on_path(name) {
-            candidates.push(path);
+    for command_name in ["opencode", "opencode-desktop", "ai.opencode.desktop"] {
+        if let Some(executable_path) = find_command_on_path(command_name) {
+            candidates.push(executable_path);
         }
     }
 
@@ -176,7 +178,7 @@ pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
 }
 
 fn push_opencode_commands(candidates: &mut Vec<PathBuf>, directory: &Path) {
-    for name in [
+    for executable_name in [
         "opencode",
         "opencode.exe",
         "opencode.cmd",
@@ -191,7 +193,7 @@ fn push_opencode_commands(candidates: &mut Vec<PathBuf>, directory: &Path) {
         "OpenCode Dev.exe",
         "OpenCode Beta.exe",
     ] {
-        candidates.push(directory.join(name));
+        candidates.push(directory.join(executable_name));
     }
 }
 
@@ -199,25 +201,25 @@ fn push_desktop_files(candidates: &mut Vec<PathBuf>, directory: &Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path
+    for directory_entry in entries.flatten() {
+        let desktop_path = directory_entry.path();
+        let file_name = desktop_path
             .file_name()
-            .and_then(|name| name.to_str())
+            .and_then(|file_name| file_name.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if name.contains("opencode") && name.ends_with(".appimage") {
-            candidates.push(path);
+        if file_name.contains("opencode") && file_name.ends_with(".appimage") {
+            candidates.push(desktop_path);
         }
     }
 }
 
 #[cfg(target_os = "macos")]
 fn push_macos_app_bundles(candidates: &mut Vec<PathBuf>, directory: &Path) {
-    for name in ["OpenCode.app", "OpenCode Beta.app", "OpenCode Dev.app"] {
+    for app_bundle_name in ["OpenCode.app", "OpenCode Beta.app", "OpenCode Dev.app"] {
         candidates.push(
             directory
-                .join(name)
+                .join(app_bundle_name)
                 .join("Contents")
                 .join("MacOS")
                 .join("OpenCode"),
@@ -245,7 +247,7 @@ fn is_opencode_desktop_path(path: &Path) -> bool {
 
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
-    let path = path
+    let normalized_path = path
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
@@ -256,10 +258,10 @@ pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
         "opencode beta.exe",
     ]
     .iter()
-    .any(|name| path.ends_with(&format!("\\{name}")));
+    .any(|executable_name| normalized_path.ends_with(&format!("\\{executable_name}")));
     desktop_name
-        && !path.contains("\\bin\\")
-        && !path.contains("\\resources\\")
+        && !normalized_path.contains("\\bin\\")
+        && !normalized_path.contains("\\resources\\")
         && [
             "\\programs\\@opencode-aidesktop\\",
             "\\programs\\opencode\\",
@@ -273,7 +275,7 @@ pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
             "\\scoop\\apps\\opencode-desktop\\",
         ]
         .iter()
-        .any(|root| path.contains(root))
+        .any(|root| normalized_path.contains(root))
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
@@ -285,19 +287,19 @@ pub(super) fn is_macos_opencode_desktop_path(path: &Path) -> bool {
 
 #[cfg(any(not(target_os = "windows"), test))]
 pub(super) fn is_macos_app_executable(path: &Path, bundle: &str, executable: &str) -> bool {
-    let path = path.to_string_lossy().to_ascii_lowercase();
-    path.ends_with(&format!("/{bundle}.app/contents/macos/{executable}"))
+    let normalized_path = path.to_string_lossy().to_ascii_lowercase();
+    normalized_path.ends_with(&format!("/{bundle}.app/contents/macos/{executable}"))
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
 pub(super) fn is_linux_opencode_desktop_path(path: &Path) -> bool {
-    let path = path.to_string_lossy().to_ascii_lowercase();
-    path.ends_with(".appimage") && path.contains("opencode")
-        || path.ends_with("/opencode-desktop")
-        || path.ends_with("/ai.opencode.desktop")
-        || (path.ends_with("/opencode")
-            && (path.contains("/opt/opencode/")
-                || (path.contains("/.mount_") && path.contains("opencode"))))
+    let normalized_path = path.to_string_lossy().to_ascii_lowercase();
+    normalized_path.ends_with(".appimage") && normalized_path.contains("opencode")
+        || normalized_path.ends_with("/opencode-desktop")
+        || normalized_path.ends_with("/ai.opencode.desktop")
+        || (normalized_path.ends_with("/opencode")
+            && (normalized_path.contains("/opt/opencode/")
+                || (normalized_path.contains("/.mount_") && normalized_path.contains("opencode"))))
 }
 
 /// Restart OpenCode after changing its global configuration. OpenCode's

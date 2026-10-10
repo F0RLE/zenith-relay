@@ -58,18 +58,18 @@ pub(super) fn remove_if_unchanged(path: &Path, expected: &Option<Vec<u8>>) -> Re
 pub(super) fn rollback_file(
     path: &Path,
     expected_content: &str,
-    previous: &Option<Vec<u8>>,
+    previous_file_contents: &Option<Vec<u8>>,
 ) -> Result<()> {
     let expected = Some(expected_content.as_bytes().to_vec());
-    restore_snapshot_if_unchanged(path, &expected, previous)
+    restore_snapshot_if_unchanged(path, &expected, previous_file_contents)
 }
 
 pub(super) fn restore_snapshot_if_unchanged(
     path: &Path,
     expected_current: &Option<Vec<u8>>,
-    previous: &Option<Vec<u8>>,
+    previous_file_contents: &Option<Vec<u8>>,
 ) -> Result<()> {
-    match snapshot_text(previous, path)? {
+    match snapshot_text(previous_file_contents, path)? {
         Some(content) => replace_if_unchanged(path, expected_current, content),
         None => remove_if_unchanged(path, expected_current),
     }

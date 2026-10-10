@@ -73,7 +73,7 @@ impl RotationEngine {
             return Err(AdmissionError::CandidateChanged);
         }
         let (ready, ordinary_alternatives) = self.selection_candidates(request, now_ms);
-        let group = self.selection_group(&ready, now_ms);
+        let group = self.selection_group(&ready, request, now_ms);
         let selected = self
             .choose_for_request(request, &group)
             .ok_or(AdmissionError::NoEligibleCandidate)?;
@@ -154,7 +154,12 @@ impl RotationEngine {
                     .copied(),
             },
         );
-        self.advance_weighted_credit(&request.route_key, &group, &candidate_id);
+        self.advance_rotation_state(
+            &request.route_key,
+            &group,
+            &candidate_id,
+            request.owner.is_none(),
+        );
         Ok(RotationLease {
             lease_id,
             candidate_id,
@@ -196,8 +201,8 @@ impl RotationEngine {
         }
         // A verified auth/endpoint repair can retain the lease, but it must
         // present a newly charged, monotonically increasing wire dispatch.
-        if pending.attempt_id.is_some_and(|previous| {
-            !allow_retained_lease || previous.0 > u64::from(budget.dispatches())
+        if pending.attempt_id.is_some_and(|previous_dispatch| {
+            !allow_retained_lease || previous_dispatch.0 > u64::from(budget.dispatches())
         }) {
             return Err(DispatchStartError::AlreadyStarted);
         }

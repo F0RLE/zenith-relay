@@ -123,9 +123,13 @@ test("sparse reference tables stay compact and centered in a wide window", async
 
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  const sourceBoxes = await page.locator(".relay-page[data-view='sources'] > .relay-compact-content").evaluateAll((items) => items.map((item) => item.getBoundingClientRect().toJSON()));
-  expect(sourceBoxes).toHaveLength(2);
-  expect(sourceBoxes.every((box) => box.width <= 1080 && Math.abs(box.x + box.width / 2 - (pageBox!.x + pageBox!.width / 2)) <= 1)).toBe(true);
+  const sources = page.locator(".sources-workspace");
+  await expect(sources.locator(".source-card")).toHaveCount(1);
+  const sourceBox = await sources.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(sourceBox!.width).toBeLessThanOrEqual(pageBox!.width);
+  expect(Math.abs(sourceBox!.x + sourceBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(1);
+  expect(await sources.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/api-sources-centered-ru-dark-1648x1168.png" });
 });
 
@@ -145,7 +149,7 @@ test("source prices are grouped by provider and Messages models expose cache TTL
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
@@ -177,7 +181,7 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
@@ -246,7 +250,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   expect(await dialog.evaluate((element) => {

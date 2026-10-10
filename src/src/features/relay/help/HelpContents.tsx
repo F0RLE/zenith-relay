@@ -24,9 +24,9 @@ export function HelpContents({ documentRef, language }: {
     // a second, manually maintained navigation tree.
     const nextSections = Array.from(article.querySelectorAll<HTMLAnchorElement>(".help-source-contents a"))
       .flatMap((link): Section[] => {
-        const id = decodeURIComponent(link.hash.slice(1));
-        const target = article.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
-        return target ? [{ id, label: link.textContent ?? "", target }] : [];
+        const anchorId = decodeURIComponent(link.hash.slice(1));
+        const target = article.querySelector<HTMLElement>(`#${CSS.escape(anchorId)}`);
+        return target ? [{ id: anchorId, label: link.textContent ?? "", target }] : [];
       });
     setSections(nextSections);
     setOpen(false);
@@ -37,12 +37,12 @@ export function HelpContents({ documentRef, language }: {
       const offset = firstHeading ? Number.parseFloat(getComputedStyle(firstHeading).scrollMarginTop) || 0 : 0;
       const readingTop = scroller.getBoundingClientRect().top + offset + 8;
       const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 2;
-      let current = nextSections[0];
+      let activeSection = nextSections[0];
       for (const section of nextSections) {
         if (!atEnd && section.target.getBoundingClientRect().top > readingTop) break;
-        current = section;
+        activeSection = section;
       }
-      setActiveId(current?.id ?? "");
+      setActiveId(activeSection?.id ?? "");
     };
     const scheduleUpdate = () => {
       if (!frame) frame = requestAnimationFrame(update);
@@ -100,7 +100,7 @@ export function HelpContents({ documentRef, language }: {
       aria-label={t("helpCenter.contents")}
       aria-expanded={open}
       aria-controls={listId}
-      onClick={() => setOpen((value) => !value)}
+      onClick={() => setOpen((isOpen) => !isOpen)}
     >
       <List aria-hidden />
       <span><small>{t("helpCenter.contents")}</small><strong>{sections.find((section) => section.id === activeId)?.label}</strong></span>

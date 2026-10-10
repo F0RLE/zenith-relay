@@ -11,21 +11,22 @@ use std::collections::HashSet;
 pub fn ensure_proxy_record(
     store: &Store,
     vault: &Vault,
-    value: &str,
+    proxy_url: &str,
 ) -> Result<ServerProxyRecord, String> {
-    let value = zenith_relay_core::normalize_proxy_url(value)?;
-    let id = proxy_id(&value);
-    if let Some(record) = store.proxy(&id)? {
-        match vault.load(&record.secret_ref)? {
-            Some(stored) if stored != value => {
+    let normalized_proxy_url = zenith_relay_core::normalize_proxy_url(proxy_url)?;
+    let proxy_identifier = proxy_id(&normalized_proxy_url);
+    if let Some(proxy_record) = store.proxy(&proxy_identifier)? {
+        match vault.load(&proxy_record.secret_ref)? {
+            Some(stored) if stored != normalized_proxy_url => {
                 return Err("stored proxy reference is inconsistent".to_string())
             }
             Some(_) => {}
-            None => vault.save(&record.secret_ref, &value)?,
+            None => vault.save(&proxy_record.secret_ref, &normalized_proxy_url)?,
         }
-        return Ok(record);
+        return Ok(proxy_record);
     }
-    let url = url::Url::parse(&value).map_err(|_| "stored proxy URL is invalid".to_string())?;
+    let url = url::Url::parse(&normalized_proxy_url)
+        .map_err(|_| "stored proxy URL is invalid".to_string())?;
     let host = url
         .host_str()
         .ok_or_else(|| "stored proxy URL is invalid".to_string())?;
@@ -34,47 +35,47 @@ pub fn ensure_proxy_record(
     } else {
         host.to_string()
     };
-    let record = ServerProxyRecord {
-        id: id.clone(),
+    let proxy_record = ServerProxyRecord {
+        id: proxy_identifier.clone(),
         endpoint: format!(
             "{}://{}:{}",
             url.scheme(),
             host,
             url.port_or_known_default().unwrap_or_default()
         ),
-        secret_ref: format!("proxy:{id}"),
+        secret_ref: format!("proxy:{proxy_identifier}"),
         created_at_ms: now_ms(),
     };
-    vault.save(&record.secret_ref, &value)?;
-    if let Err(error) = store.save_proxy(&record) {
-        let _ = vault.delete(&record.secret_ref);
+    vault.save(&proxy_record.secret_ref, &normalized_proxy_url)?;
+    if let Err(error) = store.save_proxy(&proxy_record) {
+        let _ = vault.delete(&proxy_record.secret_ref);
         return Err(error);
     }
-    Ok(record)
+    Ok(proxy_record)
 }
 
 pub(super) fn migrate_legacy_proxies(store: &Store, vault: &Vault) -> Result<(), String> {
     if store.common_proxy_id()?.is_none() && store.common_proxy_configured()? {
-        if let Some(value) = vault.load(COMMON_PROXY_SECRET_REF)? {
-            let proxy = ensure_proxy_record(store, vault, &value)?;
+        if let Some(proxy_url) = vault.load(COMMON_PROXY_SECRET_REF)? {
+            let proxy = ensure_proxy_record(store, vault, &proxy_url)?;
             store.set_common_proxy_id(Some(&proxy.id))?;
         }
     }
-    for mut record in store.accounts()? {
-        let Some(secret) = vault.load(&record.secret_ref)? else {
+    for mut account_record in store.accounts()? {
+        let Some(secret) = vault.load(&account_record.secret_ref)? else {
             continue;
         };
         let mut credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
-        if record.proxy_id.is_none() {
-            if let Some(value) = credential.proxy_url.as_deref() {
-                record.proxy_id = Some(ensure_proxy_record(store, vault, value)?.id);
-                store.save_account(&record)?;
+        if account_record.proxy_id.is_none() {
+            if let Some(proxy_url) = credential.proxy_url.as_deref() {
+                account_record.proxy_id = Some(ensure_proxy_record(store, vault, proxy_url)?.id);
+                store.save_account(&account_record)?;
             }
         }
-        if record.proxy_id.is_some() && credential.proxy_url.take().is_some() {
+        if account_record.proxy_id.is_some() && credential.proxy_url.take().is_some() {
             vault.save(
-                &record.secret_ref,
+                &account_record.secret_ref,
                 &serde_json::to_string(&credential)
                     .map_err(|_| "stored account credential is invalid".to_string())?,
             )?;
@@ -110,7 +111,7 @@ pub(super) fn retire_user_gateway_keys(store: &Store, vault: &Vault) -> Result<(
         }
         secrets.push((key.secret_ref.clone(), vault.load(&key.secret_ref)?));
     }
-    let ids = retired.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+    let retired_key_ids = retired.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
     let mut attempted_refs = Vec::new();
     for (secret_ref, _) in &secrets {
         attempted_refs.push(secret_ref.clone());
@@ -123,7 +124,7 @@ pub(super) fn retire_user_gateway_keys(store: &Store, vault: &Vault) -> Result<(
             ));
         }
     }
-    if let Err(error) = store.delete_keys(&ids) {
+    if let Err(error) = store.delete_keys(&retired_key_ids) {
         return Err(rollback_retired_gateway_keys(
             vault,
             &secrets,
@@ -142,7 +143,10 @@ fn rollback_retired_gateway_keys(
 ) -> String {
     let mut failures = Vec::new();
     for (secret_ref, secret) in secrets {
-        if !attempted_refs.iter().any(|value| value == secret_ref) {
+        if !attempted_refs
+            .iter()
+            .any(|attempted_ref| attempted_ref == secret_ref)
+        {
             continue;
         }
         if let Some(secret) = secret {
@@ -171,7 +175,7 @@ pub(super) fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<
     let changed = existing
         .as_ref()
         .is_none_or(|key| !key.enabled || !key.system);
-    let mut record = existing.unwrap_or_else(|| GatewayKeyRecord {
+    let mut gateway_key_record = existing.unwrap_or_else(|| GatewayKeyRecord {
         id: SYSTEM_GATEWAY_KEY_ID.to_string(),
         label: "ChatGPT".to_string(),
         enabled: true,
@@ -180,16 +184,16 @@ pub(super) fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<
         created_at_ms: now_ms(),
         last_used_at_ms: None,
     });
-    record.enabled = true;
-    record.system = true;
-    let created_secret = vault.load(&record.secret_ref)?.is_none();
+    gateway_key_record.enabled = true;
+    gateway_key_record.system = true;
+    let created_secret = vault.load(&gateway_key_record.secret_ref)?.is_none();
     if created_secret {
-        vault.save(&record.secret_ref, &generate_pool_key())?;
+        vault.save(&gateway_key_record.secret_ref, &generate_pool_key())?;
     }
     if changed {
-        if let Err(error) = store.save_key(&record) {
+        if let Err(error) = store.save_key(&gateway_key_record) {
             if created_secret {
-                let _ = vault.delete(&record.secret_ref);
+                let _ = vault.delete(&gateway_key_record.secret_ref);
             }
             return Err(error);
         }
@@ -203,8 +207,8 @@ pub(crate) fn generate_pool_key() -> String {
     format!("zrs_{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-pub fn identity_hint(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))[..12].to_string()
+pub fn identity_hint(identifier: &str) -> String {
+    hex::encode(Sha256::digest(identifier.as_bytes()))[..12].to_string()
 }
 
 pub fn identity_fingerprint(server_id: &str) -> String {
@@ -213,6 +217,6 @@ pub fn identity_fingerprint(server_id: &str) -> String {
     ))
 }
 
-pub fn proxy_id(value: &str) -> String {
-    zenith_relay_core::proxy_reference_id(value).expect("stored proxy URL was normalized")
+pub fn proxy_id(proxy_url: &str) -> String {
+    zenith_relay_core::proxy_reference_id(proxy_url).expect("stored proxy URL was normalized")
 }

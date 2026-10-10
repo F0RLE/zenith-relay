@@ -73,7 +73,7 @@ struct TextOutput {
 impl MessagesStreamBridge {
     pub fn new(request: MessagesBridgeRequest) -> Self {
         Self {
-            model: request.state.model.clone(),
+            model: request.bridge_state.model.clone(),
             request: Some(request),
             pending: Vec::new(),
             output: VecDeque::new(),

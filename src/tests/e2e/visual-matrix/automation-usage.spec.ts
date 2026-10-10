@@ -137,7 +137,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 
   await page.locator(".relay-sidebar nav button").nth(1).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.locator(".relay-table .row-actions summary").click();
+  await page.locator(".source-card .row-actions summary").click();
   let menu = page.getByRole("menu");
   expect(await menu.locator("span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/source-actions-ru-840x560.png" });
@@ -155,7 +155,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 
-  await page.locator(".relay-sidebar nav button").nth(4).click();
+  await page.getByRole("button", { name: "Использование", exact: true }).click();
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
   await expect(dialog).toContainText("req_synthetic_local");
@@ -181,7 +181,7 @@ for (const scenario of [
     await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true });
     await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
     await page.goto("/");
-    await page.locator(".relay-sidebar nav button").nth(4).click();
+    await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
 
     if (scenario.width === 840) {
       await page.locator(".usage-metrics > div").nth(2).evaluate((card) => {
@@ -221,22 +221,23 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Использование", exact: true }).click();
 
     const filters = page.locator(".usage-filter-panel");
+    const scope = page.locator(".usage-scope-controls");
     await expect(page.locator(".usage-range-menu").getByRole("button", { name: /^Период:/ })).toBeVisible();
-    await expect(filters.getByRole("button", { name: /^Модель:/ })).toBeVisible();
-    await expect(filters.getByRole("button", { name: /^Участник пула:/ })).toBeVisible();
+    await expect(scope.getByRole("button", { name: /^Модель:/ })).toBeVisible();
+    await expect(scope.getByRole("button", { name: /^Участник пула:/ })).toBeVisible();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
-    await filters.getByRole("button", { name: "Другие фильтры" }).click();
+    await scope.getByRole("button", { name: "Другие фильтры" }).click();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
     await expect(filters.getByRole("button", { name: /^Категория ошибки:/ })).toBeVisible();
     const protocol = filters.getByRole("button", { name: /^Протокол:/ });
     await protocol.click();
     await expect(protocol).toHaveAttribute("aria-expanded", "true");
     await page.getByRole("option", { name: "Responses", exact: true }).click();
-    await expect(filters.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
-    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
-    await filters.getByRole("button", { name: "Сбросить фильтры" }).click();
+    await expect(scope.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
+    await expect(scope.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
+    await scope.getByRole("button", { name: "Сбросить фильтры" }).click();
     await expect(filters.getByRole("button", { name: "Протокол: Любой протокол" })).toBeVisible();
-    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
+    await expect(scope.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/usage-filters-open-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await page.getByRole("tab", { name: "Модели" }).click();

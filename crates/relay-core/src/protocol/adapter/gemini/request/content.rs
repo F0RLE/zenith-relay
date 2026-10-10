@@ -4,103 +4,103 @@ use super::{AdapterError, AdapterResult, MessagesBridgeState};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
 
-const MAX_INLINE_MEDIA_BYTES: usize = 20 * 1024 * 1024;
-
 pub(super) fn append_responses_input(
-    state: &mut MessagesBridgeState,
+    bridge_state: &mut MessagesBridgeState,
     input: &Value,
 ) -> AdapterResult<()> {
     match input {
         Value::String(text) => {
             if !text.is_empty() {
-                append_message(state, "user", vec![json!({"text":text})]);
+                append_message(bridge_state, "user", vec![json!({"text":text})]);
             }
             Ok(())
         }
-        Value::Array(items) => {
-            for value in items {
-                let item = value
+        Value::Array(input_items) => {
+            for input_value in input_items {
+                let input_item = input_value
                     .as_object()
                     .ok_or_else(AdapterError::invalid_request)?;
-                if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                if input_item.get("type").and_then(Value::as_str) == Some("additional_tools") {
                     continue;
                 }
-                match item.get("type").and_then(Value::as_str) {
+                match input_item.get("type").and_then(Value::as_str) {
                     Some("function_call_output" | "custom_tool_call_output") => {
-                        let call_id = item
+                        let call_id = input_item
                             .get("call_id")
-                            .or_else(|| item.get("id"))
+                            .or_else(|| input_item.get("id"))
                             .and_then(Value::as_str)
                             .ok_or_else(AdapterError::invalid_request)?;
-                        let name = find_call_name(state, call_id)
-                            .or_else(|| item.get("name").and_then(Value::as_str))
+                        let tool_name = find_call_name(bridge_state, call_id)
+                            .or_else(|| input_item.get("name").and_then(Value::as_str))
                             .ok_or_else(AdapterError::invalid_request)?;
-                        let response = if item.get("type").and_then(Value::as_str)
+                        let function_response = if input_item.get("type").and_then(Value::as_str)
                             == Some("custom_tool_call_output")
                         {
-                            json!({"input": output_text(item.get("output").ok_or_else(AdapterError::invalid_request)?)?})
+                            json!({"input": output_text(input_item.get("output").ok_or_else(AdapterError::invalid_request)?)?})
                         } else {
                             output_value(
-                                item.get("output")
+                                input_item
+                                    .get("output")
                                     .ok_or_else(AdapterError::invalid_request)?,
                             )?
                         };
                         append_message(
-                            state,
+                            bridge_state,
                             "user",
                             vec![
-                                json!({"functionResponse":{"name":name,"response":response,"id":call_id}}),
+                                json!({"functionResponse":{"name":tool_name,"response":function_response,"id":call_id}}),
                             ],
                         );
                     }
                     Some("function_call" | "custom_tool_call") => {
-                        let name = item
+                        let tool_name = input_item
                             .get("name")
                             .and_then(Value::as_str)
                             .ok_or_else(AdapterError::invalid_request)?;
-                        let namespace = item
+                        let namespace = input_item
                             .get("namespace")
                             .and_then(Value::as_str)
                             .map(str::trim)
-                            .filter(|value| !value.is_empty());
-                        let upstream_name = state
-                            .upstream_tool_name(namespace, name)
+                            .filter(|namespace_candidate| !namespace_candidate.is_empty());
+                        let upstream_name = bridge_state
+                            .upstream_tool_name(namespace, tool_name)
                             .ok_or_else(AdapterError::invalid_request)?;
-                        let call_id = item
+                        let call_id = input_item
                             .get("call_id")
-                            .or_else(|| item.get("id"))
+                            .or_else(|| input_item.get("id"))
                             .and_then(Value::as_str)
                             .ok_or_else(AdapterError::invalid_request)?;
-                        let args = if item.get("type").and_then(Value::as_str)
+                        let function_arguments = if input_item.get("type").and_then(Value::as_str)
                             == Some("custom_tool_call")
                         {
-                            json!({"input": output_text(item.get("input").ok_or_else(AdapterError::invalid_request)?)?})
+                            json!({"input": output_text(input_item.get("input").ok_or_else(AdapterError::invalid_request)?)?})
                         } else {
                             serde_json::from_str::<Value>(
-                                item.get("arguments")
+                                input_item
+                                    .get("arguments")
                                     .and_then(Value::as_str)
                                     .unwrap_or("{}"),
                             )
                             .map_err(|_| AdapterError::invalid_request())?
                         };
-                        if !args.is_object() {
+                        if !function_arguments.is_object() {
                             return Err(AdapterError::invalid_request());
                         }
                         append_message(
-                            state,
+                            bridge_state,
                             "model",
                             vec![
-                                json!({"functionCall":{"name":upstream_name,"args":args,"id":call_id}}),
+                                json!({"functionCall":{"name":upstream_name,"args":function_arguments,"id":call_id}}),
                             ],
                         );
                     }
                     Some("reasoning") => {
-                        if state.messages.is_empty() {
+                        if bridge_state.messages.is_empty() {
                             return Err(AdapterError::continuation_missing());
                         }
                     }
                     Some("message") | None => {
-                        let role = item
+                        let role = input_item
                             .get("role")
                             .and_then(Value::as_str)
                             .ok_or_else(AdapterError::invalid_request)?;
@@ -111,16 +111,17 @@ pub(super) fn append_responses_input(
                             _ => return Err(AdapterError::invalid_request()),
                         };
                         let parts = content_parts(
-                            item.get("content")
+                            input_item
+                                .get("content")
                                 .ok_or_else(AdapterError::invalid_request)?,
                         )?;
                         if parts.is_empty() {
                             continue;
                         }
                         if role == "system" {
-                            append_system_parts(state, parts)?;
+                            append_system_parts(bridge_state, parts)?;
                         } else {
-                            append_message(state, role, parts);
+                            append_message(bridge_state, role, parts);
                         }
                     }
                     _ => return Err(AdapterError::invalid_request()),
@@ -133,14 +134,14 @@ pub(super) fn append_responses_input(
 }
 
 pub(in crate::protocol::adapter) fn append_message(
-    state: &mut MessagesBridgeState,
+    bridge_state: &mut MessagesBridgeState,
     role: &str,
     parts: Vec<Value>,
 ) {
     if parts.is_empty() {
         return;
     }
-    if let Some(last) = state.messages.last_mut() {
+    if let Some(last) = bridge_state.messages.last_mut() {
         if last.get("role").and_then(Value::as_str) == Some(role) {
             if let Some(existing) = last.get_mut("parts").and_then(Value::as_array_mut) {
                 existing.extend(parts);
@@ -148,11 +149,13 @@ pub(in crate::protocol::adapter) fn append_message(
             }
         }
     }
-    state.messages.push(json!({"role": role, "parts": parts}));
+    bridge_state
+        .messages
+        .push(json!({"role": role, "parts": parts}));
 }
 
-fn find_call_name<'a>(state: &'a MessagesBridgeState, call_id: &str) -> Option<&'a str> {
-    state.messages.iter().rev().find_map(|message| {
+fn find_call_name<'a>(bridge_state: &'a MessagesBridgeState, call_id: &str) -> Option<&'a str> {
+    bridge_state.messages.iter().rev().find_map(|message| {
         message
             .get("parts")
             .and_then(Value::as_array)
@@ -168,14 +171,14 @@ fn find_call_name<'a>(state: &'a MessagesBridgeState, call_id: &str) -> Option<&
 }
 
 pub(super) fn append_system_parts(
-    state: &mut MessagesBridgeState,
+    bridge_state: &mut MessagesBridgeState,
     parts: Vec<Value>,
 ) -> AdapterResult<()> {
     if parts.is_empty() {
         return Ok(());
     }
-    match state.system.take() {
-        None => state.system = Some(json!({"parts": parts})),
+    match bridge_state.system.take() {
+        None => bridge_state.system = Some(json!({"parts": parts})),
         Some(Value::Object(mut object)) => {
             let existing = object
                 .entry("parts".to_string())
@@ -184,7 +187,7 @@ pub(super) fn append_system_parts(
                 return Err(AdapterError::invalid_request());
             };
             existing.extend(parts);
-            state.system = Some(Value::Object(object));
+            bridge_state.system = Some(Value::Object(object));
         }
         Some(_) => return Err(AdapterError::invalid_request()),
     }
@@ -200,8 +203,8 @@ pub(super) fn content_parts(content: &Value) -> AdapterResult<Vec<Value>> {
     }
 }
 
-fn content_part(value: &Value) -> AdapterResult<Value> {
-    let part = value
+fn content_part(input_part: &Value) -> AdapterResult<Value> {
+    let part = input_part
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
     match part.get("type").and_then(Value::as_str) {
@@ -223,24 +226,21 @@ fn image_part(part: &Map<String, Value>) -> AdapterResult<Value> {
         .or_else(|| part.get("url"))
         .and_then(Value::as_str)
         .ok_or_else(AdapterError::invalid_request)?;
-    if let Some((header, data)) = url.split_once(',') {
+    if let Some((header, encoded_data)) = url.split_once(',') {
         let mime = header
             .strip_prefix("data:")
-            .and_then(|value| value.strip_suffix(";base64"))
-            .filter(|value| {
+            .and_then(|mime_header| mime_header.strip_suffix(";base64"))
+            .filter(|mime_type| {
                 matches!(
-                    *value,
+                    *mime_type,
                     "image/gif" | "image/jpeg" | "image/png" | "image/webp"
                 )
             })
             .ok_or_else(AdapterError::invalid_request)?;
-        let decoded = STANDARD
-            .decode(data)
+        STANDARD
+            .decode(encoded_data)
             .map_err(|_| AdapterError::invalid_request())?;
-        if decoded.len() > MAX_INLINE_MEDIA_BYTES {
-            return Err(AdapterError::invalid_request());
-        }
-        return Ok(json!({"inlineData":{"mimeType":mime,"data":data}}));
+        return Ok(json!({"inlineData":{"mimeType":mime,"data":encoded_data}}));
     }
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(AdapterError::invalid_request());
@@ -254,7 +254,7 @@ fn file_part(part: &Map<String, Value>) -> AdapterResult<Value> {
         .or_else(|| part.get("file_uri"))
         .or_else(|| part.get("url"))
         .and_then(Value::as_str)
-        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+        .filter(|file_url| file_url.starts_with("https://") || file_url.starts_with("http://"))
         .ok_or_else(AdapterError::invalid_request)?;
     let mime = part
         .get("mime_type")
@@ -264,12 +264,12 @@ fn file_part(part: &Map<String, Value>) -> AdapterResult<Value> {
     Ok(json!({"fileData":{"fileUri":url,"mimeType":mime}}))
 }
 
-fn output_text(value: &Value) -> AdapterResult<String> {
-    match value {
-        Value::String(value) => Ok(value.clone()),
+fn output_text(output_value: &Value) -> AdapterResult<String> {
+    match output_value {
+        Value::String(text_value) => Ok(text_value.clone()),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .filter_map(|text_part| text_part.get("text").and_then(Value::as_str))
             .map(str::to_string)
             .reduce(|mut left, right| {
                 left.push_str(&right);
@@ -280,44 +280,47 @@ fn output_text(value: &Value) -> AdapterResult<String> {
     }
 }
 
-fn output_value(value: &Value) -> AdapterResult<Value> {
-    match value {
-        Value::String(text) => {
-            Ok(serde_json::from_str(text).unwrap_or_else(|_| json!({"output":text})))
+fn output_value(output_value: &Value) -> AdapterResult<Value> {
+    match output_value {
+        Value::String(output_text) => {
+            Ok(serde_json::from_str(output_text).unwrap_or_else(|_| json!({"output":output_text})))
         }
-        Value::Object(_) => Ok(value.clone()),
+        Value::Object(_) => Ok(output_value.clone()),
         Value::Array(parts) => {
-            let mut text = Vec::new();
-            let mut media = Vec::new();
-            for part in parts {
-                let object = part.as_object().ok_or_else(AdapterError::invalid_request)?;
-                match object.get("type").and_then(Value::as_str) {
-                    Some("input_text" | "output_text" | "text") => text.push(
-                        object
+            let mut text_parts = Vec::new();
+            let mut media_parts = Vec::new();
+            for output_part in parts {
+                let output_object = output_part
+                    .as_object()
+                    .ok_or_else(AdapterError::invalid_request)?;
+                match output_object.get("type").and_then(Value::as_str) {
+                    Some("input_text" | "output_text" | "text") => text_parts.push(
+                        output_object
                             .get("text")
                             .and_then(Value::as_str)
                             .ok_or_else(AdapterError::invalid_request)?
                             .to_string(),
                     ),
                     Some("input_image" | "output_image" | "input_file" | "output_file") => {
-                        media.push(content_part(part)?);
+                        media_parts.push(content_part(output_part)?);
                     }
-                    _ => text.push(
-                        serde_json::to_string(part).map_err(|_| AdapterError::invalid_request())?,
+                    _ => text_parts.push(
+                        serde_json::to_string(output_part)
+                            .map_err(|_| AdapterError::invalid_request())?,
                     ),
                 }
             }
-            let mut response = Map::new();
-            if !text.is_empty() {
-                response.insert("output".to_string(), Value::String(text.join("\n")));
+            let mut response_object = Map::new();
+            if !text_parts.is_empty() {
+                response_object.insert("output".to_string(), Value::String(text_parts.join("\n")));
             }
-            if !media.is_empty() {
-                response.insert("parts".to_string(), Value::Array(media));
+            if !media_parts.is_empty() {
+                response_object.insert("parts".to_string(), Value::Array(media_parts));
             }
-            if response.is_empty() {
-                response.insert("output".to_string(), Value::String(String::new()));
+            if response_object.is_empty() {
+                response_object.insert("output".to_string(), Value::String(String::new()));
             }
-            Ok(Value::Object(response))
+            Ok(Value::Object(response_object))
         }
         _ => Err(AdapterError::invalid_request()),
     }

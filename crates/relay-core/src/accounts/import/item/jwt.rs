@@ -20,9 +20,9 @@ pub(in crate::accounts::import::item) fn token_identity_seed(
     user_id: Option<&str>,
     email: Option<&str>,
 ) -> Option<String> {
-    let account = account_id.map(|value| value.trim().to_ascii_lowercase());
-    let user = user_id.map(|value| value.trim().to_ascii_lowercase());
-    let email = email.map(|value| value.trim().to_ascii_lowercase());
+    let account = account_id.map(|account_id| account_id.trim().to_ascii_lowercase());
+    let user = user_id.map(|user_id| user_id.trim().to_ascii_lowercase());
+    let email = email.map(|email| email.trim().to_ascii_lowercase());
     match (account, email, user) {
         (Some(account), Some(email), _) => Some(format!("account:{account}:email:{email}")),
         (Some(account), None, Some(user)) => Some(format!("account:{account}:user:{user}")),
@@ -89,8 +89,8 @@ pub(in crate::accounts::import::item) fn imported_jwt_metadata(
     metadata
 }
 
-fn jwt_email(value: Option<&Value>) -> Option<String> {
-    value
+fn jwt_email(claim_value: Option<&Value>) -> Option<String> {
+    claim_value
         .and_then(Value::as_str)
         .and_then(normalize_login_email)
 }

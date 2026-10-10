@@ -4,11 +4,11 @@ pub(super) async fn prepare_authorization(
     state: &Arc<AppState>,
     fence: &AccountRefreshFence,
 ) -> Result<PreparedAuthorization, AuthorizationFailure> {
-    let (account, current) = state
+    let (account, stored_fence) = state
         .store
         .account_refresh_scope(&fence.account_id)
         .map_err(|_| AuthorizationFailure::Stale)?;
-    if &current != fence {
+    if &stored_fence != fence {
         return Err(AuthorizationFailure::Stale);
     }
     let secret = state
@@ -22,11 +22,11 @@ pub(super) async fn prepare_authorization(
         prepare_server_account_authorization(state, &account, credential, None)
             .await
             .map_err(|_| AuthorizationFailure::Prepare)?;
-    let (_, current) = state
+    let (_, stored_fence) = state
         .store
         .account_refresh_scope(&fence.account_id)
         .map_err(|_| AuthorizationFailure::Stale)?;
-    if &current != fence {
+    if &stored_fence != fence {
         return Err(AuthorizationFailure::Stale);
     }
     Ok(PreparedAuthorization {
@@ -40,7 +40,7 @@ pub(in crate::jobs) async fn request_authorization(
     state: &Arc<AppState>,
     fence: &AccountRefreshFence,
 ) -> Result<PreparedAuthorization, AuthorizationFailure> {
-    let result = state
+    let authorization_read = state
         .refresh
         .request(&fence.identity(), RefreshKind::Auth)
         .await
@@ -50,18 +50,18 @@ pub(in crate::jobs) async fn request_authorization(
             }
             _ => AuthorizationFailure::Prepare,
         })?;
-    let prepared = match result.as_ref() {
+    let prepared = match authorization_read.as_ref() {
         Ok(RefreshRead::Authorization(Ok(prepared))) => Ok((**prepared).clone()),
         Ok(RefreshRead::Authorization(Err(error))) => Err(*error),
         _ => Err(AuthorizationFailure::Prepare),
     }?;
     // The shared read could have finished just before an operator changed the
     // login/proxy. Do not start provider HTTP with that obsolete preparation.
-    let (_, current) = state
+    let (_, stored_fence) = state
         .store
         .account_refresh_scope(&fence.account_id)
         .map_err(|_| AuthorizationFailure::Stale)?;
-    if &current != fence {
+    if &stored_fence != fence {
         return Err(AuthorizationFailure::Stale);
     }
     Ok(prepared)

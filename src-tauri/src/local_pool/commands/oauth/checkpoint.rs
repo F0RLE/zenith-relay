@@ -2,7 +2,7 @@ use crate::local_pool::{
     accounts::{
         credentials::{CredentialError, StoredCodexCredentials},
         import_session::SecretBackend,
-        oauth::{CodexOAuthClient, OAuthTokenSet},
+        oauth::{CodexOAuthClient, OAuthClientKind, OAuthTokenSet},
         oauth_flow::callback_secret_ref,
         oauth_flow::{OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
         records::{self},
@@ -26,6 +26,8 @@ const MAX_COMPLETION_CHECKPOINT_BYTES: usize = 256 * 1024;
 pub(super) struct OAuthCompletionCheckpoint {
     pub(super) version: u32,
     pub(super) login_id: String,
+    #[serde(default)]
+    pub(super) client_kind: OAuthClientKind,
     pub(super) access_token: String,
     pub(super) refresh_token: Option<String>,
     pub(super) id_token: Option<String>,
@@ -41,7 +43,15 @@ pub(super) struct OAuthCompletionCheckpoint {
 }
 
 impl OAuthCompletionCheckpoint {
-    fn from_tokens(login_id: &str, tokens: OAuthTokenSet, issued_at_ms: u64) -> LocalResult<Self> {
+    fn from_tokens(
+        login_id: &str,
+        client_kind: OAuthClientKind,
+        tokens: OAuthTokenSet,
+        issued_at_ms: u64,
+    ) -> LocalResult<Self> {
+        client_kind
+            .validate_token_hints(tokens.id_token(), Some(tokens.access_token()))
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         let claims = tokens
             .identity_claims()
             .map_err(oauth_error)?
@@ -54,7 +64,7 @@ impl OAuthCompletionCheckpoint {
         let provider_account_id = claims
             .account_id()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|account_id| !account_id.is_empty())
             .ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
@@ -65,6 +75,7 @@ impl OAuthCompletionCheckpoint {
         let checkpoint = Self {
             version: COMPLETION_CHECKPOINT_VERSION,
             login_id: login_id.to_string(),
+            client_kind,
             access_token: tokens.access_token().to_string(),
             refresh_token: tokens.refresh_token().map(str::to_string),
             id_token: tokens.id_token().map(str::to_string),
@@ -114,14 +125,31 @@ impl OAuthCompletionCheckpoint {
             self.plan_type.clone(),
             self.account_is_fedramp,
         )
+        .map(|credentials| credentials.with_oauth_client_kind(self.client_kind))
     }
 
     pub(super) fn identity_hash(&self) -> String {
-        records::identity_hash(
+        records::credential_identity_hash(
+            self.client_kind,
             &self.provider_account_id,
             self.provider_user_id.as_deref(),
             self.email.as_deref(),
         )
+    }
+
+    pub(super) fn matches_connection(&self, credentials: &StoredCodexCredentials) -> bool {
+        credentials.oauth_client_kind() == self.client_kind
+            && credentials
+                .provider_account_id()
+                .is_none_or(|account_id| account_id == self.provider_account_id)
+            && match credentials.provider_user_id() {
+                Some(user_id) => Some(user_id) == self.provider_user_id.as_deref(),
+                None => credentials.email().is_some_and(|email| {
+                    self.email
+                        .as_deref()
+                        .is_some_and(|other| email.eq_ignore_ascii_case(other))
+                }),
+            }
     }
 }
 
@@ -131,6 +159,7 @@ impl fmt::Debug for OAuthCompletionCheckpoint {
             .debug_struct("OAuthCompletionCheckpoint")
             .field("version", &self.version)
             .field("login_id", &self.login_id)
+            .field("client_kind", &self.client_kind)
             .field("access_token", &"[redacted]")
             .field(
                 "refresh_token",
@@ -176,6 +205,9 @@ where
         .map_err(|_| completion_secret_error())?
         .ok_or_else(completion_secret_error)?;
     if let Some(checkpoint) = decode_completion_checkpoint(&stored, &start.login_id)? {
+        if checkpoint.client_kind != start.client_kind {
+            return Err(invalid_completion_checkpoint());
+        }
         return Ok((checkpoint, stored, start.target_account_id));
     }
     drop(stored);
@@ -184,29 +216,31 @@ where
         .exchange_material(&start.login_id)
         .map_err(flow_error)?;
     let (pending, callback) = material.into_parts();
-    let tokens = CodexOAuthClient::new_with_proxy(proxy)
+    let client_kind = pending.client_kind();
+    let tokens = CodexOAuthClient::new_with_proxy_for_kind(client_kind, proxy)
         .map_err(oauth_error)?
         .exchange_code(&pending, callback, now_ms)
         .await
         .map_err(oauth_error)?;
-    let checkpoint = OAuthCompletionCheckpoint::from_tokens(&start.login_id, tokens, now_ms)?;
+    let checkpoint =
+        OAuthCompletionCheckpoint::from_tokens(&start.login_id, client_kind, tokens, now_ms)?;
     let encoded = encode_completion_checkpoint(&checkpoint)?;
     store_completion_checkpoint(&start.login_id, &encoded)?;
     Ok((checkpoint, encoded, start.target_account_id))
 }
 
 pub(super) fn decode_completion_checkpoint(
-    value: &str,
+    checkpoint_json: &str,
     expected_login_id: &str,
 ) -> LocalResult<Option<OAuthCompletionCheckpoint>> {
-    if !value.trim_start().starts_with('{') {
+    if !checkpoint_json.trim_start().starts_with('{') {
         return Ok(None);
     }
-    if value.len() > MAX_COMPLETION_CHECKPOINT_BYTES {
+    if checkpoint_json.len() > MAX_COMPLETION_CHECKPOINT_BYTES {
         return Err(invalid_completion_checkpoint());
     }
     let checkpoint: OAuthCompletionCheckpoint =
-        serde_json::from_str(value).map_err(|_| invalid_completion_checkpoint())?;
+        serde_json::from_str(checkpoint_json).map_err(|_| invalid_completion_checkpoint())?;
     checkpoint.validate(expected_login_id)?;
     Ok(Some(checkpoint))
 }

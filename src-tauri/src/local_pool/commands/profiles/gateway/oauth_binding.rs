@@ -42,7 +42,10 @@ pub(super) async fn resolve_gateway_oauth_binding(
                 .map_err(|error| {
                     LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
                 })?
-                .is_some()
+                .is_some_and(|credentials| {
+                    credentials.oauth_client_kind()
+                        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+                })
             {
                 let Some(remaining) = profile_quota_rank(
                     candidate_quota_with_stale_after(
@@ -75,7 +78,8 @@ pub(super) async fn resolve_gateway_oauth_binding(
     for (account_id, _) in candidates {
         match prepare_account_credentials(state, &account_id).await {
             Ok(prepared)
-                if prepared.tokens().refresh_token().is_some()
+                if prepared.supports_native_codex()
+                    && prepared.tokens().refresh_token().is_some()
                     && prepared.tokens().id_token().is_some() =>
             {
                 return Ok(Some((account_id, prepared)));

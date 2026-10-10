@@ -3,10 +3,10 @@ use super::*;
 impl TranslationStream {
     pub(in crate::protocol::adapter::translation::stream) fn chat(
         &mut self,
-        value: &Value,
+        upstream_event: &Value,
     ) -> AdapterResult<bool> {
         let invalid = AdapterError::upstream_stream_invalid;
-        let choices = value
+        let choices = upstream_event
             .get("choices")
             .and_then(Value::as_array)
             .ok_or_else(invalid)?;
@@ -36,7 +36,10 @@ impl TranslationStream {
                 "refusal",
             ],
         )?;
-        if let Some(refusal) = delta.get("refusal").filter(|value| !value.is_null()) {
+        if let Some(refusal) = delta
+            .get("refusal")
+            .filter(|refusal_value| !refusal_value.is_null())
+        {
             let refusal = refusal.as_str().ok_or_else(invalid)?;
             if !refusal.is_empty() {
                 self.saw_refusal = true;
@@ -45,7 +48,7 @@ impl TranslationStream {
                     Some(index) => *index,
                     None => self.insert("text".into(), Block::Text(String::new()))?,
                 };
-                let Block::Text(text) = &mut self.response.blocks[index] else {
+                let Block::Text(text) = &mut self.decoded_response.blocks[index] else {
                     return Err(invalid());
                 };
                 text.push_str(refusal);
@@ -55,8 +58,11 @@ impl TranslationStream {
             ("reasoning_content", "reasoning", true),
             ("content", "text", false),
         ] {
-            if let Some(text) = delta.get(field).filter(|value| !value.is_null()) {
-                let text = text.as_str().ok_or_else(invalid)?;
+            if let Some(text_value) = delta
+                .get(field)
+                .filter(|field_value| !field_value.is_null())
+            {
+                let text = text_value.as_str().ok_or_else(invalid)?;
                 let index = match self.indices.get(key) {
                     Some(index) => *index,
                     None => self.insert(
@@ -68,13 +74,18 @@ impl TranslationStream {
                         },
                     )?,
                 };
-                match &mut self.response.blocks[index] {
-                    Block::Text(value) | Block::Reasoning(value) => value.push_str(text),
+                match &mut self.decoded_response.blocks[index] {
+                    Block::Text(block_text) | Block::Reasoning(block_text) => {
+                        block_text.push_str(text)
+                    }
                     _ => return Err(invalid()),
                 }
             }
         }
-        if let Some(calls) = delta.get("tool_calls").filter(|value| !value.is_null()) {
+        if let Some(calls) = delta
+            .get("tool_calls")
+            .filter(|tool_calls_value| !tool_calls_value.is_null())
+        {
             for call in calls.as_array().ok_or_else(invalid)? {
                 checked(call, &["index", "id", "type", "function"])?;
                 if call
@@ -105,7 +116,7 @@ impl TranslationStream {
                     id,
                     name,
                     arguments,
-                } = &mut self.response.blocks[index]
+                } = &mut self.decoded_response.blocks[index]
                 else {
                     return Err(invalid());
                 };

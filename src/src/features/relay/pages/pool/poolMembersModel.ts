@@ -37,11 +37,11 @@ export function poolMembersFromRuntime(runtime: RuntimeSnapshot | null): PoolMem
   if (!runtime) return [];
   return [
     ...runtime.accounts
-      .filter((item) => item.inPool)
-      .map((item) => ({ ...item, kind: "account" as const })),
+      .filter((account) => account.inPool)
+      .map((account) => ({ ...account, kind: "account" as const })),
     ...runtime.sources
-      .filter((item) => item.inPool)
-      .map((item) => ({ ...item, kind: "source" as const })),
+      .filter((source) => source.inPool)
+      .map((source) => ({ ...source, kind: "source" as const })),
   ];
 }
 
@@ -135,24 +135,22 @@ function compareDisplayedPoolMembers(
   const status = compareOperationalStatus(left.operationalStatus, right.operationalStatus);
   if (status || mode !== "automatic") return status || comparePoolMembers(left, right, order);
   return compareRoutingRemainder(left, right)
+    || compareCreditsWhenQuotaIsEmpty(left, right)
     || compareRoutingOrder(left.id, right.id, order)
     || compareStableText(memberName(left), memberName(right));
 }
 
 /**
- * Known window remainder used only to place automatic cards.
- * Credits keep an exhausted window behind every positive window.
- * A source balance is not a routing remainder.
+ * Positive known window remainder used only to place automatic cards.
+ * Provider credits are a separate display key when no positive window exists.
+ * A source balance is not a routing remainder or provider credit balance.
  */
 export function memberRoutingRemainder(member: PoolMember): number | null {
   if (member.kind !== "account") return null;
   const windows = [member.quota?.primary, member.quota?.secondary]
     .map((window) => window?.availableBasisPoints)
-    .filter((value): value is number => value != null);
+    .filter((basisPointRemainder): basisPointRemainder is number => basisPointRemainder != null);
   const remaining = windows.length ? Math.min(...windows) : null;
-  if (member.quota?.providerCreditsAvailable) {
-    return remaining != null && remaining > 0 ? remaining : 1;
-  }
   return remaining != null && remaining > 0 ? remaining : null;
 }
 
@@ -165,10 +163,37 @@ function compareRoutingRemainder(left: PoolMember, right: PoolMember) {
   return rightRemainder - leftRemainder;
 }
 
+function compareCreditsWhenQuotaIsEmpty(left: PoolMember, right: PoolMember) {
+  if (
+    memberRoutingRemainder(left) != null
+    || memberRoutingRemainder(right) != null
+  ) return 0;
+  const leftCredits = memberProviderCredits(left);
+  const rightCredits = memberProviderCredits(right);
+  if (leftCredits === "unlimited" && rightCredits === "unlimited") return 0;
+  if (leftCredits === "unlimited") return -1;
+  if (rightCredits === "unlimited") return 1;
+  if (leftCredits == null && rightCredits == null) return 0;
+  if (leftCredits == null) return 1;
+  if (rightCredits == null) return -1;
+  return rightCredits - leftCredits;
+}
+
+function memberProviderCredits(member: PoolMember): number | "unlimited" | null {
+  if (member.kind !== "account") return null;
+  if (member.refreshState?.quota !== "fresh") return null;
+  if (member.quota?.providerCreditsUnlimited === true) return "unlimited";
+  const credits = member.quota?.availableCreditsMicroUnits;
+  return credits != null && Number.isSafeInteger(credits) && credits >= 0
+    ? credits
+    : null;
+}
+
 function savedMemberPositions(members: readonly { id: string }[] | undefined) {
   const positions = new Map<string, number>();
   for (const member of members ?? []) {
-    if (member.id && !positions.has(member.id)) positions.set(member.id, positions.size);
+    const memberId = member.id;
+    if (memberId && !positions.has(memberId)) positions.set(memberId, positions.size);
   }
   return positions;
 }

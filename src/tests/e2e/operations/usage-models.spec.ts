@@ -26,11 +26,32 @@ test("usage filters are named and stay scoped to the request report", async ({ p
   })).toMatchObject({ includeEvents: false, includeModels: true, includePoolMembers: false });
 });
 
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} clearing usage filters resets the date range`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Usage", exact: true }).click();
+    await chooseOption(page, page, "Range", "weekly");
+    const selectedRange = () => page.evaluate((command) => {
+      const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { range?: string } } }> }).__TAURI_TEST_INVOKES__;
+      return calls.findLast((call) => call.command === command)?.args.input?.range ?? null;
+    }, mode === "local" ? "get_local_usage_page" : "get_remote_server_usage");
+    await expect.poll(selectedRange).toBe("weekly");
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Range: All", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear filters", exact: true })).toHaveCount(0);
+    // The all-period report may already be cached. Refresh checks the reset
+    // query without requiring a duplicate request just to display that cache.
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(selectedRange).toBeNull();
+  });
+}
+
 test("account usage keeps API equivalent, payback, and provider quota windows separate", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountCount: 4 });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await chooseOption(page, page, "Account", "account_synthetic");
+  await chooseOption(page, page, "Pool member", "account_synthetic");
 
   const accountUsage = page.locator(".usage-account-value");
   await expect(accountUsage).toContainText("Personal Plus");
@@ -106,7 +127,7 @@ test("usage request columns reorder, resize, and open details only from the requ
   expect(await page.locator(".usage-request-table").evaluate((element) => element.parentElement!.scrollWidth <= element.parentElement!.clientWidth)).toBe(true);
 });
 
-test("usage shows the request protocol and persists hidden summary metrics", async ({ page }) => {
+test("usage shows the request protocol and keeps aggregate summaries compact", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -114,23 +135,13 @@ test("usage shows the request protocol and persists hidden summary metrics", asy
   await expect(page.locator('.usage-request-table th[data-column="protocol"]')).toHaveText("Protocol");
   await expect(page.locator('.usage-request-table td[data-column="protocol"]')).toHaveText("Responses");
 
-  await page.locator(".usage-overflow summary").click();
-  await page.getByRole("menuitem", { name: "Customize summary" }).click();
-  const dialog = page.getByRole("dialog", { name: "Customize summary" });
-  await expect(dialog.getByRole("checkbox", { name: "Generation speed" })).toBeChecked();
-  await expect(dialog.getByRole("checkbox", { name: "E2E speed" })).toBeChecked();
-  await dialog.getByRole("checkbox", { name: "Generation speed" }).uncheck();
-  await dialog.getByRole("checkbox", { name: "Total tokens" }).uncheck();
-  await page.keyboard.press("Escape");
-
+  await expect(page.locator(".usage-overview .usage-metric")).toHaveCount(6);
+  await page.getByRole("tab", { name: "Models", exact: true }).click();
+  await expect(page.locator(".usage-overview .usage-metric")).toHaveCount(3);
+  await page.getByRole("tab", { name: "Errors", exact: true }).click();
+  await expect(page.locator(".usage-overview .usage-metric")).toHaveCount(3);
+  await expect(page.locator(".usage-overview").getByText("Success", { exact: true })).toHaveCount(0);
   await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageSummaryMetrics") ?? "null"))).toMatchObject({ generationSpeed: false, tokens: false });
-
-  await page.reload();
-  await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".usage-overview").getByText("Total tokens", { exact: true })).toHaveCount(0);
 });
 
 test("usage details warn when forwarded tools yield a text-only response", async ({ page }) => {
@@ -141,9 +152,9 @@ test("usage details warn when forwarded tools yield a text-only response", async
 
   const dialog = page.getByRole("dialog", { name: "Request details" });
   await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
-  await expect(dialog.getByText("Tools received from client", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("3 → 3", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Client tools", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-details-list").getByText("3", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Tools sent", { exact: true })).toHaveCount(0);
   await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeVisible();
   await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeVisible();
@@ -185,15 +196,17 @@ test("usage attributes API token totals to the selected account", async ({ page 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
   await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Out8Cache ↓12Cache ↑4Reason5", "28", "≈$0.0001", "6.7 tok/s", "128 ms / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Out8", "Cache ↓12", "Cache ↑4", "Reason5"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Generation speed6.7 tok/s");
-  await expect(page.locator(".usage-metrics")).toContainText("E2E speed18.7 tok/s");
+  await expect(page.locator(".usage-metrics > .usage-metric")).toHaveCount(3);
 
   await page.getByRole("tab", { name: "Requests" }).click();
+  await expect(page.locator(".usage-metrics")).toContainText("Generation speed6.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("E2E speed18.7 tok/s");
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toContainText("Generation speed6.7 tok/s");
   await expect(details).toContainText("Total time428 ms");
-  await expect(details).toContainText("Visible output3");
+  await expect(details.locator(".request-details-metrics > div")).toHaveCount(4);
+  await expect(details).toContainText("Request cost≈$0.0001");
   await details.getByRole("tab", { name: "Tokens", exact: true }).click();
   await expect(details).toContainText("Input tokens20");
   await expect(details).toContainText("Output tokens8");
@@ -201,7 +214,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Cache writes4");
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Total tokens28");
-  await expect(details).toContainText("API equivalent≈$0.0001");
+  await expect(details).toContainText("Request cost≈$0.0001");
   await details.getByRole("tab", { name: "Route", exact: true }).click();
   await expect(details).toContainText("Selection reasonGreatest quota remaining");
   await expect(details).toContainText("Eligible participants4");

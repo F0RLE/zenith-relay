@@ -12,8 +12,8 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 
 impl super::ClientRequest {
-    pub(in crate::gateway::websocket) fn error_stream_id(payload: &[u8]) -> Option<String> {
-        serde_json::from_slice::<Value>(payload)
+    pub(in crate::gateway::websocket) fn error_stream_id(request_bytes: &[u8]) -> Option<String> {
+        serde_json::from_slice::<Value>(request_bytes)
             .ok()?
             .get("stream_id")?
             .as_str()
@@ -25,30 +25,30 @@ impl super::ClientRequest {
         runtime: &GatewayRuntime,
         key: &AuthenticatedKey,
         headers: &HeaderMap,
-        payload: &[u8],
+        request_bytes: &[u8],
     ) -> Result<Self, GatewayFailure> {
-        Self::parse_on_connection(runtime, key, headers, payload, None)
+        Self::parse_on_connection(runtime, key, headers, request_bytes, None)
     }
 
     pub(in crate::gateway::websocket) fn parse_on_connection(
         runtime: &GatewayRuntime,
         key: &AuthenticatedKey,
         headers: &HeaderMap,
-        payload: &[u8],
+        request_bytes: &[u8],
         connection_response: Option<(&str, &str)>,
     ) -> Result<Self, GatewayFailure> {
-        if payload.len() > super::super::MAX_WEBSOCKET_MESSAGE_BYTES {
+        if request_bytes.len() > super::super::MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::invalid_request(
                 "WebSocket request is too large",
             ));
         }
-        let mut value: Value = serde_json::from_slice(payload)
+        let mut request_body: Value = serde_json::from_slice(request_bytes)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
-        let tool_policy = RequestToolPolicy::new(runtime, &value);
-        let object = value
+        let mut tool_policy = RequestToolPolicy::new(runtime, &request_body);
+        let request_object = request_body
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
-        if object
+        if request_object
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|kind| kind != "response.create")
@@ -57,7 +57,7 @@ impl super::ClientRequest {
                 "only response.create messages are supported",
             ));
         }
-        let stream_id = match object.get("stream_id") {
+        let stream_id = match request_object.get("stream_id") {
             None => None,
             Some(Value::String(stream_id)) => {
                 if !valid_stream_id(stream_id) {
@@ -67,7 +67,7 @@ impl super::ClientRequest {
             }
             Some(_) => return Err(GatewayFailure::invalid_stream_id()),
         };
-        let requested_model = object
+        let requested_model = request_object
             .get("model")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -75,14 +75,24 @@ impl super::ClientRequest {
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
         let service_tier_policy = if is_managed_codex_client(headers) {
-            ServiceTierPolicy::pool_owned(&value)
+            ServiceTierPolicy::pool_owned(&request_body)
         } else {
-            ServiceTierPolicy::client_owned(&value)
+            ServiceTierPolicy::client_owned(&request_body)
         };
-        let background_kind = codex_background_request_kind(headers, &value);
+        let background_kind = codex_background_request_kind(headers, &request_body);
         let request_id = crate::gateway::request::request_id();
         if let Some(kind) = background_kind {
             runtime.mark_request_origin(&request_id, kind);
+        }
+        let client_context_id = client_context_fingerprint(headers);
+        if background_kind.is_none() {
+            tool_policy.capture_cache_context(
+                runtime,
+                &request_body,
+                &key.id,
+                &request_id,
+                client_context_id.as_deref(),
+            );
         }
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
@@ -97,20 +107,20 @@ impl super::ClientRequest {
             .ok_or_else(GatewayFailure::model_not_found)?;
         let responses_lite = headers
             .contains_key(crate::gateway::request::CODEX_RESPONSES_LITE_HEADER)
-            || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY);
+            || metadata_flag(&request_body, RESPONSES_LITE_METADATA_KEY);
         // Responses Lite is a transport contract, not an OAuth-only option.
         // Normalize it before route selection so every selected provider sees
         // the same serial-tool request shape.
         if responses_lite {
-            let object = value
+            let request_object = request_body
                 .as_object_mut()
                 .expect("request object was validated before normalization");
-            if !crate::gateway::request::responses_lite_parallel_tool_calls_valid(object) {
+            if !crate::gateway::request::responses_lite_parallel_tool_calls_valid(request_object) {
                 return Err(GatewayFailure::invalid_request(
                     "responses Lite requires parallel_tool_calls to be a boolean",
                 ));
             }
-            crate::gateway::request::normalize_responses_lite_request(object);
+            crate::gateway::request::normalize_responses_lite_request(request_object);
         }
         // Keep automatic Lite consistent with HTTP: a pool that can fall back
         // to a non-Lite or non-official Responses route must stay on full
@@ -124,29 +134,31 @@ impl super::ClientRequest {
             };
         let connection_affinity_key = connection_response
             .filter(|(id, _)| {
-                value.get("previous_response_id").and_then(Value::as_str) == Some(*id)
+                request_body
+                    .get("previous_response_id")
+                    .and_then(Value::as_str)
+                    == Some(*id)
             })
             .map(|(_, affinity)| affinity);
         let continuation = continuation::prepare_response_continuation(
             runtime,
             &key.id,
-            &mut value,
+            &mut request_body,
             now_ms(),
             connection_affinity_key,
         )
         .map_err(|()| GatewayFailure::continuation_unavailable())?;
-        let client_context_id = client_context_fingerprint(headers);
         let prompt_affinity_key = runtime.prompt_affinity_key(
             &key.id,
             &resolved_model,
-            value.get("prompt_cache_key").and_then(Value::as_str),
+            request_body.get("prompt_cache_key").and_then(Value::as_str),
             client_context_id.as_deref(),
         );
         Ok(Self {
             tool_policy,
             request_id,
             budget: SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),
-            value,
+            request_body,
             requested_model,
             resolved_model,
             stream_id,
@@ -170,13 +182,13 @@ fn valid_stream_id(stream_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
-fn metadata_flag(value: &Value, key: &str) -> bool {
-    value
+fn metadata_flag(request_body: &Value, key: &str) -> bool {
+    request_body
         .get("client_metadata")
         .and_then(|metadata| metadata.get(key))
-        .is_some_and(|value| match value {
-            Value::Bool(value) => *value,
-            Value::String(value) => value.eq_ignore_ascii_case("true"),
+        .is_some_and(|metadata_flag| match metadata_flag {
+            Value::Bool(flag) => *flag,
+            Value::String(flag_text) => flag_text.eq_ignore_ascii_case("true"),
             _ => false,
         })
 }

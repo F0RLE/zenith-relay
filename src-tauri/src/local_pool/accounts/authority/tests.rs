@@ -33,14 +33,14 @@ struct MemorySecrets {
 }
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         if self.fail_save.load(Ordering::SeqCst) {
             return Err(SecretBackendError);
         }
         self.values
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         Ok(())
     }
 
@@ -65,6 +65,7 @@ impl CodexRefreshClient for RefreshOnce {
         provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
+        _kind: super::super::oauth::OAuthClientKind,
     ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -262,6 +263,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
             _provider_account_id: Option<&'a str>,
             _refresh_token: &'a str,
             now_ms: u64,
+            _kind: super::super::oauth::OAuthClientKind,
         ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
         {
             Box::pin(async move {
@@ -280,8 +282,8 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
 
     let root = temp_root("removed-slot-refresh");
     let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
-    let old = expired_credentials();
-    store.save(&old).unwrap();
+    let expired_account = expired_credentials();
+    store.save(&expired_account).unwrap();
     let client = Arc::new(PausedRefresh {
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
@@ -305,7 +307,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
     authority
         .register(
             "relay_account_1",
-            old.to_token_set().unwrap(),
+            expired_account.to_token_set().unwrap(),
             AccountAuthState::Active,
         )
         .await
@@ -394,7 +396,8 @@ async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task(
     const TEST_KEY: &str = "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
     let root = temp_root("replaced-agent-task");
     let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
-    let old = AgentIdentityCredential::unregistered(TEST_KEY.into(), "old-runtime".into()).unwrap();
+    let previous_identity =
+        AgentIdentityCredential::unregistered(TEST_KEY.into(), "old-runtime".into()).unwrap();
     let replacement = StoredCodexCredentials::new_agent_identity(
         "relay_account_1",
         AgentIdentityCredential::unregistered(TEST_KEY.into(), "new-runtime".into()).unwrap(),
@@ -415,7 +418,7 @@ async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task(
         root.clone(),
     );
     assert!(persistence
-        .persist_agent_task_id_for_identity("relay_account_1", &old, "old-task")
+        .persist_agent_task_id_for_identity("relay_account_1", &previous_identity, "old-task")
         .await
         .is_err());
     assert!(store

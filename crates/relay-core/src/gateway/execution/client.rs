@@ -14,7 +14,7 @@ use super::request::{execute_request, RequestExecution};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::scheduler::rotation::SharedRequestBudget;
-use crate::{GatewayRuntime, WireApi};
+use crate::{GatewayRuntime, UsageTransport, WireApi};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, Response, StatusCode};
@@ -27,73 +27,89 @@ use std::sync::Arc;
 pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) request_id: String,
     pub(in crate::gateway) budget: SharedRequestBudget,
+    pub(in crate::gateway) transport: UsageTransport,
 }
+
+/// Internal compact-to-Responses dispatch is not an ordinary conversation turn.
+#[derive(Clone, Copy)]
+pub(in crate::gateway) struct RoutedCompactionRequest;
 
 pub(in crate::gateway) async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
-    request: Request<Body>,
-    wire_api: WireApi,
+    http_request: Request<Body>,
+    client_wire_api: WireApi,
 ) -> Response<Body> {
-    execute_client_request_inner(runtime, request, wire_api, None, false).await
+    execute_client_request_inner(runtime, http_request, client_wire_api, None, false).await
 }
 
 pub(in crate::gateway) async fn execute_gemini_client_request(
     runtime: Arc<GatewayRuntime>,
-    request: Request<Body>,
+    http_request: Request<Body>,
     model: String,
     force_stream: bool,
 ) -> Response<Body> {
-    execute_client_request_inner(runtime, request, WireApi::Gemini, Some(model), force_stream).await
+    execute_client_request_inner(
+        runtime,
+        http_request,
+        WireApi::Gemini,
+        Some(model),
+        force_stream,
+    )
+    .await
 }
 
 async fn execute_client_request_inner(
     runtime: Arc<GatewayRuntime>,
-    request: Request<Body>,
-    wire_api: WireApi,
+    http_request: Request<Body>,
+    client_wire_api: WireApi,
     path_model: Option<String>,
     force_stream: bool,
 ) -> Response<Body> {
-    let (parts, body) = request.into_parts();
+    let (parts, request_body) = http_request.into_parts();
     let headers = parts.headers;
     if !valid_local_host(&headers) {
         return invalid_host();
     }
-    let key = super::super::auth::authenticate_client(&runtime, &headers, wire_api);
+    let key = super::super::auth::authenticate_client(&runtime, &headers, client_wire_api);
     let Some(key) = key else {
         return unauthorized();
     };
-    let client_wire_api = match wire_api {
+    let client_api = match client_wire_api {
         WireApi::Responses => ClientWireApi::Responses,
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
         WireApi::Messages => ClientWireApi::Messages,
         WireApi::Gemini => ClientWireApi::Gemini,
     };
-    if !runtime.allows_client_wire_api(&key, client_wire_api) {
+    if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
     }
-    let mut request = match super::super::request_body::read_json_object(&headers, body).await {
-        Ok(object) => Value::Object(object),
-        Err(response) => return *response,
-    };
-    let tool_policy = parts
+    let mut request_json =
+        match super::super::request_body::read_json_object(&headers, request_body).await {
+            Ok(request_object) => Value::Object(request_object),
+            Err(error_response) => return *error_response,
+        };
+    runtime.refresh_basis_points_access(&key).await;
+    let mut tool_policy = parts
         .extensions
         .get::<super::super::request::RequestToolPolicy>()
         .cloned()
-        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request));
+        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request_json));
     let managed_codex_client = is_managed_codex_client(&headers);
     let service_tier_policy = if managed_codex_client {
-        ServiceTierPolicy::pool_owned(&request)
+        ServiceTierPolicy::pool_owned(&request_json)
     } else {
-        ServiceTierPolicy::client_owned(&request)
+        ServiceTierPolicy::client_owned(&request_json)
     };
-    if wire_api == WireApi::ChatCompletions && !chat_request_is_text_or_image_only(&request) {
+    if client_wire_api == WireApi::ChatCompletions
+        && !chat_request_is_text_or_image_only(&request_json)
+    {
         return api_error(
             StatusCode::BAD_REQUEST,
             "Chat Completions supports text and image content only",
             error_codes::CHAT_FEATURE_NOT_SUPPORTED,
         );
     }
-    let body_model = request
+    let body_model = request_json
         .get("model")
         .and_then(Value::as_str)
         .filter(|model| !model.trim().is_empty())
@@ -114,10 +130,14 @@ async fn execute_client_request_inner(
             error_codes::INVALID_REQUEST,
         );
     };
-    let background_kind = (wire_api == WireApi::Responses)
-        .then(|| codex_background_request_kind(&headers, &request))
+    let background_kind = (client_wire_api == WireApi::Responses)
+        .then(|| codex_background_request_kind(&headers, &request_json))
         .flatten();
     let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
+    let transport = identity
+        .as_ref()
+        .map(|identity| identity.transport)
+        .unwrap_or(UsageTransport::Http);
     let (request_id, budget) = identity.map_or_else(
         || {
             (
@@ -127,7 +147,7 @@ async fn execute_client_request_inner(
         },
         |identity| (identity.request_id, identity.budget),
     );
-    let stream = match request.get("stream") {
+    let stream = match request_json.get("stream") {
         Some(Value::Bool(stream)) => *stream,
         Some(_) => {
             return api_error(
@@ -145,14 +165,28 @@ async fn execute_client_request_inner(
                 &request_id,
                 &key.id,
                 &requested_model,
-                wire_api,
+                client_wire_api,
+                UsageTransport::Http,
                 kind,
             );
-            return blocked_background_response(wire_api, stream, &request_id, kind);
+            return blocked_background_response(client_wire_api, stream, &request_id, kind);
         }
     }
-    let continuation = if wire_api == WireApi::Responses {
-        match prepare_response_continuation(&runtime, &key.id, &mut request, now_ms(), None) {
+    let client_context_id = client_context_fingerprint(&headers);
+    if client_wire_api == WireApi::Responses
+        && background_kind.is_none()
+        && parts.extensions.get::<RoutedCompactionRequest>().is_none()
+    {
+        tool_policy.capture_cache_context(
+            &runtime,
+            &request_json,
+            &key.id,
+            &request_id,
+            client_context_id.as_deref(),
+        );
+    }
+    let continuation = if client_wire_api == WireApi::Responses {
+        match prepare_response_continuation(&runtime, &key.id, &mut request_json, now_ms(), None) {
             Ok(continuation) => Some(continuation),
             Err(()) => {
                 return api_error(
@@ -170,7 +204,7 @@ async fn execute_client_request_inner(
         .resolve_visible_model(
             &key,
             &requested_model,
-            candidate_protocols(wire_api),
+            candidate_protocols(client_wire_api),
             now_ms(),
         )
         .or_else(|| {
@@ -180,7 +214,7 @@ async fn execute_client_request_inner(
                     runtime.resolve_configured_model(
                         &key,
                         &requested_model,
-                        candidate_protocols(wire_api),
+                        candidate_protocols(client_wire_api),
                     )
                 })
                 .flatten()
@@ -192,11 +226,10 @@ async fn execute_client_request_inner(
             error_codes::MODEL_NOT_FOUND,
         );
     };
-    let responses_lite = (wire_api == WireApi::Responses)
+    let responses_lite = (client_wire_api == WireApi::Responses)
         .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
         .flatten();
-    let client_context_id = client_context_fingerprint(&headers);
-    let forwarded_headers = match wire_api {
+    let forwarded_headers = match client_wire_api {
         WireApi::Messages => forwarded_messages_headers(&headers),
         WireApi::Responses | WireApi::ChatCompletions => {
             forwarded_codex_headers(&headers, &request_id)
@@ -207,7 +240,7 @@ async fn execute_client_request_inner(
         tool_policy,
         runtime: runtime.clone(),
         key,
-        request,
+        request: request_json,
         service_tier_policy,
         requested_model,
         resolved_model,
@@ -220,23 +253,24 @@ async fn execute_client_request_inner(
             .and_then(|continuation| continuation.response_affinity_key.clone()),
         requires_affinity_owner: continuation
             .is_some_and(|continuation| continuation.requires_affinity_owner),
-        wire_api,
+        client_wire_api,
         responses_lite,
         allow_previous_response_reset: true,
         attempt_offset: 0,
         budget,
+        transport,
     })
     .await
 }
 
 fn blocked_background_response(
-    wire_api: WireApi,
+    client_wire_api: WireApi,
     stream: bool,
     request_id: &str,
     kind: &str,
 ) -> Response<Body> {
     let response_id = format!("resp_relay_blocked_{request_id}");
-    let body = if stream {
+    let response_body = if stream {
         format!(
             "event: response.completed\ndata: {}\n\n",
             serde_json::json!({
@@ -245,7 +279,7 @@ fn blocked_background_response(
             })
         )
     } else {
-        match wire_api {
+        match client_wire_api {
             WireApi::Responses => serde_json::json!({
                 "id": response_id,
                 "object": "response",
@@ -270,6 +304,6 @@ fn blocked_background_response(
                 "application/json"
             },
         )
-        .body(Body::from(body))
+        .body(Body::from(response_body))
         .expect("blocked response builder is valid")
 }

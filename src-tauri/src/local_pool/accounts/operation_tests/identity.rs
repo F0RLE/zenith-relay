@@ -34,6 +34,8 @@ fn refresh_only_without_explicit_account_id_updates_after_exchange_identity() {
         plan_type: None,
         subscription_active_until_ms: None,
         account_is_fedramp: false,
+        basis_points_headers: None,
+        oauth_client_kind: Default::default(),
     }
     .into_stored(&resolved.account.id, 2, 8)
     .unwrap();
@@ -75,6 +77,7 @@ fn provider_identity_hash_matches_import_parser_without_exposing_id() {
         "Provider-Private",
         Some("User-Private"),
         Some("private@example.test"),
+        Default::default(),
     );
     assert_eq!(parsed.items[0].identity_key, key);
     assert!(!key.contains("provider"));

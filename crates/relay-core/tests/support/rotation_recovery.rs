@@ -38,7 +38,7 @@ async fn bounded_requests_reach_the_ninth_candidate_without_hiding_it_from_the_p
         ),
         (
             StatusCode::BAD_REQUEST,
-            json!({"code":"invalid_request", "message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}),
+            json!({"code":"vendor_route_42", "message":"this route cannot serve the request"}),
         ),
     ];
     let mut servers = Vec::new();

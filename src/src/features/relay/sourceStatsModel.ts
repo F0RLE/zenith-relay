@@ -2,7 +2,7 @@ import type { SourceStats, SourceStatsAmount, SourceStatsStatus } from "./api/ty
 import { formatNumber } from "./numberFormatting";
 
 export type SourceStatsState = {
-  value: SourceStats | null;
+  stats: SourceStats | null;
   loading: boolean;
   failed: boolean;
   error?: SourceStatsStatus;
@@ -13,23 +13,23 @@ export function sourceStatsStatus(stats: SourceStats): SourceStatsStatus {
   return status === "available" && stats.provider === "unsupported" ? "unsupported" : status;
 }
 
-export function settledSourceStats(previous: SourceStats | null, result: SourceStats): SourceStatsState {
-  const status = sourceStatsStatus(result);
+export function settledSourceStats(previousStats: SourceStats | null, nextStats: SourceStats): SourceStatsState {
+  const status = sourceStatsStatus(nextStats);
   const failed = status !== "available" && status !== "unsupported";
-  const retained = failed && previous && sourceStatsStatus(previous) === "available";
+  const retained = failed && previousStats && sourceStatsStatus(previousStats) === "available";
   return {
-    value: retained ? { ...previous, stale: true, refreshError: status } : result,
+    stats: retained ? { ...previousStats, stale: true, refreshError: status } : nextStats,
     loading: false,
-    failed: failed || Boolean(result.refreshError),
-    ...(result.refreshError || failed ? { error: result.refreshError ?? status } : {}),
+    failed: failed || Boolean(nextStats.refreshError),
+    ...(nextStats.refreshError || failed ? { error: nextStats.refreshError ?? status } : {}),
   };
 }
 
 /** A delayed host snapshot must not replace a newer explicit read. Snapshot
  * projection also cannot complete an independent in-flight UI operation. */
-export function projectedSourceStats(previous: SourceStatsState | undefined, result: SourceStats): SourceStatsState {
-  if (previous?.value?.asOfMs != null && result.asOfMs != null && previous.value.asOfMs > result.asOfMs) return previous;
-  return { ...settledSourceStats(previous?.value ?? null, result), loading: previous?.loading ?? false };
+export function projectedSourceStats(previousState: SourceStatsState | undefined, nextStats: SourceStats): SourceStatsState {
+  if (previousState?.stats?.asOfMs != null && nextStats.asOfMs != null && previousState.stats.asOfMs > nextStats.asOfMs) return previousState;
+  return { ...settledSourceStats(previousState?.stats ?? null, nextStats), loading: previousState?.loading ?? false };
 }
 
 export function sourceStatsAmounts(stats: SourceStats | null | undefined): SourceStatsAmount[] {

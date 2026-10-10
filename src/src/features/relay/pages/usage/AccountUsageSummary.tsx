@@ -32,6 +32,7 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
 
   useEffect(() => {
     if (!calculationOpen) return;
+    calculationRef.current?.querySelector<HTMLElement>("p")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node) || !calculationRef.current?.contains(target)) setCalculationOpen(false);
@@ -57,7 +58,7 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
         <strong>{account.label}</strong>
       </div>
       <details ref={calculationRef} open={calculationOpen}>
-        <summary onClick={(event) => { event.preventDefault(); setCalculationOpen((value) => !value); }}>
+        <summary onClick={(event) => { event.preventDefault(); setCalculationOpen((isOpen) => !isOpen); }}>
           {t("usage.howCalculated")}
         </summary>
         <p className="relay-popover-panel">{t("usage.calculationHint")}</p>

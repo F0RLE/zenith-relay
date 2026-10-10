@@ -133,7 +133,16 @@
   color: var(--relay-muted);
 }
 
-.account-plan-badge {
+.account-badges {
+  min-width: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.account-plan-badge,
+.account-client-badge {
   --plan-accent: var(--relay-muted);
   width: fit-content;
   max-width: 100%;
@@ -141,28 +150,18 @@
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   overflow: hidden;
-  padding: 0 3px;
-  border: 1px solid color-mix(in srgb, var(--plan-accent) 32%, var(--relay-border));
+  padding: 0 7px;
+  border: 0;
   border-radius: 4px;
-  background: color-mix(in srgb, var(--plan-accent) 9%, var(--relay-surface));
-  color: color-mix(in srgb, var(--plan-accent) 78%, var(--relay-text));
-  font-size: 10px;
+  background: color-mix(in srgb, var(--plan-accent) 16%, var(--relay-surface));
+  color: var(--plan-accent);
+  font-size: 11px;
   font-style: normal;
-  font-weight: 700;
-  line-height: 18px;
+  font-weight: 500;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.account-plan-badge::before {
-  width: 4px;
-  height: 4px;
-  flex: 0 0 4px;
-  border-radius: 50%;
-  background: currentColor;
-  content: "";
 }
 
 .account-plan-badge[data-plan="plus"] { --plan-accent: var(--relay-accent-hover); }
@@ -172,6 +171,10 @@
 .account-plan-badge[data-plan="go"] { --plan-accent: #15869a; }
 .account-plan-badge[data-plan="edu"],
 .account-plan-badge[data-plan="k12"] { --plan-accent: #ad4f82; }
+
+.account-client-badge {
+  --plan-accent: var(--relay-accent-hover);
+}
 
 @media (max-width: 1023px) {
   .scope-grid {
@@ -228,7 +231,7 @@
 
 .mode-picker > button {
   background: var(--relay-surface);
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   color: var(--relay-text);
   font-weight: 650;
   box-shadow: var(--relay-shadow-soft);
@@ -240,7 +243,7 @@
 }
 
 .mode-picker > button[aria-expanded="true"] {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
@@ -295,10 +298,10 @@
   margin-left: auto;
 }
 
-.mode-menu button:hover,
-.relay-sidebar nav button:hover,
-.sidebar-footer button:hover,
-.sidebar-update:hover {
+.mode-menu button:is(:hover, :focus-visible),
+.relay-sidebar nav button:is(:hover, :focus-visible),
+.sidebar-footer button:is(:hover, :focus-visible),
+.sidebar-update:is(:hover, :focus-visible) {
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
@@ -314,7 +317,7 @@
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
   font-weight: 650;
-  box-shadow: inset 3px 0 0 var(--relay-accent);
+  box-shadow: none;
 }
 
 .relay-sidebar svg,
@@ -371,7 +374,7 @@
 .sidebar-update {
   position: relative;
   min-height: 34px !important;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 35%, var(--relay-border)) !important;
+  border: 1px solid transparent !important;
   background: var(--relay-accent-soft) !important;
   color: var(--relay-accent-hover) !important;
   font-size: 12px;
@@ -403,7 +406,7 @@
 .sidebar-footer .relay-icon-button {
   width: 34px;
   flex: 0 0 34px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   background: var(--relay-surface);
 }
 
@@ -448,7 +451,7 @@
   min-height: 34px;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   background: var(--relay-surface);
 }
 
@@ -560,7 +563,7 @@
 .relay-render-error button {
   min-height: 34px;
   padding: 0 16px;
-  border: 1px solid var(--relay-accent);
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-accent);
   color: var(--relay-on-accent, #fff);
@@ -578,7 +581,7 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  border: 1px solid var(--relay-border);
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-surface);
   color: var(--relay-text);
@@ -586,7 +589,7 @@
   line-height: 18px;
   font-weight: 500;
   cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
 
 .relay-button {
@@ -686,56 +689,56 @@
   color: var(--relay-error);
 }
 
-.relay-icon-button.danger:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+.relay-icon-button.danger:is(:hover, :focus-visible):not(:disabled) {
+  border-color: transparent;
   background: var(--relay-error-soft);
 }
 
-.relay-button:hover:not(:disabled),
-.relay-icon-button:hover:not(:disabled) {
-  border-color: var(--relay-border-strong);
+.relay-button:is(:hover, :focus-visible):not(:disabled),
+.relay-icon-button:is(:hover, :focus-visible):not(:disabled) {
+  border-color: transparent;
   background: var(--relay-subtle);
 }
 
 .relay-button.primary {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent);
   color: var(--relay-on-accent);
   box-shadow: 0 1px 2px rgb(5 78 58 / 22%);
 }
 
-.relay-button.primary:hover:not(:disabled) {
-  border-color: var(--relay-accent-hover);
+.relay-button.primary:is(:hover, :focus-visible):not(:disabled) {
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
 :root[data-theme="dark"] .relay-button.primary {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent);
   color: var(--relay-on-accent);
 }
 
-:root[data-theme="dark"] .relay-button.primary:hover:not(:disabled) {
-  border-color: var(--relay-accent-hover);
+:root[data-theme="dark"] .relay-button.primary:is(:hover, :focus-visible):not(:disabled) {
+  border-color: transparent;
   background: var(--relay-accent-hover);
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] .relay-button.primary {
-    border-color: var(--relay-accent);
+    border-color: transparent;
     background: var(--relay-accent);
     color: var(--relay-on-accent);
   }
 
-  :root[data-theme="system"] .relay-button.primary:hover:not(:disabled) {
-    border-color: var(--relay-accent-hover);
+  :root[data-theme="system"] .relay-button.primary:is(:hover, :focus-visible):not(:disabled) {
+    border-color: transparent;
     background: var(--relay-accent-hover);
   }
 }
 
 .relay-button.primary:disabled,
 :root[data-theme="dark"] .relay-button.primary:disabled {
-  border-color: var(--relay-border-strong);
+  border-color: transparent;
   background: var(--relay-border);
   color: var(--relay-secondary);
   box-shadow: none;
@@ -744,7 +747,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] .relay-button.primary:disabled {
-    border-color: var(--relay-border-strong);
+    border-color: transparent;
     background: var(--relay-border);
     color: var(--relay-secondary);
     box-shadow: none;
@@ -759,7 +762,7 @@
 }
 
 .relay-button.danger {
-  border-color: var(--relay-error);
+  border-color: transparent;
   color: var(--relay-error);
   background: transparent;
 }
@@ -779,6 +782,7 @@ textarea:focus-visible {
 .relay-tabs button:focus-visible {
   outline: 0;
   border-radius: 4px;
+  background: var(--relay-subtle);
 }
 
 .relay-tabs {
@@ -815,7 +819,8 @@ textarea:focus-visible {
 }
 
 .relay-tabs button.active {
-  border-bottom-color: var(--relay-accent);
+  border-bottom-color: transparent;
+  background: var(--relay-accent-soft);
   color: var(--relay-text);
   font-weight: 600;
 }
@@ -1142,7 +1147,7 @@ textarea:focus-visible {
 }
 
 .help-contents-list a[aria-current] {
-  border-left-color: var(--relay-accent);
+  border-left-color: transparent;
   color: var(--relay-accent-hover);
   background: var(--relay-accent-soft);
   font-weight: 600;
@@ -1525,7 +1530,7 @@ textarea:focus-visible {
   align-items: flex-start;
   gap: 10px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--relay-error) 34%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 6px;
   background: var(--relay-error-soft);
   color: var(--relay-error);

@@ -14,7 +14,7 @@ use std::{
 };
 
 pub use loader::{ModelMetadataCatalogLoader, ModelMetadataError};
-use parsing::{payload_hash, validate_payload};
+use parsing::{metadata_payload_hash, validate_metadata_payload};
 
 pub const MODELS_DEV_SOURCE_URL: &str = "https://models.dev/models.json";
 pub const MODELS_DEV_DETAILS_SOURCE_URL: &str = "https://models.dev/api.json";
@@ -80,7 +80,15 @@ pub enum ReasoningMethod {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelMetadata {
+    /// The identifier supplied by the reference source. Keep it separate
+    /// from a hosted route ID or a canonical provider model ID.
+    #[serde(default)]
+    pub source_model_id: String,
     pub provider: String,
+    /// A registry-provided relation to the underlying provider model. This is
+    /// advisory identity metadata and never grants a runtime route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_model_id: Option<String>,
     pub family: Option<String>,
     pub name: Option<String>,
     pub release_date: Option<String>,
@@ -110,19 +118,19 @@ pub struct MetadataSourceStatus {
 
 #[derive(Clone, Debug)]
 pub struct ModelMetadataCatalogHandle {
-    current: Arc<RwLock<Arc<ModelMetadataCatalog>>>,
+    active_catalog: Arc<RwLock<Arc<ModelMetadataCatalog>>>,
 }
 
 impl ModelMetadataCatalogHandle {
     /// Share an already validated reference snapshot with a runtime.
     pub fn new(catalog: ModelMetadataCatalog) -> Self {
         Self {
-            current: Arc::new(RwLock::new(Arc::new(catalog))),
+            active_catalog: Arc::new(RwLock::new(Arc::new(catalog))),
         }
     }
 
     pub fn snapshot(&self) -> Arc<ModelMetadataCatalog> {
-        self.current
+        self.active_catalog
             .read()
             .expect("model metadata catalog lock poisoned")
             .clone()
@@ -130,7 +138,7 @@ impl ModelMetadataCatalogHandle {
 
     pub(crate) fn replace(&self, catalog: ModelMetadataCatalog) {
         *self
-            .current
+            .active_catalog
             .write()
             .expect("model metadata catalog lock poisoned") = Arc::new(catalog);
     }
@@ -153,8 +161,11 @@ pub(crate) struct MetadataCacheEnvelope {
 
 impl MetadataCacheEnvelope {
     #[cfg(test)]
-    pub(crate) fn new(payload: Value, fetched_at_ms: u64) -> Result<Self, ModelMetadataError> {
-        let revision = parsing::payload_hash(&payload)?;
+    pub(crate) fn new(
+        metadata_payload: Value,
+        fetched_at_ms: u64,
+    ) -> Result<Self, ModelMetadataError> {
+        let revision = parsing::metadata_payload_hash(&metadata_payload)?;
         let envelope = Self {
             format: LEGACY_CACHE_FORMAT.to_string(),
             schema_version: CACHE_SCHEMA_VERSION,
@@ -165,10 +176,10 @@ impl MetadataCacheEnvelope {
             fetched_at_ms,
             payload_sha256: revision,
             stale: false,
-            payload,
+            payload: metadata_payload,
         };
         envelope.validate()?;
-        ModelMetadataCatalog::from_payload(&envelope.payload, None, None, false)?;
+        ModelMetadataCatalog::from_metadata_payload(&envelope.payload, None, None, false)?;
         Ok(envelope)
     }
 
@@ -178,11 +189,12 @@ impl MetadataCacheEnvelope {
             || self.source_url != MODELS_DEV_SOURCE_URL
             || self.fetched_at_ms == 0
             || self.revision != self.payload_sha256
-            || self.revision != parsing::payload_hash(&self.payload)?
+            || self.revision != parsing::metadata_payload_hash(&self.payload)?
         {
             return Err(ModelMetadataError::InvalidCache);
         }
-        parsing::validate_payload(&self.payload).map_err(|_| ModelMetadataError::InvalidCache)?;
+        parsing::validate_metadata_payload(&self.payload)
+            .map_err(|_| ModelMetadataError::InvalidCache)?;
         Ok(())
     }
 }

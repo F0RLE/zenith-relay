@@ -54,6 +54,24 @@ fn non_stream_usage_normalizes_cached_reasoning_and_total_tokens() {
 }
 
 #[test]
+fn truncated_stream_keeps_usage_from_complete_frames_without_marking_success() {
+    let mut event = test_usage_event();
+    event.success = false;
+    populate_tokens(
+        &mut event,
+        b"data: {\"type\":\"response.created\",\"response\":{\"usage\":{\"input_tokens\":17,\"input_tokens_details\":{\"cached_tokens\":5},\"total_tokens\":17}}}\n\n\
+          data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n\
+          data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":999",
+    );
+    assert_eq!(event.input_tokens, Some(17));
+    assert_eq!(event.cached_input_tokens, Some(5));
+    assert_eq!(event.output_tokens, Some(3));
+    assert_eq!(event.reasoning_tokens, Some(1));
+    assert_eq!(event.total_tokens, Some(20));
+    assert!(!event.success);
+}
+
+#[test]
 fn response_service_tier_preserves_upstream_text_and_prefers_nested_response() {
     assert_eq!(
         response_service_tier(&serde_json::json!({"service_tier": "flex"})),
@@ -221,41 +239,49 @@ fn buffered_model_mismatch_is_rejected_but_generated_output_is_not_replayed() {
     }
 }
 #[tokio::test]
-async fn buffered_account_stream_finishes_without_waiting_for_upstream_eof() {
+async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstream_eof() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 1024];
-        assert!(socket.read(&mut request).await.unwrap() > 0);
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-        let frame = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\",\"output\":[]}}\n\n";
-        socket
-            .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
-            .await
-            .unwrap();
-        std::future::pending::<()>().await;
-    });
-    let upstream = reqwest::get(format!("http://{address}/")).await.unwrap();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        super::collect_upstream_response(upstream, true, Some("gpt-6-astra")),
-    )
-    .await;
-    server.abort();
-    let bytes = result
-        .expect("terminal event must not wait for EOF")
-        .unwrap_or_else(|failure| {
-            panic!(
-                "unexpected buffered response failure: {}",
-                failure.failure.category
-            )
+    for basis_points in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let frame = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"ignored_tail\"}}}\n\n",
+        );
+            socket
+                .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
         });
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"],
-        "resp_test"
-    );
+        let upstream = reqwest::get(format!("http://{address}/")).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            if basis_points {
+                super::collect_basis_points_response(upstream, Some("gpt-6-astra")).await
+            } else {
+                super::collect_upstream_response(upstream, true, Some("gpt-6-astra")).await
+            }
+        })
+        .await;
+        server.abort();
+        let bytes = result
+            .expect("terminal event must not wait for EOF")
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "unexpected buffered response failure: {}",
+                    failure.failure.category
+                )
+            });
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"],
+            "resp_test"
+        );
+    }
 }
 
 #[test]

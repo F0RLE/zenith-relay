@@ -55,6 +55,7 @@ pub enum SelectionReason {
     SourceLoad,
     PoolPolicy,
     QuotaHeadroom,
+    ProviderCredits,
     SubscriptionExpiry,
     SubscriptionPlan,
     ManualPriority,
@@ -76,6 +77,8 @@ pub struct RoutingDiagnostics {
     /// credential, or provider response data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
 }
 
 impl PoolScheduler {
@@ -110,7 +113,8 @@ impl PoolScheduler {
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
         self.sync_all_rotation_candidates();
-        let next = self.preview_new_request_candidate(scope, models, protocols, now_ms);
+        let new_request_candidate_id =
+            self.preview_new_request_candidate(scope, models, protocols, now_ms);
         let mut snapshots = self
             .candidates
             .values()
@@ -125,19 +129,22 @@ impl PoolScheduler {
                         continue;
                     }
                     let operation = Self::model_operation(model);
-                    let request = self.rotation_request(
+                    let candidate_request = self.rotation_request(
                         None,
                         Some(&candidate.id),
                         model,
                         operation,
                         BTreeSet::from([candidate.id.clone()]),
                     );
-                    let circuit = self.rotation.circuit(&candidate.id, &request.route_key);
-                    half_open |= circuit.state == super::super::rotation::CircuitState::HalfOpen;
-                    match self
+                    let circuit = self
                         .rotation
-                        .candidate_availability(&request, &candidate.id, now_ms)
-                    {
+                        .circuit(&candidate.id, &candidate_request.route_key);
+                    half_open |= circuit.state == super::super::rotation::CircuitState::HalfOpen;
+                    match self.rotation.candidate_availability(
+                        &candidate_request,
+                        &candidate.id,
+                        now_ms,
+                    ) {
                         super::super::rotation::CandidateAvailability::Ready { .. } => {
                             available |= operation != RotationOperation::Image
                                 || self.lane_allows(candidate, InFlightLane::Image);
@@ -162,7 +169,8 @@ impl PoolScheduler {
                     candidate_id: candidate.id.clone(),
                     kind: candidate.kind,
                     available,
-                    next_for_new_request: next.as_deref() == Some(candidate.id.as_str()),
+                    next_for_new_request: new_request_candidate_id.as_deref()
+                        == Some(candidate.id.as_str()),
                     activity_revision: 0,
                     runtime_id: 0,
                     in_flight: self.in_flight_count(&candidate.id, InFlightLane::Text),
@@ -176,14 +184,14 @@ impl PoolScheduler {
                 }
             })
             .collect::<Vec<_>>();
-        snapshots.sort_by_key(|entry| {
+        snapshots.sort_by_key(|snapshot| {
             (
-                !entry.active_request_count.gt(&0),
-                !entry.available,
-                !entry.next_for_new_request,
-                self.member_policy(&self.candidates[&entry.candidate_id])
+                !snapshot.active_request_count.gt(&0),
+                !snapshot.available,
+                !snapshot.next_for_new_request,
+                self.member_policy(&self.candidates[&snapshot.candidate_id])
                     .map_or(usize::MAX, |(rank, _)| rank),
-                entry.candidate_id.clone(),
+                snapshot.candidate_id.clone(),
             )
         });
         snapshots
@@ -211,7 +219,7 @@ impl PoolScheduler {
                     .map(|model| (crate::model_id_key(model), candidate.protocol))
             })
             .collect::<BTreeSet<_>>();
-        let mut next: Option<String> = None;
+        let mut selected_candidate_id: Option<String> = None;
         for (model, protocol) in routes {
             let selected = self.select(SelectionRequest {
                 model: &model,
@@ -222,15 +230,18 @@ impl PoolScheduler {
                 prompt_affinity_key: None,
                 now_ms,
             })?;
-            if next.as_ref().is_some_and(|previous| {
-                members::member_key(&self.candidates[previous])
-                    != members::member_key(&self.candidates[&selected.candidate_id])
-            }) {
+            if selected_candidate_id
+                .as_ref()
+                .is_some_and(|previous_candidate_id| {
+                    members::member_key(&self.candidates[previous_candidate_id])
+                        != members::member_key(&self.candidates[&selected.candidate_id])
+                })
+            {
                 return None;
             }
-            next.get_or_insert(selected.candidate_id);
+            selected_candidate_id.get_or_insert(selected.candidate_id);
         }
-        next
+        selected_candidate_id
     }
 }
 
@@ -248,11 +259,15 @@ impl PoolScheduler {
             eligible_candidates: u32::try_from(eligible_candidates).unwrap_or(u32::MAX),
             quota_remaining_basis_points: match candidate.quota {
                 CandidateQuota::Available(remaining) => Some(remaining),
-                CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => None,
+                CandidateQuota::Unknown
+                | CandidateQuota::CreditFallback
+                | CandidateQuota::Exhausted
+                | CandidateQuota::Stale => None,
             },
             in_flight_before: self.in_flight_count(candidate_id, lane),
             dispatches_before: self.dispatch_count(candidate_id, lane),
             endpoint_kind: None,
+            cache_context: None,
         })
     }
 }

@@ -1,5 +1,5 @@
 import { type ChangeEvent, useRef, useState } from "react";
-import { Check, Copy, Download, Eye, Pencil, Upload } from "lucide-react";
+import { Copy, Download, Eye, Pencil, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountExportFormat } from "../../api/types";
@@ -11,8 +11,8 @@ const MAX_ZENITH_EXPORT_DESCRIPTION_LENGTH = 2_000;
 const accountExportFormats: Array<{ value: AccountExportFormat; label: string; multiple: boolean }> = [
   { value: "zenith", label: "Zenith", multiple: true },
   { value: "sub2api", label: "sub2api", multiple: true },
-  { value: "cpa", label: "CPA", multiple: false },
   { value: "cockpit", label: "Cockpit Tools", multiple: true },
+  { value: "cpa", label: "CPA", multiple: false },
   { value: "9router", label: "9router", multiple: true },
   { value: "codex", label: "ChatGPT", multiple: false },
   { value: "axon_hub", label: "AxonHub", multiple: false },
@@ -20,19 +20,23 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string; m
 ];
 export function AccountExportDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, perform, busy } = useRelayState();
+  const { mode, runtime, perform, busy } = useRelayState();
   const [format, setFormat] = useState<AccountExportFormat>("zenith");
   const [description, setDescription] = useState("");
   const [descriptionMode, setDescriptionMode] = useState<"edit" | "preview">("edit");
   const [descriptionError, setDescriptionError] = useState<string | null>(null);
   const markdownFileInput = useRef<HTMLInputElement>(null);
-  const formats = accountExportFormats.filter((option) => accountIds.length === 1 || option.multiple);
+  const hasExcelAccount = runtime?.accounts.some((account) => accountIds.includes(account.id) && account.oauthClientKind === "excel_bps");
+  const formats = accountExportFormats.filter((option) =>
+    (accountIds.length === 1 || option.multiple)
+    && (!hasExcelAccount || option.value === "zenith" || option.value === "sub2api"),
+  );
   const selectedFormat = formats.find((option) => option.value === format) ?? formats[0];
   if (!selectedFormat) return null;
   const loadMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    input.value = "";
+    const markdownInput = event.currentTarget;
+    const file = markdownInput.files?.[0];
+    markdownInput.value = "";
     if (!file) return;
     try {
       const content = (await file.text()).replace(/\r\n?/g, "\n");
@@ -49,18 +53,18 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
   };
   const run = async (destination: "copy" | "download") => {
     const ok = await perform(`account-export-${destination}`, async () => {
-      const input = {
+      const exportRequest = {
         accountIds,
         format: selectedFormat.value,
         destination,
         ...(selectedFormat.value === "zenith" && description.trim() ? { description } : {}),
       } as const;
-      const result = mode === "local"
-        ? await relayCommands.exportLocalAccounts(input)
-        : await relayCommands.exportRemoteAccounts(input);
+      const exportResult = mode === "local"
+        ? await relayCommands.exportLocalAccounts(exportRequest)
+        : await relayCommands.exportRemoteAccounts(exportRequest);
       if (destination === "copy") {
-        if (!result.content) throw new Error("account export content is missing");
-        await copyText(result.content);
+        if (!exportResult.content) throw new Error("account export content is missing");
+        await copyText(exportResult.content);
       }
     }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded", { backgroundRefresh: true });
     if (ok) onClose();
@@ -71,9 +75,11 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
     onClose={onClose}
     footer={
       <>
-        <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
-        <Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
-        <Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
+        <Button className="account-export-cancel" variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
+        <div className="account-export-actions">
+          <Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
+          <Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
+        </div>
       </>
     }
   >
@@ -81,14 +87,13 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
       <div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: accountIds.length })}</strong></div>
       <div className="account-export-formats" data-count={formats.length} role="radiogroup" aria-label={t("accounts.exportFormat")}>
         {formats.map((option) => (
-          <button type="button" role="radio" data-value={option.value} aria-checked={format === option.value} key={option.value} onClick={() => setFormat(option.value)}>
+          <button type="button" role="radio" data-value={option.value} aria-checked={selectedFormat.value === option.value} key={option.value} onClick={() => setFormat(option.value)}>
             <span>{option.label}</span>
-            {format === option.value ? <Check aria-hidden /> : null}
           </button>
         ))}
       </div>
       <p className="account-export-description">{t(`accounts.exportFormats.${selectedFormat.value}`)}</p>
-      {format === "zenith" ? <div className="relay-field account-export-description-field">
+      {selectedFormat.value === "zenith" ? <div className="relay-field account-export-description-field">
         <div className="account-export-description-toolbar">
           <label htmlFor="zenith-export-description">{t("accounts.exportDescription")}</label>
           <div className="account-export-description-controls">

@@ -135,6 +135,7 @@ pub(in crate::local_pool::store::telemetry_db) fn is_unfiltered_all_time(
         && query.model_query.is_none()
         && query.source_or_account_query.is_none()
         && query.wire_api.is_none()
+        && query.transport.is_none()
         && query.success.is_none()
         && query.error_category.is_none()
         && query.request_id_query.is_none()
@@ -144,56 +145,61 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
     query: &UsageQuery,
 ) -> (String, Vec<SqlValue>) {
     let mut clauses = Vec::new();
-    let mut values = Vec::new();
-    if let Some(value) = query.from_ms {
+    let mut query_parameters = Vec::new();
+    if let Some(from_ms) = query.from_ms {
         clauses.push("created_at >= datetime(? / 1000, 'unixepoch')");
-        values.push(SqlValue::Integer(super::sql_u64(value)));
+        query_parameters.push(SqlValue::Integer(super::sql_u64(from_ms)));
     }
-    if let Some(value) = query.to_ms {
+    if let Some(to_ms) = query.to_ms {
         clauses.push("created_at <= datetime(? / 1000, 'unixepoch')");
-        values.push(SqlValue::Integer(super::sql_u64(value)));
+        query_parameters.push(SqlValue::Integer(super::sql_u64(to_ms)));
     }
-    if let Some(value) = query.model_query.as_deref() {
+    if let Some(model_query) = query.model_query.as_deref() {
         clauses.push("(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')");
-        let value = SqlValue::Text(sql_like_contains_pattern(value));
-        values.push(value.clone());
-        values.push(value);
+        let model_pattern = SqlValue::Text(sql_like_contains_pattern(model_query));
+        query_parameters.push(model_pattern.clone());
+        query_parameters.push(model_pattern);
     }
-    if let Some(value) = query.source_or_account_query.as_deref() {
+    if let Some(source_or_account_query) = query.source_or_account_query.as_deref() {
         clauses.push("(source_id LIKE ? ESCAPE '\\' OR account_id LIKE ? ESCAPE '\\')");
-        let value = SqlValue::Text(sql_like_contains_pattern(value));
-        values.push(value.clone());
-        values.push(value);
+        let source_or_account_pattern =
+            SqlValue::Text(sql_like_contains_pattern(source_or_account_query));
+        query_parameters.push(source_or_account_pattern.clone());
+        query_parameters.push(source_or_account_pattern);
     }
-    if let Some(value) = query.wire_api {
-        match value {
+    if let Some(wire_api) = query.wire_api {
+        match wire_api {
             WireApi::ChatCompletions => {
                 clauses.push("wire_api IN (?, ?)");
-                values.push(SqlValue::Text("chat_completions".to_string()));
-                values.push(SqlValue::Text("chatcompletions".to_string()));
+                query_parameters.push(SqlValue::Text("chat_completions".to_string()));
+                query_parameters.push(SqlValue::Text("chatcompletions".to_string()));
             }
             _ => {
                 clauses.push("wire_api = ?");
-                values.push(SqlValue::Text(value.as_str().to_string()));
+                query_parameters.push(SqlValue::Text(wire_api.as_str().to_string()));
             }
         }
     }
-    if let Some(value) = query.success {
+    if let Some(transport) = query.transport {
+        clauses.push("transport = ?");
+        query_parameters.push(SqlValue::Text(transport.as_str().to_string()));
+    }
+    if let Some(success) = query.success {
         clauses.push("success = ?");
-        values.push(SqlValue::Integer(i64::from(value)));
+        query_parameters.push(SqlValue::Integer(i64::from(success)));
     }
-    if let Some(value) = query.error_category.as_deref() {
+    if let Some(error_category) = query.error_category.as_deref() {
         clauses.push("error_category = ?");
-        values.push(SqlValue::Text(value.to_string()));
+        query_parameters.push(SqlValue::Text(error_category.to_string()));
     }
-    if let Some(value) = query.request_id_query.as_deref() {
+    if let Some(request_id_query) = query.request_id_query.as_deref() {
         clauses.push("request_id LIKE ? ESCAPE '\\'");
-        values.push(SqlValue::Text(sql_like_contains_pattern(value)));
+        query_parameters.push(SqlValue::Text(sql_like_contains_pattern(request_id_query)));
     }
     let sql = if clauses.is_empty() {
         String::new()
     } else {
         format!(" WHERE {}", clauses.join(" AND "))
     };
-    (sql, values)
+    (sql, query_parameters)
 }

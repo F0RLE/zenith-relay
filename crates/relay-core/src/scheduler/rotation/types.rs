@@ -17,6 +17,10 @@ pub enum QuotaState {
     Exhausted { reset_at_ms: Option<u64> },
 }
 
+/// Minimum lead required before a cached session affinity moves to another
+/// member based on provider-reported credits.
+pub(crate) const PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS: u64 = 15_000_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RateState {
     Ready,
@@ -43,6 +47,8 @@ pub struct RotationRoute {
 pub enum RotationMode {
     #[default]
     Automatic,
+    /// Cycle through ready members in the user-configured order.
+    Manual,
     InOrder,
     RoundRobin,
 }
@@ -92,16 +98,21 @@ pub struct RotationCandidate {
     /// `Available`; zero and missing values do not outrank anyone.
     pub quota_remaining_basis_points: Option<u64>,
     pub quota_observed_at_ms: Option<u64>,
+    /// Provider-reported balance in millionths of one credit. This is a
+    /// separate fallback signal and never changes percentage-quota state.
+    pub provider_credits_micro_units: Option<u64>,
+    pub provider_credits_unlimited: bool,
+    pub provider_credits_observed_at_ms: Option<u64>,
     pub rate: RateState,
 }
 
 impl RotationCandidate {
     pub fn new(
-        id: impl Into<String>,
+        candidate_id: impl Into<String>,
         route_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
-        let id = id.into();
+        let candidate_id = candidate_id.into();
         let route_key = route_key.into();
         let routes = BTreeMap::from([(
             route_key.clone(),
@@ -111,8 +122,8 @@ impl RotationCandidate {
             },
         )]);
         Self {
-            capacity_key: id.clone(),
-            id,
+            capacity_key: candidate_id.clone(),
+            id: candidate_id,
             priority: 0,
             weight: 1,
             max_concurrency: 0,
@@ -125,6 +136,9 @@ impl RotationCandidate {
             quota: QuotaState::Unknown,
             quota_remaining_basis_points: None,
             quota_observed_at_ms: None,
+            provider_credits_micro_units: None,
+            provider_credits_unlimited: false,
+            provider_credits_observed_at_ms: None,
             rate: RateState::Ready,
         }
     }
@@ -152,11 +166,11 @@ impl RotationCandidate {
             || self.routes.iter().any(|(key, route)| {
                 [key.as_str(), route.model.as_str()]
                     .into_iter()
-                    .any(|value| {
-                        value.trim().is_empty()
-                            || value.trim() != value
-                            || value.len() > 256
-                            || value.chars().any(char::is_control)
+                    .any(|route_identifier| {
+                        route_identifier.trim().is_empty()
+                            || route_identifier.trim() != route_identifier
+                            || route_identifier.len() > 256
+                            || route_identifier.chars().any(char::is_control)
                     })
             })
         {
@@ -324,13 +338,15 @@ impl RotationRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RotationSelectionReason {
     HardOwner,
-    PrimaryFirst,
+    ManualPriority,
     WeightedRotation,
     Recovery,
     OnlyEligible,
     LeastLoaded,
     /// Automatic mode kept the members with the greatest known remainder.
     QuotaHeadroom,
+    /// Automatic mode used provider credits because no fresh quota ranked.
+    ProviderCredits,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

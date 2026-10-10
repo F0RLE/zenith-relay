@@ -1,16 +1,16 @@
 use super::ImportedCredentialMaterial;
 use zenith_relay_core::accounts::{ImportAuthMode, ParsedImportItem};
 
-pub(super) fn parsed_item_value(
-    item: &ParsedImportItem,
+pub(super) fn parsed_item_json(
+    import_item: &ParsedImportItem,
     auth_mode: ImportAuthMode,
 ) -> serde_json::Value {
-    let mut value = serde_json::Map::new();
-    value.insert(
+    let mut item_json = serde_json::Map::new();
+    item_json.insert(
         "label".into(),
-        serde_json::Value::String(item.label.clone()),
+        serde_json::Value::String(import_item.label.clone()),
     );
-    value.insert(
+    item_json.insert(
         "auth_mode".into(),
         serde_json::Value::String(
             match auth_mode {
@@ -23,30 +23,39 @@ pub(super) fn parsed_item_value(
             .into(),
         ),
     );
-    insert_optional_string(&mut value, "account_id", item.account_id.as_deref());
-    insert_optional_string(&mut value, "user_id", item.chatgpt_user_id.as_deref());
     insert_optional_string(
-        &mut value,
-        "organization_id",
-        item.organization_id.as_deref(),
+        &mut item_json,
+        "account_id",
+        import_item.account_id.as_deref(),
     );
-    insert_optional_string(&mut value, "base_url", item.base_url.as_deref());
-    insert_optional_string(&mut value, "protocol", item.protocol.as_deref());
-    insert_optional_string(&mut value, "email", item.email());
-    insert_optional_string(&mut value, "phone", item.phone());
-    insert_optional_string(&mut value, "password", item.password());
-    insert_optional_string(&mut value, "2fa", item.totp_secret());
-    if let Some(priority) = item.priority {
-        value.insert("priority".into(), priority.into());
+    insert_optional_string(
+        &mut item_json,
+        "user_id",
+        import_item.chatgpt_user_id.as_deref(),
+    );
+    insert_optional_string(
+        &mut item_json,
+        "organization_id",
+        import_item.organization_id.as_deref(),
+    );
+    insert_optional_string(&mut item_json, "base_url", import_item.base_url.as_deref());
+    insert_optional_string(&mut item_json, "protocol", import_item.protocol.as_deref());
+    insert_optional_string(&mut item_json, "email", import_item.email());
+    insert_optional_string(&mut item_json, "phone", import_item.phone());
+    insert_optional_string(&mut item_json, "password", import_item.password());
+    insert_optional_string(&mut item_json, "2fa", import_item.totp_secret());
+    if let Some(priority) = import_item.priority {
+        item_json.insert("priority".into(), priority.into());
     }
-    if item.account_is_fedramp {
-        value.insert("chatgpt_account_is_fedramp".into(), true.into());
+    if import_item.account_is_fedramp {
+        item_json.insert("chatgpt_account_is_fedramp".into(), true.into());
     }
-    if !item.tags.is_empty() {
-        value.insert(
+    if !import_item.tags.is_empty() {
+        item_json.insert(
             "tags".into(),
             serde_json::Value::Array(
-                item.tags
+                import_item
+                    .tags
                     .iter()
                     .cloned()
                     .map(serde_json::Value::String)
@@ -54,61 +63,94 @@ pub(super) fn parsed_item_value(
             ),
         );
     }
-    let secrets = item.secrets();
-    insert_optional_string(&mut value, "access_token", secrets.access_token());
-    insert_optional_string(&mut value, "refresh_token", secrets.refresh_token());
-    insert_optional_string(&mut value, "id_token", secrets.id_token());
-    insert_optional_string(&mut value, "api_key", secrets.api_key());
-    insert_optional_string(&mut value, "agent_private_key", secrets.agent_private_key());
-    insert_optional_string(&mut value, "agent_runtime_id", secrets.agent_runtime_id());
-    insert_optional_string(&mut value, "task_id", secrets.agent_task_id());
-    serde_json::Value::Object(value)
+    let secrets = import_item.secrets();
+    insert_optional_string(&mut item_json, "access_token", secrets.access_token());
+    insert_optional_string(&mut item_json, "refresh_token", secrets.refresh_token());
+    insert_optional_string(&mut item_json, "id_token", secrets.id_token());
+    insert_optional_string(&mut item_json, "api_key", secrets.api_key());
+    if let Some(kind) = secrets.oauth_client_kind() {
+        insert_optional_string(&mut item_json, "client_id", Some(kind.client_id()));
+    }
+    if let Some(headers) = secrets.basis_points_headers() {
+        item_json.insert("basis_points_headers".into(), serde_json::json!(headers));
+    }
+    insert_optional_string(
+        &mut item_json,
+        "agent_private_key",
+        secrets.agent_private_key(),
+    );
+    insert_optional_string(
+        &mut item_json,
+        "agent_runtime_id",
+        secrets.agent_runtime_id(),
+    );
+    insert_optional_string(&mut item_json, "task_id", secrets.agent_task_id());
+    serde_json::Value::Object(item_json)
 }
 
-pub(super) fn parsed_item_value_from_material(
-    original: serde_json::Value,
+pub(super) fn parsed_item_json_with_material(
+    original_json: serde_json::Value,
     material: &ImportedCredentialMaterial,
 ) -> serde_json::Value {
-    let mut value = original.as_object().cloned().unwrap_or_default();
-    apply_material(&mut value, material);
-    serde_json::Value::Object(value)
+    let mut item_json = original_json.as_object().cloned().unwrap_or_default();
+    apply_material(&mut item_json, material);
+    serde_json::Value::Object(item_json)
 }
 
 fn apply_material(
-    value: &mut serde_json::Map<String, serde_json::Value>,
+    item_json: &mut serde_json::Map<String, serde_json::Value>,
     material: &ImportedCredentialMaterial,
 ) {
-    insert_optional_string(value, "account_id", material.provider_account_id.as_deref());
-    insert_optional_string(value, "user_id", material.provider_user_id.as_deref());
     insert_optional_string(
-        value,
+        item_json,
+        "account_id",
+        material.provider_account_id.as_deref(),
+    );
+    insert_optional_string(item_json, "user_id", material.provider_user_id.as_deref());
+    insert_optional_string(
+        item_json,
         "organization_id",
         material.organization_id.as_deref(),
     );
-    insert_optional_string(value, "email", material.email.as_deref());
-    insert_optional_string(value, "access_token", Some(&material.access_token));
-    if let Some(agent) = material.agent_identity.as_ref() {
-        insert_optional_string(value, "agent_private_key", Some(agent.private_key()));
-        insert_optional_string(value, "agent_runtime_id", Some(agent.runtime_id()));
-        insert_optional_string(value, "task_id", agent.task_id());
+    insert_optional_string(item_json, "email", material.email.as_deref());
+    insert_optional_string(item_json, "access_token", Some(&material.access_token));
+    insert_optional_string(
+        item_json,
+        "client_id",
+        Some(material.oauth_client_kind.client_id()),
+    );
+    if let Some(headers) = material.basis_points_headers.as_ref() {
+        item_json.insert("basis_points_headers".into(), serde_json::json!(headers));
     }
-    insert_optional_string(value, "refresh_token", material.refresh_token.as_deref());
-    insert_optional_string(value, "id_token", material.id_token.as_deref());
-    insert_optional_string(value, "plan_type", material.plan_type.as_deref());
+    if let Some(agent) = material.agent_identity.as_ref() {
+        insert_optional_string(item_json, "agent_private_key", Some(agent.private_key()));
+        insert_optional_string(item_json, "agent_runtime_id", Some(agent.runtime_id()));
+        insert_optional_string(item_json, "task_id", agent.task_id());
+    }
+    insert_optional_string(
+        item_json,
+        "refresh_token",
+        material.refresh_token.as_deref(),
+    );
+    insert_optional_string(item_json, "id_token", material.id_token.as_deref());
+    insert_optional_string(item_json, "plan_type", material.plan_type.as_deref());
     if material.account_is_fedramp {
-        value.insert("chatgpt_account_is_fedramp".into(), true.into());
+        item_json.insert("chatgpt_account_is_fedramp".into(), true.into());
     }
     if let Some(expires_at_ms) = material.expires_at_ms {
-        value.insert("expires_at_ms".into(), expires_at_ms.into());
+        item_json.insert("expires_at_ms".into(), expires_at_ms.into());
     }
 }
 
 fn insert_optional_string(
-    object: &mut serde_json::Map<String, serde_json::Value>,
+    item_json: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
-    value: Option<&str>,
+    optional_text: Option<&str>,
 ) {
-    if let Some(value) = zenith_relay_core::omit_blank(value) {
-        object.insert(key.into(), serde_json::Value::String(value.to_string()));
+    if let Some(optional_text) = zenith_relay_core::omit_blank(optional_text) {
+        item_json.insert(
+            key.into(),
+            serde_json::Value::String(optional_text.to_string()),
+        );
     }
 }

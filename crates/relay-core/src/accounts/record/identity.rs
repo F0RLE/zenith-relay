@@ -25,7 +25,7 @@ impl AccountIdentity {
         let namespace = required(namespace)?;
         let organization_hash = organization_hash
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|provider_user_id| !provider_user_id.is_empty())
             .map(str::to_ascii_lowercase);
         let stable_index = hex::encode(Sha256::digest(
             format!(
@@ -46,11 +46,11 @@ impl AccountIdentity {
     }
 }
 
-fn required(value: &str) -> Result<&str, &'static str> {
-    let value = value.trim();
-    if value.is_empty() {
+fn required(identity_part: &str) -> Result<&str, &'static str> {
+    let trimmed_part = identity_part.trim();
+    if trimmed_part.is_empty() {
         Err("stable identity parts must not be empty")
     } else {
-        Ok(value)
+        Ok(trimmed_part)
     }
 }

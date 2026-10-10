@@ -49,13 +49,13 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
         second.enabled = false;
         if stored_policy {
             let mut gateway = store.gateway().clone();
-            let mut old = gateway.pool_routing_for(
+            let mut persisted_policy = gateway.pool_routing_for(
                 &[source("removed", true, WireApi::Responses), first.clone()],
                 &[],
             );
-            old.members[0].weight = 7;
-            old.members[0].max_concurrency = 2;
-            gateway.pool_routing = Some(old);
+            persisted_policy.members[0].weight = 7;
+            persisted_policy.members[0].max_concurrency = 2;
+            gateway.pool_routing = Some(persisted_policy);
             store.replace_gateway(gateway).unwrap();
         }
         for record in [first, second, source("outside", false, WireApi::Responses)] {
@@ -82,11 +82,11 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
-        let mut next = displayed.clone();
-        next.mode = mode;
+        let mut updated_policy = displayed.clone();
+        updated_policy.mode = mode;
         let input = || {
             serde_json::from_value(serde_json::json!({
-                "poolRouting": next,
+                "poolRouting": updated_policy,
                 "expectedPoolRouting": displayed,
                 "maxRetryCandidates": 3,
                 "defaultServiceTier": "standard",
@@ -100,13 +100,16 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
         let result = update_local_routing_at(input(), &state, &codex_home)
             .await
             .unwrap();
-        assert_eq!(result.gateway.pool_routing, Some(next.clone()));
+        assert_eq!(result.gateway.pool_routing, Some(updated_policy.clone()));
         let saved_gateway = state.store().unwrap().gateway().clone();
         assert_eq!(saved_gateway.max_retry_candidates, 3);
         let refreshed = super::super::state::build_local_runtime_state(&state)
             .await
             .unwrap();
-        assert_eq!(refreshed.gateway.pool_routing.as_ref(), Some(&next));
+        assert_eq!(
+            refreshed.gateway.pool_routing.as_ref(),
+            Some(&updated_policy)
+        );
         // A real edit since the read must still conflict, without overwriting it.
         let error = update_local_routing_at(input(), &state, &codex_home)
             .await

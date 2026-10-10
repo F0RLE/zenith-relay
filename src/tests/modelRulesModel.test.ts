@@ -60,13 +60,13 @@ describe("model rules model", () => {
 
   test("moves complete groups while preserving each group's model order", () => {
     const groups: ModelRuleGroup[] = [
-      { id: "one", label: "One", items: [model("a"), model("b")] },
-      { id: "two", label: "Two", items: [model("c")] },
-      { id: "three", label: "Three", items: [model("d"), model("e")] },
+      { id: "one", label: "One", models: [model("a"), model("b")] },
+      { id: "two", label: "Two", models: [model("c")] },
+      { id: "three", label: "Three", models: [model("d"), model("e")] },
     ];
     const next = reorderModelGroups(groups, "one", "three");
     expect(next?.map((item) => item.id)).toEqual(["c", "d", "e", "a", "b"]);
-    expect(groups[0]?.items.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(groups[0]?.models.map((item) => item.id)).toEqual(["a", "b"]);
   });
 
   test("keeps unavailable catalog models when saving a reordered visible group", () => {

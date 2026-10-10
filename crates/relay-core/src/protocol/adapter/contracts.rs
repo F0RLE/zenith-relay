@@ -14,8 +14,8 @@ pub use prepared::{AdapterResponse, PreparedAdapterRequest};
 pub use reasoning::MessagesReasoningMode;
 pub use source::{AdapterRequestContext, SourceAdapter, UpstreamProtocol};
 pub(in crate::protocol::adapter) use tools::{
-    bridged_namespace_tool_name, request_tool_catalog, ClientToolTarget, ResponsesToolKind,
-    TranslatedTools,
+    bridged_namespace_tool_name, bridged_tool_description, request_tool_catalog, ClientToolTarget,
+    ResponsesToolKind, TranslatedTools,
 };
 
 pub(in crate::protocol::adapter) use replay::custom_tool_item_id;

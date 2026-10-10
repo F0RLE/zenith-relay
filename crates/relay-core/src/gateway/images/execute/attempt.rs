@@ -10,14 +10,14 @@ use super::super::{ImageEndpoint, PreparedImageRequest};
 use super::response::handle_collected_image;
 use super::ImageAttemptStep;
 use crate::error_codes;
-use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorRoute};
+use crate::runtime::{
+    AccountTransport, AuthenticatedKey, AuthorizationIdentityPolicy, CandidateLease, ExecutorRoute,
+};
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::GatewayRuntime;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use std::time::Instant;
-
-const MAX_IMAGE_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) struct SelectedImageRoute<'a> {
     pub(super) runtime: &'a GatewayRuntime,
@@ -30,7 +30,9 @@ pub(super) struct SelectedImageRoute<'a> {
     pub(super) route: ExecutorRoute,
 }
 
-pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> ImageAttemptStep {
+pub(super) async fn run_selected_attempt(
+    selected_image_route: SelectedImageRoute<'_>,
+) -> ImageAttemptStep {
     let SelectedImageRoute {
         runtime,
         key,
@@ -40,7 +42,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
         budget,
         lease,
         mut route,
-    } = input;
+    } = selected_image_route;
     let account_route = route.account_id.is_some();
     let upstream_url = if account_route {
         Some(route.upstream_url.clone())
@@ -66,7 +68,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
             }
         }
     } else {
-        direct_request_body(prepared)
+        direct_request_body(prepared, &route.source_model)
     };
 
     let started = Instant::now();
@@ -94,10 +96,19 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
         .send_authorized_request(
             &route.candidate_id,
             upstream,
-            None,
-            None,
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: None,
+                identity_policy: if account_route
+                    && route.account_transport == AccountTransport::ExcelBasisPoints
+                {
+                    AuthorizationIdentityPolicy::PreserveUpstream
+                } else {
+                    AuthorizationIdentityPolicy::RelayCodex
+                },
+                turn_scope: None,
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await;
     let attempt = u16::from(budget.dispatches());
@@ -136,7 +147,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
                     failure.category,
                 ));
             }
-            let state = settle_attempt_failure(
+            let failure_state = settle_attempt_failure(
                 runtime,
                 lease,
                 &prepared.resolved_model,
@@ -145,7 +156,7 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
             );
             let mut event =
                 observed.event(false, failure.status, Some(failure.category.to_string()));
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             return ImageAttemptStep::Retry(failure);
         }
@@ -161,14 +172,13 @@ pub(super) async fn run_selected_attempt(input: SelectedImageRoute<'_>) -> Image
 
     let status = upstream.status();
     let response_headers = upstream.headers().clone();
-    let Ok(bytes) =
-        crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES).await
-    else {
+    let Ok(bytes) = crate::transport::collect(upstream).await else {
         lease.settle_rotation_unknown(now_ms());
-        let failure = AttemptFailure::body();
-        let state = current_failure_state(runtime, &route.candidate_id, &prepared.resolved_model);
+        let failure = AttemptFailure::upstream_response_body_failure();
+        let failure_state =
+            current_failure_state(runtime, &route.candidate_id, &prepared.resolved_model);
         let mut event = observed.event(false, failure.status, Some(failure.category.to_string()));
-        apply_failure_state(&mut event, state);
+        apply_failure_state(&mut event, failure_state);
         emit_usage(runtime, event);
         return ImageAttemptStep::Retry(failure);
     };

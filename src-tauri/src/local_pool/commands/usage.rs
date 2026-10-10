@@ -14,6 +14,7 @@ pub fn get_local_usage_page(
     input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<LocalUsagePage, CommandError> {
+    let usage_query = input;
     let (gateway, sources, accounts) = {
         let store = state.store()?;
         (
@@ -23,11 +24,12 @@ pub fn get_local_usage_page(
         )
     };
     let catalog = state.pricing_catalog();
-    let context = pricing_context(&gateway, &sources, &accounts);
+    let reference_catalog = state.model_metadata_catalog();
+    let context = pricing_context(&gateway, &sources, &accounts, &reference_catalog);
     let mut page = state
         .telemetry
         .usage_page_with_pricing(
-            &normalize_usage_query(input.unwrap_or_default()),
+            &normalize_usage_query(usage_query.unwrap_or_default()),
             &catalog,
             &context,
         )
@@ -46,9 +48,10 @@ pub fn get_local_cache_sessions(
     input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<CacheSession>, CommandError> {
+    let usage_query = input;
     state
         .telemetry
-        .cache_sessions(&normalize_usage_query(input.unwrap_or_default()))
+        .cache_sessions(&normalize_usage_query(usage_query.unwrap_or_default()))
         .map_err(CommandError::from)
 }
 
@@ -62,16 +65,16 @@ fn normalize_usage_query(query: UsageQuery) -> UsageQuery {
 
 fn normalize_usage_query_at(mut query: UsageQuery, now: u64) -> UsageQuery {
     query.normalize_pagination();
-    for value in [
+    for query_field in [
         &mut query.model_query,
         &mut query.source_or_account_query,
         &mut query.error_category,
         &mut query.request_id_query,
     ] {
-        if let Some(text) = value {
+        if let Some(text) = query_field {
             *text = text.trim().to_string();
             if text.is_empty() {
-                *value = None;
+                *query_field = None;
             }
         }
     }

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, CalendarDays, CheckCircle2, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp } from "lucide-react";
+import { Activity, CalendarDays, CheckCircle2, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RemoteUsageQuery, UsageTotals } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, Tabs, ToggleSwitch, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, EmptyState, IconButton, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
 import { orderModelIdsBySnapshot } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useRelayUsageContext } from "../../state/relayStateContext";
@@ -11,11 +11,12 @@ import { formatTokenSpeed, observedTokensPerSecond } from "../../usageSpeed";
 import { AggregateView } from "./AggregateView";
 import { ErrorsView } from "./ErrorsView";
 import { RequestDetails } from "./RequestDetails";
+import { RequestFilters } from "./RequestFilters";
 import { RequestsView } from "./RequestsView";
 import { CompactNumber } from "./usageReportParts";
-import { AccountUsageSummary } from "./AccountUsageSummary";
 import { UsageMetric } from "./UsageMetric";
 import { UsagePagination } from "./UsagePagination";
+import { AccountUsageSummary } from "./AccountUsageSummary";
 import { totalsFromRows, usageRowsFromLocal, usageRowsFromRemote, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
@@ -24,22 +25,13 @@ type View = "requests" | "models" | "connections" | "errors";
 type Range = "all" | "daily" | "weekly" | "monthly";
 const USAGE_SUMMARY_METRICS = ["requests", "success", "tokens", "equivalent", "generationSpeed", "e2eSpeed"] as const;
 type UsageSummaryMetric = typeof USAGE_SUMMARY_METRICS[number];
-const USAGE_SUMMARY_LAYOUT_KEY = "relay.usageSummaryMetrics";
-
-function loadUsageSummaryMetrics(): Record<UsageSummaryMetric, boolean> {
-  const defaults = Object.fromEntries(USAGE_SUMMARY_METRICS.map((metric) => [metric, true])) as Record<UsageSummaryMetric, boolean>;
-  try {
-    const stored = JSON.parse(localStorage.getItem(USAGE_SUMMARY_LAYOUT_KEY) ?? "null") as Record<string, unknown> | null;
-    for (const metric of USAGE_SUMMARY_METRICS) if (typeof stored?.[metric] === "boolean") defaults[metric] = stored[metric];
-    if (typeof stored?.["generationSpeed"] !== "boolean" && typeof stored?.["streamSpeed"] === "boolean") defaults.generationSpeed = stored["streamSpeed"];
-  } catch { }
-  return defaults;
-}
+const REQUEST_SUMMARY_METRICS: UsageSummaryMetric[] = [...USAGE_SUMMARY_METRICS];
+const AGGREGATE_SUMMARY_METRICS: UsageSummaryMetric[] = ["requests", "tokens", "equivalent"];
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, loading, busy, perform, accountDisplayName } = useRelayState();
-  const { revision: usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage } = useRelayUsageContext();
+  const { usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage } = useRelayUsageContext();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -47,38 +39,39 @@ export function UsagePage() {
   const [modelQuery, setModelQuery] = useState("");
   const [connectionQuery, setConnectionQuery] = useState("");
   const [wireApi, setWireApi] = useState("");
+  const [transport, setTransport] = useState("");
   const [errorQuery, setErrorQuery] = useState("");
   const [requestQuery, setRequestQuery] = useState("");
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [page, setPage] = useState(1);
-  const [selectedAccountId, setSelectedAccountId] = useState("");
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState(false);
-  const [selected, setSelected] = useState<UsageRow | null>(null);
-  const [summaryMetrics, setSummaryMetrics] = useState(loadUsageSummaryMetrics);
-  const [summarySettingsOpen, setSummarySettingsOpen] = useState(false);
+  const [selectedRequest, setSelectedRequest] = useState<UsageRow | null>(null);
   const appliedUsageRevision = useRef(usageRevision);
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const runtimeReady = runtime !== null;
   const requestFiltersActive = view === "requests";
-  const selectedAccount = runtime?.accounts.find((account) => account.id === selectedAccountId) ?? null;
-  const selectedAccountQuery = selectedAccount?.id;
   const usageQuery = useMemo<RemoteUsageQuery>(() => {
-    const model = requestFiltersActive ? modelQuery.trim() : "";
-    const connection = requestFiltersActive ? connectionQuery.trim() : "";
+    const model = modelQuery.trim();
+    const connection = connectionQuery.trim();
     const error = requestFiltersActive ? errorQuery.trim() : "";
     const requestId = requestFiltersActive ? requestQuery.trim() : "";
     const selectedWireApi: NonNullable<RemoteUsageQuery["wireApi"]> | undefined = requestFiltersActive && wireApi
       ? wireApi as NonNullable<RemoteUsageQuery["wireApi"]>
       : undefined;
-    const success = view === "errors" ? false : requestFiltersActive && status !== "all" ? status === "success" : undefined;
+    const selectedTransport: NonNullable<RemoteUsageQuery["transport"]> | undefined = requestFiltersActive && transport
+      ? transport as NonNullable<RemoteUsageQuery["transport"]>
+      : undefined;
+    const success = view === "errors" ? false : status !== "all" ? status === "success" : undefined;
     return {
       page,
       pageSize: 50,
       ...(range !== "all" ? { range } : {}),
       ...(model ? { modelQuery: model } : {}),
-      ...((selectedAccountQuery ?? connection) ? { sourceOrAccountQuery: selectedAccountQuery ?? connection } : {}),
+      ...(connection ? { sourceOrAccountQuery: connection } : {}),
       ...(selectedWireApi !== undefined ? { wireApi: selectedWireApi } : {}),
+      ...(selectedTransport !== undefined ? { transport: selectedTransport } : {}),
       ...(success !== undefined ? { success } : {}),
       ...(error ? { errorCategory: error } : {}),
       ...(requestId ? { requestIdQuery: requestId } : {}),
@@ -88,30 +81,29 @@ export function UsagePage() {
       includeModels: view === "models",
       includePoolMembers: view === "connections",
     };
-  }, [page, range, modelQuery, connectionQuery, wireApi, status, errorQuery, requestQuery, view, selectedAccountQuery, requestFiltersActive]);
+  }, [page, range, modelQuery, connectionQuery, wireApi, transport, status, errorQuery, requestQuery, view, requestFiltersActive]);
 
   useEffect(() => {
     if (mode === "zenith" || !runtimeReady || !remoteUsageSupported) {
       setUsageLoading(false);
       return;
     }
-    let active = true;
+    let isActive = true;
     const usageChanged = appliedUsageRevision.current !== usageRevision;
     appliedUsageRevision.current = usageRevision;
     setUsageLoading(true);
     setUsageError(false);
-    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    load(usageQuery, { force: usageChanged })
-      .catch(() => active && setUsageError(true))
-      .finally(() => active && setUsageLoading(false));
-    return () => { active = false; };
+    const loadUsage = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+    loadUsage(usageQuery, { force: usageChanged })
+      .catch(() => isActive && setUsageError(true))
+      .finally(() => isActive && setUsageLoading(false));
+    return () => { isActive = false; };
   }, [mode, runtimeReady, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
 
   useEffect(() => {
     setPage(1);
-    setSelected(null);
-    setSelectedAccountId("");
+    setSelectedRequest(null);
   }, [mode]);
 
   const accountLabels = useMemo(() => new Map(runtime?.accounts.map((account) => [account.id, account.label]) ?? []), [runtime?.accounts]);
@@ -137,49 +129,28 @@ export function UsagePage() {
     });
   }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   useEffect(() => {
-    if (!selected) return;
-    const current = rows.find((row) => row.id === selected.id)
-      ?? (selected.requestId ? rows.find((row) => row.requestId === selected.requestId) : undefined);
-    if (current !== selected) setSelected(current ?? null);
-  }, [rows, selected]);
-  const cutoff = useMemo(() => range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000, [range]);
-  const filtered = useMemo(() => {
-    if (mode !== "zenith") return rows;
-    const normalizedRequestQuery = requestFiltersActive ? requestQuery.trim().toLocaleLowerCase() : "";
-    const normalizedModelQuery = requestFiltersActive ? modelQuery.trim().toLocaleLowerCase() : "";
-    const normalizedConnectionQuery = requestFiltersActive ? connectionQuery.trim().toLocaleLowerCase() : "";
-    const normalizedErrorQuery = requestFiltersActive ? errorQuery.trim() : "";
-    return rows.filter((item) => {
-      if (new Date(item.time).getTime() < cutoff) return false;
-      if (view === "errors") return !item.success;
-      if (!requestFiltersActive) return true;
-      return (status === "all" || (status === "success" ? item.success : !item.success))
-        && (!normalizedRequestQuery || item.requestId?.toLocaleLowerCase().includes(normalizedRequestQuery))
-        && (!normalizedModelQuery || item.model?.toLocaleLowerCase().includes(normalizedModelQuery))
-        && (!normalizedConnectionQuery || item.connection.toLocaleLowerCase().includes(normalizedConnectionQuery))
-        && (!wireApi || item.wireApi === wireApi)
-        && (!normalizedErrorQuery || item.errorCategory === normalizedErrorQuery);
-    });
-  }, [connectionQuery, cutoff, errorQuery, mode, modelQuery, requestFiltersActive, requestQuery, rows, status, view, wireApi]);
+    if (!selectedRequest) return;
+    const currentRow = rows.find((row) => row.id === selectedRequest.id)
+      ?? (selectedRequest.requestId ? rows.find((row) => row.requestId === selectedRequest.requestId) : undefined);
+    if (currentRow !== selectedRequest) setSelectedRequest(currentRow ?? null);
+  }, [rows, selectedRequest]);
   const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
-  const totals = usagePage?.totals ?? totalsFromRows(filtered);
+  const totals = usagePage?.totals ?? totalsFromRows(rows);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
   const averageE2eSpeed = observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs);
   const successRate = totals.requests ? Math.round(totals.successfulRequests / totals.requests * 100) : null;
-  useEffect(() => {
-    try { localStorage.setItem(USAGE_SUMMARY_LAYOUT_KEY, JSON.stringify(summaryMetrics)); } catch { }
-  }, [summaryMetrics]);
   const timeFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
-  const formatTime = useCallback((value: string) => timeFormatter.format(new Date(value)), [timeFormatter]);
-  const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
-  const changePage = (next: number) => { setPage(next); setSelected(null); };
-  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({
+  const formatTime = useCallback((timestamp: string) => timeFormatter.format(new Date(timestamp)), [timeFormatter]);
+  const resetPage = (work: () => void) => { work(); setPage(1); setSelectedRequest(null); };
+  const changePage = (nextPage: number) => { setPage(nextPage); setSelectedRequest(null); };
+  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(rows.map((row) => ({
     time: row.time,
     success: row.success,
     model: row.model,
     requestedReasoningEffort: row.requestedReasoningEffort,
     effectiveReasoningEffort: row.effectiveReasoningEffort,
     connection: row.connection,
+    transport: row.transport,
     latencyMs: row.duration,
     ttftMs: row.ttft,
     inputTokens: row.inputTokens,
@@ -206,8 +177,8 @@ export function UsagePage() {
     setUsageLoading(true);
     setUsageError(false);
     try {
-      const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-      await load(usageQuery, { force: true });
+      const loadUsage = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+      await loadUsage(usageQuery, { force: true });
     } catch {
       setUsageError(true);
     } finally {
@@ -230,7 +201,7 @@ export function UsagePage() {
     ],
     runtime?.gateway.models ?? [],
   ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.visibleModelIds]);
-  const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))], [modelOptionIds, t]);
+  const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((modelId) => ({ value: modelId, label: modelId }))], [modelOptionIds, t]);
   const poolMemberOptionSource = useMemo(() => [
     ...(poolMemberGroups ?? []),
     ...(runtime?.accounts ?? []).map((account) => ({ key: account.id, label: account.label })),
@@ -241,12 +212,36 @@ export function UsagePage() {
     .filter((group) => group.key)
     .map((group) => ({ value: group.key, label: group.label || group.key }))
     .sort((left, right) => left.label.localeCompare(right.label, i18n.language))
-    .map((option) => [option.label, option] as const)).values())], [i18n.language, poolMemberOptionSource, t]);
-  const errorRows = useMemo(() => filtered.filter((item) => !item.success), [filtered]);
+    .map((option) => [option.value, option] as const)).values())], [i18n.language, poolMemberOptionSource, t]);
+  const selectedAccount = mode !== "zenith"
+    ? runtime?.accounts.find((account) => account.id === connectionQuery)
+    : undefined;
+  const errorRows = useMemo(() => rows.filter((usageRow) => !usageRow.success), [rows]);
   const clearFilters = () => {
-    setStatus("all"); setModelQuery(""); setConnectionQuery("");
-    setWireApi(""); setErrorQuery(""); setRequestQuery("");
-    setPage(1); setSelected(null);
+    setRange("all"); setStatus("all"); setModelQuery(""); setConnectionQuery("");
+    setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
+    setPage(1); setSelectedRequest(null);
+  };
+  const visibleSummaryMetrics = view === "requests" ? REQUEST_SUMMARY_METRICS : AGGREGATE_SUMMARY_METRICS;
+  const showStatusFilter = view !== "errors";
+  const showModelFilter = view !== "models";
+  const showPoolMemberFilter = view !== "connections";
+  const additionalFilterCount = [wireApi, transport, errorQuery, requestQuery.trim()].filter(Boolean).length;
+  const scopeMenuProps = { showSelectionIndicator: false, fitContent: true };
+  const scopeFilterCount = 1 + Number(showStatusFilter) + Number(showModelFilter) + Number(showPoolMemberFilter);
+  const hasFilters = range !== "all"
+    || (showStatusFilter && status !== "all")
+    || (showModelFilter && Boolean(modelQuery))
+    || (showPoolMemberFilter && Boolean(connectionQuery))
+    || (requestFiltersActive && Boolean(wireApi || transport || errorQuery || requestQuery));
+  const changeView = (nextView: View) => {
+    setView(nextView);
+    setPage(1);
+    setSelectedRequest(null);
+    setShowMoreFilters(false);
+    if (nextView === "errors") setStatus("all");
+    if (nextView === "models") setModelQuery("");
+    if (nextView === "connections") setConnectionQuery("");
   };
 
   if (mode === "remote" && !remoteUsageSupported) {
@@ -258,7 +253,7 @@ export function UsagePage() {
       title={t("nav.usage")}
       navigation={<Tabs
         value={view}
-        onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }}
+        onChange={(nextView) => changeView(nextView as View)}
         label={t("usage.views")}
         items={[
           { id: "requests", label: t("usage.requests") },
@@ -270,34 +265,19 @@ export function UsagePage() {
       actions={<>
         <IconButton label={t("common.refresh")} icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()} />
         <ActionMenu className="usage-overflow">
-          <ActionMenuItem icon={<SlidersHorizontal aria-hidden />} onClick={() => setSummarySettingsOpen(true)}>{t("usage.configureSummary")}</ActionMenuItem>
           <ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem>
           <ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem>
         </ActionMenu>
       </>}
     />
     <div className="usage-view-toolbar">
-      <div className="usage-scope-controls">
-        {mode !== "zenith" && runtime?.accounts.length ? (
-          <OptionMenu
-            className="usage-account-menu"
-            label={t("usage.account")}
-            value={selectedAccountId}
-            onChange={(value) => resetPage(() => {
-              setSelectedAccountId(value);
-              setConnectionQuery("");
-            })}
-            options={[
-              { value: "", label: t("usage.allAccounts") },
-              ...runtime.accounts.map((account) => ({ value: account.id, label: account.label })),
-            ]}
-          />
-        ) : null}
+      <div className="usage-scope-controls" data-filter-count={scopeFilterCount}>
         <OptionMenu
+          {...scopeMenuProps}
           className="usage-range-menu"
           label={t("usage.range")}
           value={range}
-          onChange={(value) => resetPage(() => setRange(value as Range))}
+          onChange={(rangeValue) => resetPage(() => setRange(rangeValue as Range))}
           icon={<CalendarDays aria-hidden />}
           options={[
             { value: "daily", label: t("usage.daily") },
@@ -306,12 +286,67 @@ export function UsagePage() {
             { value: "all", label: t("common.all") },
           ]}
         />
+        {showStatusFilter ? <OptionMenu
+          {...scopeMenuProps}
+          className="usage-status-menu"
+          label={t("common.status")}
+          value={status}
+          onChange={(statusValue) => resetPage(() => setStatus(statusValue))}
+          options={[
+            { value: "all", label: t("usage.anyStatus") },
+            { value: "success", label: t("common.success") },
+            { value: "failed", label: t("common.failed") },
+          ]}
+        /> : null}
+        {showModelFilter ? <OptionMenu
+          {...scopeMenuProps}
+          className="usage-model-menu"
+          label={t("common.model")}
+          value={modelQuery}
+          onChange={(modelValue) => resetPage(() => setModelQuery(modelValue))}
+          options={modelOptions}
+        /> : null}
+        {showPoolMemberFilter ? <div className="usage-member-controls"><OptionMenu
+          {...scopeMenuProps}
+          className="usage-pool-member-menu"
+          label={t("usage.poolMember")}
+          value={connectionQuery}
+          onChange={(memberValue) => resetPage(() => setConnectionQuery(memberValue))}
+          options={poolMemberOptions}
+        />
+          {requestFiltersActive ? <span className="usage-filter-toggle-wrap">
+            <IconButton
+              className="usage-filter-toggle"
+              label={t("usage.moreFilters")}
+              icon={<SlidersHorizontal aria-hidden />}
+              aria-expanded={showMoreFilters}
+              aria-controls="usage-request-filters"
+              onClick={() => setShowMoreFilters((isVisible) => !isVisible)}
+            />
+            {additionalFilterCount ? <small>{additionalFilterCount}</small> : null}
+          </span> : null}
+        </div> : null}
+        {hasFilters ? <IconButton className="usage-clear-filters" label={t("usage.clearFilters")} icon={<X aria-hidden />} onClick={clearFilters} /> : null}
       </div>
     </div>
-    {selectedAccount ? <AccountUsageSummary account={selectedAccount} totals={totals} /> : null}
-    {USAGE_SUMMARY_METRICS.some((metric) => summaryMetrics[metric]) ? (
+    {requestFiltersActive && showMoreFilters ? <RequestFilters
+      rows={rows}
+      wireApi={wireApi}
+      onWireApiChange={(value) => resetPage(() => setWireApi(value))}
+      transport={transport}
+      onTransportChange={(value) => resetPage(() => setTransport(value))}
+      errorQuery={errorQuery}
+      onErrorChange={(value) => resetPage(() => setErrorQuery(value))}
+      requestQuery={requestQuery}
+      onRequestChange={(value) => resetPage(() => setRequestQuery(value))}
+      onReset={() => resetPage(() => {
+        setWireApi(""); setTransport(""); setErrorQuery(""); setRequestQuery("");
+      })}
+      onClose={() => setShowMoreFilters(false)}
+    /> : null}
+    {visibleSummaryMetrics.length ? (
       <UsageSummary
-        metrics={summaryMetrics}
+        visibleMetrics={visibleSummaryMetrics}
         totals={totals}
         successRate={successRate}
         generationSpeed={averageGenerationSpeed}
@@ -320,52 +355,31 @@ export function UsagePage() {
         locale={i18n.resolvedLanguage ?? i18n.language}
       />
     ) : null}
+    {selectedAccount && view !== "errors" ? <AccountUsageSummary account={selectedAccount} totals={totals} /> : null}
     {view === "requests" ? <RequestsView
-      rows={filtered}
-      status={status}
-      setStatus={(value) => resetPage(() => setStatus(value))}
-      modelQuery={modelQuery}
-      modelOptions={modelOptions}
-      setModelQuery={(value) => resetPage(() => setModelQuery(value))}
-      connectionQuery={connectionQuery}
-      poolMemberOptions={poolMemberOptions}
-      setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))}
-      wireApi={wireApi}
-      setWireApi={(value) => resetPage(() => setWireApi(value))}
-      errorQuery={errorQuery}
-      setErrorQuery={(value) => resetPage(() => setErrorQuery(value))}
-      requestQuery={requestQuery}
-      setRequestQuery={(value) => resetPage(() => setRequestQuery(value))}
-      clearFilters={clearFilters}
+      rows={rows}
       formatTime={formatTime}
-      onSelect={setSelected}
+      onSelect={setSelectedRequest}
     /> : null}
-    {view === "models" ? <AggregateView rows={filtered} {...(modelGroups ? { groups: modelGroups } : {})} field="model" empty={t("usage.empty")} /> : null}
-    {view === "connections" ? <AggregateView rows={filtered} {...(poolMemberGroups ? { groups: poolMemberGroups } : {})} field="connection" empty={t("usage.empty")} /> : null}
-    {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelected} /> : null}
+    {view === "models" ? <AggregateView rows={rows} {...(modelGroups ? { groups: modelGroups } : {})} field="model" empty={t("usage.empty")} /> : null}
+    {view === "connections" ? <AggregateView rows={rows} {...(poolMemberGroups ? { groups: poolMemberGroups } : {})} field="connection" empty={t("usage.empty")} /> : null}
+    {view === "errors" ? <ErrorsView rows={errorRows} formatTime={formatTime} onSelect={setSelectedRequest} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.page === page && usagePage.totalPages > 1 ? (
       <UsagePagination
-        key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, errorQuery, requestQuery, selectedAccountId])}
+        key={JSON.stringify([mode, view, status, range, modelQuery, connectionQuery, wireApi, transport, errorQuery, requestQuery])}
         page={page}
         totalPages={usagePage.totalPages}
         loading={usageLoading}
         onPageChange={changePage}
       />
     ) : null}
-    {selected ? <RequestDetails row={selected} local={mode === "local"} onClose={() => setSelected(null)} /> : null}
-    {summarySettingsOpen ? (
-      <UsageSummarySettings
-        metrics={summaryMetrics}
-        onChange={(metric, checked) => setSummaryMetrics((current) => ({ ...current, [metric]: checked }))}
-        onClose={() => setSummarySettingsOpen(false)}
-      />
-    ) : null}
+    {selectedRequest ? <RequestDetails row={selectedRequest} local={mode === "local"} onClose={() => setSelectedRequest(null)} /> : null}
   </section>;
 }
 
 function UsageSummary({
-  metrics,
+  visibleMetrics,
   totals,
   successRate,
   generationSpeed,
@@ -373,7 +387,7 @@ function UsageSummary({
   language,
   locale,
 }: {
-  metrics: Record<UsageSummaryMetric, boolean>;
+  visibleMetrics: UsageSummaryMetric[];
   totals: UsageTotals;
   successRate: number | null;
   generationSpeed: number | null;
@@ -386,8 +400,8 @@ function UsageSummary({
   return (
     <section className="usage-overview" aria-label={t("usage.summary")}>
       <div className="usage-metrics">
-        {metrics.requests ? <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={language} />} /> : null}
-        {metrics.success ? (
+        {visibleMetrics.includes("requests") ? <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={language} />} /> : null}
+        {visibleMetrics.includes("success") ? (
           <UsageMetric
             icon={<CheckCircle2 aria-hidden />}
             label={t("common.success")}
@@ -395,7 +409,7 @@ function UsageSummary({
             detail={`${formatFullNumber(totals.successfulRequests, language)} / ${formatFullNumber(totals.requests, language)}`}
           />
         ) : null}
-        {metrics.tokens ? (
+        {visibleMetrics.includes("tokens") ? (
           <UsageMetric
             icon={<Database aria-hidden />}
             label={t("usage.totalTokens")}
@@ -411,7 +425,7 @@ function UsageSummary({
             title={t("usage.tokenCompositionHint")}
           />
         ) : null}
-        {metrics.equivalent ? (
+        {visibleMetrics.includes("equivalent") ? (
           <UsageMetric
             icon={<CreditCard aria-hidden />}
             label={t("usage.apiEquivalent")}
@@ -423,7 +437,7 @@ function UsageSummary({
             title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, language) })}
           />
         ) : null}
-        {metrics.generationSpeed ? (
+        {visibleMetrics.includes("generationSpeed") ? (
           <UsageMetric
             icon={<TrendingUp aria-hidden />}
             label={t("usage.generationSpeed")}
@@ -431,7 +445,7 @@ function UsageSummary({
             title={t("usage.generationSpeedHint")}
           />
         ) : null}
-        {metrics.e2eSpeed ? (
+        {visibleMetrics.includes("e2eSpeed") ? (
           <UsageMetric
             icon={<Gauge aria-hidden />}
             label={t("usage.summaryMetrics.e2eSpeed")}
@@ -440,33 +454,5 @@ function UsageSummary({
         ) : null}
       </div>
     </section>
-  );
-}
-
-function UsageSummarySettings({
-  metrics,
-  onChange,
-  onClose,
-}: {
-  metrics: Record<UsageSummaryMetric, boolean>;
-  onChange: (metric: UsageSummaryMetric, checked: boolean) => void;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <Dialog title={t("usage.configureSummary")} onClose={onClose}>
-      <div className="usage-summary-settings">
-        {USAGE_SUMMARY_METRICS.map((metric) => (
-          <label key={metric}>
-            <span>{t(`usage.summaryMetrics.${metric}`)}</span>
-            <ToggleSwitch
-              label={t(`usage.summaryMetrics.${metric}`)}
-              checked={metrics[metric]}
-              onChange={(checked) => onChange(metric, checked)}
-            />
-          </label>
-        ))}
-      </div>
-    </Dialog>
   );
 }

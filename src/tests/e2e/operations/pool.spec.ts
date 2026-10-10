@@ -89,6 +89,7 @@ test("connections show the same sign-in action instead of stale quota data", asy
   const signIn = account.getByRole("button", { name: "Sign-in required", exact: true });
   await expect(account.locator(".quota-meter")).toHaveCount(0);
   await expect(signIn).toBeVisible();
+  await expect(account.getByRole("button", { name: "Launch in ChatGPT" })).toBeDisabled();
   await signIn.click();
   await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
   const oauthStart = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth"));
@@ -107,6 +108,7 @@ test("connections stay outside the pool until the user adds selected members", a
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   await dialog.getByText("Business Workspace", { exact: true }).click();
   await dialog.getByRole("button", { name: "Add selected (1)" }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
 
   const rows = page.locator(".pool-member-card");
   await expect(rows).toHaveCount(1);
@@ -146,7 +148,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Sources" }).click();
 
-    const row = page.getByRole("row").filter({ hasText: "Example compatible API" });
+    const row = page.locator(".source-card").filter({ hasText: "Example compatible API" });
     await expect(row).not.toContainText("Stabilizer");
     await row.locator(".relay-action-menu summary").click();
     await page.getByRole("menuitem", { name: "Remove from pool" }).click();
@@ -179,12 +181,12 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByLabel("Name", { exact: true }).fill("Failover API");
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
     await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
-    await sourceDialog.getByRole("button", { name: "Save" }).click();
+    await sourceDialog.getByRole("button", { name: "Add source" }).click();
     await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
     await expect(member).toContainText("Automatic");
-    for (const name of ["In order", "Round robin"]) {
+    for (const name of ["Manual"]) {
       await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
       const editor = page.getByRole("dialog", { name: "Pool rotation", exact: true });
       await editor.getByRole("radio", { name, exact: true }).click();
@@ -196,12 +198,12 @@ for (const mode of ["local", "remote"] as const) {
     if (mode === "local") {
       expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 0 });
       expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
-      expect(calls.filter((call) => call.command === "update_local_routing")).toHaveLength(2);
+      expect(calls.filter((call) => call.command === "update_local_routing")).toHaveLength(1);
     } else {
       const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
       expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 0 });
       expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
-      expect(actions.filter((call) => call.action.type === "set_routing_policy")).toHaveLength(2);
+      expect(actions.filter((call) => call.action.type === "set_routing_policy")).toHaveLength(1);
     }
   });
 
@@ -444,7 +446,7 @@ test("pool member picker lists individual accounts instead of subscription group
   await expect(accountRows.locator("small")).toHaveCount(4);
   await expect(accountRows.locator("small.pool-picker-status")).toHaveCount(4);
   await expect(accountRows.nth(2).locator("small.pool-picker-status")).toContainText("Waiting for quota");
-  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Pro", "Business", "Plus", "Free"]);
+  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Pro 200", "Business", "Plus", "Free"]);
 
   await dialog.getByRole("navigation").getByRole("button", { name: "Accounts", exact: true }).click();
   await chooseOption(page, dialog, "Filter by plan", "business");
@@ -524,9 +526,9 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(dialog).not.toContainText("Request speed");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
-  await expect(dialog.getByRole("radio")).toHaveCount(3);
+  await expect(dialog.getByRole("radio")).toHaveCount(2);
   await expect(dialog.getByRole("radio", { name: "Automatic", exact: true })).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   await expect(dialog.getByLabel("Retry candidates")).toHaveCount(0);
   await expect(dialog.getByLabel("Failures before cooldown")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
@@ -579,7 +581,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   const ids = () => dialog.getByRole("listitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-member-id")));
   const original = await ids();
   await dialog.getByRole("listitem").first().getByRole("button", { name: / down$/ }).click();
@@ -587,7 +589,7 @@ test("closing mixed rotation retains the immediately applied order", async ({ pa
   const reordered = await ids();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
-  await expect(dialog.getByRole("radio", { name: "In order", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radio", { name: "Manual", exact: true })).toHaveAttribute("aria-checked", "true");
   expect(await ids()).toEqual(reordered);
 });
 
@@ -602,7 +604,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const dialog = page.getByRole("dialog", { name: "Pool rotation" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Request speed");
-  await dialog.getByRole("radio", { name: "In order", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Manual", exact: true }).click();
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -766,7 +768,7 @@ test("source and automation rows keep rare actions in consistent menus", async (
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   await page.getByRole("tab", { name: "Sources" }).click();
-  let actions = page.locator(".relay-table .row-actions");
+  let actions = page.locator(".source-card .row-actions");
   expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
   await actions.locator("summary").click();
   expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Refresh API data", "Remove from pool", "Disable", "Delete"]);

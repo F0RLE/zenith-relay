@@ -37,7 +37,7 @@ pub(super) struct OpenStreamInput<'a> {
     pub(super) requested_model: String,
     pub(super) source_model: String,
     pub(super) prompt_affinity_key: Option<String>,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) tool_use: ToolUseDiagnostics,
     pub(super) attempt: u16,
@@ -61,7 +61,7 @@ pub(super) struct OpenStreamInput<'a> {
 
 /// Open a client SSE response, or repair a bootstrap failure before any output
 /// bytes are forwarded.
-pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedStream {
+pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> OpenedStream {
     let OpenStreamInput {
         upstream,
         status,
@@ -76,7 +76,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
         requested_model,
         source_model,
         prompt_affinity_key,
-        wire_api,
+        client_wire_api,
         reasoning_effort,
         tool_use,
         attempt,
@@ -96,7 +96,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
         last_failure,
         last_failure_origin,
         last_preserved_upstream_error,
-    } = input;
+    } = stream_input;
     let legacy_call_id_repair_attempted = &mut repairs.legacy_call_id;
     let native_replay_attempted = &mut repairs.native_replay;
     let stale_tool_history_recovered = &mut repairs.stale_tool_history;
@@ -127,7 +127,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                     requested_model,
                     source_model,
                     prompt_affinity_key,
-                    wire_api,
+                    client_wire_api,
                     reasoning_effort,
                     tool_use,
                     attempt,
@@ -142,7 +142,8 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
             )
         }
         Err(bootstrap_failure) => {
-            let zenith_gateway_invalid_request = bootstrap_failure.zenith_gateway_invalid_request;
+            let invalid_function_call_output_call_id =
+                bootstrap_failure.invalid_function_call_output_call_id;
             let missing_tool_output = bootstrap_failure
                 .preserved
                 .as_ref()
@@ -175,7 +176,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
             if safe_to_repair
                 && try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
                     request: &mut request,
-                    wire_api,
+                    client_wire_api,
                     adapter_is_passthrough,
                     upstream_rejected_tool_links: tool_links_rejected,
                     repair_attempted: legacy_call_id_repair_attempted,
@@ -194,11 +195,11 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                 ));
             }
             if safe_to_repair
-                && wire_api == WireApi::Responses
+                && client_wire_api == WireApi::Responses
                 && adapter_is_passthrough
                 && has_previous_response_id
                 && !*native_replay_attempted
-                && ((contains_tool_call_output(&request) && zenith_gateway_invalid_request)
+                && ((contains_tool_call_output(&request) && invalid_function_call_output_call_id)
                     || (response_affinity_hit
                         && failure.category == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND))
             {
@@ -228,6 +229,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                             last_failure,
                             last_failure_origin,
                             selected_error_origin,
+                            failure.category == error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND,
                             retry(request, request_id, requested_model, prompt_affinity_key),
                         );
                     }
@@ -236,7 +238,7 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                 }
             }
             if safe_to_repair
-                && wire_api == WireApi::Responses
+                && client_wire_api == WireApi::Responses
                 && has_previous_response_id
                 && missing_tool_output
                 && last_preserved_upstream_error.as_ref().is_some_and(|error| {
@@ -263,14 +265,16 @@ pub(super) async fn open_response_stream(input: OpenStreamInput<'_>) -> OpenedSt
                     last_failure,
                     last_failure_origin,
                     selected_error_origin,
+                    false,
                     retry(request, request_id, requested_model, prompt_affinity_key),
                 );
             }
             let failure_state =
-                settle_attempt_failure(runtime, &lease, &source_model, &failure, response_headers);
+                settle_route_failure(runtime, &lease, &route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             if failure_category_is_request_terminal(failure.category)
+                || route_forbids_fallback(&route, failure.status, failure.category)
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return OpenedStream::Respond(attempt_error_response(
@@ -301,11 +305,11 @@ fn respond_opened_stream(
     remaining: UpstreamStream,
     account_route: bool,
 ) -> OpenedStream {
-    let mut response = execution.into_response(status, headers.clone(), first, remaining);
+    let mut stream_response = execution.into_response(status, headers.clone(), first, remaining);
     if account_route {
-        relay_account_response_header(forwarded_headers, &headers, &mut response);
+        relay_account_response_header(forwarded_headers, &headers, &mut stream_response);
     }
-    OpenedStream::Respond(response)
+    OpenedStream::Respond(stream_response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -322,13 +326,18 @@ fn continue_after_history_repair(
     last_failure: &mut Option<AttemptFailure>,
     last_failure_origin: &mut ErrorOrigin,
     selected_error_origin: ErrorOrigin,
+    retain_owner: bool,
     retry: StreamRetryState,
 ) -> OpenedStream {
-    clear_materialized_continuation(
-        response_affinity_key,
-        requires_affinity_owner,
-        has_unpaired_tool_output,
-    );
+    if retain_owner {
+        retain_materialized_continuation_owner(requires_affinity_owner, has_unpaired_tool_output);
+    } else {
+        clear_materialized_continuation(
+            response_affinity_key,
+            requires_affinity_owner,
+            has_unpaired_tool_output,
+        );
+    }
     tried.remove(candidate_id);
     lease.allow_rotation_repair();
     emit_usage(runtime, event);

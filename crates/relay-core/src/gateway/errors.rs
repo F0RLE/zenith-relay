@@ -1,6 +1,6 @@
 use super::now_ms;
 use crate::error_codes;
-use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError};
+use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError, ExecutorRoute};
 use crate::scheduler::{CooldownReason, CooldownRequest};
 use crate::{GatewayRuntime, UsageEvent};
 use axum::body::Body;
@@ -23,7 +23,8 @@ use classify::{normalized_error_text, text_has_any, upstream_error_text};
 pub(super) use cooldown::{
     apply_failure_state, current_failure_state, failure_cooldown, rate_limit_body_hint,
     rate_limit_body_hint_value, settle_attempt_failure, settle_classified_failure,
-    settle_image_capability_failure, settle_status_failure, CooldownInput, RateLimitBodyHint,
+    settle_image_capability_failure, settle_route_failure, settle_status_failure, CooldownInput,
+    RateLimitBodyHint,
 };
 
 pub(crate) use failure::failure_category_affects_account_state;
@@ -34,19 +35,20 @@ pub(super) use failure::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
+    responses_function_call_output_has_invalid_call_id_value,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    retryable_failure, retryable_status, zenith_gateway_invalid_request,
-    zenith_gateway_invalid_request_value,
+    retryable_failure, retryable_status,
 };
 
 #[cfg(test)]
-use failure::responses_call_id_is_missing;
+use failure::{responses_call_id_is_missing, zenith_gateway_invalid_request};
 
 pub(super) use response::{
     api_error, api_error_code, api_error_type, api_error_with_origin,
     api_error_with_origin_and_category, api_error_with_parameter, cooldown_error,
+    prefix_error_body, prefix_error_value,
 };
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
@@ -73,6 +75,59 @@ pub(super) fn retryable_recovery_wait(
                 | error_codes::UPSTREAM_INVALID_REQUEST
                 | error_codes::UPSTREAM_CANDIDATE_REJECTED
         )
+}
+
+/// Basis Points must return an upstream `403` as-is. A policy or entitlement
+/// rejection is not evidence that another OAuth account can safely replay the
+/// generation, and switching accounts would hide the provider's decision.
+pub(super) fn route_forbids_fallback(
+    route: &ExecutorRoute,
+    status: StatusCode,
+    category: &str,
+) -> bool {
+    route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints
+        && (status == StatusCode::FORBIDDEN || category == error_codes::UPSTREAM_MODEL_UNAVAILABLE)
+}
+
+pub(crate) fn basis_points_transport_rejected(status: u16, category: Option<&str>) -> bool {
+    // An explicit credential or account failure applies to the connection,
+    // even when Basis Points returns it as an access or rate-limit refusal.
+    if matches!(
+        category,
+        Some(
+            error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                | error_codes::UPSTREAM_REFRESH_TOKEN_REUSED
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+        )
+    ) {
+        return false;
+    }
+    matches!(status, 403 | 429) || category == Some(error_codes::UPSTREAM_MODEL_UNAVAILABLE)
+}
+
+pub(super) fn retryable_route_failure(
+    route: &ExecutorRoute,
+    status: StatusCode,
+    category: &'static str,
+    has_previous_response_id: bool,
+) -> bool {
+    if route_forbids_fallback(route, status, category) {
+        return false;
+    }
+    retryable_failure(status, category, has_previous_response_id)
+}
+
+pub(super) fn retryable_route_status(
+    route: &ExecutorRoute,
+    status: StatusCode,
+    has_previous_response_id: bool,
+) -> bool {
+    if route_forbids_fallback(route, status, "") {
+        return false;
+    }
+    retryable_status(status, has_previous_response_id)
 }
 
 pub(super) fn admission_failure(
@@ -129,21 +184,21 @@ pub(super) struct PreservedUpstreamError {
 /// Preserves only the bounded, redacted error envelope across retries and bridges.
 pub(super) fn preserved_upstream_error(
     failure: &AttemptFailure,
-    body: &[u8],
+    response_body: &[u8],
 ) -> Option<PreservedUpstreamError> {
     preserved_error_details(
         failure,
-        crate::usage::UpstreamErrorDetails::from_body(None, body),
+        crate::usage::UpstreamErrorDetails::from_response_body(None, response_body),
     )
 }
 
 pub(super) fn preserved_upstream_error_value(
     failure: &AttemptFailure,
-    value: &Value,
+    error_payload: &Value,
 ) -> Option<PreservedUpstreamError> {
     preserved_error_details(
         failure,
-        crate::usage::UpstreamErrorDetails::from_value(None, value),
+        crate::usage::UpstreamErrorDetails::from_value(None, error_payload),
     )
 }
 
@@ -157,7 +212,10 @@ fn preserved_error_details(
         code: details
             .code
             .unwrap_or_else(|| api_error_code(failure.category).to_string()),
-        message: details.message?,
+        message: response::message_with_request_id(
+            &details.message?,
+            details.request_id.as_deref(),
+        ),
         error_type: details.error_type,
     })
 }
@@ -200,7 +258,7 @@ pub(super) fn canonical_upstream_status(status: StatusCode, category: &str) -> S
         upstream_failure_status(category)
     }
 }
-pub(super) fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
+pub(super) fn upstream_status_from_value(error_payload: &Value) -> Option<StatusCode> {
     [
         "/status",
         "/status_code",
@@ -216,11 +274,15 @@ pub(super) fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
         "/response/error/status_code",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path))
-    .find_map(|value| {
-        value
+    .filter_map(|path| error_payload.pointer(path))
+    .find_map(|status_value| {
+        status_value
             .as_u64()
-            .or_else(|| value.as_str().and_then(|status| status.trim().parse().ok()))
+            .or_else(|| {
+                status_value
+                    .as_str()
+                    .and_then(|status| status.trim().parse().ok())
+            })
             .and_then(|status| u16::try_from(status).ok())
             .filter(|status| *status > 0)
             .and_then(|status| StatusCode::from_u16(status).ok())
@@ -229,19 +291,25 @@ pub(super) fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
 
 pub(super) fn upstream_event_failure_category(
     event_type: Option<&str>,
-    value: &Value,
+    event_payload: &Value,
 ) -> Option<&'static str> {
     let event_type = if ["/error", "/response/error", "/body/error"]
         .iter()
-        .any(|path| value.pointer(path).is_some_and(|error| !error.is_null()))
-    {
+        .any(|path| {
+            event_payload
+                .pointer(path)
+                .is_some_and(|error| !error.is_null())
+        }) {
         Some("error")
     } else {
         event_type
     };
     match event_type {
         Some("response.completed" | "response.done") => {
-            match value.pointer("/response/status").and_then(Value::as_str) {
+            match event_payload
+                .pointer("/response/status")
+                .and_then(Value::as_str)
+            {
                 Some("failed" | "cancelled" | "canceled") => Some(error_codes::UPSTREAM_TERMINAL),
                 Some("incomplete") => Some(error_codes::RESPONSE_INCOMPLETE),
                 Some("completed") | None => None,
@@ -252,12 +320,12 @@ pub(super) fn upstream_event_failure_category(
         Some("response.cancelled" | "response.canceled") => Some(error_codes::UPSTREAM_CANCELLED),
         Some("response.failed" | "error") => {
             let classification = classify_upstream_error_value(
-                upstream_status_from_value(value).unwrap_or(StatusCode::BAD_GATEWAY),
-                value,
+                upstream_status_from_value(event_payload).unwrap_or(StatusCode::BAD_GATEWAY),
+                event_payload,
             );
             Some(
                 if classification.category == error_codes::UPSTREAM_BAD_GATEWAY
-                    && upstream_status_from_value(value).is_none()
+                    && upstream_status_from_value(event_payload).is_none()
                 {
                     error_codes::UPSTREAM_TERMINAL
                 } else {

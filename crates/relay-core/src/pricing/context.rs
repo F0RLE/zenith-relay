@@ -58,21 +58,26 @@ impl PricingContext {
             .or_else(|| self.source_metadata.get(&super::normalize(&context_id)));
         let mut resolved = catalog.resolve_source(
             model,
-            metadata.and_then(|value| value.pricing_provider.as_deref()),
-            metadata.and_then(|value| value.official_provider_family.as_deref()),
-            evidence.and_then(|value| value.provider),
-            evidence.and_then(|value| value.manual).or_else(|| {
-                self.global_manual_prices
-                    .get(&super::normalize(model))
-                    .copied()
-            }),
+            metadata.and_then(|source_metadata| source_metadata.pricing_provider.as_deref()),
+            metadata
+                .and_then(|source_metadata| source_metadata.official_provider_family.as_deref()),
+            evidence.and_then(|price_evidence| price_evidence.provider),
+            evidence
+                .and_then(|price_evidence| price_evidence.manual)
+                .or_else(|| {
+                    self.global_manual_prices
+                        .get(&super::normalize(model))
+                        .copied()
+                }),
         );
-        let cache_write_allowed = metadata
-            .is_some_and(|value| value.cache_write_models.contains(&super::normalize(model)));
+        let cache_write_allowed = metadata.is_some_and(|source_metadata| {
+            source_metadata
+                .cache_write_models
+                .contains(&super::normalize(model))
+        });
         if !cache_write_allowed {
             if let Some(quote) = resolved.quote.as_mut() {
-                quote.cache_write_5m = None;
-                quote.cache_write_1h = None;
+                *quote = quote.clear_cache_writes();
             }
         }
         resolved

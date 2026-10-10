@@ -87,7 +87,7 @@ fn enable_provider_with_intent(
 fn profile_root(backup_dir: &Path) -> Result<&Path, String> {
     if backup_dir
         .file_name()
-        .is_some_and(|name| name == "client-config")
+        .is_some_and(|directory_name| directory_name == "client-config")
     {
         backup_dir
             .parent()
@@ -140,9 +140,9 @@ fn remove_if_unchanged(path: &Path, expected: Option<&str>) -> Result<(), String
 fn rollback_file(
     path: &Path,
     expected_current: Option<&str>,
-    previous: Option<&str>,
+    original_content: Option<&str>,
 ) -> Result<(), String> {
-    match previous {
+    match original_content {
         Some(content) => replace_if_unchanged(path, expected_current, content),
         None => remove_if_unchanged(path, expected_current),
     }
@@ -151,11 +151,11 @@ fn rollback_file(
 fn rollback_ready_config(
     changed: bool,
     path: &Path,
-    current: &str,
-    previous: Option<&str>,
+    written_config: &str,
+    original_content: Option<&str>,
 ) -> Result<(), String> {
     if changed {
-        rollback_file(path, Some(current), previous)
+        rollback_file(path, Some(written_config), original_content)
     } else {
         Ok(())
     }
@@ -184,9 +184,12 @@ pub fn reset_provider(backup_dir: &Path) -> Result<(), String> {
 }
 
 fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
-    let root = profile_root(backup_dir)?;
-    if crate::local_pool::profiles::codex::restore_ready_api(&default_codex_home(), root)
-        .map_err(|error| error.message)?
+    let profile_root_path = profile_root(backup_dir)?;
+    if crate::local_pool::profiles::codex::restore_ready_api(
+        &default_codex_home(),
+        profile_root_path,
+    )
+    .map_err(|error| error.message)?
     {
         if forget_key {
             delete_saved_app_key()?;
@@ -201,36 +204,42 @@ fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
     let auth_path = codex_home.join(AUTH_FILE);
     let original_config = read_optional_text(&config_path)?;
     let original_auth = read_optional_text(&auth_path)?;
-    let original = original_config.as_deref().unwrap_or_default();
-    if !config_selects_zenith_provider(original) {
+    let original_config_text = original_config.as_deref().unwrap_or_default();
+    if !config_selects_zenith_provider(original_config_text) {
         if forget_key {
             delete_saved_app_key()?;
         }
         return Ok(());
     }
     let previous_model_provider = latest_backup_model_provider(backup_dir);
-    let mut next = remove_zenith_provider(original)?;
+    let mut updated_config = remove_zenith_provider(original_config_text)?;
 
     let model_provider =
         previous_model_provider.unwrap_or_else(|| DEFAULT_MODEL_PROVIDER.to_string());
-    next = with_model_provider(next, &model_provider)?;
+    updated_config = with_model_provider(updated_config, &model_provider)?;
     let saved_key = load_saved_app_key();
     if forget_key {
         delete_saved_app_key()?;
     }
     let reset_result = (|| {
-        if next != original {
-            replace_if_unchanged(&config_path, original_config.as_deref(), next.trim_start())?;
+        if updated_config != original_config_text {
+            replace_if_unchanged(
+                &config_path,
+                original_config.as_deref(),
+                updated_config.trim_start(),
+            )?;
         }
-        if let Err(error) =
-            restore_or_remove_zenith_auth(original, original_auth.as_deref(), saved_key.as_deref())
-        {
+        if let Err(error) = restore_or_remove_zenith_auth(
+            original_config_text,
+            original_auth.as_deref(),
+            saved_key.as_deref(),
+        ) {
             return Err(with_cleanup(
                 error,
                 rollback_ready_config(
-                    next != original,
+                    updated_config != original_config_text,
                     &config_path,
-                    next.trim_start(),
+                    updated_config.trim_start(),
                     original_config.as_deref(),
                 ),
             ));
@@ -252,9 +261,9 @@ fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
 
 pub fn provider_has_token() -> bool {
     let config_path = default_codex_home().join(CONFIG_FILE);
-    let content = fs::read_to_string(config_path).unwrap_or_default();
-    config_selects_zenith_provider(&content)
-        && content.contains(&format!("[model_providers.{PROVIDER_ID}]"))
+    let config_text = fs::read_to_string(config_path).unwrap_or_default();
+    config_selects_zenith_provider(&config_text)
+        && config_text.contains(&format!("[model_providers.{PROVIDER_ID}]"))
         && load_api_key_for_launch().is_some()
 }
 

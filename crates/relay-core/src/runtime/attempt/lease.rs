@@ -60,11 +60,11 @@ impl CandidateLease {
         guard_authorization: impl FnOnce() -> Option<G>,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
         let budget = &self.rotation_budget;
-        let result = budget.with_budget(|request_budget| {
+        let dispatch_result = budget.with_budget(|request_budget| {
             if charge_wire && !request_budget.can_start_wire() {
                 return Err(RotationDispatchStartError::BudgetExhausted);
             }
-            let scope = crate::poison::read(&self.principal_scope);
+            let candidate_scope = crate::poison::read(&self.principal_scope);
             if self.principal_scope_revision.0.load(Ordering::Acquire)
                 != self.principal_scope_revision.1
             {
@@ -76,8 +76,8 @@ impl CandidateLease {
             let _authorization =
                 guard_authorization().ok_or(RotationDispatchStartError::CandidateChanged)?;
             let mut scheduler = crate::poison::mutex(&self.scheduler);
-            let hidden = crate::poison::read(&self.hidden_models);
-            if hidden.contains(&crate::model_id_key(&self.model)) {
+            let hidden_models = crate::poison::read(&self.hidden_models);
+            if hidden_models.contains(&crate::model_id_key(&self.model)) {
                 return Err(RotationDispatchStartError::CandidateChanged);
             }
             if self
@@ -90,8 +90,8 @@ impl CandidateLease {
             if self.response_owner.as_ref().is_some_and(|(key, revision)| {
                 scheduler
                     .response_affinity_binding(key, runtime_now_ms())
-                    .is_none_or(|(owner, current)| {
-                        owner != self.candidate_id || current != *revision
+                    .is_none_or(|(owner, observed_revision)| {
+                        owner != self.candidate_id || observed_revision != *revision
                     })
             }) {
                 return Err(RotationDispatchStartError::CandidateChanged);
@@ -105,12 +105,13 @@ impl CandidateLease {
                 &self.candidate_id,
                 &self.model,
                 &self.allowed_protocols,
-                &scope,
+                &candidate_scope,
                 runtime_now_ms(),
             ) {
                 return Err(RotationDispatchStartError::CandidateChanged);
             }
-            let attempt = scheduler.begin_rotation_dispatch(self.reservation_id, request_budget)?;
+            let rotation_attempt =
+                scheduler.begin_rotation_dispatch(self.reservation_id, request_budget)?;
             if charge_wire {
                 // Both budget counters are guarded by the same lock. The
                 // availability check above makes this infallible.
@@ -118,13 +119,13 @@ impl CandidateLease {
                     .start_wire_attempt()
                     .expect("wire capacity was checked under the budget lock");
             }
-            Ok(attempt)
+            Ok(rotation_attempt)
         });
-        if result.is_ok() {
+        if dispatch_result.is_ok() {
             self.rotation_started.store(true, Ordering::Release);
             budget.record_member_attempt(&self.member_key);
         }
-        result
+        dispatch_result
     }
 
     pub(crate) fn settle_rotation(
@@ -148,7 +149,7 @@ impl CandidateLease {
         if self.rotation_settled.load(Ordering::Acquire) {
             return Ok(None);
         }
-        let result = budget.with_budget(|request_budget| {
+        let settlement_result = budget.with_budget(|request_budget| {
             if self.rotation_settled.load(Ordering::Acquire) {
                 return Ok(None);
             }
@@ -166,9 +167,9 @@ impl CandidateLease {
             self.rotation_settled.store(true, Ordering::Release);
             Ok(Some(settlement))
         });
-        let result = result?;
+        let settlement_result = settlement_result?;
         self.release();
-        Ok(result)
+        Ok(settlement_result)
     }
 
     pub(crate) fn settle_rotation_success(&self, now_ms: u64) {
@@ -263,7 +264,7 @@ impl CandidateLease {
                 });
             }
         }
-        let activity = {
+        let runtime_activity = {
             let mut scheduler = crate::poison::mutex(&self.scheduler);
             let released = scheduler.release_reservation(self.reservation_id);
             if !released {
@@ -282,7 +283,7 @@ impl CandidateLease {
                 })
             }
         };
-        if let Some(activity) = activity {
+        if let Some(runtime_activity) = runtime_activity {
             self.availability.notify_waiters();
             let callback = self
                 .activity_callback
@@ -290,7 +291,7 @@ impl CandidateLease {
                 .ok()
                 .map(|callback| callback.clone());
             if let Some(callback) = callback {
-                callback(activity);
+                callback(runtime_activity);
             }
         }
     }

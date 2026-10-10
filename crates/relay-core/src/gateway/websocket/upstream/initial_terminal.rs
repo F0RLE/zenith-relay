@@ -99,10 +99,10 @@ fn continue_after_item_prefix_repair(
     let lease = scope.lease;
     let tried = &mut *progress.tried;
     let repairs = &mut *progress.repairs;
-    let repaired = terminal_body.is_some_and(|body| {
+    let repaired = terminal_body.is_some_and(|terminal_body_bytes| {
         repair_responses_item_prefixes(
-            scope.request.value_mut(),
-            body,
+            scope.request.request_body_mut(),
+            terminal_body_bytes,
             true,
             &mut ResponsesItemPrefixRepairs {
                 function_ids: &mut repairs.function_item_id,
@@ -189,11 +189,11 @@ fn continue_after_stale_tool_history(
     let key = scope.key;
     let recovered = !progress.repairs.stale_tool_history
         && scope.request.has_previous_response_id()
-        && terminal_body.is_some_and(|body| {
-            super::super::super::errors::responses_tool_call_is_missing_output(body)
+        && terminal_body.is_some_and(|terminal_body_bytes| {
+            super::super::super::errors::responses_tool_call_is_missing_output(terminal_body_bytes)
                 && scope
                     .request
-                    .recover_stale_tool_history(runtime, &key.id, body)
+                    .recover_stale_tool_history(runtime, &key.id, terminal_body_bytes)
         });
     if !recovered {
         return false;

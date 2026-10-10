@@ -41,12 +41,18 @@ fn reconciles_inventory_without_losing_custom_order_or_limits() {
 #[test]
 fn rejects_stale_updates_and_invalid_or_changed_membership() {
     let current = policy();
-    let mut next = current.clone();
-    next.members.swap(0, 1);
-    assert!(next.validate_update(&current, Some(&current)).is_ok());
-    assert!(next.validate_update(&current, Some(&next)).is_err());
-    next.members.pop();
-    assert!(next.validate_update(&current, Some(&current)).is_err());
+    let mut updated_policy = current.clone();
+    updated_policy.members.swap(0, 1);
+    assert!(updated_policy
+        .validate_update(&current, Some(&current))
+        .is_ok());
+    assert!(updated_policy
+        .validate_update(&current, Some(&updated_policy))
+        .is_err());
+    updated_policy.members.pop();
+    assert!(updated_policy
+        .validate_update(&current, Some(&current))
+        .is_err());
     let mut invalid = current.clone();
     invalid.members[0].weight = 0;
     assert!(invalid.validate().is_err());
@@ -89,7 +95,7 @@ fn old_policy_upgrade_is_idempotent_and_preserves_order_weights_and_limits() {
         PoolRoutingMode::InOrder,
         PoolRoutingMode::RoundRobin,
     ] {
-        let old = PoolRoutingPolicy {
+        let legacy_policy = PoolRoutingPolicy {
             version: 1,
             mode,
             members: vec![PoolRoutingMember {
@@ -100,9 +106,9 @@ fn old_policy_upgrade_is_idempotent_and_preserves_order_weights_and_limits() {
             }],
         };
         let inventory = vec![(PoolMemberKind::Source, "source".into(), -1_000_000, 2)];
-        let upgraded = resolve_pool_routing(Some(&old), inventory.clone());
+        let upgraded = resolve_pool_routing(Some(&legacy_policy), inventory.clone());
         assert_eq!(upgraded.version, 2);
-        assert_eq!(upgraded.members, old.members);
+        assert_eq!(upgraded.members, legacy_policy.members);
         assert_eq!(
             upgraded.mode,
             if mode == PoolRoutingMode::Smart {

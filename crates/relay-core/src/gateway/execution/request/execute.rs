@@ -22,18 +22,17 @@ pub(in crate::gateway::execution) async fn execute_request(
         client_context_id,
         mut response_affinity_key,
         mut requires_affinity_owner,
-        wire_api,
+        client_wire_api,
         responses_lite,
         allow_previous_response_reset,
         attempt_offset,
         budget,
+        transport,
     } = context;
     let mut tried: HashSet<String> = Default::default();
     let mut attempt = attempt_offset;
     let mut confirmed_response_missing = false;
     let mut repairs = AttemptRepairs::default();
-    let mut basis_points_relay_retry_attempted = false;
-    let mut basis_points_relay_retry_parameter: Option<&'static str> = None;
     let mut last_failure: Option<AttemptFailure> = None;
     let mut last_adapter_error: Option<AdapterError> = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
@@ -44,7 +43,7 @@ pub(in crate::gateway::execution) async fn execute_request(
     // client Lite headers remain authoritative, but a mixed or partly unknown
     // pool must use full Responses so fallback preserves its tool/context
     // contract.
-    let automatic_responses_lite = wire_api == WireApi::Responses
+    let automatic_responses_lite = client_wire_api == WireApi::Responses
         && runtime.codex_model_responses_routes_all_support_lite(&key, &resolved_model);
     let mut has_unpaired_tool_output = !unpaired_tool_output_ids(&request).is_empty();
     let mut prompt_affinity_key = runtime.prompt_affinity_key(
@@ -57,7 +56,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         runtime: &runtime,
         key: &key,
         resolved_model: &resolved_model,
-        protocols: candidate_protocols(wire_api),
+        protocols: candidate_protocols(client_wire_api),
         operation: crate::scheduler::rotation::RotationOperation::Text,
         exclusions: &HashSet::new(),
     };
@@ -76,11 +75,11 @@ pub(in crate::gateway::execution) async fn execute_request(
         if !repairs.quota_yield {
             repairs.quota_yield = true;
             if let Some(affinity_key) = response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield_for_quota(
+                if runtime.automatic_response_owner_should_yield(
                     &key,
                     &affinity_key,
                     &resolved_model,
-                    candidate_protocols(wire_api),
+                    candidate_protocols(client_wire_api),
                     &tried,
                     now_ms(),
                 ) && drop_materialized_previous_response_id(
@@ -101,7 +100,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         // Recovery can deliberately remove an unusable opaque response id.
         // Derive continuation semantics from the request that will actually be
         // sent on this attempt, rather than from its original payload.
-        let has_previous_response_id = request_has_previous_response_id(wire_api, &request);
+        let has_previous_response_id = request_has_previous_response_id(client_wire_api, &request);
         // The gateway setting is live for every text protocol. Turning it off
         // wakes an already-waiting request on its next availability event.
         let retry_until_available = runtime.route_recovery_enabled();
@@ -120,7 +119,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             runtime: &runtime,
             key: &key,
             model: &resolved_model,
-            client: wire_api,
+            client: client_wire_api,
             request: &request,
             stream,
             tier_policy: &service_tier_policy,
@@ -135,7 +134,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             .select_and_reserve_with_budget(
                 &key,
                 &resolved_model,
-                candidate_protocols(wire_api),
+                candidate_protocols(client_wire_api),
                 &selection_exclusions,
                 (
                     response_affinity_key.as_deref(),
@@ -146,14 +145,20 @@ pub(in crate::gateway::execution) async fn execute_request(
             )
             .await;
         let Some((selected, lease)) = selected else {
+            release_encrypted_context_repair_owner(
+                &mut repairs,
+                &mut response_affinity_key,
+                &mut requires_affinity_owner,
+                &runtime,
+            );
             match handle_selection_miss(SelectionMissInput {
                 budget: &budget,
                 runtime: &runtime,
                 key: &key,
                 resolved_model: &resolved_model,
-                wire_api,
+                client_wire_api,
                 stream,
-                request: &mut request,
+                request_json: &mut request,
                 response_affinity_key: &mut response_affinity_key,
                 requires_affinity_owner: &mut requires_affinity_owner,
                 allow_previous_response_reset,
@@ -181,6 +186,11 @@ pub(in crate::gateway::execution) async fn execute_request(
                 SelectionMiss::Respond(response) => return response,
             }
         };
+        detach_encrypted_context_repair_owner(
+            &repairs,
+            &mut response_affinity_key,
+            &mut requires_affinity_owner,
+        );
         let driven = drive_selected_attempt(DriveAttemptInput {
             selected,
             lease,
@@ -191,15 +201,15 @@ pub(in crate::gateway::execution) async fn execute_request(
             runtime: &runtime,
             key: &key,
             budget: &budget,
+            transport,
             resolved_model: &resolved_model,
-            wire_api,
+            client_wire_api,
             stream,
             responses_lite: &responses_lite,
             automatic_responses_lite,
             service_tier_policy: &service_tier_policy,
             tool_policy: &mut tool_policy,
             client_context_id: &client_context_id,
-            basis_points_relay_retry_parameter: &mut basis_points_relay_retry_parameter,
             last_adapter_error: &mut last_adapter_error,
             forwarded_headers: &forwarded_headers,
             attempt: &mut attempt,
@@ -214,11 +224,18 @@ pub(in crate::gateway::execution) async fn execute_request(
             response_affinity_key: &mut response_affinity_key,
             allow_previous_response_reset,
             confirmed_response_missing: &mut confirmed_response_missing,
-            basis_points_relay_retry_attempted: &mut basis_points_relay_retry_attempted,
         })
         .await;
         let kept = match driven {
-            DrivenAttempt::Respond(response) => return response,
+            DrivenAttempt::Respond(response) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
+                return response;
+            }
             DrivenAttempt::Continue(kept) => kept,
             DrivenAttempt::Break(AttemptCarry {
                 request: next_request,
@@ -226,6 +243,12 @@ pub(in crate::gateway::execution) async fn execute_request(
                 requested_model: next_requested_model,
                 prompt_affinity_key: _,
             }) => {
+                release_encrypted_context_repair_owner(
+                    &mut repairs,
+                    &mut response_affinity_key,
+                    &mut requires_affinity_owner,
+                    &runtime,
+                );
                 request = next_request;
                 request_id = next_request_id;
                 requested_model = next_requested_model;
@@ -238,8 +261,15 @@ pub(in crate::gateway::execution) async fn execute_request(
         prompt_affinity_key = kept.prompt_affinity_key;
     }
 
+    release_encrypted_context_repair_owner(
+        &mut repairs,
+        &mut response_affinity_key,
+        &mut requires_affinity_owner,
+        &runtime,
+    );
+
     if allow_previous_response_reset
-        && request_has_previous_response_id(wire_api, &request)
+        && request_has_previous_response_id(client_wire_api, &request)
         && confirmed_response_missing
     {
         let mut reset_request = request;
@@ -264,11 +294,12 @@ pub(in crate::gateway::execution) async fn execute_request(
                 client_context_id,
                 response_affinity_key: None,
                 requires_affinity_owner: false,
-                wire_api,
+                client_wire_api,
                 responses_lite,
                 allow_previous_response_reset: false,
                 attempt_offset: attempt,
                 budget,
+                transport,
             }))
             .await;
         }
@@ -292,7 +323,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         runtime: &runtime,
         key: &key,
         resolved_model: &resolved_model,
-        protocols: candidate_protocols(wire_api),
+        protocols: candidate_protocols(client_wire_api),
         operation: crate::scheduler::rotation::RotationOperation::Text,
         exclusions: &HashSet::new(),
         response_affinity_key: response_affinity_key.as_deref(),

@@ -27,7 +27,7 @@ export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: Quo
   // Fast/priority is a request-speed mode, not a second user-facing quota.
   // Keep the provider signal in the snapshot for diagnostics, but do not show
   // it beside the primary and feature-specific quota windows.
-  const supplemental = (snapshot.supplemental ?? []).filter((item) => !isFastSupplementalQuota(item));
+  const supplemental = (snapshot.supplemental ?? []).filter((supplementalQuota) => !isFastSupplementalQuota(supplementalQuota));
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => {
       const window = snapshot[kind];
@@ -37,6 +37,6 @@ export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: Quo
     ...supplemental,
   ];
   if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} concise={concise} {...(nowMs !== undefined ? { nowMs } : {})} /></div>;
-  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} concise={concise} {...(item.label ? { label: `${formatSupplementalQuotaLabel(item.label, item.serviceTier, t)} · ${quotaWindowLabel(item.window, item.window.kind, t)}` } : {})} {...(nowMs !== undefined ? { nowMs } : {})} />)}</div>;
+  return <div className="quota-stack">{reported.map((quotaEntry) => <QuotaMeter key={quotaEntry.id} window={quotaEntry.window} concise={concise} {...(quotaEntry.label ? { label: `${formatSupplementalQuotaLabel(quotaEntry.label, quotaEntry.serviceTier, t)} · ${quotaWindowLabel(quotaEntry.window, quotaEntry.window.kind, t)}` } : {})} {...(nowMs !== undefined ? { nowMs } : {})} />)}</div>;
 }
 

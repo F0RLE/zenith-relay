@@ -100,6 +100,8 @@ impl fmt::Debug for AccountExportRequest {
 
 #[derive(Clone)]
 pub struct AccountExportCredential {
+    pub oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
+    pub basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
     pub label: String,
     pub email: Option<String>,
     pub phone: Option<String>,
@@ -118,7 +120,7 @@ pub struct AccountExportCredential {
     pub created_at_ms: u64,
     pub priority: i32,
     pub enabled: bool,
-    /// User metadata preserved by the Cockpit portable format.
+    /// User metadata retained for imported account records.
     pub tags: BTreeSet<String>,
 }
 
@@ -126,6 +128,7 @@ impl fmt::Debug for AccountExportCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AccountExportCredential")
+            .field("oauth_client_kind", &self.oauth_client_kind)
             .field("label", &"[redacted]")
             .field("email", &self.email.as_ref().map(|_| "[redacted]"))
             .field("phone", &self.phone.as_ref().map(|_| "[redacted]"))

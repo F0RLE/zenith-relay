@@ -7,7 +7,8 @@ use super::super::{
 use super::{AccountRuntimeParts, SourceRuntimeParts};
 use crate::pricing::PricingCatalog;
 use crate::providers::chatgpt::{
-    CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth, BASIS_POINTS_RESPONSES_URL,
+    CodexIdentityEnvelope, OAuthClientKind, RuntimeChatGptAccount, RuntimeChatGptAuth,
+    BASIS_POINTS_RESPONSES_URL,
 };
 use crate::{
     CandidateKind, Error, ModelRegistry, PoolScheduler, Result, RuntimeCandidate, WireApi,
@@ -37,6 +38,13 @@ pub(super) fn build_accounts(
         require_runtime_value("account candidate id", &account.id)?;
         require_runtime_value("account source id", &account.source_id)?;
         require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
+        let excel = account.oauth_client_kind == OAuthClientKind::ExcelBps;
+        if excel && account_auth.is_some_and(|auth| auth.agent_identities.contains_key(&account.id))
+        {
+            return Err(Error::Validation(
+                "Excel OAuth cannot use ChatGPT Agent Identity".into(),
+            ));
+        }
         if account.weight == 0 {
             return Err(Error::Validation(
                 "account weight must be at least one".to_string(),
@@ -68,8 +76,15 @@ pub(super) fn build_accounts(
             .map_err(|message| Error::Validation(message.to_string()))?;
         let mut published_models = account.models.clone();
         let models = normalized_set(account.models.iter());
-        let image_main_model =
-            select_image_main_model_with_catalog(&models, image_base_model, image_pricing_catalog);
+        let image_main_model = (!excel)
+            .then(|| {
+                select_image_main_model_with_catalog(
+                    &models,
+                    image_base_model,
+                    image_pricing_catalog,
+                )
+            })
+            .flatten();
         let mut candidate_models = models.clone();
         if image_main_model.is_some() {
             candidate_models.insert(IMAGE_API_MODEL.to_string());
@@ -111,13 +126,15 @@ pub(super) fn build_accounts(
         executors.insert(
             account.id.clone(),
             ChatGptAccountExecutor {
+                oauth_client_kind: account.oauth_client_kind,
                 id: account.id,
                 source_id: account.source_id,
                 chatgpt_account_id: account.chatgpt_account_id,
+                chatgpt_user_id: account.chatgpt_user_id,
+                basis_points_headers: account.basis_points_headers,
                 identity,
                 responses_url,
                 basis_points_url,
-                basis_points_enabled: AtomicBool::new(account.basis_points_enabled),
                 model_inventory: RwLock::new(AccountModelInventory {
                     configured_models: models,
                     image_main_model,
@@ -132,6 +149,8 @@ pub(super) fn build_accounts(
                 agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
                 agent_identity_revision: AtomicU64::new(0),
                 agent_task_lock: tokio::sync::Mutex::new(()),
+                basis_points_access: RwLock::new(None),
+                basis_points_access_refresh: tokio::sync::Mutex::new(()),
                 routing_cookies: super::super::routing_cookies::RoutingCookies::default(),
             },
         );

@@ -1,6 +1,6 @@
 use crate::{
     ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, PriceSource,
-    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, WireApi,
+    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, UsageTransport, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -203,6 +203,8 @@ pub struct UsageQuery {
     pub model_query: Option<String>,
     pub source_or_account_query: Option<String>,
     pub wire_api: Option<WireApi>,
+    #[serde(default)]
+    pub transport: Option<UsageTransport>,
     pub success: Option<bool>,
     pub error_category: Option<String>,
     pub request_id_query: Option<String>,
@@ -246,7 +248,9 @@ impl UsageQuery {
         let (page, page_size) = self.normalized_page();
         self.page = page;
         self.page_size = page_size;
-        self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
+        self.bucket_ms = self
+            .bucket_ms
+            .filter(|bucket_duration_ms| *bucket_duration_ms >= 60_000);
     }
 
     pub fn includes_models(&self) -> bool {

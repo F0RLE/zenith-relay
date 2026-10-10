@@ -28,7 +28,7 @@ pub(super) struct UpstreamFailureInput<'a> {
 
 /// Fields that survive from the failed attempt into repair and settlement.
 pub(super) struct RejectionCarry<'a> {
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) has_previous_response_id: bool,
@@ -72,7 +72,9 @@ pub(super) struct CollectedRejection<'a> {
 
 /// Classify one unsuccessful upstream response. Repairs and recoverable route
 /// failures continue the attempt loop; a terminal response leaves it.
-pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> FailureStep {
+pub(super) async fn handle_upstream_failure(
+    upstream_failure_input: UpstreamFailureInput<'_>,
+) -> FailureStep {
     let UpstreamFailureInput {
         upstream,
         status,
@@ -90,7 +92,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         started,
         carry:
             RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
@@ -113,7 +115,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
                 account_route,
                 forwarded_headers,
             },
-    } = input;
+    } = upstream_failure_input;
     let mut event = usage_event(
         UsageAttempt {
             request_id,
@@ -129,26 +131,28 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         None,
         started.elapsed().as_millis() as u64,
     );
-    let bytes = match crate::transport::collect_limited(
+    let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
+    let bytes = match crate::transport::collect_with_progress(
         upstream,
-        crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+        if basis_points {
+            crate::transport::basis_points_progress_timeout()
+        } else {
+            None
+        },
+        |event| basis_points && crate::gateway::response::stop_basis_points_event(event, None),
     )
     .await
     {
         Ok(bytes) => bytes,
-        Err(_) if retryable_status(status, has_previous_response_id) => {
+        Err(error)
+            if !basis_points && retryable_route_status(route, status, has_previous_response_id) =>
+        {
             let failure = AttemptFailure::status_with_body(status, None);
+            populate_tokens(&mut event, &error.bytes);
             event.error_category = Some(failure.category.to_string());
-            let state = settle_status_failure(
-                runtime,
-                lease,
-                source_model,
-                status,
-                failure.category,
-                response_headers,
-                None,
-            );
-            apply_failure_state(&mut event, state);
+            let failure_state =
+                settle_route_failure(runtime, lease, route, &failure, response_headers);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;
@@ -156,9 +160,21 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         }
         Err(error) => {
             lease.settle_rotation_unknown(now_ms());
-            return FailureStep::Respond(upstream_body_error_response(
-                runtime, event, started, error,
-            ));
+            populate_tokens(&mut event, &error.bytes);
+            if error.timed_out {
+                let failure = AttemptFailure::stream(error_codes::STREAM_IDLE_TIMEOUT);
+                event.error_category = Some(failure.category.to_string());
+                event.http_status = failure.status.as_u16();
+                event.latency_ms = started.elapsed().as_millis() as u64;
+                emit_usage(runtime, event);
+                return FailureStep::Respond(attempt_error_response(
+                    failure,
+                    None,
+                    selected_error_origin,
+                    request_id,
+                ));
+            }
+            return FailureStep::Respond(upstream_body_error_response(runtime, event, started));
         }
     };
 
@@ -172,7 +188,7 @@ pub(super) async fn handle_upstream_failure(input: UpstreamFailureInput<'_>) -> 
         request_id,
         key,
         carry: RejectionCarry {
-            wire_api,
+            client_wire_api,
             request,
             adapter_is_passthrough,
             has_previous_response_id,

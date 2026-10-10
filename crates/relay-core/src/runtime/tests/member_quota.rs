@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
+fn cooldowns_share_one_upstream_across_client_bindings() {
     use crate::scheduler::CooldownReason;
     let mut configured = RuntimeSource::unrestricted(source("multi", "synthetic", &["test"]));
     configured.protocol_config.capabilities = vec![
@@ -31,7 +31,7 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    let route_upstreams = runtime
+    let binding_protocols = runtime
         .source_candidate_bindings
         .iter()
         .filter(|(_, binding)| binding.source_id == "multi")
@@ -42,22 +42,22 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(route_upstreams.len(), WireApi::ALL.len());
-    let seed_upstream = route_upstreams
+    assert_eq!(binding_protocols.len(), WireApi::ALL.len());
+    let selected_protocol = binding_protocols
         .iter()
         .find(|(id, _)| id == "multi")
         .map(|(_, upstream)| *upstream)
         .unwrap();
-    assert!(route_upstreams
+    assert!(binding_protocols
         .iter()
-        .any(|(id, upstream)| id != "multi" && *upstream == seed_upstream));
-    assert!(route_upstreams
+        .any(|(id, protocol)| id != "multi" && *protocol == selected_protocol));
+    assert!(binding_protocols
         .iter()
-        .any(|(_, upstream)| *upstream != seed_upstream));
-    for (reason, scope, shared) in [
-        (CooldownReason::Mandatory, "test", false),
-        (CooldownReason::RateLimit, "test", true),
-        (CooldownReason::Mandatory, "*", true),
+        .all(|(_, protocol)| *protocol == selected_protocol));
+    for (reason, scope) in [
+        (CooldownReason::Mandatory, "test"),
+        (CooldownReason::RateLimit, "test"),
+        (CooldownReason::Mandatory, "*"),
     ] {
         assert!(runtime.set_cooldown_with_reason_for_model_at(
             "multi",
@@ -69,13 +69,13 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
-        for (id, upstream) in &route_upstreams {
+        for (id, _) in &binding_protocols {
             let cooled = scheduler
                 .candidate(id)
                 .unwrap()
                 .cooldowns
                 .contains_key(scope);
-            assert_eq!(cooled, shared || *upstream == seed_upstream, "{id}");
+            assert!(cooled, "{id} should share the selected upstream cooldown");
             scheduler.clear_cooldown(id, scope);
         }
     }
@@ -460,6 +460,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,
@@ -532,6 +533,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,

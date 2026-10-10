@@ -58,10 +58,10 @@ impl<'de> Deserialize<'de> for ToolPolicy {
             _legacy_automatic_schema_bytes_threshold: Option<serde::de::IgnoredAny>,
         }
 
-        let raw = RawToolPolicy::deserialize(deserializer)?;
+        let raw_policy = RawToolPolicy::deserialize(deserializer)?;
         let defaults = Self::default();
         Ok(Self {
-            mode: raw.mode.unwrap_or(defaults.mode),
+            mode: raw_policy.mode.unwrap_or(defaults.mode),
         })
     }
 }

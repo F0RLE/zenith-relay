@@ -55,7 +55,9 @@ impl GatewayRuntime {
                 };
                 let (reserved, busy) = if let Some(busy) = saturated_busy {
                     (None, busy)
-                } else if turn.is_none_or(|id| id == request.budget.request_id()) {
+                } else if turn
+                    .is_none_or(|turn_request_id| turn_request_id == request.budget.request_id())
+                {
                     self.try_reserve_admission(&request, now_ms)
                 } else {
                     let scope = request.key.scope_read();

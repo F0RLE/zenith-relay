@@ -43,13 +43,13 @@ export function tokenSpeed(sample: TokenSpeedSample) {
 }
 
 export function averageTokenSpeed(samples: TokenSpeedSample[]) {
-  const totals = samples.reduce((result, sample) => {
+  const totals = samples.reduce((speedTotals, sample) => {
     const measured = measureTokenSpeed(sample);
     if (measured) {
-      result.outputTokens += measured.outputTokens;
-      result.durationMs += measured.durationMs;
+      speedTotals.outputTokens += measured.outputTokens;
+      speedTotals.durationMs += measured.durationMs;
     }
-    return result;
+    return speedTotals;
   }, { outputTokens: 0, durationMs: 0 });
   return observedTokensPerSecond(totals.outputTokens, totals.durationMs);
 }
@@ -64,6 +64,6 @@ export function latestLocalAccountSpeeds(events: LocalUsage[]) {
   return speeds;
 }
 
-export function formatTokenSpeed(value: number | null | undefined, locale: string, unit: string) {
-  return value == null ? "-" : `${formatNumber(value, locale, { maximumFractionDigits: 1 })} ${unit}`;
+export function formatTokenSpeed(tokensPerSecond: number | null | undefined, locale: string, unit: string) {
+  return tokensPerSecond == null ? "-" : `${formatNumber(tokensPerSecond, locale, { maximumFractionDigits: 1 })} ${unit}`;
 }

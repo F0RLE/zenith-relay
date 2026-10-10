@@ -57,13 +57,12 @@ impl<S> UsageStream<S> {
         });
         let message = match category {
             error_codes::STREAM_INVALID => "Upstream returned an invalid streaming event",
-            error_codes::STREAM_EVENT_TOO_LARGE => {
-                "Upstream streaming event exceeded the size limit"
-            }
             error_codes::STREAM_INCOMPLETE => "Upstream stream ended before response.completed",
             _ => "Upstream stream disconnected before completion",
         };
-        let payload = json!({
+        let origin = Self::stream_error_origin(event).for_category(category);
+        let message = origin.prefix_message(message);
+        let failure_event = json!({
             "type": "response.failed",
             "response": {
                 "id": response_id,
@@ -76,25 +75,25 @@ impl<S> UsageStream<S> {
                     "code": category,
                     "message": message,
                     "zenith_relay": {
-                        "origin": Self::stream_error_origin(event).as_str(),
+                        "origin": origin.as_str(),
                         "category": category,
                         "request_id": &event.request_id,
                     },
                 }
             }
         });
-        let Ok(payload) = serde_json::to_vec(&payload) else {
+        let Ok(failure_event_bytes) = serde_json::to_vec(&failure_event) else {
             return false;
         };
-        let mut frame = Vec::with_capacity(payload.len() + 44);
+        let mut frame = Vec::with_capacity(failure_event_bytes.len() + 44);
         frame.extend_from_slice(b"event: response.failed\ndata: ");
-        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(&failure_event_bytes);
         frame.extend_from_slice(b"\n\n");
         self.output_pending.push_back(Bytes::from(frame));
         true
     }
 
-    fn stream_error_origin(event: &UsageEvent) -> crate::ErrorOrigin {
+    pub(super) fn stream_error_origin(event: &UsageEvent) -> crate::ErrorOrigin {
         if event.account_id.is_some() {
             crate::ErrorOrigin::Account
         } else {
@@ -113,29 +112,8 @@ impl<S> UsageStream<S> {
         if self.terminated {
             return false;
         }
-        if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
-            self.sse_pending.clear();
-            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-            return false;
-        }
         self.sse_pending.extend_from_slice(bytes);
         true
-    }
-
-    fn consume_aligned_response_deltas<'a>(&mut self, bytes: &'a [u8]) -> Option<&'a [u8]> {
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let Some(end) = crate::protocol::sse_event_end(&bytes[offset..]) else {
-                return Some(&bytes[offset..]);
-            };
-            let frame = &bytes[offset..offset + end];
-            let Some(delta) = fast_response_delta(frame) else {
-                return Some(&bytes[offset..]);
-            };
-            self.apply_fast_response_delta(delta);
-            offset += end;
-        }
-        None
     }
 
     fn apply_fast_response_delta(&mut self, delta: FastResponseDelta) {
@@ -149,68 +127,129 @@ impl<S> UsageStream<S> {
                 .as_ref()
                 .is_some_and(|event| event.ttft_ms.is_none())
         {
-            if let Some(current) = self.event.as_mut() {
-                current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
+            if let Some(usage_event) = self.event.as_mut() {
+                usage_event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
             }
         }
     }
 
-    pub(in crate::gateway::streaming) fn ingest_sse(&mut self, bytes: &[u8]) -> (bool, usize) {
-        if self.terminated {
-            return (false, 0);
-        }
-        if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
-            self.sse_pending.clear();
-            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-            return (false, 0);
-        }
-        let pending = if self.sse_pending.is_empty() {
-            match self.consume_aligned_response_deltas(bytes) {
-                None => return (true, bytes.len()),
-                Some(rest) => rest,
+    pub(super) fn forward_sse_bytes(
+        &mut self,
+        bytes: &[u8],
+        origin: crate::ErrorOrigin,
+    ) -> Vec<u8> {
+        self.sse_forward_pending.extend_from_slice(bytes);
+        let mut forwarded = Vec::with_capacity(bytes.len());
+        loop {
+            match self.sse_forward_mode {
+                super::SseForwardMode::Normal => {
+                    let Some(end) = crate::protocol::sse_event_end(&self.sse_forward_pending)
+                    else {
+                        forwarded.append(&mut self.sse_forward_pending);
+                        break;
+                    };
+                    let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
+                    let terminal = parse_sse_event(&event);
+                    let is_terminal = terminal.outcome.is_some();
+                    forwarded.extend(prefix_stream_error_event(&event, &terminal, origin));
+                    self.sse_forward_mode = super::SseForwardMode::Detect;
+                    if is_terminal {
+                        self.sse_forward_pending.clear();
+                        break;
+                    }
+                }
+                super::SseForwardMode::Error => {
+                    let Some(end) = crate::protocol::sse_event_end(&self.sse_forward_pending)
+                    else {
+                        break;
+                    };
+                    let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
+                    let terminal = parse_sse_event(&event);
+                    let is_terminal = terminal.outcome.is_some();
+                    forwarded.extend(prefix_stream_error_event(&event, &terminal, origin));
+                    self.sse_forward_mode = super::SseForwardMode::Detect;
+                    if is_terminal {
+                        self.sse_forward_pending.clear();
+                        break;
+                    }
+                }
+                super::SseForwardMode::Detect => {
+                    match classify_sse_prefix(&self.sse_forward_pending) {
+                        Some(true) => {
+                            self.sse_forward_mode = super::SseForwardMode::Error;
+                        }
+                        Some(false) => {
+                            self.sse_forward_mode = super::SseForwardMode::Normal;
+                        }
+                        None => {
+                            let end = crate::protocol::sse_event_end(&self.sse_forward_pending);
+                            let Some(end) = end else {
+                                if may_be_terminal_event_header_prefix(&self.sse_forward_pending) {
+                                    break;
+                                }
+                                // Preserve low-latency forwarding when an
+                                // ordinary data-only frame has not yet exposed
+                                // a terminal marker. Standard terminal SSE
+                                // events are held as soon as their `event:`
+                                // name identifies them.
+                                self.sse_forward_mode = super::SseForwardMode::Normal;
+                                forwarded.append(&mut self.sse_forward_pending);
+                                break;
+                            };
+                            let event = self.sse_forward_pending.drain(..end).collect::<Vec<_>>();
+                            let terminal = parse_sse_event(&event);
+                            let is_terminal = terminal.outcome.is_some();
+                            forwarded.extend(prefix_stream_error_event(&event, &terminal, origin));
+                            if is_terminal {
+                                self.sse_forward_pending.clear();
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-        } else {
-            bytes
-        };
-        self.sse_pending.extend_from_slice(pending);
+        }
+        forwarded
+    }
+
+    pub(in crate::gateway::streaming) fn ingest_sse(&mut self, bytes: &[u8]) -> bool {
+        if self.terminated {
+            return false;
+        }
+        self.sse_pending.extend_from_slice(bytes);
         while let Some(event) = crate::protocol::take_sse_event(&mut self.sse_pending) {
             if let Some(delta) = fast_response_delta(&event) {
                 self.apply_fast_response_delta(delta);
                 continue;
             }
-            if event.len() > MAX_SSE_EVENT_BYTES {
-                self.sse_pending.clear();
-                self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-                return (false, 0);
-            }
             let terminal = parse_sse_event(&event);
             // Reported consumption remains real even when identity validation
             // rejects the response before it can reach the client.
             if let Some(usage) = terminal.usage {
-                if let Some(current) = self.event.as_mut() {
-                    apply_usage(current, &usage);
+                if let Some(usage_event) = self.event.as_mut() {
+                    apply_usage(usage_event, &usage);
                 }
             }
             if let Some(service_tier) = terminal.applied_service_tier {
-                if let Some(current) = self.event.as_mut() {
-                    current.applied_service_tier = Some(service_tier);
+                if let Some(usage_event) = self.event.as_mut() {
+                    usage_event.applied_service_tier = Some(service_tier);
                 }
             }
             if self.expected_model.as_deref().is_some_and(|expected| {
                 terminal
-                    .payload
+                    .event_payload
                     .as_ref()
-                    .is_some_and(|value| served_model_is_rejected(value, expected))
+                    .is_some_and(|served_model| served_model_is_rejected(served_model, expected))
             }) {
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::UPSTREAM_ROUTE_DEGRADED);
-                return (false, 0);
+                return false;
             }
             if terminal.has_data && !terminal.valid {
                 self.set_upstream_error(terminal.upstream_error);
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::STREAM_INVALID);
-                return (false, 0);
+                return false;
             }
             // A terminal marker from another wire protocol cannot prove this
             // request or its continuation state completed successfully.
@@ -218,29 +257,42 @@ impl<S> UsageStream<S> {
                 .event
                 .as_ref()
                 .is_some_and(|event| match event.wire_api {
-                    WireApi::Responses => terminal.payload.as_ref().is_some_and(|payload| {
-                        matches!(
-                            payload.get("type").and_then(Value::as_str),
-                            Some("response.completed" | "response.done")
-                        )
-                    }),
-                    WireApi::ChatCompletions => terminal.payload.is_none(),
-                    WireApi::Messages => terminal.payload.as_ref().is_some_and(|payload| {
-                        payload.get("type").and_then(Value::as_str) == Some("message_stop")
-                    }),
+                    WireApi::Responses => {
+                        terminal
+                            .event_payload
+                            .as_ref()
+                            .is_some_and(|terminal_payload| {
+                                matches!(
+                                    terminal_payload.get("type").and_then(Value::as_str),
+                                    Some("response.completed" | "response.done")
+                                )
+                            })
+                    }
+                    WireApi::ChatCompletions => terminal.event_payload.is_none(),
+                    WireApi::Messages => {
+                        terminal
+                            .event_payload
+                            .as_ref()
+                            .is_some_and(|terminal_payload| {
+                                terminal_payload.get("type").and_then(Value::as_str)
+                                    == Some("message_stop")
+                            })
+                    }
                     WireApi::Gemini => false,
                 });
             if terminal.outcome == Some(TerminalOutcome::Success) && !valid_terminal {
                 self.sse_pending.clear();
                 self.fail_stream(error_codes::STREAM_INCOMPLETE);
-                return (false, 0);
+                return false;
             }
-            if let Some(payload) = terminal.payload.as_ref() {
-                if let Some(current) = self.event.as_mut() {
-                    current.tool_use.observe_stream_payload(payload);
+            if let Some(terminal_event_payload) = terminal.event_payload.as_ref() {
+                if let Some(usage_event) = self.event.as_mut() {
+                    usage_event
+                        .tool_use
+                        .observe_stream_payload(terminal_event_payload);
                 }
                 if self.native_response.is_some() {
-                    self.native_replay_capture.observe(payload);
+                    self.native_replay_capture.observe(terminal_event_payload);
                 }
             } else if terminal.is_compaction {
                 self.native_replay_capture.mark_unmaterialized();
@@ -251,8 +303,8 @@ impl<S> UsageStream<S> {
                     .as_ref()
                     .is_some_and(|event| event.ttft_ms.is_none())
             {
-                if let Some(current) = self.event.as_mut() {
-                    current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
+                if let Some(usage_event) = self.event.as_mut() {
+                    usage_event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
                 }
             }
             if terminal.response_id.is_some() {
@@ -292,17 +344,11 @@ impl<S> UsageStream<S> {
                 None => {}
             }
             if self.terminated {
-                let forward_len = bytes.len().saturating_sub(self.sse_pending.len());
                 self.sse_pending.clear();
-                return (true, forward_len);
+                return true;
             }
         }
-        if self.sse_pending.len() > MAX_SSE_EVENT_BYTES {
-            self.sse_pending.clear();
-            self.fail_stream(error_codes::STREAM_EVENT_TOO_LARGE);
-            return (false, 0);
-        }
-        (true, bytes.len())
+        true
     }
 
     /// Gemini's native SSE ends at EOF rather than with `response.completed`.
@@ -339,17 +385,21 @@ impl<S> UsageStream<S> {
             }
             // Gemini has no generic [DONE] or Responses-style terminal event.
             // Only a candidate's own finish reason proves a completed generation.
-            if terminal.payload.as_ref().is_some_and(|payload| {
-                payload
-                    .pointer("/candidates/0/finishReason")
-                    .and_then(Value::as_str)
-                    == Some("STOP")
-            }) {
+            if terminal
+                .event_payload
+                .as_ref()
+                .is_some_and(|terminal_payload| {
+                    terminal_payload
+                        .pointer("/candidates/0/finishReason")
+                        .and_then(Value::as_str)
+                        == Some("STOP")
+                })
+            {
                 self.native_gemini_finished = true;
             }
             if let Some(usage) = terminal.usage {
-                if let Some(current) = self.event.as_mut() {
-                    apply_usage(current, &usage);
+                if let Some(usage_event) = self.event.as_mut() {
+                    apply_usage(usage_event, &usage);
                 }
             }
             if terminal.has_output_delta
@@ -358,8 +408,8 @@ impl<S> UsageStream<S> {
                     .as_ref()
                     .is_some_and(|event| event.ttft_ms.is_none())
             {
-                if let Some(current) = self.event.as_mut() {
-                    current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
+                if let Some(usage_event) = self.event.as_mut() {
+                    usage_event.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
                 }
             }
         }
@@ -367,23 +417,252 @@ impl<S> UsageStream<S> {
     }
 
     fn set_upstream_error(&mut self, details: Option<crate::usage::UpstreamErrorDetails>) {
-        if let Some(current) = self.event.as_mut() {
-            current.upstream_error = details.map(|mut details| {
-                details.http_status = Some(current.http_status);
+        if let Some(usage_event) = self.event.as_mut() {
+            usage_event.upstream_error = details.map(|mut details| {
+                details.http_status = Some(usage_event.http_status);
                 details
             });
         }
     }
 
-    fn capture_native_response(&mut self, response: Option<Value>) {
+    fn capture_native_response(&mut self, completed_response: Option<Value>) {
         let Some(shared) = self.native_response.as_ref() else {
             return;
         };
-        let Some(response) = std::mem::take(&mut self.native_replay_capture)
-            .finish(response, self.response_id.as_deref())
+        let Some(replayed_response) = std::mem::take(&mut self.native_replay_capture)
+            .finish(completed_response, self.response_id.as_deref())
         else {
             return;
         };
-        *crate::poison::mutex(shared) = Some(response);
+        *crate::poison::mutex(shared) = Some(replayed_response);
+    }
+}
+
+fn classify_sse_prefix(bytes: &[u8]) -> Option<bool> {
+    let mut offset = 0;
+    let mut data_bytes = Vec::new();
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        let Some(end) = remaining
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n'))
+        else {
+            let line = remaining;
+            if line.starts_with(b":") {
+                return Some(false);
+            }
+            if let Some(event_name) = line.strip_prefix(b"event:") {
+                if is_terminal_sse_event(event_name.trim_ascii()) {
+                    return Some(true);
+                }
+            }
+            if let Some(data_line) = line.strip_prefix(b"data:") {
+                if !data_bytes.is_empty() {
+                    data_bytes.push(b'\n');
+                }
+                data_bytes.extend_from_slice(data_line.strip_prefix(b" ").unwrap_or(data_line));
+                return classify_json_error_prefix(&data_bytes);
+            }
+            return None;
+        };
+        let line = &remaining[..end];
+        let line_ending = if remaining[end] == b'\r' && remaining.get(end + 1) == Some(&b'\n') {
+            2
+        } else {
+            1
+        };
+        offset += end + line_ending;
+
+        if line.starts_with(b":") {
+            return Some(false);
+        }
+        if line.is_empty() {
+            return Some(false);
+        }
+        if let Some(event_name) = line.strip_prefix(b"event:") {
+            if is_terminal_sse_event(event_name.trim_ascii()) {
+                return Some(true);
+            }
+        } else if let Some(data_line) = line.strip_prefix(b"data:") {
+            if !data_bytes.is_empty() {
+                data_bytes.push(b'\n');
+            }
+            data_bytes.extend_from_slice(data_line.strip_prefix(b" ").unwrap_or(data_line));
+            if let Some(is_error) = classify_json_error_prefix(&data_bytes) {
+                return Some(is_error);
+            }
+        }
+    }
+    None
+}
+
+fn is_terminal_sse_event(event: &[u8]) -> bool {
+    matches!(
+        event,
+        b"error"
+            | b"response.failed"
+            | b"response.incomplete"
+            | b"response.cancelled"
+            | b"response.canceled"
+            | b"response.completed"
+            | b"response.done"
+    )
+}
+
+fn may_be_terminal_event_header_prefix(bytes: &[u8]) -> bool {
+    let Some(line_end) = bytes.iter().position(|byte| matches!(byte, b'\r' | b'\n')) else {
+        if b"event:".starts_with(bytes) {
+            return true;
+        }
+        let Some(event_name) = bytes.strip_prefix(b"event:") else {
+            return false;
+        };
+        let event_name = event_name.trim_ascii();
+        return [
+            b"error".as_slice(),
+            b"response.failed".as_slice(),
+            b"response.incomplete".as_slice(),
+            b"response.cancelled".as_slice(),
+            b"response.canceled".as_slice(),
+            b"response.completed".as_slice(),
+            b"response.done".as_slice(),
+        ]
+        .into_iter()
+        .any(|event| event.starts_with(event_name));
+    };
+    bytes[..line_end]
+        .strip_prefix(b"event:")
+        .is_some_and(|event_name| is_terminal_sse_event(event_name.trim_ascii()))
+}
+
+fn classify_json_error_prefix(bytes: &[u8]) -> Option<bool> {
+    let mut offset = skip_ascii_whitespace(bytes, 0);
+    if offset == bytes.len() {
+        return None;
+    }
+    if bytes[offset] != b'{' {
+        return Some(false);
+    }
+    offset = skip_ascii_whitespace(bytes, offset + 1);
+    if offset == bytes.len() {
+        return None;
+    }
+    if bytes[offset] != b'"' {
+        return Some(false);
+    }
+    let (key, consumed) = read_json_string_prefix(&bytes[offset..])?;
+    let key = key?;
+    offset = skip_ascii_whitespace(bytes, offset + consumed);
+    if offset == bytes.len() {
+        return None;
+    }
+    if bytes[offset] != b':' {
+        return Some(false);
+    }
+    if key == b"error" || key == b"error_description" {
+        return Some(true);
+    }
+    if key != b"type" {
+        // Keep ambiguous objects buffered until the complete SSE event is
+        // available. A later `type` field may identify a terminal error.
+        return None;
+    }
+    offset = skip_ascii_whitespace(bytes, offset + 1);
+    if offset == bytes.len() {
+        return None;
+    }
+    if bytes[offset] != b'"' {
+        return Some(false);
+    }
+    let (event_type_bytes, _) = read_json_string_prefix(&bytes[offset..])?;
+    let Some(event_type_bytes) = event_type_bytes else {
+        return Some(false);
+    };
+    Some(matches!(
+        event_type_bytes,
+        b"error"
+            | b"response.failed"
+            | b"response.incomplete"
+            | b"response.cancelled"
+            | b"response.canceled"
+            | b"response.completed"
+            | b"response.done"
+    ))
+}
+
+fn read_json_string_prefix(bytes: &[u8]) -> Option<(Option<&[u8]>, usize)> {
+    if bytes.first() != Some(&b'"') {
+        return Some((None, 0));
+    }
+    let mut offset = 1;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'"' => return Some((Some(&bytes[1..offset]), offset + 1)),
+            b'\\' => {
+                // These protocol field names and event types are plain ASCII.
+                // If a provider escapes them, wait for the complete frame and
+                // let the full JSON parser decide its outcome.
+                if offset + 1 >= bytes.len() {
+                    return None;
+                }
+                return Some((None, 0));
+            }
+            byte if byte < 0x20 => return Some((None, 0)),
+            _ => offset += 1,
+        }
+    }
+    None
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut offset: usize) -> usize {
+    while bytes.get(offset).is_some_and(u8::is_ascii_whitespace) {
+        offset += 1;
+    }
+    offset
+}
+
+fn prefix_stream_error_event(
+    event: &[u8],
+    terminal: &super::TerminalEvent,
+    origin: crate::ErrorOrigin,
+) -> Vec<u8> {
+    if !matches!(
+        terminal.outcome,
+        Some(TerminalOutcome::Failure | TerminalOutcome::Incomplete)
+    ) {
+        return event.to_vec();
+    }
+    let Some(mut terminal_event_payload) = terminal.event_payload.clone() else {
+        return event.to_vec();
+    };
+    let category = terminal
+        .error_category
+        .unwrap_or(error_codes::RESPONSE_INCOMPLETE);
+    let origin = origin.for_category(category);
+    if !super::super::super::errors::prefix_error_value(&mut terminal_event_payload, origin) {
+        return event.to_vec();
+    }
+    let Ok(encoded_terminal_event) = serde_json::to_vec(&terminal_event_payload) else {
+        return event.to_vec();
+    };
+    let mut rewritten = Vec::with_capacity(event.len().saturating_add(origin.label().len() + 2));
+    let mut wrote_data = false;
+    for line in crate::protocol::sse_lines(event) {
+        if line.strip_prefix(b"data:").is_some() {
+            if !wrote_data {
+                rewritten.extend_from_slice(b"data: ");
+                rewritten.extend_from_slice(&encoded_terminal_event);
+                rewritten.push(b'\n');
+                wrote_data = true;
+            }
+        } else {
+            rewritten.extend_from_slice(line);
+            rewritten.push(b'\n');
+        }
+    }
+    if wrote_data {
+        rewritten
+    } else {
+        event.to_vec()
     }
 }

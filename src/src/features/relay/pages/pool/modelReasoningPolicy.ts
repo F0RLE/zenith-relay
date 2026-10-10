@@ -8,6 +8,6 @@ export function toggleReasoningLevel(levels: string[], level: string) {
   const normalized = normalizeReasoningEffort(level);
   if (!normalized) return levels;
   return levels.includes(normalized)
-    ? levels.filter((current) => current !== normalized)
+    ? levels.filter((level) => level !== normalized)
     : sortReasoningEfforts([...levels, normalized]);
 }

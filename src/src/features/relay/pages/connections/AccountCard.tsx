@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Check,
   Clock3,
@@ -19,10 +19,10 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { accountQuotaRefreshState, canLaunchCodexAccount, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import {
-  AccountPlanBadge,
+  AccountBadges,
   ActionMenu,
   ActionMenuItem,
   Button,
@@ -44,6 +44,7 @@ import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
 import { accountParticipates } from "./accountTableModel";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
+import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
 
 type AccountCardProps = {
   account: AccountSummary;
@@ -77,6 +78,8 @@ export function AccountCard({
   const { t } = useTranslation();
   const [notesOpen, setNotesOpen] = useState(false);
   const confirm = useConfirm();
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const membershipPending = useRef(false);
   const { mode, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
   const participation = usePendingFlag(accountParticipates(account));
   const enabledFlag = usePendingFlag(account.enabled);
@@ -109,6 +112,7 @@ export function AccountCard({
   const quotaStatus = accountQuotaRefreshState(account);
   const clientAuthWarning = account.clientAuthStatus === "login_required";
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
+  const canLaunch = canLaunchCodexAccount(account) && !onServer;
   const indicatorTone = onServer
     ? "info"
     : operationalStatus === "unavailable" || operationalStatus === "disabled"
@@ -125,12 +129,23 @@ export function AccountCard({
   const statusIndicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
 
-  const updateParticipation = (participate: boolean) => participation.select(participate, () => perform(
-    `pool-${account.id}`,
-    () => updatePoolMembership(mode, { accountIds: [account.id], sourceIds: [], inPool: participate }),
-    "feedback.saved",
-    { backgroundRefresh: true, uiLock: false },
-  ));
+  const updateParticipation = async (participate: boolean, bypassWarning = false) => {
+    if (membershipPending.current || participation.saving) return;
+    membershipPending.current = true;
+    try {
+      if (participate && !await confirmPoolAccounts([account], bypassWarning)) return;
+      const save = perform(
+        `pool-${account.id}`,
+        () => updatePoolMembership(mode, { accountIds: [account.id], sourceIds: [], inPool: participate }),
+        "feedback.saved",
+        { backgroundRefresh: true, uiLock: false },
+      );
+      participation.select(participate, () => save);
+      await save;
+    } finally {
+      membershipPending.current = false;
+    }
+  };
   const returnToComputer = async () => {
     if (!await confirm(t("accounts.returnToComputerConfirm", { name: account.label }), {
       title: t("accounts.returnToComputer"),
@@ -191,7 +206,7 @@ export function AccountCard({
           )}
         <div className="account-identity">
           <strong className={accountIdentitiesVisible ? "revealed" : undefined} data-relay-tooltip={account.label}>{account.label}</strong>
-          <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></div>
+          <div className="account-identity-meta"><AccountBadges planType={account.subscription.planType} oauthClientKind={account.oauthClientKind} unknown={t("common.unknown")} /></div>
         </div>
         <div className="account-card-header-actions">
           <ActionMenu className="account-row-menu">
@@ -264,7 +279,14 @@ export function AccountCard({
               className={participates ? "danger" : ""}
               label={poolActionLabel}
               icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
+              data-relay-context-action
+              disabled={participation.saving}
               onClick={() => void updateParticipation(!participates)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void updateParticipation(!participates, true);
+              }}
             />
           )}
           <IconButton
@@ -284,12 +306,16 @@ export function AccountCard({
             <IconButton
               label={t("accounts.launchAccount")}
               icon={<Play aria-hidden />}
-              disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`}
+              disabled={!canLaunch || busy === `launch-account-${account.id}`}
               title={onServer
                 ? t("accounts.onServerHint")
                 : !account.secretAvailable
                   ? t("accounts.credentialsUnavailable")
-                  : t("accounts.launchAccount")}
+                  : !account.enabled
+                    ? t("common.disabled")
+                  : !canLaunch
+                    ? accountErrorLabel(errorCode ?? account.routingBlockReason ?? "auth_requires_reauth", t)
+                    : t("accounts.launchAccount")}
               onClick={() => void activateCodexProfile(
                 `launch-account-${account.id}`,
                 () => relayCommands.launchCodexAccount(account.id),

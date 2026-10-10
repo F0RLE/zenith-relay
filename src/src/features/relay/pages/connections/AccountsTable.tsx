@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CircleAlert,
@@ -29,6 +29,7 @@ import {
   type AccountQuotaRefreshReport,
 } from "../../accountQuotaRefresh";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
+import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
 import {
   ActionMenu,
   ActionMenuItem,
@@ -76,7 +77,7 @@ export function AccountsTable({
   onExport,
 }: {
   query: string;
-  onQuery: (value: string) => void;
+  onQuery: (queryText: string) => void;
   canImport: boolean;
   canManageProxies: boolean;
   canExport: boolean;
@@ -88,6 +89,8 @@ export function AccountsTable({
   onExport: (accountIds: string[]) => void;
 }) {
   const { t, i18n } = useTranslation();
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const membershipPending = useRef(false);
   const {
     mode,
     runtime,
@@ -116,7 +119,7 @@ export function AccountsTable({
     account.subscription.activeUntilMs,
     account.quota.primary?.resetAtMs,
     account.quota.secondary?.resetAtMs,
-    ...(account.quota.supplemental ?? []).map((item) => item.window.resetAtMs),
+    ...(account.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),
     ...(account.inPool
       ? (runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder)?.modelRetries ?? []).map((retry) => retry.retryAtMs)
       : []),
@@ -137,12 +140,12 @@ export function AccountsTable({
     account.inPool ? runtimeCandidateForMember(account.id, "oauth_account", runtimeOrder) : undefined,
   ])), [allAccounts, runtimeOrder]);
   const activePlan = useMemo(() => activeAccountPlan(planFilter, plans, errorCount), [errorCount, planFilter, plans]);
-  useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
+  useEffect(() => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => allAccounts.some((account) => account.id === accountId))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
-    void relayCommands.onAccountTransferProgress((progress) => setTransfer((current) => current ? { ...current, progress } : null)).then((unlisten) => {
+  void relayCommands.onAccountTransferProgress((progress) => setTransfer((previousTransfer) => previousTransfer ? { ...previousTransfer, progress } : null)).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;
     }).catch(() => undefined);
@@ -176,10 +179,10 @@ export function AccountsTable({
     allSelected,
   } = useMemo(() => accountSelectionState(allAccounts, accounts, selected), [accounts, allAccounts, selected]);
   const visiblePlanCounts = useMemo(() => buildVisiblePlanCounts(accounts, unknownPlanLabel), [accounts, unknownPlanLabel]);
-  const participationOptions = useMemo(() => (["all", "included", "excluded"] as const).map((value) => {
-    const count = value === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (value === "included")).length;
-    const state = t(`accounts.participation.${value}`);
-    return { value, label: t("accounts.participationFilterOption", { state, count }), shortLabel: `${t("accounts.poolParticipation")}: ${state}` };
+  const participationOptions = useMemo(() => (["all", "included", "excluded"] as const).map((participationFilterValue) => {
+    const count = participationFilterValue === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (participationFilterValue === "included")).length;
+    const participationLabel = t(`accounts.participation.${participationFilterValue}`);
+    return { value: participationFilterValue, label: t("accounts.participationFilterOption", { state: participationLabel, count }), shortLabel: `${t("accounts.poolParticipation")}: ${participationLabel}` };
   }), [allAccounts, t]);
   const planFilterOptions = useMemo(() => [
     { value: "all", label: t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length }), shortLabel: `${t("accounts.plan")}: ${t("accounts.allPlans")}` },
@@ -207,18 +210,27 @@ export function AccountsTable({
       />
     );
   }
-  const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
+  const toggleSelected = (accountId: string) => setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.includes(accountId) ? previousSelectedAccountIds.filter((selectedAccountId) => selectedAccountId !== accountId) : [...previousSelectedAccountIds, accountId]);
   const toggleAllVisible = (checked: boolean) => setSelected(checked ? accounts.map((account) => account.id) : []);
-  const togglePlanGrouping = () => setGroupByPlan((current) => {
-    localStorage.setItem("relay.accountsGroupByPlan", String(!current));
-    return !current;
+  const togglePlanGrouping = () => setGroupByPlan((previousGroupByPlan) => {
+    localStorage.setItem("relay.accountsGroupByPlan", String(!previousGroupByPlan));
+    return !previousGroupByPlan;
   });
-  const updateSelectedParticipation = async (participate: boolean) => {
-    const ok = await perform("pool-membership-bulk", async () => {
-      const accountIds = selectedAccounts.map((account) => account.id);
-      await updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate });
-    }, "feedback.saved", { backgroundRefresh: true });
-    if (ok) setSelected([]);
+  const updateSelectedParticipation = async (participate: boolean, bypassWarning = false) => {
+    if (membershipPending.current) return;
+    membershipPending.current = true;
+    const accountsToUpdate = [...selectedAccounts];
+    try {
+      const accepted = !participate || await confirmPoolAccounts(accountsToUpdate, bypassWarning);
+      const accountIds = accountsToUpdate
+        .filter((account) => accepted || account.oauthClientKind === "excel_bps" || account.inPool)
+        .map((account) => account.id);
+      if (!accountIds.length) return;
+      const ok = await perform("pool-membership-bulk", () => updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate }), "feedback.saved", { backgroundRefresh: true });
+      if (ok) setSelected((previous) => previous.filter((id) => !accountIds.includes(id)));
+    } finally {
+      membershipPending.current = false;
+    }
   };
   const deleteAccounts = async (accountIds: string[], operation: string) => {
     const ok = await perform(operation, async () => {
@@ -233,7 +245,7 @@ export function AccountsTable({
       }
     }, "feedback.deleted", { backgroundRefresh: true });
     if (!ok) await refresh().catch(() => undefined);
-    if (ok) setSelected((current) => current.filter((id) => !accountIds.includes(id)));
+    if (ok) setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => !accountIds.includes(accountId)));
     return ok;
   };
   const deleteSelected = async () => {
@@ -331,9 +343,9 @@ export function AccountsTable({
               label={t("accounts.filterByParticipation")}
               value={participationFilter}
               options={participationOptions}
-              onChange={(value) => {
+              onChange={(participationValue) => {
                 setSelected([]);
-                setParticipationFilter(value as ParticipationFilter);
+                setParticipationFilter(participationValue as ParticipationFilter);
               }}
             />
             {plans.length > 1 ? (
@@ -342,9 +354,9 @@ export function AccountsTable({
                 label={t("accounts.filterByPlan")}
                 value={activePlan}
                 options={planFilterOptions}
-                onChange={(value) => {
+                onChange={(planId) => {
                   setSelected([]);
-                  setPlanFilter(value);
+                  setPlanFilter(planId);
                 }}
               />
             ) : null}
@@ -367,6 +379,12 @@ export function AccountsTable({
                 icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />}
                 disabled={busy === "pool-membership-bulk"}
                 onClick={() => void updateSelectedParticipation(true)}
+                data-relay-context-action
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void updateSelectedParticipation(true, true);
+                }}
               />
             ) : null}
             {canExcludeSelected ? (
@@ -524,7 +542,7 @@ function AccountMoveProgress({
       <progress max={Math.max(1, transfer.progress.total)} value={transfer.progress.completed} />
       <ul>
         {transfer.accountIds.map((accountId, index) => {
-          const account = accounts.find((item) => item.id === accountId);
+          const account = accounts.find((candidateAccount) => candidateAccount.id === accountId);
           const status = index < transfer.progress.completed ? "validated" : index === transfer.progress.completed ? "current" : "pending";
           return (
             <li key={accountId} data-transfer-state={status}>

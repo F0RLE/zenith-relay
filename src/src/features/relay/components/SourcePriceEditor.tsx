@@ -30,7 +30,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   const { t } = useTranslation();
   const { runtime } = useRelayState();
   const compactRows = presentation === "member" || presentation === "tab";
-  const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? [], { unknownOrder: "stable-id" });
+  const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? []);
   const catalogModels = new Map(
     (runtime?.gateway.models ?? []).map((model) => [modelIdKey(model.id), model]),
   );
@@ -78,15 +78,15 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     <div className="source-price-content">
       <div className="source-price-groups">
         {groups.map((group) => {
-        const anthropicWrites = group.provider === "anthropic" && group.items.some((model) => cacheWriteModels.has(modelIdKey(model)));
-        const openAiWrites = group.provider === "openai" && group.items.some((model) => {
+        const anthropicWrites = group.provider === "anthropic" && group.models.some((model) => cacheWriteModels.has(modelIdKey(model)));
+        const openAiWrites = group.provider === "openai" && group.models.some((model) => {
           const key = modelIdKey(model);
           return cacheWritePrices(model).fiveMinutes != null || Boolean(drafts[key]?.cacheWrite5m.trim());
         });
         const cacheWriteKind = anthropicWrites ? "anthropic" : openAiWrites ? "openai" : "none";
         const groupEnabledCount = modelSelectionEnabled
-          ? group.items.filter((model) => enabledModelIds.has(modelIdKey(model))).length
-          : group.items.length;
+          ? group.models.filter((model) => enabledModelIds.has(modelIdKey(model))).length
+          : group.models.length;
         const writeHeadings = cacheWriteKind === "anthropic"
           ? <><span>{t("sources.cacheWrite5mPrice")}</span><span>{t("sources.cacheWrite1hPrice")}</span></>
           : cacheWriteKind === "openai"
@@ -98,8 +98,8 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
             <strong>{group.provider === "other" ? t("modelGroups.other") : group.label}</strong>
             <span>
               {modelSelectionEnabled
-                ? `${t("common.enabled")}: ${groupEnabledCount}/${group.items.length}`
-                : t("sources.groupModelsCount", { count: group.items.length })}
+                ? `${t("common.enabled")}: ${groupEnabledCount}/${group.models.length}`
+                : t("sources.groupModelsCount", { count: group.models.length })}
             </span>
             <ChevronDown aria-hidden />
           </summary>
@@ -125,7 +125,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                 <span />
               </div>
             )}
-            {group.items.map((model) => {
+            {group.models.map((model) => {
               const key = modelIdKey(model);
               const draft = drafts[key];
               const inherited = detectedPrices.get(key) ?? catalogPrices.get(key);
@@ -159,7 +159,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                     value={draft?.input ?? ""}
                     placeholder={formatModelPricePlaceholder(inherited?.inputMicroUsdPerMillion)}
                     invalid={draft != null && parseEditableModelPrice(draft.input) == null}
-                    onChange={(value) => setField(key, "input", value)}
+                    onChange={(priceText) => setField(key, "input", priceText)}
                   />
                   <PriceInput
                     label={t("sources.outputPriceFor", { model })}
@@ -167,7 +167,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                     value={draft?.output ?? ""}
                     placeholder={formatModelPricePlaceholder(inherited?.outputMicroUsdPerMillion)}
                     invalid={draft != null && parseEditableModelPrice(draft.output) == null}
-                    onChange={(value) => setField(key, "output", value)}
+                    onChange={(priceText) => setField(key, "output", priceText)}
                   />
                   <PriceInput
                     label={t("sources.cachedInputPriceFor", { model })}
@@ -175,7 +175,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                     value={draft?.cached ?? ""}
                     placeholder={formatModelPricePlaceholder(inherited?.cachedInputMicroUsdPerMillion)}
                     invalid={draft != null && draft.cached.trim() !== "" && parseEditableModelPrice(draft.cached) == null}
-                    onChange={(value) => setField(key, "cached", value)}
+                    onChange={(priceText) => setField(key, "cached", priceText)}
                   />
                   {showAnthropicWrites ? <>
                     <PriceInput
@@ -184,7 +184,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                       value={draft?.cacheWrite5m ?? ""}
                       placeholder={formatModelPricePlaceholder(writePrices.fiveMinutes)}
                       invalid={draft != null && draft.cacheWrite5m.trim() !== "" && parseEditableModelPrice(draft.cacheWrite5m) == null}
-                      onChange={(value) => setField(key, "cacheWrite5m", value)}
+                      onChange={(priceText) => setField(key, "cacheWrite5m", priceText)}
                     />
                     <PriceInput
                       label={t("sources.cacheWrite1hPriceFor", { model })}
@@ -192,7 +192,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                       value={draft?.cacheWrite1h ?? ""}
                       placeholder={formatModelPricePlaceholder(writePrices.oneHour)}
                       invalid={draft != null && draft.cacheWrite1h.trim() !== "" && parseEditableModelPrice(draft.cacheWrite1h) == null}
-                      onChange={(value) => setField(key, "cacheWrite1h", value)}
+                      onChange={(priceText) => setField(key, "cacheWrite1h", priceText)}
                     />
                   </> : showOpenAiWrite ? (
                     <PriceInput
@@ -201,7 +201,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                       value={draft?.cacheWrite5m ?? ""}
                       placeholder={formatModelPricePlaceholder(writePrices.fiveMinutes)}
                       invalid={draft != null && draft.cacheWrite5m.trim() !== "" && parseEditableModelPrice(draft.cacheWrite5m) == null}
-                      onChange={(value) => setField(key, "cacheWrite5m", value)}
+                      onChange={(priceText) => setField(key, "cacheWrite5m", priceText)}
                     />
                   )
                     : cacheWriteKind === "anthropic" ? <><span className="source-price-empty" aria-hidden /><span className="source-price-empty" aria-hidden /></>
@@ -267,7 +267,7 @@ function PriceInput({
   value: string;
   placeholder: string;
   invalid: boolean;
-  onChange: (value: string) => void;
+  onChange: (priceText: string) => void;
 }) {
   return (
     <label className="source-price-field">

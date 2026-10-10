@@ -20,7 +20,7 @@ pub(super) fn retryable_disconnect_request(
         return None;
     }
     if in_flight.request.has_previous_response_id() {
-        return replay_in_flight_continuation(runtime, state);
+        return replay_in_flight_continuation(runtime, state, false);
     }
     if in_flight.request.has_unpaired_tool_output() {
         return None;
@@ -31,10 +31,12 @@ pub(super) fn retryable_disconnect_request(
 fn replay_in_flight_continuation(
     runtime: &GatewayRuntime,
     state: &BridgeState,
+    retain_owner: bool,
 ) -> Option<ClientRequest> {
     let in_flight = state.in_flight.as_ref()?;
-    let mut request = in_flight.request.clone();
-    request
+    let mut replay_request = in_flight.request.clone();
+    let owner_key = replay_request.response_affinity_key.clone();
+    replay_request
         .replay_native_continuation(
             runtime,
             &state.local_key_id,
@@ -42,7 +44,17 @@ fn replay_in_flight_continuation(
             &in_flight.route.source_model,
         )
         .ok()?
-        .then_some(request)
+        .then_some(replay_request)
+        .map(|mut replay_request| {
+            if retain_owner {
+                replay_request.response_affinity_key = owner_key;
+                crate::gateway::continuation::retain_materialized_continuation_owner(
+                    &mut replay_request.requires_affinity_owner,
+                    &mut replay_request.has_unpaired_tool_output,
+                );
+            }
+            replay_request
+        })
 }
 
 pub(super) fn retryable_terminal_request(
@@ -67,7 +79,7 @@ pub(super) fn retryable_terminal_request(
     let status = super::super::super::errors::canonical_upstream_status(status, category);
     if in_flight.request.has_previous_response_id() {
         return super::super::super::errors::retryable_failure(status, category, true)
-            .then(|| replay_in_flight_continuation(runtime, state))
+            .then(|| replay_in_flight_continuation(runtime, state, false))
             .flatten();
     }
     if in_flight.request.has_unpaired_tool_output()
@@ -92,27 +104,27 @@ pub(super) fn repairable_terminal_request(
         if in_flight.client_visible_output {
             return None;
         }
-        let request = replay_in_flight_continuation(runtime, state)?;
-        return Some(request);
+        let repaired_continuation = replay_in_flight_continuation(runtime, state, true)?;
+        return Some(repaired_continuation);
     }
-    let body = match message {
+    let upstream_message_bytes = match message {
         UpstreamMessage::Text(text) => Some(text.as_bytes()),
         UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
         _ => None,
     }?;
-    if !super::super::super::errors::responses_tool_call_links_rejected(body) {
+    if !super::super::super::errors::responses_tool_call_links_rejected(upstream_message_bytes) {
         return None;
     }
     let in_flight = state.in_flight.as_mut()?;
     if in_flight.client_visible_output || in_flight.legacy_call_id_repair_attempted {
         return None;
     }
-    let mut request = in_flight.request.clone();
-    if !request.repair_legacy_call_ids() {
+    let mut repair_request = in_flight.request.clone();
+    if !repair_request.repair_legacy_call_ids() {
         return None;
     }
     in_flight.legacy_call_id_repair_attempted = true;
-    Some(request)
+    Some(repair_request)
 }
 
 pub(super) fn finish_terminal(
@@ -210,7 +222,7 @@ pub(super) fn finish_terminal(
             runtime.capture_native_responses_replay(
                 &state.local_key_id,
                 &in_flight.route.candidate_id,
-                &in_flight.request.native_replay_value(),
+                &in_flight.request.native_replay_request(),
                 &in_flight.route.source_model,
                 &response,
                 now_ms(),

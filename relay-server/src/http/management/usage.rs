@@ -47,11 +47,11 @@ pub async fn usage(
 }
 
 fn normalize_account_query(query: &mut UsageQuery, snapshot: &RuntimeStateSnapshot) {
-    let Some(value) = query.source_or_account_query.as_deref() else {
+    let Some(source_or_account_query) = query.source_or_account_query.as_deref() else {
         return;
     };
     let Some(hint) = account_query_hint(
-        value,
+        source_or_account_query,
         snapshot.accounts.iter().map(|account| account.id.as_str()),
     ) else {
         return;
@@ -60,12 +60,12 @@ fn normalize_account_query(query: &mut UsageQuery, snapshot: &RuntimeStateSnapsh
 }
 
 fn account_query_hint<'a>(
-    value: &str,
+    account_query: &str,
     account_ids: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
     account_ids
         .into_iter()
-        .find(|account_id| *account_id == value)
+        .find(|account_id| *account_id == account_query)
         .map(identity_hint)
 }
 
@@ -78,16 +78,16 @@ pub async fn clear_usage(
 
 fn normalize_usage_query(query: &mut UsageQuery) -> Result<(), ManagementError> {
     query.normalize_pagination();
-    for value in [
+    for query_field in [
         &mut query.model_query,
         &mut query.source_or_account_query,
         &mut query.error_category,
         &mut query.request_id_query,
     ] {
-        if let Some(text) = value {
+        if let Some(text) = query_field {
             *text = text.trim().to_string();
             if text.is_empty() {
-                *value = None;
+                *query_field = None;
             } else if text.len() > 256 || text.chars().any(char::is_control) {
                 return Err(validation_error("usage filter is invalid"));
             }

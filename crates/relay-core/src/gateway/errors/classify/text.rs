@@ -81,6 +81,7 @@ const RULES: &[Rule] = &[
             "thinking_signature_invalid",
             "invalid signature in thinking block",
             "encrypted content could not be verified",
+            "encrypted content could not be decrypted or parsed",
         ],
         error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
     ),

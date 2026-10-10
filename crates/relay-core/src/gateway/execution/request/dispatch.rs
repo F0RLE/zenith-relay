@@ -22,7 +22,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) lease: &'a CandidateLease,
     pub(super) budget: &'a SharedRequestBudget,
     pub(super) route: ExecutorRoute,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) stream: bool,
     pub(super) account_route: bool,
     pub(super) basis_points_route: bool,
@@ -31,7 +31,6 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) request_body: Vec<u8>,
     pub(super) reasoning_effort: &'a ReasoningEffortDiagnostics,
     pub(super) tool_use: &'a ToolUseDiagnostics,
-    pub(super) source_model: &'a str,
     pub(super) request_id: &'a str,
     pub(super) requested_model: &'a str,
     pub(super) forwarded_headers: &'a HeaderMap,
@@ -43,14 +42,16 @@ pub(super) struct RequestDispatchInput<'a> {
 
 /// Send one prepared attempt. A transport failure stays retryable until the
 /// provider may already have accepted the request.
-pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) -> RequestDispatch {
+pub(super) async fn dispatch_request_attempt(
+    request_dispatch_input: RequestDispatchInput<'_>,
+) -> RequestDispatch {
     let RequestDispatchInput {
         runtime,
         key,
         lease,
         budget,
         mut route,
-        wire_api,
+        client_wire_api,
         stream,
         account_route,
         basis_points_route,
@@ -59,7 +60,6 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         request_body,
         reasoning_effort,
         tool_use,
-        source_model,
         request_id,
         requested_model,
         forwarded_headers,
@@ -67,7 +67,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         attempt,
         last_failure,
         last_failure_origin,
-    } = input;
+    } = request_dispatch_input;
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -78,7 +78,7 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
         )
         .await
         {
-            Ok(body) => body,
+            Ok(upstream_response_body) => upstream_response_body,
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return RequestDispatch::Respond(attempt_error_response(
                     failure,
@@ -98,28 +98,20 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
     };
     let upstream_stream = stream || (account_route && !basis_points_route);
     let started = Instant::now();
-    let client = runtime.request_client(&route.candidate_id);
-    let mut upstream_headers = if basis_points_route {
-        HeaderMap::new()
-    } else if adapter_request.requires_bridge_headers() {
-        match route.adapter.upstream_protocol(wire_api) {
-            crate::UpstreamProtocol::Messages => {
-                forwarded_bridge_messages_headers(forwarded_headers)
-            }
-            crate::UpstreamProtocol::GeminiGenerateContent => {
-                forwarded_bridge_gemini_headers(forwarded_headers)
-            }
-            _ => HeaderMap::new(),
-        }
-    } else {
-        forwarded_headers.clone()
-    };
-    for (name, value) in &route.upstream_headers {
-        upstream_headers.insert(name.clone(), value.clone());
+    let request_client = runtime.request_client(&route.candidate_id);
+    let mut upstream_headers = upstream_headers_for_route(
+        account_route,
+        basis_points_route,
+        adapter_request.requires_bridge_headers(),
+        route.adapter.upstream_protocol(client_wire_api),
+        forwarded_headers,
+    );
+    for (name, header_value) in &route.upstream_headers {
+        upstream_headers.insert(name.clone(), header_value.clone());
     }
     let turn_scope = (account_route
         && !basis_points_route
-        && wire_api == WireApi::Responses
+        && client_wire_api == WireApi::Responses
         && route.adapter.is_passthrough())
     .then(|| {
         request_scope(
@@ -140,28 +132,40 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
             route.service_tier,
         );
     }
-    let mut upstream_request = client
+    let mut upstream_request = request_client
         .post(route.upstream_url.clone())
         .header(CONTENT_TYPE, "application/json")
         .headers(upstream_headers);
     if upstream_stream {
         upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
+    } else if basis_points_route {
+        // Basis Points mirrors the native client contract and expects an
+        // explicit JSON response preference for buffered requests.
+        upstream_request = upstream_request.header(ACCEPT, "application/json");
     }
     if account_route && !basis_points_route {
-        if let Some(value) = route_responses_lite.as_ref() {
-            upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value);
+        if let Some(responses_lite_header) = route_responses_lite.as_ref() {
+            upstream_request =
+                upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header);
         }
     }
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
             upstream_request.body(request_body),
-            (!basis_points_route)
-                .then(|| codex_client_version(forwarded_headers))
-                .flatten(),
-            turn_scope.as_ref(),
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: (!basis_points_route)
+                    .then(|| codex_client_version(forwarded_headers))
+                    .flatten(),
+                identity_policy: if basis_points_route {
+                    AuthorizationIdentityPolicy::PreserveUpstream
+                } else {
+                    AuthorizationIdentityPolicy::RelayCodex
+                },
+                turn_scope: turn_scope.as_ref(),
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await;
     // Includes internal auth replay; repair and recovery cannot refund a
@@ -206,22 +210,160 @@ pub(super) async fn dispatch_request_attempt(input: RequestDispatchInput<'_>) ->
                     request_id,
                 ));
             }
-            let state =
-                settle_attempt_failure(runtime, lease, source_model, &failure, &HeaderMap::new());
-            apply_failure_state(&mut event, state);
+            let failure_state =
+                settle_route_failure(runtime, lease, &route, &failure, &HeaderMap::new());
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;
             return RequestDispatch::Continue;
         }
     };
-    let status = upstream.status();
+    let upstream_status = upstream.status();
     let response_headers = upstream.headers().clone();
     RequestDispatch::Ready(Box::new(DispatchedRequestAttempt {
         route,
         upstream,
-        status,
+        status: upstream_status,
         response_headers,
         started,
     }))
+}
+
+/// Forward client metadata only within the selected protocol. Source
+/// credentials are added by the selected route; Codex/OpenAI headers must not
+/// be copied to an unrelated Messages or Gemini provider.
+/// Account routes retain their existing forwarded-header behavior.
+fn upstream_headers_for_route(
+    is_account_route: bool,
+    is_basis_points_route: bool,
+    needs_bridge_headers: bool,
+    provider_protocol: crate::UpstreamProtocol,
+    client_headers: &HeaderMap,
+) -> HeaderMap {
+    if is_basis_points_route {
+        return HeaderMap::new();
+    }
+
+    if needs_bridge_headers {
+        // A translated request is already a complete upstream contract. Keep
+        // only metadata that belongs to that contract; never copy incoming
+        // credentials or OpenAI/Codex-only headers to another provider.
+        return match provider_protocol {
+            crate::UpstreamProtocol::Messages => forwarded_bridge_messages_headers(client_headers),
+            crate::UpstreamProtocol::GeminiGenerateContent => {
+                forwarded_bridge_gemini_headers(client_headers)
+            }
+            crate::UpstreamProtocol::Responses | crate::UpstreamProtocol::ChatCompletions => {
+                HeaderMap::new()
+            }
+        };
+    }
+
+    if is_account_route {
+        client_headers.clone()
+    } else {
+        // Filter again at the source boundary. Native Responses and Messages
+        // keep their own client metadata without forwarding credentials or
+        // synthesizing a session for an API source.
+        match provider_protocol {
+            crate::UpstreamProtocol::Messages => forwarded_messages_headers(client_headers),
+            crate::UpstreamProtocol::Responses => forwarded_responses_headers(client_headers),
+            crate::UpstreamProtocol::ChatCompletions
+            | crate::UpstreamProtocol::GeminiGenerateContent => HeaderMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_headers_for_route;
+    use crate::UpstreamProtocol;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
+
+    fn codex_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("Codex Desktop/1.0"));
+        headers.insert(
+            "x-codex-session-id",
+            HeaderValue::from_static("codex-session"),
+        );
+        headers.insert(
+            CLAUDE_CODE_SESSION_HEADER,
+            HeaderValue::from_static("codex-session"),
+        );
+        headers.insert("openai-beta", HeaderValue::from_static("responses=v1"));
+        headers
+    }
+
+    #[test]
+    fn source_bridge_keeps_only_upstream_metadata() {
+        let messages = upstream_headers_for_route(
+            false,
+            false,
+            true,
+            UpstreamProtocol::Messages,
+            &codex_headers(),
+        );
+        assert_eq!(
+            messages.get(CLAUDE_CODE_SESSION_HEADER),
+            Some(&HeaderValue::from_static("codex-session"))
+        );
+        assert_eq!(
+            messages.get("user-agent"),
+            Some(&HeaderValue::from_static("Codex Desktop/1.0"))
+        );
+        assert!(!messages.contains_key("openai-beta"));
+        assert!(!messages.contains_key("x-codex-session-id"));
+
+        let gemini = upstream_headers_for_route(
+            false,
+            false,
+            true,
+            UpstreamProtocol::GeminiGenerateContent,
+            &codex_headers(),
+        );
+        assert_eq!(
+            gemini.get("user-agent"),
+            Some(&HeaderValue::from_static("Codex Desktop/1.0"))
+        );
+        assert!(!gemini.contains_key(CLAUDE_CODE_SESSION_HEADER));
+        assert!(!gemini.contains_key("openai-beta"));
+    }
+
+    #[test]
+    fn account_headers_keep_existing_bridge_policy() {
+        let forwarded = upstream_headers_for_route(
+            true,
+            false,
+            true,
+            UpstreamProtocol::Messages,
+            &codex_headers(),
+        );
+        assert_eq!(
+            forwarded.get(CLAUDE_CODE_SESSION_HEADER),
+            Some(&HeaderValue::from_static("codex-session"))
+        );
+        assert!(!forwarded.contains_key("openai-beta"));
+        assert!(!forwarded.contains_key("x-codex-session-id"));
+    }
+
+    #[test]
+    fn native_messages_source_keeps_filtered_messages_metadata() {
+        let forwarded = upstream_headers_for_route(
+            false,
+            false,
+            false,
+            UpstreamProtocol::Messages,
+            &codex_headers(),
+        );
+        assert_eq!(
+            forwarded.get(CLAUDE_CODE_SESSION_HEADER),
+            Some(&HeaderValue::from_static("codex-session"))
+        );
+        assert!(!forwarded.contains_key("openai-beta"));
+        assert!(!forwarded.contains_key("x-codex-session-id"));
+    }
 }

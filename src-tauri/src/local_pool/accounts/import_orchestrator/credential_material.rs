@@ -2,12 +2,14 @@ use crate::local_pool::accounts::credentials::{bearer_authorization, StoredCodex
 use crate::local_pool::accounts::import_orchestrator::{
     credential_item_error, ImportItemError, ItemResult,
 };
-use crate::local_pool::accounts::oauth::CodexOAuthClient;
+use crate::local_pool::accounts::oauth::{CodexOAuthClient, OAuthClientKind};
 use reqwest::header::HeaderValue;
 use url::Url;
 use zenith_relay_core::accounts::{ImportSecretMaterial, ParsedImportItem};
 use zenith_relay_core::error_codes;
-use zenith_relay_core::providers::chatgpt::{push_account_id_hint, AgentIdentityCredential};
+use zenith_relay_core::providers::chatgpt::{
+    push_account_id_hint, AgentIdentityCredential, BasisPointsCapturedHeaders,
+};
 use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::{is_http_endpoint, url_has_userinfo};
 
@@ -28,6 +30,8 @@ struct ImportDocumentIdentity<'a> {
     plan_hint: Option<&'a str>,
     subscription_active_until_hint: Option<u64>,
     item_account_is_fedramp: bool,
+    basis_points_headers: Option<BasisPointsCapturedHeaders>,
+    oauth_client_kind: OAuthClientKind,
     imported_identity: super::claims::ImportedIdentity,
     account_id_hints: Vec<String>,
 }
@@ -51,6 +55,8 @@ pub(in crate::local_pool::accounts) struct ImportedCredentialMaterial {
     pub(in crate::local_pool::accounts) plan_type: Option<String>,
     pub(in crate::local_pool::accounts) subscription_active_until_ms: Option<u64>,
     pub(in crate::local_pool::accounts) account_is_fedramp: bool,
+    pub(in crate::local_pool::accounts) basis_points_headers: Option<BasisPointsCapturedHeaders>,
+    pub(in crate::local_pool::accounts) oauth_client_kind: OAuthClientKind,
 }
 
 impl ImportedCredentialMaterial {
@@ -96,9 +102,19 @@ impl ImportedCredentialMaterial {
         issued_at_ms: u64,
         generation: u64,
     ) -> ItemResult<StoredCodexCredentials> {
+        if self.oauth_client_kind == OAuthClientKind::ExcelBps
+            && (self.agent_identity.is_some() || self.access_token.is_empty())
+        {
+            return Err(ImportItemError::new(
+                error_codes::ACCESS_TOKEN_REJECTED,
+                "Excel OAuth requires its own access token and cannot use Agent Identity",
+            ));
+        }
         let phone = self.phone.clone();
         let password = self.password.clone();
         let totp_secret = self.totp_secret.clone();
+        let basis_points_headers = self.basis_points_headers.clone();
+        let oauth_client_kind = self.oauth_client_kind;
         if self.access_token.is_empty() {
             let agent_identity = self.agent_identity.ok_or_else(|| {
                 ImportItemError::new(
@@ -118,7 +134,11 @@ impl ImportedCredentialMaterial {
                 self.plan_type,
                 self.account_is_fedramp,
             )
-            .map(|stored| stored.apply_stored_login_material(phone, password, totp_secret))
+            .map(|stored| {
+                stored
+                    .with_oauth_client_kind(oauth_client_kind)
+                    .apply_stored_login_material(phone, password, totp_secret)
+            })
             .map_err(credential_item_error);
         }
         let agent_identity = self.agent_identity;
@@ -138,8 +158,14 @@ impl ImportedCredentialMaterial {
             self.account_is_fedramp,
         )
         .map_err(credential_item_error)?;
+        stored = stored.with_oauth_client_kind(oauth_client_kind);
         if let Some(agent_identity) = agent_identity {
             stored = stored.with_agent_identity(agent_identity);
+        }
+        if let Some(headers) = basis_points_headers {
+            stored = stored
+                .with_basis_points_headers(Some(headers))
+                .map_err(credential_item_error)?;
         }
         Ok(stored.apply_stored_login_material(phone, password, totp_secret))
     }
@@ -164,6 +190,8 @@ impl ImportedCredentialMaterial {
             phone: document.phone,
             password: document.password,
             totp_secret: document.totp_secret,
+            basis_points_headers: document.basis_points_headers,
+            oauth_client_kind: document.oauth_client_kind,
             provider_account_id: document.account_id_hints.first().cloned(),
             account_id_hints: document.account_id_hints,
             provider_user_id: document
@@ -186,7 +214,7 @@ impl ImportedCredentialMaterial {
 }
 
 pub(in crate::local_pool::accounts) async fn build_import_credential_material(
-    item: ParsedImportItem,
+    import_item: ParsedImportItem,
     issued_at_ms: u64,
     plan_hint: Option<&str>,
     subscription_active_until_hint: Option<u64>,
@@ -204,15 +232,19 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
             "ChatGPT account lookup endpoint is invalid",
         ));
     }
-    let email = item.email().map(str::to_string);
-    let phone = item.phone().map(str::to_string);
-    let password = item.password().map(str::to_string);
-    let totp_secret = item.totp_secret().map(str::to_string);
-    let item_account_id = item.account_id.clone();
-    let item_user_id = item.chatgpt_user_id.clone();
-    let organization_id = item.organization_id.clone();
-    let item_account_is_fedramp = item.account_is_fedramp;
-    let secrets = item.into_secrets();
+    let email = import_item.email().map(str::to_string);
+    let phone = import_item.phone().map(str::to_string);
+    let password = import_item.password().map(str::to_string);
+    let totp_secret = import_item.totp_secret().map(str::to_string);
+    let item_account_id = import_item.account_id.clone();
+    let item_user_id = import_item.chatgpt_user_id.clone();
+    let organization_id = import_item.organization_id.clone();
+    let item_account_is_fedramp = import_item.account_is_fedramp;
+    let secrets = import_item.into_secrets();
+    let basis_points_headers = secrets.basis_points_headers().cloned();
+    let oauth_client_kind = secrets
+        .oauth_client_kind()
+        .unwrap_or(OAuthClientKind::Codex);
     let original_refresh = secrets.refresh_token().map(str::to_string);
     let imported_identity = super::imported_identity(secrets.id_token(), secrets.access_token());
     let account_id_hints = account_id_hints(item_account_id, &imported_identity)?;
@@ -230,6 +262,8 @@ pub(in crate::local_pool::accounts) async fn build_import_credential_material(
         plan_hint,
         subscription_active_until_hint,
         item_account_is_fedramp,
+        basis_points_headers,
+        oauth_client_kind,
         imported_identity,
         account_id_hints,
     };
@@ -308,12 +342,13 @@ async fn material_from_refresh_token(
     proxy: Option<&ProxyConfig>,
     document: ImportDocumentIdentity<'_>,
 ) -> ItemResult<ImportedCredentialMaterial> {
-    let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
-        ImportItemError::new(
-            error_codes::REFRESH_EXCHANGE_UNAVAILABLE,
-            "refresh-token exchange is unavailable",
-        )
-    })?;
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(document.oauth_client_kind, proxy)
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::REFRESH_EXCHANGE_UNAVAILABLE,
+                "refresh-token exchange is unavailable",
+            )
+        })?;
     let tokens = oauth
         .exchange_refresh_token(&refresh_token, issued_at_ms)
         .await
@@ -353,6 +388,8 @@ async fn material_from_refresh_token(
         plan_hint,
         subscription_active_until_hint,
         item_account_is_fedramp,
+        basis_points_headers,
+        oauth_client_kind,
         imported_identity,
         mut account_id_hints,
     } = document;
@@ -386,5 +423,7 @@ async fn material_from_refresh_token(
         account_is_fedramp: item_account_is_fedramp
             || account_is_fedramp
             || imported_identity.account_is_fedramp,
+        basis_points_headers,
+        oauth_client_kind,
     })
 }

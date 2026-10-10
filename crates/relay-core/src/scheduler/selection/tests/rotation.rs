@@ -51,7 +51,7 @@ pub(super) fn dispatch(scheduler: &mut PoolScheduler, now: u64, affinity: Option
 }
 
 #[test]
-fn reservations_keep_weighted_group_with_affinity_and_native_aliases() {
+fn manual_rotation_ignores_weights_and_soft_affinity_with_native_aliases() {
     let mut scheduler = policy::mixed(PoolRoutingMode::RoundRobin);
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy
@@ -85,9 +85,9 @@ fn reservations_keep_weighted_group_with_affinity_and_native_aliases() {
     assert_eq!(
         counts,
         BTreeMap::from([
-            ("account".into(), 20),
-            ("api-a".into(), 20),
-            ("api-b".into(), 60)
+            ("account".into(), 34),
+            ("api-a".into(), 33),
+            ("api-b".into(), 33)
         ])
     );
 }

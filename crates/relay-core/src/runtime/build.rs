@@ -234,7 +234,16 @@ impl GatewayRuntime {
         let mut registry = ModelRegistry::default();
         let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
         let image_pricing_catalog = options.image_pricing_catalog.as_deref();
-        let source_parts = build_sources(sources, &mut registry, &mut scheduler)?;
+        let reference_catalog = options
+            .model_metadata_catalog
+            .as_ref()
+            .map(|handle| handle.snapshot());
+        let source_parts = build_sources(
+            sources,
+            &mut registry,
+            &mut scheduler,
+            reference_catalog.as_deref(),
+        )?;
         let account_parts = accounts::build_accounts(
             accounts,
             account_auth.as_ref(),
@@ -325,6 +334,7 @@ impl GatewayRuntime {
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
+            cache_context_store: super::cache_context::CacheContextStore::default(),
             codex_turn_state_store: CodexTurnStateStore::default(),
             control: RuntimeControl::default(),
             max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),

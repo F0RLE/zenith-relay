@@ -8,7 +8,7 @@ import { formatSourceAmount, sourceStatsAmounts, sourceStatsStatus, type SourceS
 export function SourceStatsPanel({ source, state, overview = false }: { source: SourceSummary; state?: SourceStatsState; overview?: boolean }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const stats = state?.value;
+  const stats = state?.stats;
   const amounts = sourceStatsAmounts(stats);
   const status = stats ? sourceStatsStatus(stats) : state?.failed ? "unavailable" : source.refreshState?.balance === "unsupported" ? "unsupported" : "available";
   const available = stats != null && status === "available";
@@ -23,19 +23,19 @@ export function SourceStatsPanel({ source, state, overview = false }: { source: 
     : balances.length ? balances
       : [state?.loading ? t("providerStats.loading") : available ? t("providerStats.notReported") : t(`providerStats.status.${error}`)];
   const metrics = [
-    { key: "balance", label: t(`providerStats.balance.${stats?.balanceKind ?? "wallet"}`), values: balance, icon: CreditCard, muted: !balances.length && !stats?.balanceUnlimited },
-    { key: "spend", label: t(spending.length ? "overview.spent" : "providerStats.relayEstimate"), values: spending.length ? spending : [formatApiEquivalent(source.apiEquivalent.microUsd, locale)], icon: ArrowRight,
+    { key: "balance", label: t(`providerStats.balance.${stats?.balanceKind ?? "wallet"}`), displayValues: balance, icon: CreditCard, muted: !balances.length && !stats?.balanceUnlimited },
+    { key: "spend", label: t(spending.length ? "overview.spent" : "providerStats.relayEstimate"), displayValues: spending.length ? spending : [formatApiEquivalent(source.apiEquivalent.microUsd, locale)], icon: ArrowRight,
       hint: spending.length ? undefined : t("pool.apiEquivalentHint", { count: source.apiEquivalent.unpricedTokens }) },
-    ...(available && stats.requests != null ? [{ key: "requests", label: t("usage.requests"), values: [formatFullNumber(stats.requests, locale)], icon: Activity }] : []),
+    ...(available && stats.requests != null ? [{ key: "requests", label: t("usage.requests"), displayValues: [formatFullNumber(stats.requests, locale)], icon: Activity }] : []),
     ...(overview && available && stats.totalTokens != null
-      ? [{ key: "tokens", label: t("overview.totalTokens"), values: [formatFullNumber(stats.totalTokens, locale)], icon: Gauge }]
-      : [{ key: "models", label: t("common.models"), values: [formatFullNumber(source.models.length, locale)], icon: Gauge }]),
+      ? [{ key: "tokens", label: t("overview.totalTokens"), displayValues: [formatFullNumber(stats.totalTokens, locale)], icon: Gauge }]
+      : [{ key: "models", label: t("common.models"), displayValues: [formatFullNumber(source.models.length, locale)], icon: Gauge }]),
   ];
   return <div className={`source-stats-panel${overview ? " source-stats-overview" : ""}`} aria-busy={state?.loading || undefined}>
     <dl className={overview ? "metric-band direct-api-metrics source-stats-metrics" : "pool-source-stats"}>
-      {metrics.map(({ key, label, values, icon: Icon, muted, hint }) => <div key={key} data-metric={key} data-relay-tooltip={hint}>
+      {metrics.map(({ key, label, displayValues, icon: Icon, muted, hint }) => <div key={key} data-metric={key} data-relay-tooltip={hint}>
         {overview ? <Icon aria-hidden /> : null}<dt>{label}</dt>
-        <dd data-muted={muted ? "true" : undefined}>{values.map((value, index) => <span key={index}>{value}</span>)}</dd>
+        <dd data-muted={muted ? "true" : undefined}>{displayValues.map((displayValue, index) => <span key={index}>{displayValue}</span>)}</dd>
       </div>)}
     </dl>
     {overview && stale ? <div className="source-stats-caption" data-warning="true" data-relay-tooltip={t(`providerStats.status.${error}`)} role="status">

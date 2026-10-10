@@ -25,7 +25,7 @@ pub(super) fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
         if LEGACY_STATE_FILES
             .iter()
             .skip(1)
-            .any(|name| root.join(name).exists())
+            .any(|file_name| root.join(file_name).exists())
         {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
@@ -86,8 +86,8 @@ fn read_legacy_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 pub(in crate::local_pool::store) fn cleanup_legacy_state_files(root: &Path) -> Result<()> {
-    for name in LEGACY_STATE_FILES {
-        let path = root.join(name);
+    for file_name in LEGACY_STATE_FILES {
+        let path = root.join(file_name);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
                 fs::remove_file(&path).map_err(legacy_io_error)?;

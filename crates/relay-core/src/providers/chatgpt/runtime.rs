@@ -1,4 +1,5 @@
 use super::agent_identity::AgentIdentityCredential;
+use super::{BasisPointsCapturedHeaders, OAuthClientKind};
 use crate::accounts::{TokenAuthority, TokenPersistenceAdapter, TokenRefreshAdapter};
 use crate::quota::QuotaSnapshot;
 use crate::{CandidateHealth, CandidateQuota, ProxyConfig};
@@ -13,14 +14,15 @@ use std::sync::Arc;
 /// so another provider can supply a different runtime shape later.
 #[derive(Clone)]
 pub struct RuntimeChatGptAccount {
+    pub oauth_client_kind: OAuthClientKind,
     pub id: String,
     pub source_id: String,
     pub chatgpt_account_id: String,
+    pub chatgpt_user_id: Option<String>,
     pub responses_url: String,
-    /// Enables the explicitly labelled Excel/Basis Points Responses route for
-    /// this OAuth account. The route reuses the same candidate, quota and
-    /// concurrency reservation as native Codex traffic.
+    /// Legacy input, ignored. Only the issuing OAuth client selects the transport.
     pub basis_points_enabled: bool,
+    pub basis_points_headers: Option<BasisPointsCapturedHeaders>,
     pub models: Vec<String>,
     pub enabled: bool,
     pub draining: bool,
@@ -44,14 +46,23 @@ impl fmt::Debug for RuntimeChatGptAccount {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RuntimeChatGptAccount")
+            .field("oauth_client_kind", &self.oauth_client_kind)
             .field("id", &self.id)
             .field("source_id", &self.source_id)
             .field("chatgpt_account_id", &"[redacted]")
+            .field(
+                "chatgpt_user_id",
+                &self.chatgpt_user_id.as_ref().map(|_| "[redacted]"),
+            )
             .field(
                 "responses_url",
                 &crate::sources::redact_url(&self.responses_url),
             )
             .field("basis_points_enabled", &self.basis_points_enabled)
+            .field(
+                "basis_points_headers",
+                &self.basis_points_headers.as_ref().map(|_| "[redacted]"),
+            )
             .field("models", &self.models)
             .field("enabled", &self.enabled)
             .field("draining", &self.draining)

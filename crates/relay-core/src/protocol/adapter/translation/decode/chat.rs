@@ -5,9 +5,9 @@ use super::super::{
 use crate::WireApi;
 use serde_json::Value;
 
-pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
+pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     checked(
-        value,
+        request_body,
         &[
             "model",
             "stream",
@@ -27,16 +27,19 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             "store",
         ],
     )?;
-    if optional_u64(value, "n")?.is_some_and(|n| n != 1)
-        || optional_bool(value, "store")? == Some(true)
+    if optional_u64(request_body, "n")?.is_some_and(|n| n != 1)
+        || optional_bool(request_body, "store")? == Some(true)
     {
         return Err(AdapterError::parameter_unsupported());
     }
-    if let Some(options) = value.get("stream_options").filter(|v| !v.is_null()) {
+    if let Some(options) = request_body
+        .get("stream_options")
+        .filter(|stream_options_value| !stream_options_value.is_null())
+    {
         checked(options, &["include_usage"])?;
     }
-    let mut request = Request::default();
-    for message in value
+    let mut decoded_request = Request::default();
+    for message in request_body
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(AdapterError::invalid_request)?
@@ -53,12 +56,12 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
         )?;
         let reasoning = message
             .get("reasoning_content")
-            .filter(|value| !value.is_null());
+            .filter(|field_value| !field_value.is_null());
         if reasoning.is_some() && super::content::role(message)? != Role::Assistant {
             return Err(AdapterError::invalid_request());
         }
         if message.get("role").and_then(Value::as_str) == Some("tool") {
-            request.messages.push(Message {
+            decoded_request.messages.push(Message {
                 role: Role::User,
                 blocks: vec![Block::ToolResult {
                     id: required_text(message, "tool_call_id")?.into(),
@@ -104,19 +107,20 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
                 });
             }
         }
-        request.messages.push(Message {
+        decoded_request.messages.push(Message {
             role: super::content::role(message)?,
             blocks,
         });
     }
-    request.tools = super::content::tools(value.get("tools"), WireApi::ChatCompletions)?;
-    request.tool_choice =
-        super::content::choice(value.get("tool_choice"), WireApi::ChatCompletions)?;
-    request.parallel_tools = optional_bool(value, "parallel_tool_calls")?;
+    decoded_request.tools =
+        super::content::tools(request_body.get("tools"), WireApi::ChatCompletions)?;
+    decoded_request.tool_choice =
+        super::content::choice(request_body.get("tool_choice"), WireApi::ChatCompletions)?;
+    decoded_request.parallel_tools = optional_bool(request_body, "parallel_tool_calls")?;
     super::content::common(
-        &mut request,
-        value,
-        if value.get("max_completion_tokens").is_some() {
+        &mut decoded_request,
+        request_body,
+        if request_body.get("max_completion_tokens").is_some() {
             "max_completion_tokens"
         } else {
             "max_tokens"
@@ -124,16 +128,17 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
         "top_p",
         "stop",
     )?;
-    request.output_format =
-        super::content::output_format(value.get("response_format").unwrap_or(&Value::Null))?;
-    request.reasoning = value
+    decoded_request.output_format =
+        super::content::output_format(request_body.get("response_format").unwrap_or(&Value::Null))?;
+    decoded_request.reasoning = request_body
         .get("reasoning_effort")
-        .filter(|v| !v.is_null())
-        .map(|v| {
-            v.as_str()
+        .filter(|reasoning_effort_value| !reasoning_effort_value.is_null())
+        .map(|reasoning_effort_value| {
+            reasoning_effort_value
+                .as_str()
                 .map(|effort| Reasoning::Effort(effort.into()))
                 .ok_or_else(AdapterError::invalid_request)
         })
         .transpose()?;
-    Ok(request)
+    Ok(decoded_request)
 }

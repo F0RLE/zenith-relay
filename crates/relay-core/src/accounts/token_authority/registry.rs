@@ -10,10 +10,10 @@ impl TokenAuthority {
         match self.prepare_slot(account_id, TokenSlot::fresh(tokens, auth_state))? {
             PreparedTokenSlot::Inserted => Ok(()),
             PreparedTokenSlot::Existing { slot, candidate } => {
-                let mut current = slot.lock().await;
+                let mut slot_state = slot.lock().await;
                 let _slots = self.current_slots(account_id, &slot)?;
                 slot.bump();
-                *current = candidate;
+                *slot_state = candidate;
                 Ok(())
             }
         }
@@ -87,11 +87,11 @@ impl TokenAuthority {
         if account_id.is_empty() {
             return Err(TokenAuthorityError::InvalidAccountId);
         }
-        let entry = { lock(&self.slots).get(account_id).cloned() };
-        let Some(entry) = entry else {
+        let slot_handle = { lock(&self.slots).get(account_id).cloned() };
+        let Some(slot_handle) = slot_handle else {
             return Ok(false);
         };
-        let mut slot = entry.lock().await;
+        let mut slot = slot_handle.lock().await;
         if slot.auth_state != expected_auth_state || slot.tokens != *expected_tokens {
             return Ok(false);
         }
@@ -101,11 +101,11 @@ impl TokenAuthority {
             let slots = lock(&self.slots);
             if slots
                 .get(account_id)
-                .is_none_or(|current| !Arc::ptr_eq(current, &entry))
+                .is_none_or(|registered_slot| !Arc::ptr_eq(registered_slot, &slot_handle))
             {
                 return Ok(false);
             }
-            entry.bump();
+            slot_handle.bump();
         }
         *slot = TokenSlot {
             tokens: replacement_tokens,
@@ -143,7 +143,7 @@ impl TokenAuthority {
         let mut slots = lock(&self.slots);
         if slots
             .get(account_id)
-            .is_none_or(|current| !Arc::ptr_eq(current, &slot))
+            .is_none_or(|registered_slot| !Arc::ptr_eq(registered_slot, &slot))
         {
             return Ok(false);
         }
@@ -182,16 +182,16 @@ impl TokenAuthority {
 
     pub async fn auth_state(&self, account_id: &str) -> Option<AccountAuthState> {
         let slot = lock(&self.slots).get(account_id).cloned()?;
-        let current = slot.lock().await;
+        let slot_state = slot.lock().await;
         let _slots = self.current_slots(account_id, &slot).ok()?;
-        Some(current.auth_state)
+        Some(slot_state.auth_state)
     }
 
     pub async fn tokens(&self, account_id: &str) -> Option<TokenSet> {
         let slot = lock(&self.slots).get(account_id).cloned()?;
-        let current = slot.lock().await;
+        let slot_state = slot.lock().await;
         let _slots = self.current_slots(account_id, &slot).ok()?;
-        Some(current.tokens.clone())
+        Some(slot_state.tokens.clone())
     }
 
     pub async fn invalidate_access_and_persist(
@@ -243,11 +243,11 @@ impl TokenAuthority {
         now_ms: u64,
         persistence: &dyn TokenPersistenceAdapter,
     ) -> Result<bool, TokenAuthorityError> {
-        let entry = lock(&self.slots)
+        let slot_handle = lock(&self.slots)
             .get(account_id)
             .cloned()
             .ok_or(TokenAuthorityError::AccountNotFound)?;
-        let mut slot = entry.lock().await;
+        let mut slot = slot_handle.lock().await;
         if failed_generation.is_some_and(|generation| slot.tokens.generation != generation)
             || rejected_tokens.is_some_and(|tokens| slot.tokens != *tokens)
         {
@@ -257,22 +257,22 @@ impl TokenAuthority {
             let slots = lock(&self.slots);
             if slots
                 .get(account_id)
-                .is_none_or(|current| !Arc::ptr_eq(current, &entry))
+                .is_none_or(|registered_slot| !Arc::ptr_eq(registered_slot, &slot_handle))
             {
                 return Ok(false);
             }
-            entry.bump();
+            slot_handle.bump();
         }
         slot.tokens.expires_at_ms = Some(now_ms);
         slot.tokens.issued_at_ms = now_ms;
         slot.tokens.generation = slot.tokens.generation.saturating_add(1);
         slot.persistence_pending = true;
-        let revision = entry.snapshot();
+        let revision = slot_handle.snapshot();
         persistence
             .persist_fenced(account_id, &slot.tokens, &revision)
             .await
             .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
-        self.ensure_current_slot(account_id, &entry)?;
+        self.ensure_current_slot(account_id, &slot_handle)?;
         slot.persistence_pending = false;
         Ok(true)
     }

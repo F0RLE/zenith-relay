@@ -12,9 +12,9 @@ pub(super) fn canonical_child(root: &Path, path: &Path) -> Result<PathBuf, Strin
     Ok(canonical)
 }
 
-pub(super) fn validate_target_provider(value: &str) -> Result<(), String> {
+pub(super) fn validate_target_provider(provider_name: &str) -> Result<(), String> {
     if matches!(
-        value,
+        provider_name,
         "openai" | "zenith_relay_local" | "codex_local_access"
     ) {
         Ok(())
@@ -32,8 +32,8 @@ pub(super) fn sync_file(path: &Path) -> Result<(), String> {
         .map_err(io_error)
 }
 
-pub(super) fn validate_id(value: &str, prefix: &str) -> Result<(), String> {
-    if value.strip_prefix(prefix).is_some_and(|suffix| {
+pub(super) fn validate_id(identifier: &str, prefix: &str) -> Result<(), String> {
+    if identifier.strip_prefix(prefix).is_some_and(|suffix| {
         suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
     }) {
         Ok(())

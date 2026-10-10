@@ -9,6 +9,7 @@ mod compaction;
 mod contracts;
 mod gemini;
 mod messages;
+mod responses_usage;
 mod store;
 mod stream;
 #[cfg(test)]

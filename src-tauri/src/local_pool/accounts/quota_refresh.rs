@@ -38,7 +38,7 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     is_agent_identity_task_invalid_failure, merge_subscription_metadata_at,
-    subscription_refresh_due, AgentIdentityCredential, CodexModelsClient, CodexQuotaClient,
+    subscription_refresh_due, AccountModelsClient, AgentIdentityCredential, CodexQuotaClient,
     CodexSubscriptionClient, CodexSubscriptionMetadata, ModelDiscoveryFailure,
     ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
@@ -55,6 +55,7 @@ mod reads;
 mod types;
 
 pub(in crate::local_pool::accounts) use credentials::reconcile_force_refreshed_account_record;
+pub(crate) use credentials::sync_account_profile_bindings;
 #[cfg(test)]
 pub(in crate::local_pool::accounts) use credentials::{
     restore_force_refreshed_account_record, rollback_force_refreshed_before_authority,

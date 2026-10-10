@@ -199,13 +199,17 @@ async fn runtime_repairs_missing_enabled_gateway_key_secret() {
     let generated = secret_store::load(&key_secret_ref).unwrap().unwrap();
     assert!(generated.starts_with("zlr_"));
     let address = state.gateway.start(runtime, 0).await.unwrap();
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let response = client
         .get(format!("http://{address}/v1/models"))
         .bearer_auth(&generated)
         .send()
         .await
         .unwrap();
     assert!(response.status().is_success());
+    let models: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(models["data"][0]["id"], "gpt-test");
+    drop(client);
 
     state.gateway.stop().await;
     secret_store::delete(&source_secret_ref).unwrap();

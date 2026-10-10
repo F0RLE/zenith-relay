@@ -13,19 +13,19 @@ pub fn decode_unverified_jwt_payload<T: for<'de> Deserialize<'de>>(token: &str) 
         return None;
     }
     let mut parts = token.split('.');
-    let (Some(header), Some(payload), Some(signature), None) =
+    let (Some(header), Some(encoded_payload), Some(signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return None;
     };
-    if header.is_empty() || payload.is_empty() || signature.is_empty() {
+    if header.is_empty() || encoded_payload.is_empty() || signature.is_empty() {
         return None;
     }
-    let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    if payload.len() > MAX_UNVERIFIED_JWT_PAYLOAD_BYTES {
+    let payload_bytes = URL_SAFE_NO_PAD.decode(encoded_payload).ok()?;
+    if payload_bytes.len() > MAX_UNVERIFIED_JWT_PAYLOAD_BYTES {
         return None;
     }
-    serde_json::from_slice(&payload).ok()
+    serde_json::from_slice(&payload_bytes).ok()
 }
 
 #[cfg(test)]

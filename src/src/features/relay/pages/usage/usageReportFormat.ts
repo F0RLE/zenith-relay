@@ -29,10 +29,10 @@ export type AggregateRow = {
   apiEquivalent: UsageTotals["apiEquivalent"];
 };
 
-export function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
-  if (value == null || !Number.isFinite(value)) return "—";
-  if (value >= 1000) return t("usage.durationSeconds", { value: formatNumber(value / 1000, locale, { maximumFractionDigits: 1 }) });
-  return t("usage.durationMilliseconds", { value: Math.round(value) });
+export function formatDurationMs(elapsedMs: number | null, locale: string, t: TFunction): string {
+  if (elapsedMs == null || !Number.isFinite(elapsedMs)) return "—";
+  if (elapsedMs >= 1000) return t("usage.durationSeconds", { value: formatNumber(elapsedMs / 1000, locale, { maximumFractionDigits: 1 }) });
+  return t("usage.durationMilliseconds", { value: Math.round(elapsedMs) });
 }
 
 export function requestStatusLabel(row: Pick<UsageRow, "success" | "requestOrigin">, t: TFunction): string {
@@ -65,12 +65,18 @@ export function formatObservedServiceTier(row: Pick<UsageRow, "appliedServiceTie
   return normalizeObservedServiceTier(row.appliedServiceTier);
 }
 
-export function formatWireApi(value: string | null, t: TFunction): string {
-  if (value === "responses") return t("usage.protocols.responses");
-  if (value === "messages") return t("usage.protocols.messages");
-  if (value === "chat_completions") return t("usage.protocols.chatCompletions");
-  if (value === "gemini") return t("usage.protocols.gemini");
-  return value ?? "—";
+export function formatWireApi(wireApi: string | null, t: TFunction): string {
+  if (wireApi === "responses") return t("usage.protocols.responses");
+  if (wireApi === "messages") return t("usage.protocols.messages");
+  if (wireApi === "chat_completions") return t("usage.protocols.chatCompletions");
+  if (wireApi === "gemini") return t("usage.protocols.gemini");
+  return wireApi ?? "—";
+}
+
+export function formatTransport(transportKind: string | null | undefined, t: TFunction): string {
+  if (transportKind === "websocket") return t("usage.transports.websocket");
+  if (transportKind === "http") return t("usage.transports.http");
+  return transportKind ?? "—";
 }
 
 export function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
@@ -91,12 +97,19 @@ export function formatErrorOrigin(origin: ErrorOrigin | null, t: TFunction): str
   return origin ? t(`usage.errorOrigins.${origin}`) : t("common.unknown");
 }
 
+export function prefixErrorOrigin(origin: ErrorOrigin | null | undefined, message: string): string {
+  if (!origin) return message;
+  const label = origin === "account" ? "Account" : origin === "provider" ? "Provider" : "Relay";
+  const unprefixed = message.replace(/^(?:Account|Provider|Relay):\s*/i, "");
+  return `${label}: ${unprefixed}`;
+}
+
 export function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction): string {
   return t(`usage.toolChoices.${choice}`);
 }
 
-export function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
-  return t(`usage.terminalOutputs.${output}`);
+export function formatTerminalOutput(terminalOutput: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
+  return t(`usage.terminalOutputs.${terminalOutput}`);
 }
 
 export function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
@@ -107,12 +120,12 @@ export function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "conne
     if (group) group.push(row);
     else groups.set(key, [row]);
   }
-  return [...groups.entries()].map(([name, groupRows]) => aggregateRowFromTotals(name, totalsFromRows(groupRows)));
+  return [...groups.entries()].map(([groupLabel, groupRows]) => aggregateRowFromTotals(groupLabel, totalsFromRows(groupRows)));
 }
 
-export function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow {
+export function aggregateRowFromTotals(rowLabel: string, totals: UsageTotals): AggregateRow {
   return {
-    name,
+    name: rowLabel,
     requests: totals.requests,
     success: totals.successfulRequests,
     inputTokens: totals.inputTokens,

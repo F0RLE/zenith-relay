@@ -14,12 +14,17 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
                 "reasoning_effort_levels": ["low"],
                 "default_reasoning_effort": "low",
                 "tool_call": true,
+                "limit": {"context": 1050000},
                 "modalities": {"input": ["text"], "output": ["text"]}
             }
         }"#,
     )
     .unwrap();
     let runtime = native_catalog_test_runtime(None, Some(ModelMetadataCatalogHandle::new(catalog)));
+    runtime.set_official_codex_ultra_models(std::collections::BTreeMap::from([(
+        "gpt-native".into(),
+        json!({"slug": "gpt-native", "context_window": 272000}),
+    )]));
     let key = runtime
         .authenticate(Some(&axum::http::HeaderValue::from_static("Bearer secret")))
         .unwrap();
@@ -43,6 +48,10 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
             json!([{ "effort": "high", "description": "Native high" }]),
         ),
         ("default_reasoning_level".into(), json!("high")),
+        ("context_window".into(), json!(128_000)),
+        ("max_context_window".into(), json!(256_000)),
+        ("auto_compact_token_limit".into(), json!(110_000)),
+        ("effective_context_window_percent".into(), json!(90)),
     ]);
     let upstream = json!({"models": [Value::Object(native_entry)]});
     assert!(normalize_native_codex_catalog_entry(
@@ -67,6 +76,10 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
         json!([{"effort": "low", "description": "low"}])
     );
     assert_eq!(model["default_reasoning_level"], "low");
+    assert_eq!(model["context_window"], 128_000);
+    assert_eq!(model["max_context_window"], 256_000);
+    assert_eq!(model["auto_compact_token_limit"], 110_000);
+    assert_eq!(model["effective_context_window_percent"], 90);
 
     // A missing account card uses this exact model's external name and
     // capabilities; it does not retain the native-only features above.
@@ -78,6 +91,11 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     assert_eq!(fallback["models"][0]["slug"], "gpt-native");
     assert_eq!(fallback["models"][0]["supports_search_tool"], false);
     assert_eq!(fallback["models"][0]["default_reasoning_level"], "low");
+    assert_eq!(fallback["models"][0]["context_window"], 272_000);
+    assert!(fallback["models"][0].get("max_context_window").is_none());
+    assert!(fallback["models"][0]
+        .get("auto_compact_token_limit")
+        .is_none());
 
     // A partial native card can supply capabilities without a title.
     // The normalizer's generated title must not hide a real catalog name.
@@ -93,6 +111,25 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     );
     assert_eq!(response["models"][0]["supports_search_tool"], false);
     assert_eq!(response["models"][0]["default_reasoning_level"], "low");
+
+    let mut missing_context = upstream.clone();
+    for field in [
+        "context_window",
+        "max_context_window",
+        "auto_compact_token_limit",
+        "effective_context_window_percent",
+    ] {
+        missing_context["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
+    let response =
+        build_codex_models_response(&runtime, &key, &visible, Some(&missing_context)).unwrap();
+    assert!(response["models"][0].get("context_window").is_none());
+    assert!(response["models"][0]
+        .get("auto_compact_token_limit")
+        .is_none());
 }
 
 #[test]
@@ -140,21 +177,25 @@ fn native_codex_ultra_survives_reference_projection_when_max_is_routable() {
 #[test]
 fn native_catalog_follows_inventory_replacement_without_a_model_name_allowlist() {
     // Synthetic future identities deliberately include a non-GPT model.
-    let old = "gpt-123-retired";
-    let replacements = ["gpt-124-future", "next-family-synthetic"];
-    let cards = [old, replacements[0], replacements[1]]
-        .into_iter()
-        .map(|id| {
-            json!({
-                "slug": id,
-                "display_name": format!("Upstream title for {id}"),
-                "supported_reasoning_levels": [{"effort": "high", "description": "High"}],
-                "supports_parallel_tool_calls": true
-            })
+    let retired_model_id = "gpt-123-retired";
+    let replacement_model_ids = ["gpt-124-future", "next-family-synthetic"];
+    let cards = [
+        retired_model_id,
+        replacement_model_ids[0],
+        replacement_model_ids[1],
+    ]
+    .into_iter()
+    .map(|id| {
+        json!({
+            "slug": id,
+            "display_name": format!("Upstream title for {id}"),
+            "supported_reasoning_levels": [{"effort": "high", "description": "High"}],
+            "supports_parallel_tool_calls": true
         })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
     // A retained manifest must not resurrect a model removed from the pool.
-    for inventory in [&[old][..], &replacements[..]] {
+    for inventory in [&[retired_model_id][..], &replacement_model_ids[..]] {
         let runtime =
             native_catalog_test_runtime_with_accounts(None, None, &["native-account"], inventory);
         let key = runtime
@@ -287,8 +328,8 @@ fn missing_native_card_keeps_identity_without_inheriting_capabilities() {
             for field in ["use_responses_lite", "future_native_capability"] {
                 assert!(model.get(field).is_none(), "unexpected capability: {field}");
             }
-            assert_eq!(model["context_window"], 272_000);
-            assert_eq!(model["auto_compact_token_limit"], 244_800);
+            assert!(model.get("context_window").is_none());
+            assert!(model.get("auto_compact_token_limit").is_none());
             assert!(crate::codex_catalog_entry_is_compatible(model));
         }
         let alias = crate::codex_model_alias(&display_id);

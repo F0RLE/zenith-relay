@@ -32,8 +32,8 @@ for (const width of [1440, 1160, 840, 390, 360]) {
       await expect(header.getByRole("tab").nth(1)).toBeFocused();
       await expect(header.getByRole("tab").nth(1)).toHaveAttribute("aria-selected", "true");
       if (name === "Подключения") {
-        const toolbar = page.locator(".connections-toolbar");
-        const list = page.locator(".connection-list-wrap");
+        const toolbar = page.locator(".source-command-bar");
+        const list = page.locator(".source-cards");
         await expect(list).toBeVisible();
         const [toolbarBox, listBox] = await Promise.all([toolbar.boundingBox(), list.boundingBox()]);
         expect(Math.abs(toolbarBox!.x - listBox!.x)).toBeLessThanOrEqual(1);

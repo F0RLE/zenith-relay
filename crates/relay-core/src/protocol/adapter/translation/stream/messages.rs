@@ -3,10 +3,10 @@ use super::*;
 impl TranslationStream {
     pub(in crate::protocol::adapter::translation::stream) fn messages(
         &mut self,
-        value: &Value,
+        upstream_event: &Value,
     ) -> AdapterResult<bool> {
         let invalid = AdapterError::upstream_stream_invalid;
-        match value
+        match upstream_event
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?
@@ -15,16 +15,16 @@ impl TranslationStream {
             "message_start" => {
                 self.merge_usage(response::usage(
                     WireApi::Messages,
-                    value.get("message").ok_or_else(invalid)?,
+                    upstream_event.get("message").ok_or_else(invalid)?,
                 ));
             }
             "content_block_start" => {
-                let key = value
+                let key = upstream_event
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid)?
                     .to_string();
-                let block = value.get("content_block").ok_or_else(invalid)?;
+                let block = upstream_event.get("content_block").ok_or_else(invalid)?;
                 let block = match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         checked(block, &["type", "text"])?;
@@ -56,8 +56,10 @@ impl TranslationStream {
                             name: required_text(block, "name")?.into(),
                             arguments: block
                                 .get("input")
-                                .filter(|input| {
-                                    input.as_object().is_some_and(|object| !object.is_empty())
+                                .filter(|tool_input| {
+                                    tool_input.as_object().is_some_and(|tool_input_fields| {
+                                        !tool_input_fields.is_empty()
+                                    })
                                 })
                                 .map(Value::to_string)
                                 .unwrap_or_default(),
@@ -68,7 +70,7 @@ impl TranslationStream {
                 self.insert(key, block)?;
             }
             "content_block_delta" => {
-                let key = value
+                let key = upstream_event
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid)?
@@ -77,7 +79,7 @@ impl TranslationStream {
                 if self.closed.contains(&index) {
                     return Err(invalid());
                 }
-                let delta = value.get("delta").ok_or_else(invalid)?;
+                let delta = upstream_event.get("delta").ok_or_else(invalid)?;
                 match delta.get("type").and_then(Value::as_str) {
                     Some("text_delta") => checked(delta, &["type", "text"])?,
                     Some("thinking_delta") => checked(delta, &["type", "thinking"])?,
@@ -85,7 +87,7 @@ impl TranslationStream {
                     _ => return Err(invalid()),
                 }
                 match (
-                    &mut self.response.blocks[index],
+                    &mut self.decoded_response.blocks[index],
                     delta.get("type").and_then(Value::as_str),
                 ) {
                     (Block::Text(text), Some("text_delta")) => text.push_str(
@@ -111,7 +113,7 @@ impl TranslationStream {
                 }
             }
             "content_block_stop" => {
-                let key = value
+                let key = upstream_event
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid)?
@@ -120,19 +122,25 @@ impl TranslationStream {
                 if !self.closed.insert(index) {
                     return Err(invalid());
                 }
-                if let Block::ToolCall { arguments, .. } = &mut self.response.blocks[index] {
+                if let Block::ToolCall { arguments, .. } = &mut self.decoded_response.blocks[index]
+                {
                     if arguments.is_empty() {
                         *arguments = "{}".into();
                     }
                 }
             }
             "message_delta" => {
-                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                if let Some(reason) = upstream_event
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                {
                     self.finish_reason = Some(response::finish(WireApi::Messages, reason)?);
                 }
             }
             "message_stop" => {
-                if self.closed.len() != self.response.blocks.len() || self.finish_reason.is_none() {
+                if self.closed.len() != self.decoded_response.blocks.len()
+                    || self.finish_reason.is_none()
+                {
                     return Err(invalid());
                 }
                 return Ok(true);

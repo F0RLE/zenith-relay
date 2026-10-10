@@ -105,7 +105,7 @@ async fn lookup_import_account_id_with_hints(
         })?;
     drop(permit);
     let status = response.status();
-    let body = collect_limited(response, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES)
+    let profile_response_body = collect_limited(response, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
             LimitedBodyError::Transport => ImportItemError::new(
@@ -134,17 +134,18 @@ async fn lookup_import_account_id_with_hints(
         };
         return Err(ImportItemError::new(code, message));
     }
-    let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        ImportItemError::new(
-            error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
-            "ChatGPT account lookup returned invalid JSON",
-        )
-    })?;
+    let profile_payload: serde_json::Value = serde_json::from_slice(&profile_response_body)
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
+                "ChatGPT account lookup returned invalid JSON",
+            )
+        })?;
     let claimed_account_ids = claimed_account_ids
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    resolve_account_check_account_id(&payload, &claimed_account_ids).map_err(|error| {
+    resolve_account_check_account_id(&profile_payload, &claimed_account_ids).map_err(|error| {
         let (code, message) = match error {
             AccountCheckIdentityError::Missing => (
                 error_codes::PROVIDER_ACCOUNT_ID_MISSING,

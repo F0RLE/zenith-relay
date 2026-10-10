@@ -740,7 +740,7 @@ async fn responses_to_messages_bridge_preserves_effort_and_rejects_incompatible_
 }
 
 #[tokio::test]
-async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected() {
+async fn legacy_disabled_reasoning_mode_is_ignored_and_unmatched_forced_tools_are_rejected() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
         spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
@@ -766,7 +766,8 @@ async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected
         .json(&json!({
             "model": "claude-test",
             "input": "tool",
-            "tools": [{"type": "web_search"}]
+            "tools": [{"type": "web_search"}],
+            "tool_choice": {"type": "function", "name": "missing"}
         }))
         .send()
         .await
@@ -774,11 +775,33 @@ async fn legacy_disabled_reasoning_mode_is_ignored_and_opaque_tools_are_rejected
     assert_eq!(opaque_tool.status(), StatusCode::BAD_REQUEST);
     let body: Value = opaque_tool.json().await.unwrap();
     assert_eq!(body["error"]["code"], "adapter_tool_unsupported");
-    let requests = state.requests.lock().unwrap();
+    {
+        let requests = state.requests.lock().unwrap();
+        let bodies = state.bodies.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
+    }
+
+    // A hosted tool has no Messages equivalent: it is dropped, not rejected.
+    let hosted_only = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "claude-test",
+            "input": "tool",
+            "tools": [{"type": "web_search"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hosted_only.status(), StatusCode::OK);
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["thinking"]["type"], "adaptive");
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[1]
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty));
 }
 
 #[tokio::test]

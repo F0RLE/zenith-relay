@@ -215,7 +215,7 @@ test("dense status rows use accessible icons without repeated labels", async ({ 
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await expect(page.locator(".relay-table tbody tr").first().locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
+  await expect(page.locator(".source-card").first().locator(".relay-status-icon")).toHaveAttribute("aria-label", "In pool");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("tab", { name: "Model Rules" }).click();
@@ -372,7 +372,9 @@ test("plan filters keep unavailable accounts visible with typed errors", async (
   await invalidGrantAccount.locator(".account-status-button").click();
   const errorDialog = page.getByRole("dialog", { name: "Technical error details" });
   const errorJson = JSON.parse(await errorDialog.locator("pre").innerText()) as Record<string, unknown>;
-  expect(errorJson).toMatchObject({ code: "auth_invalid_grant", message: "Signed out or account changed", account: "Personal Plus", health: "healthy", auth_state: "requires_reauth", subscription_status: "active", observed_at: null });
+  expect(errorJson).toMatchObject({ code: "auth_invalid_grant", message: "Signed out or account changed", connection_kind: "codex", health: "healthy", auth_state: "requires_reauth", subscription_status: "active", observed_at: null });
+  expect(errorJson).not.toHaveProperty("account");
+  await expect(errorDialog).not.toContainText("Personal Plus");
   await expect(errorDialog).not.toContainText("test_zenith_source_key");
   await errorDialog.locator("footer").getByRole("button", { name: "Close" }).click();
   await page.getByRole("button", { name: "Clear filters" }).click();
@@ -414,9 +416,9 @@ test("connections and pool group availability and preserve live order within eac
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
-  const sourceRows = page.locator(".source-table tbody tr");
+  const sourceRows = page.locator(".source-card");
   await expect(sourceRows).toHaveCount(3);
-  const connectionSourceOrder = await sourceRows.locator("td:nth-child(2) strong").allTextContents();
+  const connectionSourceOrder = await sourceRows.locator(".source-card-identity strong").allTextContents();
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const poolSourceOrder = await page.locator('.pool-member-card[data-member-kind="source"] .pool-member-name').allTextContents();
@@ -607,6 +609,7 @@ test("plan filters and pool controls exclude a selected account without deleting
   await expect(page.getByRole("button", { name: "Add selected to pool", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove selected from pool", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Add selected to pool", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
   await expect(card).toBeHidden();
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership").length)).toBe(2);

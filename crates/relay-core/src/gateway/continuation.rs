@@ -22,7 +22,7 @@ pub(super) fn previous_response_id(request: &Value) -> Option<&str> {
         .get("previous_response_id")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|response_id| !response_id.is_empty())
 }
 
 /// Drops the opaque continuation binding after its history has been materialized.
@@ -35,6 +35,16 @@ pub(super) fn clear_materialized_continuation(
     has_unpaired_tool_output: &mut bool,
 ) {
     *response_affinity_key = None;
+    *requires_affinity_owner = false;
+    *has_unpaired_tool_output = false;
+}
+
+/// Drops the opaque continuation requirement after replay while retaining the
+/// saved owner binding for one same-provider repair attempt.
+pub(super) fn retain_materialized_continuation_owner(
+    requires_affinity_owner: &mut bool,
+    has_unpaired_tool_output: &mut bool,
+) {
     *requires_affinity_owner = false;
     *has_unpaired_tool_output = false;
 }

@@ -57,12 +57,12 @@ pub(in crate::local_pool) async fn runtime_from_store(
     // still select only the protocol they actually use at the gateway edge.
     let (mut pool_source_ids, mut pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
-    pool_account_ids.retain(|id| !pending_move_ids.contains(id));
+    pool_account_ids.retain(|account_id| !pending_move_ids.contains(account_id));
     let (sources, source_ids) = admit_runtime_sources(state, source_records, &source_api_keys);
     // Key scopes must reference only source executors admitted above. Keeping
     // a stale id for a malformed or credential-less source can make the core
     // reject an otherwise valid mixed pool while rebuilding the gateway.
-    pool_source_ids.retain(|id| source_ids.contains(id));
+    pool_source_ids.retain(|source_id| source_ids.contains(source_id));
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let authority = state.token_authority();
     let AdmittedAccounts {
@@ -329,13 +329,15 @@ async fn admit_runtime_account(
     let models = account.effective_models().to_vec();
     Ok(Some(AdmittedRuntimeAccount {
         account: RuntimeChatGptAccount {
+            oauth_client_kind: secret.oauth_client_kind(),
             id: account_id,
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
+            chatgpt_user_id: secret.provider_user_id().map(str::to_string),
             responses_url: CODEX_RESPONSES_URL.to_string(),
-            basis_points_enabled: settings.basis_points_enabled
-                && secret.has_oauth()
-                && !secret.is_agent_identity(),
+            basis_points_enabled: secret.oauth_client_kind()
+                == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,
+            basis_points_headers: secret.basis_points_headers().cloned(),
             models,
             enabled: candidate_enabled,
             draining: account.account.draining,
@@ -378,17 +380,17 @@ fn quarantine_source_runtime_error(
 
     let persisted = (|| -> Result<()> {
         let mut store = state.store()?;
-        let Some(current) = store.source(&source.id).cloned() else {
+        let Some(stored_source) = store.source(&source.id).cloned() else {
             return Ok(());
         };
-        if !same_source_runtime_configuration(&current, source)
-            || current.last_error.as_deref() == Some(code)
+        if !same_source_runtime_configuration(&stored_source, source)
+            || stored_source.last_error.as_deref() == Some(code)
         {
             return Ok(());
         }
-        let mut updated = current;
-        updated.last_error = Some(code.to_string());
-        store.upsert_source(updated)
+        let mut updated_source = stored_source;
+        updated_source.last_error = Some(code.to_string());
+        store.upsert_source(updated_source)
     })();
     if persisted.is_err() {
         crate::diagnostics::record_error(
@@ -406,18 +408,18 @@ fn quarantine_source_runtime_error(
 fn clear_source_runtime_error(state: &DesktopState, source: &ProviderSourceRecord) {
     let persisted = (|| -> Result<()> {
         let mut store = state.store()?;
-        let Some(current) = store.source(&source.id).cloned() else {
+        let Some(stored_source) = store.source(&source.id).cloned() else {
             return Ok(());
         };
-        let runtime_error = current.last_error.as_deref().is_some_and(|error| {
+        let runtime_error = stored_source.last_error.as_deref().is_some_and(|error| {
             error == SOURCE_PROTOCOL_INVALID_CODE || error == SOURCE_RUNTIME_INVALID_CODE
         });
-        if !same_source_runtime_configuration(&current, source) || !runtime_error {
+        if !same_source_runtime_configuration(&stored_source, source) || !runtime_error {
             return Ok(());
         }
-        let mut updated = current;
-        updated.last_error = None;
-        store.upsert_source(updated)
+        let mut updated_source = stored_source;
+        updated_source.last_error = None;
+        store.upsert_source(updated_source)
     })();
     if persisted.is_err() {
         crate::diagnostics::record_error(
@@ -430,21 +432,21 @@ fn clear_source_runtime_error(state: &DesktopState, source: &ProviderSourceRecor
 }
 
 fn same_source_runtime_configuration(
-    current: &ProviderSourceRecord,
-    expected: &ProviderSourceRecord,
+    stored_source: &ProviderSourceRecord,
+    expected_source: &ProviderSourceRecord,
 ) -> bool {
     // Transport identity includes the catalog. A catalog-only edit must not
     // receive an admission error captured for the previous evidence.
-    current.transport_identity() == expected.transport_identity()
-        && current.name == expected.name
-        && current.enabled == expected.enabled
-        && current.in_pool == expected.in_pool
-        && current.draining == expected.draining
-        && current.allowed_models == expected.allowed_models
-        && current.excluded_models == expected.excluded_models
-        && current.priority == expected.priority
-        && current.weight == expected.weight
-        && current.recovery_delay_seconds == expected.recovery_delay_seconds
+    stored_source.transport_identity() == expected_source.transport_identity()
+        && stored_source.name == expected_source.name
+        && stored_source.enabled == expected_source.enabled
+        && stored_source.in_pool == expected_source.in_pool
+        && stored_source.draining == expected_source.draining
+        && stored_source.allowed_models == expected_source.allowed_models
+        && stored_source.excluded_models == expected_source.excluded_models
+        && stored_source.priority == expected_source.priority
+        && stored_source.weight == expected_source.weight
+        && stored_source.recovery_delay_seconds == expected_source.recovery_delay_seconds
 }
 
 /// ChatGPT profile recovery is an optional desktop integration. Its metadata
@@ -465,8 +467,8 @@ pub(super) fn managed_chatgpt_account_id_for_reserve(
     .flatten()
 }
 
-pub(super) fn timestamp_ms(value: &str) -> Option<u64> {
-    zenith_relay_core::unix_time_ms_from_rfc3339(value)
+pub(super) fn timestamp_ms(timestamp_text: &str) -> Option<u64> {
+    zenith_relay_core::unix_time_ms_from_rfc3339(timestamp_text)
 }
 
 #[cfg(test)]
@@ -480,11 +482,17 @@ mod tests {
 
     #[test]
     fn catalog_evidence_changes_the_admitted_source_configuration() {
-        let current = source();
-        let mut catalog = current.clone();
+        let source_snapshot = source();
+        let mut catalog = source_snapshot.clone();
         catalog.protocol_config.revision = 1;
 
-        assert!(same_source_runtime_configuration(&current, &current));
-        assert!(!same_source_runtime_configuration(&current, &catalog));
+        assert!(same_source_runtime_configuration(
+            &source_snapshot,
+            &source_snapshot
+        ));
+        assert!(!same_source_runtime_configuration(
+            &source_snapshot,
+            &catalog
+        ));
     }
 }

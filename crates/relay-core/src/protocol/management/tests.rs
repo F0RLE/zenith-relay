@@ -43,6 +43,8 @@ fn runtime_candidate(
 
 fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
     AccountSummary {
+        credit_balance_key: None,
+        oauth_client_kind: Default::default(),
         id: "account".into(),
         label: "Account".into(),
         identity_hint: "account".into(),
@@ -118,6 +120,10 @@ fn test_token_price(input: u64, output: u64) -> TokenPrice {
         cache_write_5m: None,
         cache_write_1h: None,
         output,
+        flex: crate::pricing::TokenRateSet::EMPTY,
+        priority: crate::pricing::TokenRateSet::EMPTY,
+        above_200k: crate::pricing::LongContextRates::EMPTY,
+        above_272k: crate::pricing::LongContextRates::EMPTY,
     }
 }
 

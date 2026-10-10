@@ -5,8 +5,8 @@ pub(super) fn usage_path(query: &UsageQuery) -> String {
     let (page, page_size) = query.normalized_page();
     parameters.append_pair("page", &page.to_string());
     parameters.append_pair("pageSize", &page_size.to_string());
-    if let Some(value) = query.range {
-        parameters.append_pair("range", usage_range_name(value));
+    if let Some(usage_range) = query.range {
+        parameters.append_pair("range", usage_range_name(usage_range));
     }
     append_number(&mut parameters, "fromMs", query.from_ms);
     append_number(&mut parameters, "toMs", query.to_ms);
@@ -17,11 +17,11 @@ pub(super) fn usage_path(query: &UsageQuery) -> String {
         "sourceOrAccountQuery",
         query.source_or_account_query.as_deref(),
     );
-    if let Some(value) = query.wire_api {
-        parameters.append_pair("wireApi", value.as_str());
+    if let Some(wire_api) = query.wire_api {
+        parameters.append_pair("wireApi", wire_api.as_str());
     }
-    if let Some(value) = query.success {
-        parameters.append_pair("success", if value { "true" } else { "false" });
+    if let Some(success) = query.success {
+        parameters.append_pair("success", if success { "true" } else { "false" });
     }
     append_text(
         &mut parameters,
@@ -33,40 +33,53 @@ pub(super) fn usage_path(query: &UsageQuery) -> String {
         "requestIdQuery",
         query.request_id_query.as_deref(),
     );
-    if let Some(value) = query.include_events {
-        parameters.append_pair("includeEvents", if value { "true" } else { "false" });
+    if let Some(include_events) = query.include_events {
+        parameters.append_pair(
+            "includeEvents",
+            if include_events { "true" } else { "false" },
+        );
     }
-    if let Some(value) = query.include_models {
-        parameters.append_pair("includeModels", if value { "true" } else { "false" });
+    if let Some(include_models) = query.include_models {
+        parameters.append_pair(
+            "includeModels",
+            if include_models { "true" } else { "false" },
+        );
     }
-    if let Some(value) = query.include_pool_members {
-        parameters.append_pair("includePoolMembers", if value { "true" } else { "false" });
+    if let Some(include_pool_members) = query.include_pool_members {
+        parameters.append_pair(
+            "includePoolMembers",
+            if include_pool_members {
+                "true"
+            } else {
+                "false"
+            },
+        );
     }
     format!("/usage?{}", parameters.finish())
 }
 
 fn append_text(
     parameters: &mut url::form_urlencoded::Serializer<'_, String>,
-    name: &str,
-    value: Option<&str>,
+    parameter_name: &str,
+    text_value: Option<&str>,
 ) {
-    if let Some(value) = value.filter(|value| !value.is_empty()) {
-        parameters.append_pair(name, value);
+    if let Some(text_value) = text_value.filter(|text| !text.is_empty()) {
+        parameters.append_pair(parameter_name, text_value);
     }
 }
 
 fn append_number(
     parameters: &mut url::form_urlencoded::Serializer<'_, String>,
-    name: &str,
-    value: Option<u64>,
+    parameter_name: &str,
+    numeric_value: Option<u64>,
 ) {
-    if let Some(value) = value {
-        parameters.append_pair(name, &value.to_string());
+    if let Some(numeric_value) = numeric_value {
+        parameters.append_pair(parameter_name, &numeric_value.to_string());
     }
 }
 
-fn usage_range_name(value: UsageRange) -> &'static str {
-    match value {
+fn usage_range_name(range: UsageRange) -> &'static str {
+    match range {
         UsageRange::Daily => "daily",
         UsageRange::Weekly => "weekly",
         UsageRange::Monthly => "monthly",

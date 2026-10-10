@@ -91,43 +91,45 @@ impl RemoteClient {
         &self,
         method: Method,
         path: &str,
-        input: Option<&I>,
+        request_payload: Option<&I>,
         authenticated: bool,
     ) -> Result<O, RemoteClientError> {
         let url = self.origin.endpoint(path)?;
-        let mut request = self.http.request(method, url);
+        let mut http_request = self.http.request(method, url);
         if authenticated {
-            request = request.bearer_auth(&self.token);
+            http_request = http_request.bearer_auth(&self.token);
         }
-        if let Some(input) = input {
-            request = request.json(input);
+        if let Some(request_payload) = request_payload {
+            http_request = http_request.json(request_payload);
         }
-        let response = request
+        let http_response = http_request
             .send()
             .await
             .map_err(|_| RemoteClientError::Transport)?;
-        if response.status().is_redirection() {
-            let _ = response.headers().get(LOCATION);
+        if http_response.status().is_redirection() {
+            let _ = http_response.headers().get(LOCATION);
             return Err(RemoteClientError::RedirectRejected);
         }
-        if !response.status().is_success() {
-            return Err(RemoteClientError::HttpStatus(response.status().as_u16()));
+        if !http_response.status().is_success() {
+            return Err(RemoteClientError::HttpStatus(
+                http_response.status().as_u16(),
+            ));
         }
-        decode_success_body(response).await
+        decode_success_body(http_response).await
     }
 }
 
 async fn decode_success_body<T: DeserializeOwned>(
-    response: reqwest::Response,
+    http_response: reqwest::Response,
 ) -> Result<T, RemoteClientError> {
-    let bytes = response
+    let response_bytes = http_response
         .bytes()
         .await
         .map_err(|_| RemoteClientError::Transport)?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
+    if response_bytes.len() > MAX_RESPONSE_BYTES {
         return Err(RemoteClientError::ResponseTooLarge);
     }
-    serde_json::from_slice(&bytes).map_err(|_| RemoteClientError::InvalidResponse)
+    serde_json::from_slice(&response_bytes).map_err(|_| RemoteClientError::InvalidResponse)
 }
 
 fn validate_token(token: &str) -> Result<(), RemoteClientError> {

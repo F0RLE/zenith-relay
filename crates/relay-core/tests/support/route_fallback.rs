@@ -405,16 +405,17 @@ async fn unavailable_accounts_do_not_block_healthy_account_or_source_fallback() 
     );
     assert!(exhausted_state.requests.lock().unwrap().is_empty());
     assert!(reauth_state.requests.lock().unwrap().is_empty());
-    assert_eq!(eligible_state.requests.lock().unwrap().len(), 2);
+    // Manual rotation advances to the next eligible candidate between
+    // independent requests, so the source fallback is selected directly on
+    // the second request instead of probing the account again first.
+    assert_eq!(eligible_state.requests.lock().unwrap().len(), 1);
     assert_eq!(source_state.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0].candidate_id.as_deref(), Some("oauth-eligible"));
     assert!(events[0].success);
-    assert_eq!(events[1].candidate_id.as_deref(), Some("oauth-eligible"));
-    assert!(!events[1].success);
-    assert_eq!(events[2].candidate_id.as_deref(), Some("source-fallback"));
-    assert!(events[2].success);
+    assert_eq!(events[1].candidate_id.as_deref(), Some("source-fallback"));
+    assert!(events[1].success);
 }
 
 #[tokio::test]

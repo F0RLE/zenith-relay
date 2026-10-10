@@ -10,28 +10,28 @@ pub(in crate::protocol::adapter) fn prepare_bridge_state<'a>(
     request: &'a Value,
     model: &str,
     reasoning_mode: MessagesReasoningMode,
-    previous: Option<MessagesBridgeState>,
+    previous_bridge_state: Option<MessagesBridgeState>,
     wire_api: WireApi,
 ) -> AdapterResult<(&'a Map<String, Value>, MessagesBridgeState)> {
-    let object = request
+    let request_object = request
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
     validate_responses_bridge_request(request, wire_api)?;
-    let has_previous_response = object
+    let has_previous_response = request_object
         .get("previous_response_id")
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let mut state = match (has_previous_response, previous) {
-        (true, Some(state)) if state.model == model => state,
+        .is_some_and(|previous_response_id| !previous_response_id.trim().is_empty());
+    let mut bridge_state = match (has_previous_response, previous_bridge_state) {
+        (true, Some(previous_state)) if previous_state.model == model => previous_state,
         (true, Some(_)) => return Err(AdapterError::continuation_mismatch()),
         (true, None) => return Err(AdapterError::continuation_missing()),
         (false, _) => MessagesBridgeState::new(model, reasoning_mode),
     };
-    if state.reasoning_mode != reasoning_mode {
+    if bridge_state.reasoning_mode != reasoning_mode {
         return Err(AdapterError::continuation_mismatch());
     }
-    state.system = state.historical_system.take();
-    Ok((object, state))
+    bridge_state.system = bridge_state.historical_system.take();
+    Ok((request_object, bridge_state))
 }
 
 /// Volatile continuation state for a Responses-to-Messages bridge. It is
@@ -88,18 +88,18 @@ impl MessagesBridgeState {
             tools.retain(|tool| {
                 tool.get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(|name| allowed.contains(name))
+                    .is_some_and(|allowed_tool_name| allowed.contains(allowed_tool_name))
             });
         }
         (!tools.is_empty()).then_some(tools)
     }
 
-    pub(in crate::protocol::adapter) fn allows_tool_name(&self, name: &str) -> bool {
+    pub(in crate::protocol::adapter) fn allows_tool_name(&self, upstream_tool_name: &str) -> bool {
         self.upstream_tools().is_some_and(|tools| {
             tools.iter().any(|tool| {
                 tool.get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(|candidate| candidate == name)
+                    .is_some_and(|candidate_tool_name| candidate_tool_name == upstream_tool_name)
             })
         })
     }
@@ -123,11 +123,11 @@ impl MessagesBridgeState {
     pub(in crate::protocol::adapter) fn upstream_tool_name(
         &self,
         namespace: Option<&str>,
-        name: &str,
+        client_tool_name: &str,
     ) -> Option<&str> {
         self.tool_targets.iter().find_map(|(upstream_name, tool)| {
             (tool.namespace.as_deref() == namespace
-                && tool.name == name
+                && tool.name == client_tool_name
                 && self.allows_tool_name(upstream_name))
             .then_some(upstream_name.as_str())
         })
@@ -142,11 +142,11 @@ impl MessagesBridgeState {
         tool: &Map<String, Value>,
     ) -> Option<String> {
         let kind = ResponsesToolKind::from_definition(tool).ok()?;
-        let name = tool
+        let tool_name = tool
             .get("name")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|name| !name.is_empty())?;
+            .filter(|tool_name| !tool_name.is_empty())?;
         let namespace = match tool.get("namespace") {
             None => None,
             Some(namespace) => Some(
@@ -156,7 +156,7 @@ impl MessagesBridgeState {
                     .filter(|namespace| !namespace.is_empty())?,
             ),
         };
-        let upstream_name = self.upstream_tool_name(namespace, name)?;
+        let upstream_name = self.upstream_tool_name(namespace, tool_name)?;
         (self.client_tool_kind(upstream_name) == Some(kind)).then(|| upstream_name.to_string())
     }
 }
@@ -164,7 +164,7 @@ impl MessagesBridgeState {
 #[derive(Clone, Debug)]
 pub struct MessagesBridgeRequest {
     pub(in crate::protocol::adapter) upstream_body: Value,
-    pub(in crate::protocol::adapter) state: MessagesBridgeState,
+    pub(in crate::protocol::adapter) bridge_state: MessagesBridgeState,
     /// Stable local route scope used when deriving the client-facing
     /// response id. Keeping the scope in the request makes JSON and SSE
     /// translation use the exact same identity rule.
@@ -176,8 +176,8 @@ impl MessagesBridgeRequest {
         &self.upstream_body
     }
 
-    pub fn state(&self) -> &MessagesBridgeState {
-        &self.state
+    pub fn bridge_state(&self) -> &MessagesBridgeState {
+        &self.bridge_state
     }
 
     pub fn response_scope(&self) -> &str {

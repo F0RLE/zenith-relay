@@ -8,12 +8,13 @@ mod tests;
 
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
-    AdapterError, AdapterRequestContext, AdapterResult, MessagesBridgeResponse, MessagesBridgeState,
+    AdapterError, AdapterRequestContext, AdapterResult, ClientToolTarget, MessagesBridgeResponse,
+    MessagesBridgeState, ResponsesToolKind,
 };
 use crate::{MessagesReasoningMode, WireApi};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 pub use stream::TranslationStream;
 
@@ -57,7 +58,6 @@ struct Function {
     description: Option<String>,
     parameters: Value,
     strict: Option<bool>,
-    custom: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +89,9 @@ struct Request {
     instructions: Option<Message>,
     messages: Vec<Message>,
     tools: Vec<Function>,
+    /// Responses client identity (kind, local name, namespace) for each
+    /// upstream tool name. Only a Responses client fills it.
+    client_tools: BTreeMap<String, ClientToolTarget>,
     tool_choice: Option<ToolChoice>,
     parallel_tools: Option<bool>,
     max_tokens: Option<u64>,
@@ -136,7 +139,7 @@ pub struct TranslationRequest {
     response_id: String,
     reasoning_mode: MessagesReasoningMode,
     history: Vec<Message>,
-    custom_tools: BTreeSet<String>,
+    client_tools: BTreeMap<String, ClientToolTarget>,
 }
 
 impl TranslationRequest {
@@ -144,31 +147,32 @@ impl TranslationRequest {
         context: AdapterRequestContext<'_>,
         upstream: WireApi,
     ) -> AdapterResult<Self> {
-        let mut request = decode::request(context.client_wire_api, context.request)?;
+        let mut decoded_request = decode::request(context.client_wire_api, context.request)?;
         if context.client_wire_api == WireApi::Responses
             && context
                 .request
                 .get("previous_response_id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| !id.is_empty())
+                .is_some_and(|response_id_value| !response_id_value.is_empty())
         {
-            let previous = context
+            let previous_context = context
                 .previous
                 .ok_or_else(AdapterError::continuation_missing)?;
-            if previous.model != context.model {
+            if previous_context.model != context.model {
                 return Err(AdapterError::continuation_mismatch());
             }
-            if previous.reasoning_mode != context.reasoning_mode {
+            if previous_context.reasoning_mode != context.reasoning_mode {
                 return Err(AdapterError::continuation_mismatch());
             }
-            let mut history = previous
+            let mut history = previous_context
                 .portable_history
                 .ok_or_else(AdapterError::continuation_mismatch)?;
-            history.append(&mut request.messages);
-            request.messages = history;
+            history.append(&mut decoded_request.messages);
+            decoded_request.messages = history;
         }
-        decode::resolve_tool_history(&mut request.messages)?;
-        let mut upstream_body = encode::request(&request, upstream, context.model, context.stream)?;
+        decode::resolve_tool_history(&mut decoded_request.messages)?;
+        let mut upstream_body =
+            encode::request(&decoded_request, upstream, context.model, context.stream)?;
         if upstream == WireApi::Messages {
             super::messages::apply_cache_write_ttl(&mut upstream_body, context.cache_write_ttl)?;
         }
@@ -176,12 +180,6 @@ impl TranslationRequest {
             context.response_scope,
             context.response_id_seed,
         );
-        let custom_tools = request
-            .tools
-            .iter()
-            .filter(|tool| tool.custom)
-            .map(|tool| tool.name.clone())
-            .collect();
         Ok(Self {
             upstream_body,
             client: context.client_wire_api,
@@ -189,8 +187,8 @@ impl TranslationRequest {
             model: context.model.to_owned(),
             response_id,
             reasoning_mode: context.reasoning_mode,
-            history: request.messages,
-            custom_tools,
+            history: decoded_request.messages,
+            client_tools: decoded_request.client_tools,
         })
     }
 
@@ -198,15 +196,19 @@ impl TranslationRequest {
         &self.upstream_body
     }
 
-    pub(super) fn translate(self, value: &Value) -> AdapterResult<MessagesBridgeResponse> {
-        let response = response::decode(self.upstream, value, &self.response_id)?;
-        self.complete(response)
+    pub(super) fn translate(
+        self,
+        upstream_response: &Value,
+    ) -> AdapterResult<MessagesBridgeResponse> {
+        let decoded_response =
+            response::decode(self.upstream, upstream_response, &self.response_id)?;
+        self.complete(decoded_response)
     }
 
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
         response.id = self.response_id.clone();
         let response_body =
-            response::encode(self.client, &response, &self.model, &self.custom_tools)?;
+            response::encode(self.client, &response, &self.model, &self.client_tools)?;
         let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
         let mut history = self.history;
         history.push(Message {
@@ -222,34 +224,46 @@ impl TranslationRequest {
     }
 }
 
-fn required_text<'a>(value: &'a Value, key: &str) -> AdapterResult<&'a str> {
-    value
+fn required_text<'a>(json_object: &'a Value, key: &str) -> AdapterResult<&'a str> {
+    json_object
         .get(key)
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .ok_or_else(AdapterError::invalid_request)
 }
 
-fn optional_u64(value: &Value, key: &str) -> AdapterResult<Option<u64>> {
-    value
+fn optional_u64(json_object: &Value, key: &str) -> AdapterResult<Option<u64>> {
+    json_object
         .get(key)
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_u64().ok_or_else(AdapterError::invalid_request))
+        .filter(|field_value| !field_value.is_null())
+        .map(|field_value| {
+            field_value
+                .as_u64()
+                .ok_or_else(AdapterError::invalid_request)
+        })
         .transpose()
 }
 
-fn optional_f64(value: &Value, key: &str) -> AdapterResult<Option<f64>> {
-    value
+fn optional_f64(json_object: &Value, key: &str) -> AdapterResult<Option<f64>> {
+    json_object
         .get(key)
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_f64().ok_or_else(AdapterError::invalid_request))
+        .filter(|field_value| !field_value.is_null())
+        .map(|field_value| {
+            field_value
+                .as_f64()
+                .ok_or_else(AdapterError::invalid_request)
+        })
         .transpose()
 }
 
-fn optional_bool(value: &Value, key: &str) -> AdapterResult<Option<bool>> {
-    value
+fn optional_bool(json_object: &Value, key: &str) -> AdapterResult<Option<bool>> {
+    json_object
         .get(key)
-        .filter(|value| !value.is_null())
-        .map(|value| value.as_bool().ok_or_else(AdapterError::invalid_request))
+        .filter(|field_value| !field_value.is_null())
+        .map(|field_value| {
+            field_value
+                .as_bool()
+                .ok_or_else(AdapterError::invalid_request)
+        })
         .transpose()
 }

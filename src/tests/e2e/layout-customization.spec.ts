@@ -88,9 +88,10 @@ test("account grouping is explicit and saved on connections", async ({ page }) =
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("button", { name: "Group by plan" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("tab", { name: "Sources" }).click();
-  const sourceTable = page.locator(".source-table");
-  expect(await sourceTable.locator("th:not(:last-child), td:not(:last-child)").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "left"))).toBe(true);
-  await page.screenshot({ path: "output/playwright/source-table-aligned-en-600x760.png" });
+  const sourceCards = page.locator(".source-card");
+  await expect(sourceCards).toHaveCount(1);
+  expect(await sourceCards.evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-cards-en-600x760.png" });
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.getByRole("button", { name: "Group by plan" })).toHaveCount(0);
   await expect(page.locator(".pool-member-list .account-plan-group-heading")).toHaveCount(0);

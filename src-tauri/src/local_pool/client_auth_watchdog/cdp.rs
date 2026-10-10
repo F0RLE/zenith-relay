@@ -114,15 +114,15 @@ fn unique_remote_debugging_port(ports: impl IntoIterator<Item = u16>) -> Option<
 
 fn parse_debug_port(args: &[String]) -> Option<u16> {
     args.iter().enumerate().find_map(|(index, arg)| {
-        let value = arg.strip_prefix("--remote-debugging-port=").or_else(|| {
+        let port_text = arg.strip_prefix("--remote-debugging-port=").or_else(|| {
             if arg == "--remote-debugging-port" {
                 args.get(index + 1).map(String::as_str)
             } else {
                 None
             }
         });
-        value
-            .and_then(|value| value.parse::<u16>().ok())
+        port_text
+            .and_then(|port_text| port_text.parse::<u16>().ok())
             .filter(|port| *port != 0)
     })
 }
@@ -139,18 +139,18 @@ pub(super) async fn query_targets(client: &Client, port: u16) -> Vec<CdpTarget> 
     {
         return Vec::new();
     }
-    let mut body = Vec::new();
+    let mut response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
             return Vec::new();
         };
-        if chunk.len() > MAX_CDP_RESPONSE_BYTES.saturating_sub(body.len()) {
+        if chunk.len() > MAX_CDP_RESPONSE_BYTES.saturating_sub(response_bytes.len()) {
             return Vec::new();
         }
-        body.extend_from_slice(&chunk);
+        response_bytes.extend_from_slice(&chunk);
     }
-    parse_cdp_targets_body(&body)
+    parse_cdp_targets_body(&response_bytes)
 }
 
 pub(super) async fn query_snapshot(target: &CdpTarget) -> Option<AuthPageSnapshot> {
@@ -185,19 +185,23 @@ pub(super) async fn query_snapshot(target: &CdpTarget) -> Option<AuthPageSnapsho
         let Ok(Some(Ok(Message::Text(text)))) = timeout(CDP_TIMEOUT, socket.next()).await else {
             return None;
         };
-        let value: serde_json::Value = serde_json::from_str(text.as_ref()).ok()?;
-        if value.get("id").and_then(serde_json::Value::as_i64) != Some(1) {
+        let response_document: serde_json::Value = serde_json::from_str(text.as_ref()).ok()?;
+        if response_document
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            != Some(1)
+        {
             continue;
         }
-        return value
+        return response_document
             .pointer("/result/result/value")
             .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
+            .and_then(|snapshot_value| serde_json::from_value(snapshot_value).ok());
     }
 }
 
-fn is_loopback_websocket_url(value: &str) -> bool {
-    let Ok(url) = Url::parse(value) else {
+fn is_loopback_websocket_url(url_text: &str) -> bool {
+    let Ok(url) = Url::parse(url_text) else {
         return false;
     };
     let host = url
@@ -209,11 +213,11 @@ fn is_loopback_websocket_url(value: &str) -> bool {
             .is_some_and(|host| host.is_loopback())
 }
 
-fn parse_cdp_targets_body(body: &[u8]) -> Vec<CdpTarget> {
-    if body.len() > MAX_CDP_RESPONSE_BYTES {
+fn parse_cdp_targets_body(response_body: &[u8]) -> Vec<CdpTarget> {
+    if response_body.len() > MAX_CDP_RESPONSE_BYTES {
         return Vec::new();
     }
-    serde_json::from_slice(body).unwrap_or_default()
+    serde_json::from_slice(response_body).unwrap_or_default()
 }
 
 #[cfg(test)]

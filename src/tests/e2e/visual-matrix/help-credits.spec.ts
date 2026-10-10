@@ -21,7 +21,7 @@ for (const theme of themes) {
         else expect(contentsBox!.y + contentsBox!.height).toBeLessThan(articleBox!.y);
         expect(await article.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
         await page.screenshot({ path: `output/playwright/help-${locale}-${theme}-${width}.png` });
-        const errors = article.getByRole("heading", { name: locale === "ru" ? "8. Ошибки" : "8. Errors", exact: true });
+        const errors = article.getByRole("heading", { name: locale === "ru" ? "9. Ошибки" : "9. Errors", exact: true });
         await errors.evaluate((element) => element.scrollIntoView({ block: "start" }));
         await expect(contents.locator("a[aria-current]")).toHaveText(locale === "ru" ? "Ошибки" : "Errors");
         await expect(contents).toBeInViewport();

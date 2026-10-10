@@ -2,6 +2,7 @@ mod completion;
 mod http;
 mod usage;
 
+pub(in crate::gateway) use completion::{collect_basis_points_response, stop_basis_points_event};
 pub(super) use completion::{collect_upstream_response, completed_upstream_response};
 pub(super) use http::{
     attach_error_diagnostics, attach_stream_diagnostics, proxy_error_response, proxy_json_response,

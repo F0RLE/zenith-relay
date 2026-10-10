@@ -101,8 +101,11 @@ impl SourceCatalogRecord for SourceCatalogEvidence<'_> {
 }
 
 /// Whether discovery replaced any stored catalog field.
-pub fn source_catalog_changed<T: SourceCatalogRecord + ?Sized>(previous: &T, next: &T) -> bool {
-    previous.catalog_evidence() != next.catalog_evidence()
+pub fn source_catalog_changed<T: SourceCatalogRecord + ?Sized>(
+    previous_catalog: &T,
+    updated_source: &T,
+) -> bool {
+    previous_catalog.catalog_evidence() != updated_source.catalog_evidence()
 }
 
 /// Catalog refresh is read-only at the provider: it never sends a generation.
@@ -128,7 +131,7 @@ pub async fn discover_source_with_protocol_config_with_scope(
 ) -> Result<SourceDiscovery> {
     read_source_models_with_scope(source, bindings, config, scope)
         .await
-        .value
+        .read_value
 }
 
 pub async fn read_source_models(
@@ -155,9 +158,9 @@ pub async fn read_source_models_with_scope(
     // Stored bindings are discovery hints for providers that expose distinct
     // catalogs per physical protocol. Runtime routes are still recomputed from
     // the resulting catalog and capability evidence.
-    let value = read_bindings(&catalog_source, bindings, &hints, &scope).await;
+    let discovery_result = read_bindings(&catalog_source, bindings, &hints, &scope).await;
     SourceRead {
-        value,
+        read_value: discovery_result,
         retry_after_ms: hints.delay(),
     }
 }

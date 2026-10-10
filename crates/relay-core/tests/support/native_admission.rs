@@ -9,7 +9,11 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
         .into_iter()
         .chain([(WireApi::Responses, WireApi::Messages)])
     {
-        for feature_status in [CapabilityStatus::Unsupported, CapabilityStatus::Declared] {
+        for (reasoning_status, declared_effort) in [
+            (CapabilityStatus::Unsupported, None),
+            (CapabilityStatus::Declared, Some("low")),
+            (CapabilityStatus::Declared, Some("high")),
+        ] {
             for reference_support in [false, true] {
                 let observed = Arc::new(Mutex::new(Vec::new()));
                 let captured = observed.clone();
@@ -37,12 +41,8 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                     status: CapabilityStatus::Unknown,
                     origin: CapabilityOrigin::Catalog,
                     checked_at_ms: 1,
-                    features: [(ProtocolFeature::Reasoning, feature_status)].into(),
-                    reasoning_efforts: if feature_status == CapabilityStatus::Declared {
-                        vec!["low".into()]
-                    } else {
-                        vec![]
-                    },
+                    features: [(ProtocolFeature::Reasoning, reasoning_status)].into(),
+                    reasoning_efforts: declared_effort.into_iter().map(str::to_owned).collect(),
                 }];
                 let runtime = GatewayRuntime::from_pool(
                 vec![source],
@@ -77,7 +77,7 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                         body[field],
                         "{client:?}"
                     );
-                } else if !reference_support {
+                } else if !reference_support || declared_effort != Some("high") {
                     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
                     assert!(observed.lock().unwrap().is_empty());
                 } else {

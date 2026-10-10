@@ -48,9 +48,9 @@ impl AgentIdentityCredential {
                 .await
                 .map_err(|_| AgentIdentityError::RegistrationTransport)?;
             if response.status().is_success() {
-                let result = decode_task_registration_response(self, response).await;
+                let registration_result = decode_task_registration_response(self, response).await;
                 drop(permit);
-                return result;
+                return registration_result;
             }
             if retryable_status(response.status()) && attempt + 1 < REGISTRATION_ATTEMPTS {
                 let delay = crate::transport::retry_after_ms(
@@ -127,13 +127,14 @@ impl AgentIdentityCredential {
                 .await
                 .map_err(|_| AgentIdentityError::RegistrationTransport)?;
             if response.status().is_success() {
-                let body = collect_registration_response(response).await?;
+                let registration_response_body = collect_registration_response(response).await?;
                 drop(permit);
-                let response: AgentRegistrationResponse = serde_json::from_slice(&body)
-                    .map_err(|_| AgentIdentityError::InvalidRegistrationResponse)?;
-                let registered_runtime_id = response
+                let registration_response: AgentRegistrationResponse =
+                    serde_json::from_slice(&registration_response_body)
+                        .map_err(|_| AgentIdentityError::InvalidRegistrationResponse)?;
+                let registered_runtime_id = registration_response
                     .agent_runtime_id
-                    .or(response.agent_runtime_id_camel)
+                    .or(registration_response.agent_runtime_id_camel)
                     .ok_or(AgentIdentityError::InvalidRegistrationResponse)?
                     .trim()
                     .to_string();
@@ -224,17 +225,21 @@ async fn decode_task_registration_response(
     credential: &AgentIdentityCredential,
     response: reqwest::Response,
 ) -> Result<String, AgentIdentityError> {
-    let body = collect_registration_response(response).await?;
-    let response: TaskRegistrationResponse = serde_json::from_slice(&body)
-        .map_err(|_| AgentIdentityError::InvalidRegistrationResponse)?;
-    if let Some(task_id) = response.task_id.or(response.task_id_camel) {
+    let task_registration_response_body = collect_registration_response(response).await?;
+    let task_registration_response: TaskRegistrationResponse =
+        serde_json::from_slice(&task_registration_response_body)
+            .map_err(|_| AgentIdentityError::InvalidRegistrationResponse)?;
+    if let Some(task_id) = task_registration_response
+        .task_id
+        .or(task_registration_response.task_id_camel)
+    {
         let task_id = task_id.trim().to_string();
         validate_identifier(&task_id).map_err(|_| AgentIdentityError::InvalidTaskId)?;
         return Ok(task_id);
     }
-    let encrypted = response
+    let encrypted = task_registration_response
         .encrypted_task_id
-        .or(response.encrypted_task_id_camel)
+        .or(task_registration_response.encrypted_task_id_camel)
         .ok_or(AgentIdentityError::InvalidRegistrationResponse)?;
     credential.decrypt_task_id(&encrypted)
 }
@@ -270,14 +275,18 @@ fn retry_delay(attempt: usize) -> Duration {
 async fn collect_registration_response(
     response: reqwest::Response,
 ) -> Result<Vec<u8>, AgentIdentityError> {
-    let mut body = Vec::new();
+    let mut registration_response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| AgentIdentityError::RegistrationTransport)?;
-        if body.len().saturating_add(chunk.len()) > MAX_REGISTRATION_RESPONSE_BYTES {
+        if registration_response_bytes
+            .len()
+            .saturating_add(chunk.len())
+            > MAX_REGISTRATION_RESPONSE_BYTES
+        {
             return Err(AgentIdentityError::RegistrationResponseTooLarge);
         }
-        body.extend_from_slice(&chunk);
+        registration_response_bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(registration_response_bytes)
 }

@@ -12,7 +12,9 @@ impl ModelMetadataCatalog {
         self.resolve(model)
             .and_then(|metadata| metadata.name.as_deref())
             .map(str::trim)
-            .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+            .filter(|display_name| {
+                !display_name.is_empty() && !display_name.chars().any(char::is_control)
+            })
             .map(str::to_owned)
             .unwrap_or_else(|| crate::codex_model_display_name(model))
     }
@@ -30,9 +32,9 @@ impl ModelMetadataCatalog {
             .unwrap_or_else(ModelCapabilities::unknown_model)
     }
 
-    pub fn apply_codex_capabilities(&self, model: &str, entry: &mut Value) {
-        self.capabilities_for(model).apply_to_codex(entry);
-        crate::catalog::set_codex_service_tiers(entry, self.service_tiers_for(model));
+    pub fn apply_codex_capabilities(&self, model: &str, catalog_entry: &mut Value) {
+        self.capabilities_for(model).apply_to_codex(catalog_entry);
+        crate::catalog::set_codex_service_tiers(catalog_entry, self.service_tiers_for(model));
     }
 
     pub fn service_tiers_for(&self, model: &str) -> &'static [crate::DefaultServiceTier] {
@@ -55,60 +57,83 @@ impl ModelMetadataCatalog {
         }
     }
 
-    pub fn from_models_dev_json(raw: &str) -> Result<Self, ModelMetadataError> {
-        let payload = serde_json::from_str(raw).map_err(|_| ModelMetadataError::InvalidCatalog)?;
-        Self::from_payload(&payload, None, None, false)
+    pub fn from_models_dev_json(models_dev_json: &str) -> Result<Self, ModelMetadataError> {
+        let catalog_payload = serde_json::from_str(models_dev_json)
+            .map_err(|_| ModelMetadataError::InvalidCatalog)?;
+        Self::from_metadata_payload(&catalog_payload, None, None, false)
     }
 
-    pub(super) fn from_payload(
-        payload: &Value,
+    pub(super) fn from_metadata_payload(
+        metadata_payload: &Value,
         revision: Option<String>,
         fetched_at_ms: Option<u64>,
         stale: bool,
     ) -> Result<Self, ModelMetadataError> {
-        let records = parsing::validate_payload(payload)?;
-        let mut entries = BTreeMap::new();
+        let metadata_records = parsing::validate_metadata_payload(metadata_payload)?;
+        let mut metadata_entries = BTreeMap::new();
         let mut leaf_matches = BTreeMap::new();
         let mut ambiguous_leaves = BTreeSet::new();
         let mut leaf_priorities = BTreeMap::new();
 
-        for (source_id, value) in records {
-            let provider = source_id
+        for (source_id, metadata_record) in metadata_records {
+            let provider_namespace = source_id
                 .split_once('/')
                 .map_or("", |(provider, _)| provider);
-            let Some(metadata) = parsing::parse_metadata(provider, value) else {
+            let Some(metadata) =
+                parsing::parse_metadata(&source_id, provider_namespace, metadata_record)
+            else {
                 continue;
             };
-            let key = order::normalize(&source_id);
-            let leaf = order::model_leaf(&key).to_string();
-            entries.insert(key.clone(), metadata);
+            let normalized_model_id = order::normalize(&source_id);
+            let leaf = order::model_leaf(&normalized_model_id).to_string();
+            metadata_entries.insert(normalized_model_id.clone(), metadata);
 
             // Supplemental hosting catalogs must not make a canonical model
-            // lose its unqualified identity. Equal-priority collisions remain
-            // ambiguous; exact qualified IDs always resolve independently.
-            let priority = reference::identity_priority(value);
+            // lose its unqualified identity. Equal-priority conflicts remain
+            // ambiguous unless their semantic metadata is equivalent; exact
+            // qualified IDs always resolve independently.
+            let priority = reference::identity_priority(metadata_record);
             match leaf_priorities.get(&leaf) {
-                Some(previous) if *previous < priority => continue,
-                Some(previous) if *previous == priority => {}
+                Some(previous_priority) if *previous_priority < priority => continue,
+                Some(previous_priority) if *previous_priority == priority => {}
                 _ => {
                     leaf_priorities.insert(leaf.clone(), priority);
                     ambiguous_leaves.remove(&leaf);
-                    leaf_matches.insert(leaf, key);
+                    leaf_matches.insert(leaf, normalized_model_id);
                     continue;
                 }
             }
             if ambiguous_leaves.contains(&leaf) {
                 continue;
             }
-            if let Some(previous) = leaf_matches.insert(leaf.clone(), key.clone()) {
-                if previous != key {
-                    leaf_matches.remove(&leaf);
-                    ambiguous_leaves.insert(leaf);
+            if let Some(previous_model_id) =
+                leaf_matches.insert(leaf.clone(), normalized_model_id.clone())
+            {
+                if previous_model_id != normalized_model_id {
+                    // Share metadata only when descriptive identity and every
+                    // semantic field agree. The reference source ID is kept
+                    // for identity/provenance, but is not a semantic
+                    // capability field. Exact provider IDs remain separate;
+                    // this never merges routes or participant inventories.
+                    let current_metadata = &metadata_entries[&normalized_model_id];
+                    if current_metadata.name.is_some()
+                        && (current_metadata.family.is_some()
+                            || current_metadata.release_date.is_some())
+                        && equivalent_reference_metadata(
+                            &metadata_entries[&previous_model_id],
+                            current_metadata,
+                        )
+                    {
+                        leaf_matches.insert(leaf, previous_model_id);
+                    } else {
+                        leaf_matches.remove(&leaf);
+                        ambiguous_leaves.insert(leaf);
+                    }
                 }
             }
         }
 
-        if entries.is_empty() {
+        if metadata_entries.is_empty() {
             return Err(ModelMetadataError::InvalidCatalog);
         }
 
@@ -117,7 +142,7 @@ impl ModelMetadataCatalog {
             fetched_at_ms,
             stale,
             sources: BTreeMap::new(),
-            entries,
+            entries: metadata_entries,
             leaf_matches,
             ambiguous_leaves,
         })
@@ -126,17 +151,64 @@ impl ModelMetadataCatalog {
     /// Resolve exact catalog IDs first. An unqualified or Relay-qualified ID
     /// may use its leaf only when that leaf identifies one catalog record.
     pub fn resolve(&self, model: &str) -> Option<&ModelMetadata> {
-        let key = order::normalize(model);
-        if let Some(metadata) = self.entries.get(&key) {
+        let normalized_model_id = order::normalize(model);
+        if let Some(metadata) = self.entries.get(&normalized_model_id) {
             return Some(metadata);
         }
-        let leaf = order::model_leaf(&key);
+        let leaf = order::model_leaf(&normalized_model_id);
         if self.ambiguous_leaves.contains(leaf) {
             return None;
         }
         self.leaf_matches
             .get(leaf)
-            .and_then(|id| self.entries.get(id))
+            .and_then(|model_id| self.entries.get(model_id))
+    }
+
+    /// The protocol native to the model's own group, independent of the host
+    /// or reseller serving it: OpenAI models use Responses, Anthropic models
+    /// use Messages, Google models use the Gemini endpoint, and every other
+    /// model uses OpenAI-compatible Chat Completions.
+    ///
+    /// The group comes from the validated reference record: the canonical
+    /// model ID's namespace first, then a first-party namespace, then the
+    /// family. A hosting namespace alone never decides it. Unknown or
+    /// ambiguous models return `None` so callers keep their other evidence.
+    pub fn native_protocol_for(&self, model: &str) -> Option<crate::WireApi> {
+        let metadata = self.resolve(model)?;
+        let canonical_namespace = metadata
+            .canonical_model_id
+            .as_deref()
+            .and_then(|canonical| canonical.split_once('/'))
+            .map(|(namespace, _)| namespace.to_ascii_lowercase());
+        let first_party_namespace = metadata.provider.to_ascii_lowercase();
+        let group = canonical_namespace
+            .filter(|namespace| !namespace.is_empty())
+            .or_else(|| {
+                matches!(
+                    first_party_namespace.as_str(),
+                    "openai" | "anthropic" | "google"
+                )
+                .then_some(first_party_namespace)
+            });
+        let family = metadata
+            .family
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        // Every model outside the three first-party groups falls to the
+        // family, and then to Chat Completions. This last arm is the single
+        // place that defines "all other models".
+        Some(match group.as_deref() {
+            Some("openai") => crate::WireApi::Responses,
+            Some("anthropic") => crate::WireApi::Messages,
+            Some("google") => crate::WireApi::Gemini,
+            _ if family.starts_with("gpt") && !family.starts_with("gpt-oss") => {
+                crate::WireApi::Responses
+            }
+            _ if family.starts_with("claude") => crate::WireApi::Messages,
+            _ if family.starts_with("gemini") => crate::WireApi::Gemini,
+            _ => crate::WireApi::ChatCompletions,
+        })
     }
 
     pub fn reasoning_effort_levels(&self, model: &str) -> Option<Vec<String>> {
@@ -144,81 +216,53 @@ impl ModelMetadataCatalog {
             .map(|metadata| metadata.capabilities.reasoning_effort_levels.clone())
     }
 
-    /// Keep companies and catalog families together. Provider family precedence
-    /// is applied where the catalog has a stable product-tier order; release /
-    /// update dates then order versions inside each family. Presentation never
-    /// determines eligibility.
+    /// Keep provider blocks together while preserving the order supplied by
+    /// the account or API source inside each block. Presentation never
+    /// determines eligibility and the catalog must not invent a model ranking
+    /// from release dates, family names, or model IDs.
     pub fn order_model_ids<I, S>(&self, models: I) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let source = crate::normalize_model_ids(models);
-        let family_order = order::family_order(self, &source);
-        let mut indexed = source.into_iter().collect::<Vec<_>>();
-        indexed.sort_by(|left_id, right_id| {
-            order::compare_metadata(
-                left_id,
-                self.resolve(left_id),
-                right_id,
-                self.resolve(right_id),
-                &family_order,
-            )
-            .then_with(|| order::normalize(left_id).cmp(&order::normalize(right_id)))
-            .then_with(|| left_id.cmp(right_id))
-        });
-        indexed
+        let source_model_ids = crate::normalize_model_ids(models);
+        let mut indexed = source_model_ids.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by(
+            |(left_position, left_model_id), (right_position, right_model_id)| {
+                order::compare_metadata(
+                    left_model_id,
+                    self.resolve(left_model_id),
+                    right_model_id,
+                    self.resolve(right_model_id),
+                )
+                .then_with(|| left_position.cmp(right_position))
+            },
+        );
+        indexed.into_iter().map(|(_, model_id)| model_id).collect()
     }
 
     /// Preserve the relative order explicitly saved by the user. Newly
-    /// discovered models are inserted at their catalog position around those
-    /// anchors instead of resetting the complete list.
+    /// discovered models are inserted at their provider-block position around
+    /// those anchors instead of resetting the complete list.
     pub fn merge_display_order<I, S>(&self, models: I, saved_order: &[String]) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let source = crate::normalize_model_ids(models);
-        let available = source
-            .iter()
-            .map(|id| order::normalize(id))
-            .collect::<BTreeSet<_>>();
-        let catalog_order = self.order_model_ids(source);
-        if !saved_order
-            .iter()
-            .any(|id| available.contains(&order::normalize(id)))
-        {
-            return catalog_order;
-        }
-
-        let positions = catalog_order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (order::normalize(id), position))
-            .collect::<BTreeMap<_, _>>();
-        let mut saved = BTreeSet::new();
-        let mut ordered = Vec::with_capacity(catalog_order.len());
-
-        for id in saved_order {
-            let key = order::normalize(id);
-            if saved.insert(key.clone()) {
-                if let Some(position) = positions.get(&key) {
-                    ordered.push(catalog_order[*position].clone());
-                }
-            }
-        }
-        for id in catalog_order {
-            let key = order::normalize(&id);
-            if saved.contains(&key) {
-                continue;
-            }
-            let position = positions[&key];
-            let insertion = ordered
-                .iter()
-                .position(|existing| positions[&order::normalize(existing)] > position)
-                .unwrap_or(ordered.len());
-            ordered.insert(insertion, id);
-        }
-        ordered
+        crate::merge_model_display_order(self.order_model_ids(models), saved_order)
     }
+}
+
+/// Compare catalog semantics while keeping source identity and provenance
+/// independent from the metadata used to resolve an unqualified display name.
+/// Canonical identity remains part of the comparison: two aliases are
+/// equivalent only when they point at the same canonical model (or both omit
+/// that relation).
+fn equivalent_reference_metadata(left: &ModelMetadata, right: &ModelMetadata) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.source_model_id.clear();
+    right.source_model_id.clear();
+    left.provider = right.provider.clone();
+    left == right
 }

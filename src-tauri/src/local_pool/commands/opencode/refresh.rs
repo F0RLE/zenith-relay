@@ -1,20 +1,21 @@
 use super::*;
 
-fn owns_connection(config: &Map<String, Value>, base: &str, secret: &str) -> bool {
+fn owns_connection(config: &Map<String, Value>, base_url: &str, secret: &str) -> bool {
     let Some(providers) = config.get("provider").and_then(Value::as_object) else {
         return false;
     };
     let mut found = false;
-    for (protocol, id, npm) in protocols::GROUPS {
-        let Some(provider) = providers.get(id) else {
+    for (protocol, provider_id, npm) in protocols::GROUPS {
+        let Some(provider) = providers.get(provider_id) else {
             continue;
         };
         found = true;
-        let Ok(base) = protocols::base_url(base, protocol) else {
+        let Ok(protocol_base_url) = protocols::base_url(base_url, protocol) else {
             return false;
         };
         if provider.get("npm").and_then(Value::as_str) != Some(npm)
-            || provider.pointer("/options/baseURL").and_then(Value::as_str) != Some(&base)
+            || provider.pointer("/options/baseURL").and_then(Value::as_str)
+                != Some(&protocol_base_url)
             || provider.pointer("/options/apiKey").and_then(Value::as_str) != Some(secret)
         {
             return false;
@@ -37,7 +38,11 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
     if !config
         .get("provider")
         .and_then(Value::as_object)
-        .is_some_and(|providers| providers.keys().any(|id| protocols::managed_id(id)))
+        .is_some_and(|providers| {
+            providers
+                .keys()
+                .any(|provider_id| protocols::managed_id(provider_id))
+        })
     {
         return Ok(());
     }

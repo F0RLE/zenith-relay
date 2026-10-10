@@ -30,21 +30,21 @@ export function SecretField({
       : <label htmlFor={inputId}>{label}</label>}
     <div className="secret-field">
       <input id={inputId} type={visible ? "text" : "password"} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} autoComplete="off" spellCheck={false} />
-      <IconButton label={visible ? t("common.hide") : t("common.reveal")} icon={visible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setVisible((current) => !current)} type="button" />
+      <IconButton label={visible ? t("common.hide") : t("common.reveal")} icon={visible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setVisible((previousVisibility) => !previousVisibility)} type="button" />
     </div>
   </div>;
 }
 
-export async function copyText(value: string) {
-  await navigator.clipboard.writeText(value);
+export async function copyText(textToCopy: string) {
+  await navigator.clipboard.writeText(textToCopy);
 }
 
-export function CopyButton({ value, label, children }: { value: string; label: string; children?: ReactNode }) {
+export function CopyButton({ value: copyValue, label, children }: { value: string; label: string; children?: ReactNode }) {
   const { t } = useTranslation();
   const [copied, showCopied] = useTransientFlag(1_500);
   const accessibleLabel = copied ? `${label}: ${t("feedback.copied")}` : label;
   const icon = copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />;
-  const onClick = async () => { await copyText(value); showCopied(); };
+  const onClick = async () => { await copyText(copyValue); showCopied(); };
   return children !== undefined
     ? <Button aria-label={accessibleLabel} icon={icon} onClick={onClick}>{children}</Button>
     : <IconButton label={accessibleLabel} icon={icon} onClick={onClick} />;

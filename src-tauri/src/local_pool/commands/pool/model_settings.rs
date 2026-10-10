@@ -21,14 +21,14 @@ pub(super) async fn set_local_model_enabled(
     let _mutation = state.setup_guard().await;
     let canonical = super::canonical_pool_model(&state, &input.model_id)?;
     let mut gateway = state.store()?.gateway().clone();
-    let previous = gateway.hidden_models.clone();
+    let previous_hidden_models = gateway.hidden_models.clone();
     gateway
         .hidden_models
         .retain(|model| !model.eq_ignore_ascii_case(&canonical));
     if !input.enabled {
         gateway.hidden_models.push(canonical);
     }
-    if gateway.hidden_models == previous {
+    if gateway.hidden_models == previous_hidden_models {
         return Ok(());
     }
     let hidden = gateway.hidden_models.clone();

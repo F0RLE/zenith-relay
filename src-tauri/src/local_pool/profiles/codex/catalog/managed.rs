@@ -43,8 +43,9 @@ pub(super) fn collect_native_catalog_template(
     // a plain upstream /v1/models row before it is advertised again.
     let managed_template = managed_models
         .iter()
-        .filter(|entry| {
-            codex_catalog_entry_is_compatible(entry) && catalog_entry_is_picker_eligible(entry)
+        .filter(|catalog_entry| {
+            codex_catalog_entry_is_compatible(catalog_entry)
+                && catalog_entry_is_picker_eligible(catalog_entry)
         })
         .find_map(Value::as_object)
         .cloned();
@@ -63,23 +64,23 @@ pub(super) fn collect_native_catalog_template(
             models.push(candidate);
         }
     }
-    let picker_template = |entry: &&Value| {
-        catalog_entry_is_picker_eligible(entry)
-            && entry.get("supported_in_api") != Some(&Value::Bool(false))
+    let picker_template = |catalog_entry: &&Value| {
+        catalog_entry_is_picker_eligible(catalog_entry)
+            && catalog_entry.get("supported_in_api") != Some(&Value::Bool(false))
     };
     // Prefer an actual native entry over a namespaced user provider row. The
     // latter remains a useful schema fallback when it is the only catalog
     // available, but must not override native client capabilities by default.
     let template = models
         .iter()
-        .filter(|entry| picker_template(entry))
-        .filter(|entry| model_slug(entry).is_some_and(|slug| !slug.contains('/')))
+        .filter(|catalog_entry| picker_template(catalog_entry))
+        .filter(|catalog_entry| model_slug(catalog_entry).is_some_and(|slug| !slug.contains('/')))
         .find_map(Value::as_object)
         .cloned()
         .or_else(|| {
             models
                 .iter()
-                .filter(|entry| picker_template(entry))
+                .filter(|catalog_entry| picker_template(catalog_entry))
                 .find_map(Value::as_object)
                 .cloned()
         })
@@ -101,7 +102,15 @@ fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<
     } else {
         codex_home.join(configured_path)
     };
-    let content = fs::read(&path).map_err(|error| io_error_at(&path, error))?;
+    // A stale `model_catalog_json` entry must not block a provider switch. The
+    // path is retained in the recovery snapshot, while the active Relay
+    // catalog can use the native cache or its own validated template. Treat a
+    // missing optional source as empty; surface other filesystem failures.
+    let content = match fs::read(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_error_at(&path, error)),
+    };
     read_catalog_values(&content, false)
 }
 
@@ -115,10 +124,10 @@ pub(in crate::local_pool::profiles::codex) fn read_catalog_values(
             "ChatGPT model catalog exceeds 512 KiB",
         ));
     }
-    let value: Value = serde_json::from_slice(content).map_err(|_| {
+    let catalog_document: Value = serde_json::from_slice(content).map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT model catalog is invalid")
     })?;
-    let models = value
+    let models = catalog_document
         .get("models")
         .and_then(Value::as_array)
         .filter(|models| !models.is_empty() && models.len() <= 4_096)
@@ -128,19 +137,19 @@ pub(in crate::local_pool::profiles::codex) fn read_catalog_values(
                 "ChatGPT model catalog has no usable models",
             )
         })?;
-    let mut output = Vec::new();
-    for model in models {
-        if require_compatible && !codex_catalog_entry_is_compatible(model) {
+    let mut compatible_models = Vec::new();
+    for catalog_entry in models {
+        if require_compatible && !codex_catalog_entry_is_compatible(catalog_entry) {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
                 "ChatGPT model catalog contains incompatible model entries",
             ));
         }
-        if !require_compatible || codex_catalog_entry_is_compatible(model) {
-            output.push(model.clone());
+        if !require_compatible || codex_catalog_entry_is_compatible(catalog_entry) {
+            compatible_models.push(catalog_entry.clone());
         }
     }
-    Ok(output)
+    Ok(compatible_models)
 }
 
 pub(super) fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
@@ -151,21 +160,21 @@ pub(super) fn normalize_model_catalog_values(models: Vec<Value>) -> Result<Strin
         ));
     }
     let mut seen = HashSet::new();
-    let mut models = models
+    let mut catalog_entries = models
         .into_iter()
         .filter(codex_catalog_entry_is_compatible)
-        .filter(|model| {
-            model_slug(model).is_some_and(|slug| seen.insert(slug.to_ascii_lowercase()))
+        .filter(|catalog_entry| {
+            model_slug(catalog_entry).is_some_and(|slug| seen.insert(slug.to_ascii_lowercase()))
         })
         .collect::<Vec<_>>();
-    if models.is_empty() {
+    if catalog_entries.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "ChatGPT model catalog has no compatible models",
         ));
     }
-    normalize_codex_catalog_priorities(&mut models);
-    serde_json::to_string_pretty(&json!({ "models": models }))
+    normalize_codex_catalog_priorities(&mut catalog_entries);
+    serde_json::to_string_pretty(&json!({ "models": catalog_entries }))
         .map(|content| format!("{content}\n"))
         .map_err(LocalPoolError::invalid_state)
 }
@@ -176,7 +185,7 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog(
     current_managed_catalog: Option<&[u8]>,
     relay_catalog_json: &str,
 ) -> Result<String> {
-    let bundled = bundled_codex_ultra_models(codex_home);
+    let bundled = bundled_codex_ultra_models();
     build_managed_model_catalog_with_bundled(
         codex_home,
         user_catalog_path,
@@ -215,33 +224,33 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
                 .get("comp_hash")
                 .and_then(Value::as_str)
                 .is_some_and(|hash| hash == CODEX_RELAY_CATALOG_HASH);
-        let model = if slug.to_ascii_lowercase().starts_with("zenith/") {
-            let Some(model) = decode_codex_model_alias(slug) else {
+        let model_id = if slug.to_ascii_lowercase().starts_with("zenith/") {
+            let Some(decoded_model_id) = decode_codex_model_alias(slug) else {
                 continue;
             };
-            model
+            decoded_model_id
         } else {
             slug.to_string()
         };
         // The Relay catalog already applied the downgrade-id policy.
-        if !codex_model_is_picker_eligible_for(&model, false) {
+        if !codex_model_is_picker_eligible_for(&model_id, false) {
             continue;
         }
         accepted += 1;
         let context_window = relay_model
             .get("context_window")
             .and_then(Value::as_u64)
-            .filter(|value| *value > 0);
+            .filter(|context_window| *context_window > 0);
         let priority = relay_model
             .get("priority")
             .and_then(Value::as_i64)
-            .and_then(|value| u64::try_from(value).ok())
+            .and_then(|priority_value| u64::try_from(priority_value).ok())
             .unwrap_or(DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64);
         // A Relay-owned row may have come from a real upstream Codex catalog.
         // Preserve its strictly validated capability data (including arbitrary
         // reasoning levels) instead of inheriting anything from the native
         // template. Bare rows without the Relay marker are native rows.
-        let mut entry = relay_model
+        let mut catalog_entry = relay_model
             .as_object()
             .and_then(|upstream| {
                 if codex_catalog_entry_is_compatible(relay_model) {
@@ -252,54 +261,59 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
                 } else if relay_managed {
                     normalize_upstream_codex_catalog_entry(
                         upstream,
-                        &model,
+                        &model_id,
                         priority,
                         context_window,
                     )
                 } else {
-                    normalize_native_codex_catalog_entry(upstream, &model, priority, context_window)
+                    normalize_native_codex_catalog_entry(
+                        upstream,
+                        &model_id,
+                        priority,
+                        context_window,
+                    )
                 }
             })
             .unwrap_or_else(|| {
                 if relay_managed {
-                    routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
+                    routed_codex_catalog_entry(Some(&template), &model_id, priority, context_window)
                 } else {
                     // A malformed native row must not fall back to Relay's
                     // routed context policy. Codex owns native context, so a
                     // missing field stays missing until the native catalog is
                     // available again.
                     let mut fallback =
-                        routed_codex_catalog_entry(Some(&template), &model, priority, None);
-                    if let Some(object) = fallback.as_object_mut() {
+                        routed_codex_catalog_entry(Some(&template), &model_id, priority, None);
+                    if let Some(fallback_object) = fallback.as_object_mut() {
                         for key in [
                             "context_window",
                             "max_context_window",
                             "auto_compact_token_limit",
                             "effective_context_window_percent",
                         ] {
-                            object.remove(key);
+                            fallback_object.remove(key);
                         }
-                        object.insert("slug".into(), Value::String(slug.to_string()));
+                        fallback_object.insert("slug".into(), Value::String(slug.to_string()));
                     }
                     fallback
                 }
             });
         if !slug.to_ascii_lowercase().starts_with("zenith/") {
-            entry["slug"] = Value::String(slug.to_string());
+            catalog_entry["slug"] = Value::String(slug.to_string());
         }
-        entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
+        catalog_entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
         if let Some(display_name) = relay_model.get("display_name").and_then(Value::as_str) {
-            entry["display_name"] = Value::String(display_name.to_string());
+            catalog_entry["display_name"] = Value::String(display_name.to_string());
         }
         if let Some(description) = relay_model.get("description").and_then(Value::as_str) {
-            entry["description"] = Value::String(description.to_string());
+            catalog_entry["description"] = Value::String(description.to_string());
         }
         if relay_managed {
-            add_installed_codex_ultra(&mut entry, &model, bundled);
+            add_installed_codex_ultra(&mut catalog_entry, &model_id, bundled);
         }
-        if let Some(slug) = model_slug(&entry) {
+        if let Some(slug) = model_slug(&catalog_entry) {
             if seen.insert(slug.to_ascii_lowercase()) {
-                models.push(entry);
+                models.push(catalog_entry);
             }
         }
     }

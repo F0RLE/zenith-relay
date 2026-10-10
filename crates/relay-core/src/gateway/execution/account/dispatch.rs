@@ -1,15 +1,20 @@
 use super::super::super::errors::{
-    apply_failure_state, current_failure_state, settle_attempt_failure, AttemptFailure,
+    apply_failure_state, current_failure_state, settle_route_failure, AttemptFailure,
 };
 use super::super::super::now_ms;
 use super::super::super::request::{
     apply_codex_routing_hint, codex_client_version, forwarded_codex_headers, AccountEndpoint,
     CODEX_RESPONSES_LITE_HEADER,
 };
-use super::super::super::response::{emit_usage, usage_event, UsageAttempt};
+use super::super::super::response::{
+    emit_usage, populate_tokens, stop_basis_points_event, usage_event, UsageAttempt,
+};
 use super::super::super::turn_state::request_scope;
 use super::super::{attempt_error_response, finish_request_failure, RequestFailureInput};
-use crate::runtime::{AuthenticatedKey, AuthorizedRequestError, CandidateLease, ExecutorRoute};
+use crate::runtime::{
+    AuthenticatedKey, AuthorizationIdentityPolicy, AuthorizedRequestError, CandidateLease,
+    ExecutorRoute,
+};
 use crate::scheduler::rotation::{ExecutionCertainty, RotationOperation, SharedRequestBudget};
 use crate::usage::UsageEvent;
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
@@ -68,7 +73,9 @@ pub(super) struct AccountDispatchInput<'a> {
 
 /// Send one prepared account attempt and collect its body. Transport failures
 /// stay retryable until the provider may already have accepted the request.
-pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) -> AccountDispatch {
+pub(super) async fn dispatch_account_attempt(
+    account_attempt_input: AccountDispatchInput<'_>,
+) -> AccountDispatch {
     let AccountDispatchInput {
         runtime,
         key,
@@ -93,7 +100,7 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         response_affinity_key,
         last_failure,
         last_failure_origin,
-    } = input;
+    } = account_attempt_input;
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -104,7 +111,7 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         )
         .await
         {
-            Ok(body) => body,
+            Ok(upstream_response_body) => upstream_response_body,
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return AccountDispatch::Respond(attempt_error_response(
                     failure,
@@ -172,20 +179,28 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         .header(ACCEPT, "application/json")
         .headers(request_headers);
     if endpoint == AccountEndpoint::Compact && !basis_points_route {
-        if let Some(value) = route_responses_lite.as_ref() {
-            upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
+        if let Some(responses_lite_header) = route_responses_lite.as_ref() {
+            upstream_request =
+                upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header.clone());
         }
     }
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
             upstream_request.body(request_body),
-            (!basis_points_route)
-                .then(|| codex_client_version(client_headers))
-                .flatten(),
-            turn_scope.as_ref(),
-            Some(budget),
-            Some(lease),
+            crate::runtime::AuthorizationDispatch {
+                client_version: (!basis_points_route)
+                    .then(|| codex_client_version(client_headers))
+                    .flatten(),
+                identity_policy: if basis_points_route {
+                    AuthorizationIdentityPolicy::PreserveUpstream
+                } else {
+                    AuthorizationIdentityPolicy::RelayCodex
+                },
+                turn_scope: turn_scope.as_ref(),
+                budget: Some(budget),
+                lease: Some(lease),
+            },
         )
         .await;
     let attempt = u16::from(budget.dispatches());
@@ -211,22 +226,39 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
     };
     let mut status = upstream.status();
     let mut response_headers = upstream.headers().clone();
-    let mut bytes =
-        match crate::transport::collect_limited(upstream, endpoint.response_limit()).await {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return continue_after_unreadable_body(
-                    runtime,
-                    lease,
-                    &route,
-                    attempt,
-                    &failed_usage,
-                    selected_error_origin,
-                    last_failure,
-                    last_failure_origin,
-                );
-            }
-        };
+    let mut bytes = match crate::transport::collect_with_progress(
+        upstream,
+        if basis_points_route {
+            crate::transport::basis_points_progress_timeout()
+        } else {
+            None
+        },
+        |event| {
+            basis_points_route
+                && stop_basis_points_event(
+                    event,
+                    runtime
+                        .block_degraded_routes_enabled()
+                        .then_some(route.source_model.as_str()),
+                )
+        },
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return reject_unreadable_body(
+                runtime,
+                lease,
+                &route,
+                attempt,
+                &failed_usage,
+                selected_error_origin,
+                request_id,
+                error,
+            );
+        }
+    };
     if endpoint == AccountEndpoint::Compact
         && budget.can_dispatch()
         && super::super::super::compaction::missing_legacy_endpoint(status, &bytes)
@@ -250,10 +282,10 @@ pub(super) async fn dispatch_account_attempt(input: AccountDispatchInput<'_>) ->
         )
         .await
         {
-            Ok((headers, body)) => {
+            Ok((fallback_headers, fallback_body)) => {
                 status = StatusCode::OK;
-                response_headers = headers;
-                bytes = body;
+                response_headers = fallback_headers;
+                bytes = fallback_body;
             }
             Err(step) => return step,
         }
@@ -301,14 +333,8 @@ fn reject_authorized_dispatch(
             request_id,
         ));
     }
-    let state = settle_attempt_failure(
-        runtime,
-        lease,
-        &route.source_model,
-        &failure,
-        &HeaderMap::new(),
-    );
-    apply_failure_state(&mut event, state);
+    let failure_state = settle_route_failure(runtime, lease, route, &failure, &HeaderMap::new());
+    apply_failure_state(&mut event, failure_state);
     emit_usage(runtime, event);
     *last_failure = Some(failure);
     *last_failure_origin = selected_error_origin;
@@ -316,25 +342,33 @@ fn reject_authorized_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn continue_after_unreadable_body(
+fn reject_unreadable_body(
     runtime: &GatewayRuntime,
     lease: &CandidateLease,
     route: &ExecutorRoute,
     attempt: u16,
     failed_usage: &impl Fn(&ExecutorRoute, u16, AttemptFailure) -> UsageEvent,
     selected_error_origin: ErrorOrigin,
-    last_failure: &mut Option<AttemptFailure>,
-    last_failure_origin: &mut ErrorOrigin,
+    request_id: &str,
+    error: crate::transport::BodyReadFailure,
 ) -> AccountDispatch {
     lease.settle_rotation_unknown(now_ms());
-    let failure = AttemptFailure::body();
-    let state = current_failure_state(runtime, &route.candidate_id, &route.source_model);
+    let failure = AttemptFailure::stream(if error.timed_out {
+        crate::error_codes::STREAM_IDLE_TIMEOUT
+    } else {
+        crate::error_codes::UPSTREAM_BODY
+    });
+    let failure_state = current_failure_state(runtime, &route.candidate_id, &route.source_model);
     let mut event = failed_usage(route, attempt, failure);
-    apply_failure_state(&mut event, state);
+    populate_tokens(&mut event, &error.bytes);
+    apply_failure_state(&mut event, failure_state);
     emit_usage(runtime, event);
-    *last_failure = Some(failure);
-    *last_failure_origin = selected_error_origin;
-    AccountDispatch::Continue
+    AccountDispatch::Respond(attempt_error_response(
+        failure,
+        None,
+        selected_error_origin,
+        request_id,
+    ))
 }
 
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
@@ -366,13 +400,12 @@ async fn fallback_missing_compact(
     )
     .await
     {
-        Ok((headers, body)) => Ok((headers, body)),
+        Ok((fallback_headers, fallback_body)) => Ok((fallback_headers, fallback_body)),
         Err(error) => {
             let (failure, headers) = *error;
             let mut event = failed_usage(route, u16::from(budget.dispatches()), failure);
-            let state =
-                settle_attempt_failure(runtime, lease, &route.source_model, &failure, &headers);
-            apply_failure_state(&mut event, state);
+            let failure_state = settle_route_failure(runtime, lease, route, &failure, &headers);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(runtime, event);
             Err(AccountDispatch::Respond(finish_request_failure(
                 RequestFailureInput {

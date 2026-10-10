@@ -2,11 +2,11 @@ use super::{AuthenticatedKey, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
 use crate::{CandidateKind, Error, Result, WireApi};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
         let scope = key.scope_snapshot();
+        let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
         let mut models = BTreeSet::new();
         for account in self.chatgpt_accounts.values() {
@@ -18,6 +18,7 @@ impl GatewayRuntime {
                 if !self.degraded_route_blocked(model)
                     && key.model_rules.allows(model)
                     && self.model_enabled(model)
+                    && basis_points_models.model_available(&account.id, model)
                     && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
                 {
                     models.insert(match key.model_prefix.as_deref() {
@@ -69,7 +70,7 @@ impl GatewayRuntime {
         self.chatgpt_accounts
             .values()
             .filter(|account| {
-                !account.basis_points_enabled.load(Ordering::Relaxed)
+                account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex
                     && crate::poison::read(&account.model_inventory)
                         .configured_models
                         .iter()
@@ -115,7 +116,7 @@ impl GatewayRuntime {
         model: &str,
         account_only: bool,
     ) -> bool {
-        let Some(model) = self.resolve_model(key, model) else {
+        let Some(resolved_model_id) = self.resolve_model(key, model) else {
             return false;
         };
         let scope = key.scope_snapshot();
@@ -127,7 +128,7 @@ impl GatewayRuntime {
             scheduler
                 .candidates()
                 .filter(|candidate| {
-                    candidate.is_configured(&model, &[WireApi::Responses], &scope)
+                    candidate.is_configured(&resolved_model_id, &[WireApi::Responses], &scope)
                         && (!account_only || candidate.kind == CandidateKind::OAuthAccount)
                 })
                 .map(|candidate| (candidate.id.clone(), candidate.kind))
@@ -136,11 +137,11 @@ impl GatewayRuntime {
         if configured.is_empty() {
             return false;
         }
-        let model = crate::model_id_key(&model);
+        let model_id = crate::model_id_key(&resolved_model_id);
         let lite_models = crate::poison::mutex(&self.codex_responses_lite_models);
         configured.into_iter().all(|(candidate_id, kind)| {
             kind == CandidateKind::OAuthAccount
-                && lite_models.contains(&(candidate_id, model.clone()))
+                && lite_models.contains(&(candidate_id, model_id.clone()))
         })
     }
 
@@ -182,14 +183,20 @@ impl GatewayRuntime {
         model: &str,
         client: WireApi,
     ) -> Vec<String> {
-        let fallback = self.model_capabilities(model).reasoning_effort_levels;
         let mut levels = Vec::new();
         for route in self.configured_executor_routes(key, model, &[client], false) {
+            let fallback = self
+                .model_capabilities(&route.source_model)
+                .reasoning_effort_levels_for_route(route.route_capability.as_ref());
             levels.extend(
                 fallback
                     .iter()
                     .filter(|level| {
-                        route
+                        self.basis_points_reasoning_available(
+                            &route.candidate_id,
+                            &route.source_model,
+                            level,
+                        ) && route
                             .adapter
                             .supports_reasoning_effort(route.reasoning_mode, level)
                     })

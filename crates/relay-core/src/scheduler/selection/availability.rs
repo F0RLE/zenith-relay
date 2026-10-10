@@ -30,7 +30,7 @@ impl PoolScheduler {
 
     pub(crate) fn admission_ready_for(
         &mut self,
-        request: SelectionRequest<'_>,
+        selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> bool {
         let lane = if operation == RotationOperation::Image {
@@ -38,7 +38,7 @@ impl PoolScheduler {
         } else {
             InFlightLane::Text
         };
-        self.select_for_operation(request, lane, operation)
+        self.select_for_operation(selection_request, lane, operation)
             .is_some()
     }
 
@@ -52,17 +52,18 @@ impl PoolScheduler {
 
     pub(crate) fn capacity_blocked_for(
         &mut self,
-        request: SelectionRequest<'_>,
+        selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> bool {
-        let Some(projected) = self.prepare_rotation_request(&request, operation) else {
+        let Some(projected) = self.prepare_rotation_request(&selection_request, operation) else {
             return false;
         };
         self.candidates.values().any(|candidate| {
-            match self
-                .rotation
-                .candidate_availability(&projected, &candidate.id, request.now_ms)
-            {
+            match self.rotation.candidate_availability(
+                &projected,
+                &candidate.id,
+                selection_request.now_ms,
+            ) {
                 CandidateAvailability::Busy(_) => true,
                 CandidateAvailability::Ready { .. } => {
                     operation == RotationOperation::Image
@@ -75,63 +76,75 @@ impl PoolScheduler {
 
     pub(crate) fn recovery_retry_at_for(
         &mut self,
-        request: SelectionRequest<'_>,
+        selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> Option<u64> {
-        let projected = self.prepare_rotation_request(&request, operation)?;
+        let projected = self.prepare_rotation_request(&selection_request, operation)?;
         // A timer may have elapsed while another request completed. In that
         // case the caller can immediately retry, using its original budget.
-        if self.rotation.select(&projected, request.now_ms).is_some() {
-            return Some(request.now_ms);
+        if self
+            .rotation
+            .select(&projected, selection_request.now_ms)
+            .is_some()
+        {
+            return Some(selection_request.now_ms);
         }
-        self.rotation.next_wakeup(&projected, request.now_ms)
+        self.rotation
+            .next_wakeup(&projected, selection_request.now_ms)
     }
 
-    pub fn earliest_retry_at(&mut self, request: SelectionRequest<'_>) -> Option<u64> {
-        let operation = Self::model_operation(request.model);
-        self.earliest_retry_at_for(request, operation)
+    pub fn earliest_retry_at(&mut self, selection_request: SelectionRequest<'_>) -> Option<u64> {
+        let operation = Self::model_operation(selection_request.model);
+        self.earliest_retry_at_for(selection_request, operation)
     }
 
     pub(crate) fn earliest_retry_at_for(
         &mut self,
-        request: SelectionRequest<'_>,
+        selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> Option<u64> {
-        let projected = self.prepare_rotation_request(&request, operation)?;
-        self.rotation.next_wakeup(&projected, request.now_ms)
+        let projected = self.prepare_rotation_request(&selection_request, operation)?;
+        self.rotation
+            .next_wakeup(&projected, selection_request.now_ms)
     }
 
     #[cfg(test)]
     pub(crate) fn all_applicable_cooldown(
         &mut self,
-        request: SelectionRequest<'_>,
+        selection_request: SelectionRequest<'_>,
     ) -> Option<(u64, CooldownReason)> {
-        let operation = Self::model_operation(request.model);
-        self.all_applicable_cooldown_for(request, operation)
+        let operation = Self::model_operation(selection_request.model);
+        self.all_applicable_cooldown_for(selection_request, operation)
     }
 
     pub(crate) fn all_applicable_cooldown_for(
         &mut self,
-        request: SelectionRequest<'_>,
+        selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> Option<(u64, CooldownReason)> {
-        let projected = self.prepare_rotation_request(&request, operation)?;
+        let projected = self.prepare_rotation_request(&selection_request, operation)?;
         let mut deadline: Option<u64> = None;
         let mut reason = CooldownReason::RateLimit;
         for candidate in self.candidates.values() {
-            match self
-                .rotation
-                .candidate_availability(&projected, &candidate.id, request.now_ms)
-            {
+            match self.rotation.candidate_availability(
+                &projected,
+                &candidate.id,
+                selection_request.now_ms,
+            ) {
                 CandidateAvailability::WaitUntil {
                     at_ms,
                     reason: block,
                 } => {
-                    deadline = Some(deadline.map_or(at_ms, |current| current.min(at_ms)));
+                    deadline =
+                        Some(deadline.map_or(at_ms, |known_deadline| known_deadline.min(at_ms)));
                     let next_reason = match block {
                         CandidateBlockReason::CircuitOpen => CooldownReason::Transient,
                         CandidateBlockReason::QuotaExhausted => CooldownReason::Mandatory,
-                        _ => self.cooldown_reason_for(candidate, request.model, request.now_ms),
+                        _ => self.cooldown_reason_for(
+                            candidate,
+                            selection_request.model,
+                            selection_request.now_ms,
+                        ),
                     };
                     reason = Self::aggregate_cooldown_reason(reason, next_reason);
                 }
@@ -157,7 +170,7 @@ impl PoolScheduler {
         }
         let mut projection = self.clone();
         projection.sync_all_rotation_candidates();
-        let request = projection.rotation_request(
+        let candidate_request = projection.rotation_request(
             None,
             Some(&candidate.id),
             model,
@@ -167,7 +180,7 @@ impl PoolScheduler {
         matches!(
             projection
                 .rotation
-                .candidate_availability(&request, &candidate.id, now_ms),
+                .candidate_availability(&candidate_request, &candidate.id, now_ms,),
             CandidateAvailability::Ready { .. }
         )
     }
@@ -201,10 +214,10 @@ impl PoolScheduler {
     }
 
     pub(super) fn aggregate_cooldown_reason(
-        current: CooldownReason,
-        next: CooldownReason,
+        existing_reason: CooldownReason,
+        incoming: CooldownReason,
     ) -> CooldownReason {
-        match (current, next) {
+        match (existing_reason, incoming) {
             (CooldownReason::Mandatory, _) | (_, CooldownReason::Mandatory) => {
                 CooldownReason::Mandatory
             }

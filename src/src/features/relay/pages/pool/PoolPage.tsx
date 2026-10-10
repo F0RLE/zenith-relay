@@ -116,7 +116,7 @@ export function PoolPage() {
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page relay-workspace-page" data-view={view}>
-    <PageHeader title={t("nav.pool")} actions={action} navigation={<Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />} />
+    <PageHeader title={t("nav.pool")} actions={action} navigation={<Tabs value={view} onChange={(viewId) => setView(viewId as View)} label={t("pool.views")} items={tabs} />} />
     {view === "members" ? (
       <PoolMembersView
         onAdd={() => setAddMembers(true)}
@@ -143,7 +143,7 @@ export function PoolPage() {
         onClose={() => setConfigurationPreview(null)}
       />
     ) : null}
-    {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}
+    {oauth.flow ? <OAuthDialog flow={oauth.flow} starting={oauth.starting} onCancel={oauth.cancel} /> : null}
     {!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}
   </section>;
 }
@@ -214,7 +214,7 @@ function formatConfigurationPath(path: string) {
   return path.split("/").filter(Boolean).join(" / ");
 }
 
-function formatConfigurationValue(value: unknown) {
-  if (typeof value === "string") return value;
-  return JSON.stringify(value) ?? String(value);
+function formatConfigurationValue(configurationValue: unknown) {
+  if (typeof configurationValue === "string") return configurationValue;
+  return JSON.stringify(configurationValue) ?? String(configurationValue);
 }

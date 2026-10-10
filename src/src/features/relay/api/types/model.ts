@@ -18,6 +18,8 @@ export type ModelSummary = {
   codexVisible: boolean;
   codexDisplayName: string;
   catalogProvider?: string | null;
+  catalogSourceModelId?: string | null;
+  catalogCanonicalModelId?: string | null;
   catalogFamily?: string | null;
   catalogName?: string | null;
   catalogReleaseDate?: string | null;
@@ -27,6 +29,9 @@ export type ModelSummary = {
   catalogReasoningMethod?: "effort" | "toggle" | "budget_tokens" | "adaptive" | "unknown" | null;
   catalogReasoningEffortLevels?: string[];
   catalogDefaultReasoningEffort?: string | null;
+  catalogReasoningBudgetMinTokens?: number | null;
+  catalogReasoningBudgetMaxTokens?: number | null;
+  catalogReasoningBudgetDefaultTokens?: number | null;
   catalogToolCall?: boolean | null;
   catalogStructuredOutput?: boolean | null;
   catalogAttachment?: boolean | null;

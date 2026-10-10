@@ -1,15 +1,31 @@
 import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
+import type { OAuthClientKind } from "../../api/types";
 import { accountErrorTranslationKey } from "../../accountStatus";
 import { accountPlanOption } from "../../accountPlans";
 
 export function accountErrorLabel(code: string, t: TFunction) {
-  return t(accountErrorTranslationKey(code));
+  return t(`usage.errorCategories.${code.trim().toLowerCase()}`, {
+    defaultValue: t(accountErrorTranslationKey(code)),
+  });
 }
 
 export function AccountPlanBadge({ planType, unknown }: { planType: string | null; unknown: string }) {
   const plan = accountPlanOption(planType, unknown);
   return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
+}
+
+export function AccountBadges({ planType, oauthClientKind, unknown }: {
+  planType: string | null;
+  oauthClientKind?: OAuthClientKind | undefined;
+  unknown: string;
+}) {
+  return <span className="account-badges">
+    <AccountPlanBadge planType={planType} unknown={unknown} />
+    {oauthClientKind === "excel_bps"
+      ? <span className="account-client-badge" data-relay-tooltip="Excel · Basis Points" aria-label="Excel · Basis Points">BPS</span>
+      : null}
+  </span>;
 }
 
 export function PageHeader({ title, subtitle, actions, navigation, workspace = false }: { title: string; subtitle?: string; actions?: ReactNode; navigation?: ReactNode; workspace?: boolean }) {
@@ -23,7 +39,7 @@ export function PageHeader({ title, subtitle, actions, navigation, workspace = f
 }
 
 
-export function Tabs({ value, items, onChange, label }: { value: string; items: Array<{ id: string; label: string }>; onChange: (id: string) => void; label: string }) {
+export function Tabs({ value, items, onChange, label }: { value: string; items: Array<{ id: string; label: string }>; onChange: (itemId: string) => void; label: string }) {
   const selectAdjacent = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
     const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
     const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;

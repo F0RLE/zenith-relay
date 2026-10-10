@@ -13,7 +13,7 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_m
     let template = template.unwrap_or_default();
     // `model_provider` points to this selected source. Native Codex rows are
     // useful only as a schema template here; advertising them would send
-    // their requests to this source and produce a false model picker entry.
+    // their requests to this source and produce a false model picker catalog_entry.
     // A direct API connection is not the pool, so it keeps every source model.
     let selected_models = source_models
         .iter()
@@ -28,14 +28,14 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_m
         if !seen.insert(normalized) {
             continue;
         }
-        let entry = direct_source_catalog_entry(
+        let catalog_entry = direct_source_catalog_entry(
             &template,
             source_manifest.and_then(|manifest| source_catalog_entry(manifest, model)),
             model,
             DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
         );
-        if codex_catalog_entry_is_compatible(&entry) {
-            models.push(entry);
+        if codex_catalog_entry_is_compatible(&catalog_entry) {
+            models.push(catalog_entry);
         }
     }
     if models.is_empty() {
@@ -53,9 +53,13 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
     let Some(catalog) = catalog else {
         return Ok(None);
     };
-    let mut value: Value = serde_json::from_str(&catalog)
+    let mut catalog_document: Value = serde_json::from_str(&catalog)
         .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
-    if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
+    let bundled = super::installed::bundled_codex_ultra_models();
+    if let Some(models) = catalog_document
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+    {
         for model in models {
             let Some(slug) = model.get("slug").and_then(Value::as_str) else {
                 continue;
@@ -63,10 +67,17 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
             let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
             model["display_name"] = Value::String(metadata.codex_display_name(&decoded));
             metadata.apply_codex_capabilities(&decoded, model);
+            zenith_relay_core::publish_routed_codex_context(
+                model,
+                metadata.capabilities_for(&decoded).context_limit,
+                bundled
+                    .get(&zenith_relay_core::model_id_key(&decoded))
+                    .and_then(|official| official.get("context_window").and_then(Value::as_u64)),
+            );
         }
     }
     Ok(Some(
-        serde_json::to_string(&value).map_err(LocalPoolError::invalid_state)?,
+        serde_json::to_string(&catalog_document).map_err(LocalPoolError::invalid_state)?,
     ))
 }
 
@@ -77,13 +88,15 @@ fn is_direct_source_model(model: &str) -> bool {
         && !zenith_relay_core::model_id_key(model).starts_with("zenith/")
 }
 
-pub(in crate::local_pool::profiles::codex) fn is_native_catalog_entry(entry: &Value) -> bool {
-    entry
+pub(in crate::local_pool::profiles::codex) fn is_native_catalog_entry(
+    catalog_entry: &Value,
+) -> bool {
+    catalog_entry
         .get("slug")
         .and_then(Value::as_str)
         .is_some_and(|slug| {
             !zenith_relay_core::model_id_key(slug).starts_with("zenith/")
-                && entry
+                && catalog_entry
                     .get("comp_hash")
                     .and_then(Value::as_str)
                     .is_none_or(|hash| hash != CODEX_RELAY_CATALOG_HASH)
@@ -102,20 +115,20 @@ pub(super) fn cached_native_catalog_models(codex_home: &Path) -> Vec<Value> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|entry| is_native_catalog_entry(entry))
-        .filter(|entry| codex_catalog_entry_is_compatible(entry))
+        .filter(|catalog_entry| is_native_catalog_entry(catalog_entry))
+        .filter(|catalog_entry| codex_catalog_entry_is_compatible(catalog_entry))
         .cloned()
         .collect()
 }
 
-pub(super) fn model_slug(entry: &Value) -> Option<&str> {
-    entry.get("slug").and_then(Value::as_str)
+pub(super) fn model_slug(catalog_entry: &Value) -> Option<&str> {
+    catalog_entry.get("slug").and_then(Value::as_str)
 }
 
-pub(super) fn catalog_entry_is_picker_eligible(entry: &Value) -> bool {
-    model_slug(entry).is_some_and(|slug| {
-        let model = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
-        codex_model_is_picker_eligible(&model)
+pub(super) fn catalog_entry_is_picker_eligible(catalog_entry: &Value) -> bool {
+    model_slug(catalog_entry).is_some_and(|slug| {
+        let model_id = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
+        codex_model_is_picker_eligible(&model_id)
     })
 }
 
@@ -125,16 +138,16 @@ fn direct_source_catalog_entry(
     model: &str,
     priority: u64,
 ) -> Value {
-    let mut entry = source_entry
+    let mut catalog_entry = source_entry
         .and_then(|source_entry| {
             normalize_upstream_codex_catalog_entry(source_entry, model, priority, None)
         })
         .unwrap_or_else(|| routed_codex_catalog_entry(Some(template), model, priority, None));
-    entry["slug"] = Value::String(model.to_string());
-    entry["display_name"] = Value::String(codex_model_display_name(model));
-    entry["description"] = Value::String("Available through this API connection.".into());
-    entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
-    entry
+    catalog_entry["slug"] = Value::String(model.to_string());
+    catalog_entry["display_name"] = Value::String(codex_model_display_name(model));
+    catalog_entry["description"] = Value::String("Available through this API connection.".into());
+    catalog_entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
+    catalog_entry
 }
 
 fn source_catalog_entry<'a>(
@@ -147,8 +160,8 @@ fn source_catalog_entry<'a>(
         .into_iter()
         .flatten()
         .filter_map(Value::as_object)
-        .find(|entry| {
-            entry
+        .find(|catalog_entry| {
+            catalog_entry
                 .get("slug")
                 .and_then(Value::as_str)
                 .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
@@ -160,11 +173,11 @@ fn source_catalog_entry<'a>(
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_object)
-                .find(|entry| {
-                    entry
+                .find(|catalog_entry| {
+                    catalog_entry
                         .get("id")
                         .and_then(Value::as_str)
-                        .is_some_and(|id| id.eq_ignore_ascii_case(model))
+                        .is_some_and(|model_id| model_id.eq_ignore_ascii_case(model))
                 })
         })
 }

@@ -13,7 +13,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub(crate) use crate::unix_time_ms as now_ms;
-pub(crate) use errors::failure_category_affects_account_state;
+pub(crate) use errors::{basis_points_transport_rejected, failure_category_affects_account_state};
 
 mod auth;
 mod catalog;
@@ -130,7 +130,25 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         )
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(runtime)
+}
+
+async fn route_not_found() -> Response<Body> {
+    errors::api_error(
+        StatusCode::NOT_FOUND,
+        "route not found",
+        error_codes::ROUTE_NOT_FOUND,
+    )
+}
+
+async fn method_not_allowed() -> Response<Body> {
+    errors::api_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method is not allowed for this route",
+        error_codes::METHOD_NOT_ALLOWED,
+    )
 }
 
 #[cfg(test)]
@@ -154,6 +172,7 @@ mod test_support {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: crate::WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: true,
@@ -175,6 +194,35 @@ mod test_support {
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod route_error_tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn route_and_method_error_bodies_identify_relay() {
+        for (response, expected_code, expected_message) in [
+            (
+                route_not_found().await,
+                error_codes::ROUTE_NOT_FOUND,
+                "Relay: route not found",
+            ),
+            (
+                method_not_allowed().await,
+                error_codes::METHOD_NOT_ALLOWED,
+                "Relay: method is not allowed for this route",
+            ),
+        ] {
+            let response_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response_json: Value = serde_json::from_slice(&response_bytes).unwrap();
+            assert_eq!(response_json["error"]["code"], expected_code);
+            assert_eq!(response_json["error"]["message"], expected_message);
+            assert_eq!(response_json["error"]["zenith_relay"]["origin"], "relay");
         }
     }
 }

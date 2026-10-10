@@ -11,11 +11,11 @@ for (const failedStep of ["state", "membership"] as const) {
     const form = page.getByRole("dialog", { name: "Add API source", exact: true });
     await form.getByRole("radio", { name: "OpenAI", exact: true }).click();
     await form.getByLabel("Upstream API key").fill("synthetic-retry-key");
-    await form.getByRole("button", { name: "Save", exact: true }).click();
+    await form.getByRole("button", { name: "Add source", exact: true }).click();
     const error = page.getByRole("dialog", { name: "Error details" });
     await expect(error).toBeVisible();
     await error.locator("footer").getByRole("button", { name: "Close", exact: true }).click();
-    await page.getByRole("dialog", { name: failedStep === "state" ? "Add API source" : "Edit source", exact: true }).getByRole("button", { name: "Save", exact: true }).click();
+    await page.getByRole("dialog", { name: failedStep === "state" ? "Add API source" : "Edit source", exact: true }).getByRole("button", { name: failedStep === "state" ? "Add source" : "Save", exact: true }).click();
     await expect(error).toBeHidden();
     await expect(page.getByRole("dialog", { name: "Add API source", exact: true })).toBeHidden();
     await expect(page.getByRole("dialog", { name: "Edit source", exact: true })).toBeHidden();
@@ -39,25 +39,25 @@ test("provider picker supports keyboard selection and preserves edits to the sel
   const first = dialog.getByRole("radio", { name: "OpenAI", exact: true });
   await first.focus();
   await first.press("ArrowRight");
-  const router = dialog.getByRole("radio", { name: "OpenRouter", exact: true });
-  await expect(router).toBeFocused();
-  await expect(router).toBeChecked();
-  await expect(dialog.getByLabel("API address", { exact: true })).toHaveValue("https://openrouter.ai/api/v1");
-  await router.press("End");
+  const anthropic = dialog.getByRole("radio", { name: "Anthropic", exact: true });
+  await expect(anthropic).toBeFocused();
+  await expect(anthropic).toBeChecked();
+  await expect(dialog.getByLabel("API address", { exact: true })).toHaveValue("https://api.anthropic.com/v1");
+  await anthropic.press("End");
   const custom = dialog.getByRole("radio", { name: "Custom API", exact: true });
   await expect(custom).toBeFocused();
   await expect(custom).toBeChecked();
 
   await dialog.getByLabel("Upstream API key").fill("synthetic-provider-key");
   await dialog.getByLabel("API address", { exact: true }).fill("https://api.example.invalid/v1");
-  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Add source", exact: true })).toBeDisabled();
   await dialog.getByLabel("Name", { exact: true }).fill("Work API");
   await custom.click();
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Work API");
   await expect(dialog.getByLabel("API address", { exact: true })).toHaveValue("https://api.example.invalid/v1");
   await expect(dialog.getByLabel("Upstream API key")).toHaveValue("synthetic-provider-key");
-  await expect(dialog.getByRole("radio")).toHaveCount(4);
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog.getByRole("radio")).toHaveCount(12);
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   const input = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: unknown } }>;
@@ -80,18 +80,18 @@ for (const theme of ["light", "dark"] as const) {
       await dialog.getByLabel("Ключ внешнего API").fill("synthetic-preview-key");
       await dialog.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
       await dialog.getByLabel("Название", { exact: true }).fill("Рабочий API");
-      await expect(dialog.getByRole("button", { name: "Сохранить", exact: true })).toBeEnabled();
+      await expect(dialog.getByRole("button", { name: "Добавить источник", exact: true })).toBeEnabled();
       expect(await dialog.evaluate((element) => {
         const box = element.getBoundingClientRect();
         const body = element.querySelector(".relay-dialog-body")!;
-        return box.width <= 620 && box.left >= 0 && box.right <= innerWidth && box.top >= 36 && box.bottom <= innerHeight && body.scrollWidth <= body.clientWidth;
+        return box.width <= Math.min(920, innerWidth) && box.left >= 0 && box.right <= innerWidth && box.top >= 36 && box.bottom <= innerHeight && body.scrollWidth <= body.clientWidth;
       })).toBe(true);
       expect(await dialog.locator("input, [role=radio], footer").evaluateAll((items) => items.every((item) => {
         const box = item.getBoundingClientRect();
         return box.left >= 0 && box.right <= innerWidth && box.top >= 36 && box.bottom <= innerHeight && item.scrollWidth <= item.clientWidth;
       }))).toBe(true);
       await page.screenshot({ path: `output/playwright/provider-custom-${theme}-${viewport.width}.png`, animations: "disabled" });
-      await dialog.getByRole("button", { name: "Сохранить", exact: true }).click();
+      await dialog.getByRole("button", { name: "Добавить источник", exact: true }).click();
       await expect(page.getByRole("dialog", { name: "Добавить источник" })).toBeHidden();
     });
   }

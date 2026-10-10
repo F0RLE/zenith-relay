@@ -26,8 +26,12 @@ pub struct PricingCacheEnvelope {
 }
 
 impl PricingCacheEnvelope {
-    pub fn new(payload: Value, revision: String, fetched_at_ms: u64) -> Result<Self, PricingError> {
-        let payload_sha256 = payload_hash(&payload)?;
+    pub fn new(
+        pricing_payload: Value,
+        revision: String,
+        fetched_at_ms: u64,
+    ) -> Result<Self, PricingError> {
+        let payload_sha256 = payload_hash(&pricing_payload)?;
         let envelope = Self {
             format: CACHE_FORMAT.to_string(),
             schema_version: CACHE_SCHEMA_VERSION,
@@ -38,7 +42,7 @@ impl PricingCacheEnvelope {
             fetched_at_ms,
             payload_sha256,
             stale: false,
-            payload,
+            payload: pricing_payload,
         };
         envelope.validate()?;
         Ok(envelope)
@@ -55,11 +59,13 @@ impl PricingCacheEnvelope {
             || self
                 .etag
                 .as_ref()
-                .is_some_and(|value| value.len() > MAX_CACHE_STRING_LENGTH)
+                .is_some_and(|etag_value| etag_value.len() > MAX_CACHE_STRING_LENGTH)
             || self
                 .last_modified
                 .as_ref()
-                .is_some_and(|value| value.len() > MAX_CACHE_STRING_LENGTH)
+                .is_some_and(|last_modified_value| {
+                    last_modified_value.len() > MAX_CACHE_STRING_LENGTH
+                })
         {
             return Err(PricingError::InvalidCache);
         }
@@ -70,11 +76,11 @@ impl PricingCacheEnvelope {
         if !self.payload.is_object() {
             return Err(PricingError::InvalidCache);
         }
-        let records = self.payload.as_object().ok_or(PricingError::InvalidCache)?;
-        if records.len() > MAX_CACHE_RECORDS {
+        let pricing_records = self.payload.as_object().ok_or(PricingError::InvalidCache)?;
+        if pricing_records.len() > MAX_CACHE_RECORDS {
             return Err(PricingError::CacheTooLarge);
         }
-        if records
+        if pricing_records
             .keys()
             .any(|key| key.is_empty() || key.len() > MAX_CACHE_STRING_LENGTH)
         {
@@ -97,27 +103,30 @@ impl PricingCacheEnvelope {
     }
 }
 
-pub fn payload_hash(payload: &Value) -> Result<String, PricingError> {
-    let bytes = serde_json::to_vec(payload).map_err(|_| PricingError::InvalidCache)?;
-    let digest = Sha256::digest(bytes);
+pub fn payload_hash(pricing_payload: &Value) -> Result<String, PricingError> {
+    let serialized_payload =
+        serde_json::to_vec(pricing_payload).map_err(|_| PricingError::InvalidCache)?;
+    let digest = Sha256::digest(serialized_payload);
     Ok(format!("sha256:{}", hex::encode(digest)))
 }
 
 /// Returns a deterministic object containing only LiteLLM model records.
 pub fn validate_litellm_payload(
-    payload: &Value,
+    pricing_payload: &Value,
 ) -> Result<&serde_json::Map<String, Value>, PricingError> {
-    let object = payload.as_object().ok_or(PricingError::InvalidCatalog)?;
-    if object.len() > MAX_CACHE_RECORDS {
+    let pricing_records = pricing_payload
+        .as_object()
+        .ok_or(PricingError::InvalidCatalog)?;
+    if pricing_records.len() > MAX_CACHE_RECORDS {
         return Err(PricingError::CacheTooLarge);
     }
-    if object
+    if pricing_records
         .keys()
         .any(|key| key.is_empty() || key.len() > MAX_CACHE_STRING_LENGTH)
     {
         return Err(PricingError::InvalidCatalog);
     }
-    Ok(object)
+    Ok(pricing_records)
 }
 
 #[cfg(test)]

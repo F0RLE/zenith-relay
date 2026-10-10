@@ -21,8 +21,8 @@ pub(super) use checks::{
 /// often send prose descriptions that wrap into the following option and make
 /// the menu unreadable. Keep short labels intact and collapse verbose copy to
 /// the stable effort identifier; this changes presentation only, not support.
-pub(super) fn compact_reasoning_level_descriptions(entry: &mut Map<String, Value>) {
-    let Some(levels) = entry
+pub(super) fn compact_reasoning_level_descriptions(catalog_entry: &mut Map<String, Value>) {
+    let Some(levels) = catalog_entry
         .get_mut("supported_reasoning_levels")
         .and_then(Value::as_array_mut)
     else {
@@ -53,8 +53,8 @@ pub(super) fn compact_reasoning_level_descriptions(entry: &mut Map<String, Value
     }
 }
 
-pub(super) fn prefer_medium_reasoning_default(entry: &mut Map<String, Value>) {
-    let Some(medium) = entry
+pub(super) fn prefer_medium_reasoning_default(catalog_entry: &mut Map<String, Value>) {
+    let Some(medium) = catalog_entry
         .get("supported_reasoning_levels")
         .and_then(Value::as_array)
         .and_then(|levels| {
@@ -67,11 +67,11 @@ pub(super) fn prefer_medium_reasoning_default(entry: &mut Map<String, Value>) {
         })
         .map(str::to_owned)
     else {
-        entry.remove("default_reasoning_level");
+        catalog_entry.remove("default_reasoning_level");
         return;
     };
 
-    entry.insert("default_reasoning_level".into(), Value::String(medium));
+    catalog_entry.insert("default_reasoning_level".into(), Value::String(medium));
 }
 
 /// Preserve the upstream Codex identity for a confirmed ChatGPT account model.
@@ -89,7 +89,7 @@ pub fn normalize_native_codex_catalog_entry(
 ) -> Option<Value> {
     // Normalize the account transport template without an API context override.
     // The final projection applies shared model semantics and client context policy.
-    let mut entry = catalog_entry_base(template, model, priority, None)?;
+    let mut catalog_entry = catalog_entry_base(template, model, priority, None)?;
     // `catalog_entry_base` starts from the routed fallback schema, which has
     // a context value for API clients. Native catalogs are different: an
     // omitted field means Codex owns the context policy, so do not manufacture
@@ -100,18 +100,18 @@ pub fn normalize_native_codex_catalog_entry(
         "auto_compact_token_limit",
         "effective_context_window_percent",
     ] {
-        entry.remove(key);
+        catalog_entry.remove(key);
     }
     // Start from a known-compatible native-shaped row so partial manifests
     // cannot make the whole pool catalog row disappear, then overlay every
     // upstream field to retain native capabilities. Speed is Relay-owned.
-    entry.extend(
+    catalog_entry.extend(
         template
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
     if !template.contains_key("input_modalities") {
-        entry.remove("input_modalities");
+        catalog_entry.remove("input_modalities");
     }
     // Native account rows are identified by the upstream slug. The caller's
     // model is only a routing fallback; never replace a real upstream ID with
@@ -122,30 +122,33 @@ pub fn normalize_native_codex_catalog_entry(
         .map(str::trim)
         .filter(|slug| valid_model_id(slug))
         .unwrap_or(model);
-    entry.insert("slug".into(), Value::String(native_model.to_string()));
-    entry.insert(
+    catalog_entry.insert("slug".into(), Value::String(native_model.to_string()));
+    catalog_entry.insert(
         "priority".into(),
         Value::Number(priority.min(i32::MAX as u64).into()),
     );
-    let mut value = Value::Object(entry);
-    set_codex_service_tiers(&mut value, super::super::model_service_tiers(model, None));
-    codex_catalog_entry_is_compatible(&value).then_some(value)
+    let mut catalog_value = Value::Object(catalog_entry);
+    set_codex_service_tiers(
+        &mut catalog_value,
+        super::super::model_service_tiers(model, None),
+    );
+    codex_catalog_entry_is_compatible(&catalog_value).then_some(catalog_value)
 }
 
-pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
-    let Some(entry) = value.as_object() else {
+pub fn codex_catalog_entry_is_compatible(catalog_entry_value: &Value) -> bool {
+    let Some(catalog_entry) = catalog_entry_value.as_object() else {
         return false;
     };
-    required_non_empty_string(entry, "slug")
-        && required_string(entry, "display_name")
-        && optional_string(entry, "description")
-        && optional_non_empty_string(entry, "default_reasoning_level")
-        && entry
+    required_non_empty_string(catalog_entry, "slug")
+        && required_string(catalog_entry, "display_name")
+        && optional_string(catalog_entry, "description")
+        && optional_non_empty_string(catalog_entry, "default_reasoning_level")
+        && catalog_entry
             .get("supported_reasoning_levels")
             .and_then(Value::as_array)
             .is_some_and(|levels| levels.iter().all(valid_reasoning_level))
         && enum_string(
-            entry,
+            catalog_entry,
             "shell_type",
             &[
                 "default",
@@ -156,57 +159,61 @@ pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
             ],
             true,
         )
-        && enum_string(entry, "visibility", &["list", "hide", "none"], true)
-        && required_bool(entry, "supported_in_api")
-        && required_i32(entry, "priority")
-        && default_string_array(entry, "additional_speed_tiers")
-        && default_service_tiers(entry)
-        && optional_string(entry, "default_service_tier")
-        && optional_message_object(entry, "availability_nux")
-        && optional_upgrade(entry)
-        && required_string(entry, "base_instructions")
-        && optional_model_messages(entry)
-        && default_bool(entry, "include_skills_usage_instructions")
-        && default_bool(entry, "supports_reasoning_summary_parameter")
-        && default_bool(entry, "supports_reasoning_summaries")
+        && enum_string(catalog_entry, "visibility", &["list", "hide", "none"], true)
+        && required_bool(catalog_entry, "supported_in_api")
+        && required_i32(catalog_entry, "priority")
+        && default_string_array(catalog_entry, "additional_speed_tiers")
+        && default_service_tiers(catalog_entry)
+        && optional_string(catalog_entry, "default_service_tier")
+        && optional_message_object(catalog_entry, "availability_nux")
+        && optional_upgrade(catalog_entry)
+        && required_string(catalog_entry, "base_instructions")
+        && optional_model_messages(catalog_entry)
+        && default_bool(catalog_entry, "include_skills_usage_instructions")
+        && default_bool(catalog_entry, "supports_reasoning_summary_parameter")
+        && default_bool(catalog_entry, "supports_reasoning_summaries")
         && default_enum_string(
-            entry,
+            catalog_entry,
             "default_reasoning_summary",
             &["auto", "concise", "detailed", "none"],
         )
-        && required_bool(entry, "support_verbosity")
+        && required_bool(catalog_entry, "support_verbosity")
         && enum_string(
-            entry,
+            catalog_entry,
             "default_verbosity",
             &["low", "medium", "high"],
             false,
         )
-        && enum_string(entry, "apply_patch_tool_type", &["freeform"], false)
-        && default_enum_string(entry, "web_search_tool_type", &["text", "text_and_image"])
-        && valid_truncation_policy(entry)
-        && required_bool(entry, "supports_parallel_tool_calls")
-        && default_bool(entry, "supports_image_detail_original")
-        && optional_i64(entry, "context_window")
-        && optional_i64(entry, "max_context_window")
-        && optional_i64(entry, "auto_compact_token_limit")
-        && optional_string(entry, "comp_hash")
-        && optional_i64(entry, "effective_context_window_percent")
-        && entry
+        && enum_string(catalog_entry, "apply_patch_tool_type", &["freeform"], false)
+        && default_enum_string(
+            catalog_entry,
+            "web_search_tool_type",
+            &["text", "text_and_image"],
+        )
+        && valid_truncation_policy(catalog_entry)
+        && required_bool(catalog_entry, "supports_parallel_tool_calls")
+        && default_bool(catalog_entry, "supports_image_detail_original")
+        && optional_i64(catalog_entry, "context_window")
+        && optional_i64(catalog_entry, "max_context_window")
+        && optional_i64(catalog_entry, "auto_compact_token_limit")
+        && optional_string(catalog_entry, "comp_hash")
+        && optional_i64(catalog_entry, "effective_context_window_percent")
+        && catalog_entry
             .get("experimental_supported_tools")
             .and_then(Value::as_array)
             .is_some_and(|tools| tools.iter().all(Value::is_string))
-        && valid_input_modalities(entry)
-        && default_bool(entry, "supports_search_tool")
-        && default_bool(entry, "use_responses_lite")
-        && optional_string(entry, "auto_review_model_override")
+        && valid_input_modalities(catalog_entry)
+        && default_bool(catalog_entry, "supports_search_tool")
+        && default_bool(catalog_entry, "use_responses_lite")
+        && optional_string(catalog_entry, "auto_review_model_override")
         && enum_string(
-            entry,
+            catalog_entry,
             "tool_mode",
             &["direct", "code_mode", "code_mode_only"],
             false,
         )
         && enum_string(
-            entry,
+            catalog_entry,
             "multi_agent_version",
             &["disabled", "v1", "v2"],
             false,

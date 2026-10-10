@@ -1,26 +1,6 @@
 use super::super::*;
 
 impl GatewayRuntime {
-    /// Fast and Ultrafast cannot travel through Basis Points. Keep that
-    /// transport for Standard and send any other speed on the account's
-    /// normal Responses endpoint.
-    pub(crate) fn use_native_responses_when_speed_requested(&self, route: &mut ExecutorRoute) {
-        if route.service_tier == DefaultServiceTier::Standard
-            || route.account_transport != AccountTransport::ExcelBasisPoints
-        {
-            return;
-        }
-        let Some(account_id) = route.account_id.as_deref() else {
-            return;
-        };
-        let Some(account) = self.chatgpt_accounts.get(account_id) else {
-            return;
-        };
-        route.account_transport = AccountTransport::NativeResponses;
-        route.upstream_url = account.responses_url.clone();
-        route.upstream_headers = HeaderMap::new();
-    }
-
     pub(crate) fn executor_route(
         &self,
         candidate_id: &str,
@@ -69,6 +49,9 @@ impl GatewayRuntime {
             return self.source_executor_route(candidate_id, binding, model, false);
         }
         let account = self.chatgpt_accounts.get(candidate_id)?;
+        if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps {
+            return None;
+        }
         Some(Self::account_executor_route(
             account,
             crate::poison::read(&account.model_inventory)
@@ -85,26 +68,38 @@ impl GatewayRuntime {
         model: &str,
         upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
-        let source = self.sources.get(&binding.source_id)?;
-        let source_binding = source.binding_for(binding.binding_key)?;
-        let source_model = source.canonical_model_for(binding.binding_key, model)?;
+        let provider_source = self.sources.get(&binding.source_id)?;
+        let source_binding = provider_source.binding_for(binding.binding_key)?;
+        let source_model = provider_source.canonical_model_for(binding.binding_key, model)?;
+        let route_capability = binding
+            .capabilities
+            .get(&crate::model_id_key(&source_model))
+            .or_else(|| binding.capabilities.get(&crate::model_id_key(model)))
+            .cloned();
         Some(ExecutorRoute {
             candidate_id: candidate_id.to_string(),
             source_id: binding.source_id.clone(),
             account_id: None,
             account_token_generation: None,
             client_context_id: None,
-            wire_api: binding.wire_api,
+            client_wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
             cache_write_ttl: binding.cache_write_ttl,
             service_tier: DefaultServiceTier::Standard,
-            upstream_url: source.endpoint(binding.binding_key, &source_model, upstream_stream)?,
-            upstream_headers: source.protocol_headers_for_binding(source_binding),
+            upstream_url: provider_source.endpoint(
+                binding.binding_key,
+                &source_model,
+                upstream_stream,
+            )?,
+            upstream_headers: provider_source.protocol_headers_for_binding(source_binding),
             account_transport: AccountTransport::NativeResponses,
+            client_transport: crate::UsageTransport::Http,
             source_model,
+            route_capability,
             half_open_probe: false,
             routing: None,
+            cache_context_observation: None,
         })
     }
 
@@ -119,20 +114,19 @@ impl GatewayRuntime {
             .unwrap_or(WireApi::Responses);
         let adapter =
             SourceAdapter::between(wire_api, WireApi::Responses).expect("registered account route");
-        let account_transport = if account.basis_points_enabled.load(Ordering::Relaxed)
-            && crate::poison::read(&account.agent_identity).is_none()
-        {
-            AccountTransport::ExcelBasisPoints
-        } else {
-            AccountTransport::NativeResponses
-        };
+        let account_transport =
+            if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps {
+                AccountTransport::ExcelBasisPoints
+            } else {
+                AccountTransport::NativeResponses
+            };
         ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             account_token_generation: None,
             client_context_id: None,
-            wire_api,
+            client_wire_api: wire_api,
             adapter,
             reasoning_mode: if adapter.is_passthrough() {
                 MessagesReasoningMode::Disabled
@@ -147,14 +141,19 @@ impl GatewayRuntime {
             },
             upstream_headers: match account_transport {
                 AccountTransport::NativeResponses => HeaderMap::new(),
-                AccountTransport::ExcelBasisPoints => {
-                    basis_points_headers(&account.chatgpt_account_id)
-                }
+                AccountTransport::ExcelBasisPoints => basis_points_headers(
+                    &account.chatgpt_account_id,
+                    account.chatgpt_user_id.as_deref(),
+                    account.basis_points_headers.as_ref(),
+                ),
             },
             account_transport,
+            client_transport: crate::UsageTransport::Http,
             source_model,
+            route_capability: None,
             half_open_probe: false,
             routing: None,
+            cache_context_observation: None,
         }
     }
 }

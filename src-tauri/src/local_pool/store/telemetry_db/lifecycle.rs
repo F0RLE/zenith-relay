@@ -118,6 +118,12 @@ impl TelemetryDb {
         if version <= 28 {
             connection.execute_batch(MIGRATION_029).map_err(db_error)?;
         }
+        if version <= 29 {
+            connection.execute_batch(MIGRATION_030).map_err(db_error)?;
+        }
+        if version <= 30 {
+            connection.execute_batch(MIGRATION_031).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -136,7 +142,7 @@ impl TelemetryDb {
         connection: &Connection,
         query: &UsageQuery,
         where_sql: &str,
-        values: &[SqlValue],
+        query_parameters: &[SqlValue],
     ) -> Result<UsageTotals> {
         if is_unfiltered_all_time(query) {
             if let Some(cached) = self
@@ -149,7 +155,7 @@ impl TelemetryDb {
                 return Ok(cached);
             }
         }
-        let totals = usage_totals(connection, where_sql, values)?;
+        let totals = usage_totals(connection, where_sql, query_parameters)?;
         if is_unfiltered_all_time(query) {
             self.usage_totals_cache
                 .lock()
@@ -161,17 +167,17 @@ impl TelemetryDb {
 
     pub(super) fn update_cached_usage_totals(
         &self,
-        previous: Option<UsageTotals>,
-        current: UsageTotals,
+        previous_totals: Option<UsageTotals>,
+        incoming_totals: UsageTotals,
     ) -> Result<()> {
         let mut cache = self.usage_totals_cache.lock().map_err(lock_error)?;
         let Some(totals) = cache.as_mut() else {
             return Ok(());
         };
-        if let Some(previous) = previous {
-            apply_usage_totals_delta(totals, previous, false);
+        if let Some(previous_totals) = previous_totals {
+            apply_usage_totals_delta(totals, previous_totals, false);
         }
-        apply_usage_totals_delta(totals, current, true);
+        apply_usage_totals_delta(totals, incoming_totals, true);
         Ok(())
     }
 
@@ -193,7 +199,9 @@ impl TelemetryDb {
         if !valid_performance_name(name)
             || !duration_ms.is_finite()
             || !(0.0..=600_000.0).contains(&duration_ms)
-            || context.is_some_and(|value| !zenith_relay_core::is_ascii_ref(value, 64))
+            || context.is_some_and(|performance_context| {
+                !zenith_relay_core::is_ascii_ref(performance_context, 64)
+            })
         {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,

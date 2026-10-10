@@ -162,7 +162,7 @@ impl CodexQuotaClient {
             )
             .await
         {
-            Ok(data) => QuotaRefreshOutcome::Updated(Box::new(data)),
+            Ok(quota_refresh) => QuotaRefreshOutcome::Updated(Box::new(quota_refresh)),
             Err(failure) => QuotaRefreshOutcome::Failed {
                 failure,
                 subscription: previous_subscription.clone(),
@@ -209,13 +209,25 @@ impl CodexQuotaClient {
                 HttpClass::Ordinary,
             )
             .await
-            .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true))?;
+            .map_err(|error| {
+                QuotaRefreshFailure::new(
+                    if error.is_timeout() {
+                        error_codes::QUOTA_TIMEOUT
+                    } else {
+                        error_codes::QUOTA_TRANSPORT
+                    },
+                    true,
+                )
+            })?;
         let status = response.status();
         let retry_after_ms =
             crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
-        let body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
+        let usage_response_body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
+                ResponseBodyError::Timeout => {
+                    QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true)
+                }
                 ResponseBodyError::Transport => {
                     QuotaRefreshFailure::new(error_codes::QUOTA_TRANSPORT, true)
                 }
@@ -227,10 +239,11 @@ impl CodexQuotaClient {
         drop(permit);
         if !status.is_success() {
             return Err(
-                classify_quota_failure(status.as_u16(), &body).with_retry_after(retry_after_ms)
+                classify_quota_failure(status.as_u16(), &usage_response_body)
+                    .with_retry_after(retry_after_ms),
             );
         }
-        parse_codex_usage(&body, now_ms)
+        parse_codex_usage(&usage_response_body, now_ms)
     }
 
     pub async fn refresh_data_with_subscription(
@@ -280,10 +293,11 @@ impl CodexQuotaClient {
         previous_subscription: &Subscription,
         refresh_subscription: bool,
     ) -> Result<QuotaRefreshResult, QuotaRefreshFailure> {
-        let mut data = self
+        let mut quota_refresh = self
             .refresh_data_authorized(authorization, chatgpt_account_id, now_ms)
             .await?;
-        data.quota
+        quota_refresh
+            .quota
             .preserve_subscription_metadata(previous_subscription);
         if refresh_subscription {
             let metadata = match subscription_authorization {
@@ -294,34 +308,35 @@ impl CodexQuotaClient {
                 ),
                 None => None,
             };
-            let input = data
-                .quota
-                .subscription
-                .get_or_insert_with(|| SubscriptionInput {
-                    plan_type: previous_subscription.plan_type.clone(),
-                    active_until_ms: previous_subscription.active_until_ms,
-                    forbidden: false,
-                    observed_at_ms: now_ms,
-                });
+            let subscription_input =
+                quota_refresh
+                    .quota
+                    .subscription
+                    .get_or_insert_with(|| SubscriptionInput {
+                        plan_type: previous_subscription.plan_type.clone(),
+                        active_until_ms: previous_subscription.active_until_ms,
+                        forbidden: false,
+                        observed_at_ms: now_ms,
+                    });
             match metadata {
                 Some(Ok(metadata)) => {
                     merge_subscription_metadata_at(
-                        &mut input.plan_type,
-                        &mut input.active_until_ms,
+                        &mut subscription_input.plan_type,
+                        &mut subscription_input.active_until_ms,
                         metadata,
                         Some(now_ms),
                     );
-                    input.observed_at_ms = now_ms;
+                    subscription_input.observed_at_ms = now_ms;
                 }
-                Some(Err(_)) | None => input.observed_at_ms = now_ms,
+                Some(Err(_)) | None => subscription_input.observed_at_ms = now_ms,
             }
-        } else if let Some(input) = data.quota.subscription.as_mut() {
+        } else if let Some(input) = quota_refresh.quota.subscription.as_mut() {
             if input.plan_type == previous_subscription.plan_type && input.active_until_ms.is_none()
             {
                 input.observed_at_ms = previous_subscription.updated_at_ms.unwrap_or(now_ms);
             }
         }
-        Ok(data)
+        Ok(quota_refresh)
     }
 }
 
@@ -351,12 +366,12 @@ pub fn is_agent_identity_task_invalid_failure(failure: &QuotaRefreshFailure) -> 
         )
 }
 
-fn classify_quota_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
-    if is_agent_identity_task_invalid_response(status, body) {
+fn classify_quota_failure(status: u16, response_body: &[u8]) -> QuotaRefreshFailure {
+    if is_agent_identity_task_invalid_response(status, response_body) {
         return QuotaRefreshFailure::new(error_codes::INVALID_TASK_ID, false)
             .with_http_status(status);
     }
-    crate::quota::classify_quota_http_failure(status, body)
+    crate::quota::classify_quota_http_failure(status, response_body)
 }
 
 fn bearer_authorization(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {

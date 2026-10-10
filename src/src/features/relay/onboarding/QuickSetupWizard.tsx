@@ -1,11 +1,13 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Clock3, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, MessageSquare, Server, SkipForward, Terminal, Upload, UserRoundCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, CircleAlert, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, MessageSquare, Server, SkipForward, Terminal, Upload, UserRoundCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import relayLogoUrl from "../../../../../src-tauri/icons/zenith-relay.svg?url";
 import { setI18nLanguage } from "../../../i18n";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
+import { usePoolAccountWarning } from "../hooks/usePoolAccountWarning";
 import { useRelayState } from "../state/RelayStateProvider";
 import { captureOperationResult } from "../state/relayOperationModel";
 
@@ -20,6 +22,7 @@ type CurrentProfileImportState =
 
 export function QuickSetupWizard() {
   const { t } = useTranslation();
+  const confirmPoolAccounts = usePoolAccountWarning();
   const { mode: appMode, runtime, finishOnboarding, perform, activateCodexProfile, busy } = useRelayState();
   const [intro, setIntro] = useState(true);
   const [step, setStep] = useState(1);
@@ -73,8 +76,8 @@ export function QuickSetupWizard() {
     if (sessionId) void relayCommands.cancelImport(sessionId).catch(() => undefined);
   }, []);
 
-  const selectMode = (value: RelayMode) => {
-    setMode(value);
+  const selectMode = (selectedMode: RelayMode) => {
+    setMode(selectedMode);
     setConnectionReady(false);
   };
   const finishLater = () => finishOnboarding(intro ? appMode : mode);
@@ -122,7 +125,11 @@ export function QuickSetupWizard() {
           .filter((row) => row.selectable && row.defaultSelected)
           .map((row) => row.itemId);
         if (!selectedItemIds.length) throw new Error("current_profile_import_has_no_selectable_items");
-        return relayCommands.confirmImport(session.sessionId, selectedItemIds, true);
+        const poolRows = session.preview.rows.filter((row) => selectedItemIds.includes(row.itemId) && row.authMode !== "api_key");
+        const addToPool = await confirmPoolAccounts(poolRows);
+        if (run !== currentProfileImportRun.current) return null;
+        const result = await relayCommands.confirmImport(session.sessionId, selectedItemIds, addToPool);
+        return { result, addToPool };
       },
     );
     if (run !== currentProfileImportRun.current) return;
@@ -131,13 +138,17 @@ export function QuickSetupWizard() {
       if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
     }
-    const importedCount = captured.value.results.filter((item) => item.status === "succeeded").length;
-    if (!importedCount || captured.value.results.some((item) => item.status === "failed")) {
+    const importedCount = captured.value.result.results.filter((importResult) => importResult.status === "succeeded").length;
+    if (!importedCount || captured.value.result.results.some((importResult) => importResult.status === "failed")) {
       await cancelCurrentProfileImport();
       if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
     }
     currentProfileImportSession.current = null;
+    if (!captured.value.addToPool) {
+      setCurrentProfileImport({ kind: "idle" });
+      return;
+    }
     await completeCurrentProfileSetup(run, importedCount);
   };
 
@@ -170,7 +181,7 @@ export function QuickSetupWizard() {
     ? mode === "local" ? !oauthPending && (currentProfileImport.kind === "idle" || currentProfileImport.kind === "complete") : remoteReady
     : true;
 
-  const next = async () => {
+  const continueSetup = async () => {
     if (step === 2 && mode === "remote" && !connectionReady) {
       const ok = await perform("onboarding-remote", () => relayCommands.connectRemote({
         baseUrl: serverUrl,
@@ -200,7 +211,7 @@ export function QuickSetupWizard() {
       if (!ok) return;
     }
     if (step === 4) finishOnboarding(mode);
-    else setStep((value) => value + 1);
+    else setStep((currentStep) => currentStep + 1);
   };
 
   return <main className="setup-shell">
@@ -215,9 +226,9 @@ export function QuickSetupWizard() {
           mode={mode}
           connectionReady={connectionReady}
           serverUrl={serverUrl}
-          setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }}
+          setServerUrl={(serverUrlValue) => { setServerUrl(serverUrlValue); setConnectionReady(false); }}
           serverToken={serverToken}
-          setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }}
+          setServerToken={(serverTokenValue) => { setServerToken(serverTokenValue); setConnectionReady(false); }}
           currentProfileAvailable={currentProfileAvailable}
           currentProfileImport={currentProfileImport}
           onConnected={() => setConnectionReady(true)}
@@ -238,10 +249,10 @@ export function QuickSetupWizard() {
     </section>
     <footer className="setup-footer">
       <div>
-        <Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>
+        {step > 1 ? <Button variant="ghost" icon={<ArrowLeft aria-hidden />} onClick={() => setStep((currentStep) => Math.max(1, currentStep - 1))}>{t("common.back")}</Button> : null}
         {step < 3 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={finishLater}>{t("onboarding.skipStep")}</Button> : null}
       </div>
-      <Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button>
+      <Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={continueSetup}>{step === 4 ? t("onboarding.openApp") : t("common.continue")}</Button>
     </footer>
     </div>
     </div>
@@ -251,7 +262,7 @@ export function QuickSetupWizard() {
           {...(importSession ? { initialSession: importSession } : {})}
           modeOverride="local"
           defaultAddToPool
-          onImported={() => setConnectionReady(true)}
+          onImported={(addedToPool) => { if (addedToPool) setConnectionReady(true); }}
           onClose={closeImport}
         />
       </Suspense>
@@ -264,9 +275,9 @@ type ConnectionStepProps = {
   mode: RelayMode;
   connectionReady: boolean;
   serverUrl: string;
-  setServerUrl: (value: string) => void;
+  setServerUrl: (serverUrlValue: string) => void;
   serverToken: string;
-  setServerToken: (value: string) => void;
+  setServerToken: (serverTokenValue: string) => void;
   currentProfileAvailable: boolean;
   currentProfileImport: CurrentProfileImportState;
   onConnected: () => void;
@@ -297,9 +308,19 @@ function ConnectionStep({
 }: ConnectionStepProps) {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
-  const oauth = useOAuthSignIn(async (result) => {
-    const added = await perform("oauth-pool-membership", () => relayCommands.setPoolMembership([result.account.id], [], true), "feedback.accountAdded", { backgroundRefresh: true });
-    if (added) onConnected();
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const oauth = useOAuthSignIn(async (oauthResult) => {
+    const added = await captureOperationResult(
+      (work) => perform("oauth-pool-membership", work, undefined, { backgroundRefresh: true }),
+      async () => {
+        const snapshot = await relayCommands.localState();
+        const account = snapshot.accounts.find((candidate) => candidate.id === oauthResult.account.id);
+        if (!await confirmPoolAccounts(account ? [account] : [{}])) return false;
+        await relayCommands.setPoolMembership([oauthResult.account.id], [], true);
+        return true;
+      },
+    );
+    if (added.ok && added.value) onConnected();
   });
   useEffect(() => {
     onOAuthPendingChange(Boolean(oauth.flow));
@@ -414,17 +435,43 @@ function SetupHeader() {
 
 function SetupIntro({ onStart, onSkip }: { onStart: () => void; onSkip: () => void }) {
   const { t } = useTranslation();
+  const sources = [
+    { id: "accounts", label: t("onboarding.accounts") },
+    { id: "api", label: "API" },
+  ];
+  const harnesses = [
+    { id: "chatgpt", label: "ChatGPT", icon: "/icons/chatgpt.svg" },
+    { id: "opencode", label: "OpenCode", icon: "/icons/opencode.svg" },
+  ];
+
   return (
     <main className="setup-shell setup-shell-intro">
-      <SetupHeader />
+      <header className="setup-header setup-header-intro"><LanguageSelect /></header>
       <section className="product-intro">
-        <div className="intro-copy">
-          <h1>Zenith Relay</h1>
-          <p>{t("onboarding.intro")}</p>
-        </div>
-        <div className="intro-actions">
-          <Button variant="primary" onClick={onStart}>{t("onboarding.start")}</Button>
-          <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={onSkip}>{t("onboarding.skip")}</Button>
+        <div className="intro-hero">
+          <div className="intro-copy">
+            <div className="intro-copy-heading">
+              <h1>Zenith Relay</h1>
+              <p>{t("onboarding.intro")}</p>
+            </div>
+            <div className="intro-actions">
+              <Button variant="primary" onClick={onStart}>{t("onboarding.start")}</Button>
+              <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={onSkip}>{t("onboarding.skip")}</Button>
+            </div>
+          </div>
+          <div className="intro-visual">
+            <div className="intro-flow" role="group" aria-label={t("onboarding.flowLabel")}>
+              <div className="intro-flow-column intro-flow-sources">
+                {sources.map((source) => <div className="intro-flow-node" key={source.id}><span>{source.label}</span></div>)}
+              </div>
+              <ArrowRight className="intro-flow-arrow" aria-hidden />
+              <img className="intro-flow-logo" src={relayLogoUrl} alt="" />
+              <ArrowRight className="intro-flow-arrow" aria-hidden />
+              <div className="intro-flow-column intro-flow-harnesses">
+                {harnesses.map((harness) => <div className="intro-flow-node" key={harness.id}><img src={harness.icon} alt="" /><span>{harness.label}</span></div>)}
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -435,16 +482,16 @@ function SetupProgress({ step }: { step: number }) {
   const { t } = useTranslation();
   return (
     <ol className="setup-progress" aria-label={t("onboarding.progress")}>
-      {[1, 2, 3, 4].map((value) => (
+      {[1, 2, 3, 4].map((stepNumber) => (
         <li
-          key={value}
-          className={value < step ? "complete" : value === step ? "active" : ""}
-          aria-current={value === step ? "step" : undefined}
+          key={stepNumber}
+          className={stepNumber < step ? "complete" : stepNumber === step ? "active" : ""}
+          aria-current={stepNumber === step ? "step" : undefined}
         >
-          <span>{value < step ? <Check aria-hidden /> : value}</span>
+          <span>{stepNumber < step ? <Check aria-hidden /> : stepNumber}</span>
           <div>
-            <strong>{t(`onboarding.steps.${value}`)}</strong>
-            <small>{t(`onboarding.stepHints.${value}`)}</small>
+            <strong>{t(`onboarding.steps.${stepNumber}`)}</strong>
+            <small>{t(`onboarding.stepHints.${stepNumber}`)}</small>
           </div>
         </li>
       ))}
@@ -458,13 +505,13 @@ function ModeStep({ mode, onSelect }: { mode: RelayMode; onSelect: (mode: RelayM
     <div className="setup-step setup-mode-step">
       <div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div>
       <div className="mode-options" role="group" aria-label={t("onboarding.steps.1")}>
-        {(["local", "remote"] as RelayMode[]).map((value) => {
-          const Icon = value === "local" ? Laptop : Server;
+        {(["local", "remote"] as RelayMode[]).map((relayMode) => {
+          const Icon = relayMode === "local" ? Laptop : Server;
           return (
-            <button key={value} type="button" aria-pressed={mode === value} className={mode === value ? "selected" : ""} onClick={() => onSelect(value)}>
+            <button key={relayMode} type="button" aria-pressed={mode === relayMode} className={mode === relayMode ? "selected" : ""} onClick={() => onSelect(relayMode)}>
               <Icon aria-hidden />
-              <span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span>
-              <i>{mode === value ? <Check aria-hidden /> : null}</i>
+              <span><strong>{t(`modes.${relayMode}`)}</strong><small>{t(`onboarding.modeDescriptions.${relayMode}`)}</small></span>
+              <i>{mode === relayMode ? <Check aria-hidden /> : null}</i>
             </button>
           );
         })}
@@ -479,21 +526,21 @@ function ClientStep({ client, onSelect }: { client: string; onSelect: (client: s
     <div className="setup-step">
       <div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div>
       <div className="client-options" role="group" aria-label={t("onboarding.steps.3")}>
-        {["codex", "opencode", "later"].map((value) => {
-          const Icon = value === "codex" ? MessageSquare : value === "opencode" ? Terminal : Clock3;
+        {["codex", "opencode", "later"].map((clientOption) => {
+          const Icon = clientOption === "codex" ? MessageSquare : clientOption === "opencode" ? Terminal : Clock3;
           return (
             <button
               type="button"
-              key={value}
-              aria-label={t(`clients.${value}`)}
-              aria-describedby={`setup-client-${value}-hint`}
-              aria-pressed={client === value}
-              className={client === value ? "selected" : ""}
-              onClick={() => onSelect(value)}
+              key={clientOption}
+              aria-label={t(`clients.${clientOption}`)}
+              aria-describedby={`setup-client-${clientOption}-hint`}
+              aria-pressed={client === clientOption}
+              className={client === clientOption ? "selected" : ""}
+              onClick={() => onSelect(clientOption)}
             >
               <Icon aria-hidden />
-              <span><strong>{t(`clients.${value}`)}</strong><small id={`setup-client-${value}-hint`}>{t(`onboarding.clientDescriptions.${value}`)}</small></span>
-              <i>{client === value ? <Check aria-hidden /> : null}</i>
+              <span><strong>{t(`clients.${clientOption}`)}</strong><small id={`setup-client-${clientOption}-hint`}>{t(`onboarding.clientDescriptions.${clientOption}`)}</small></span>
+              <i>{client === clientOption ? <Check aria-hidden /> : null}</i>
             </button>
           );
         })}
@@ -521,10 +568,13 @@ function LanguageSelect() {
   const { i18n, t } = useTranslation();
   return <OptionMenu
     className="setup-language-menu"
-    icon={<Languages aria-hidden />}
+    listClassName="setup-language-options"
     label={t("settings.language")}
     value={i18n.language.startsWith("ru") ? "ru" : "en"}
-    onChange={(value) => void setI18nLanguage(value)}
+    align="center"
+    fitContent
+    showSelectionIndicator={false}
+    onChange={(languageCode) => void setI18nLanguage(languageCode)}
     options={[{ value: "ru", label: "Русский", shortLabel: "RU" }, { value: "en", label: "English", shortLabel: "EN" }]}
   />;
 }

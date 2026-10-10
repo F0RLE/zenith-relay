@@ -4,7 +4,9 @@ use crate::accounts::{
 use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::{AgentIdentityCredential, CodexIdentityEnvelope};
+use crate::providers::chatgpt::{
+    basis_points_headers, AgentIdentityCredential, CodexIdentityEnvelope,
+};
 #[cfg(test)]
 use crate::providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 use crate::quota::QuotaSnapshot;
@@ -39,7 +41,10 @@ mod admission;
 mod attempt;
 mod authentication;
 mod authorization;
+mod basis_points_access;
+pub(crate) use authorization::AuthorizationDispatch;
 mod build;
+pub(crate) mod cache_context;
 mod candidates;
 mod clients;
 mod codex_metadata;
@@ -55,10 +60,10 @@ mod source_metadata;
 mod support;
 
 pub(in crate::runtime) use support::{
-    all_native_wire_apis, apply_candidate_policy, basis_points_headers, client_wire_apis_to_native,
-    model_rules, normalize_client_wire_api, normalize_prefix, normalized_responses_url,
-    normalized_set, parse_bearer, require_runtime_value, runtime_client, runtime_now_ms,
-    runtime_websocket_client, strip_prefix_ignore_ascii_case,
+    all_native_wire_apis, apply_candidate_policy, client_wire_apis_to_native, model_rules,
+    normalize_client_wire_api, normalize_prefix, normalized_responses_url, normalized_set,
+    parse_bearer, require_runtime_value, runtime_client, runtime_now_ms, runtime_websocket_client,
+    strip_prefix_ignore_ascii_case,
 };
 
 use config::source_candidate_id;
@@ -88,8 +93,14 @@ pub use images::normalize_image_base_model;
 #[cfg(test)]
 use images::{cheapest_image_main_model, select_image_main_model};
 
-pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
-pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
+/// Relay's virtual Image API model for OAuth account routes.
+///
+/// The account bridge sends this model in the Responses `image_generation`
+/// tool while the top-level Responses model remains the account's selected
+/// text model. Keep the public virtual id aligned with the current stable
+/// GPT Image model; provider routes still use the model selected by their own
+/// source catalog.
+pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 const CHATGPT_TEAM_BREAKER_DEDUP_MS: u64 = 60 * 1_000;
@@ -125,6 +136,7 @@ pub struct GatewayRuntime {
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
+    cache_context_store: cache_context::CacheContextStore,
     codex_turn_state_store: CodexTurnStateStore,
     control: RuntimeControl,
     max_retry_candidates: std::sync::atomic::AtomicUsize,
@@ -151,7 +163,7 @@ struct PassiveQuotaState {
 
 #[derive(Clone, Debug)]
 struct CachedModelManifest {
-    value: Value,
+    manifest_payload: Value,
 }
 
 #[derive(Default)]
@@ -181,13 +193,15 @@ impl AuthenticatedKey {
 }
 
 struct ChatGptAccountExecutor {
+    oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
     id: String,
     source_id: String,
     chatgpt_account_id: String,
+    chatgpt_user_id: Option<String>,
+    basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
     basis_points_url: Url,
-    basis_points_enabled: AtomicBool,
     model_inventory: RwLock<AccountModelInventory>,
     image_bridge_revision: Arc<AtomicU64>,
     token_authority: Arc<TokenAuthority>,
@@ -199,6 +213,8 @@ struct ChatGptAccountExecutor {
     agent_identity: RwLock<Option<AgentIdentityCredential>>,
     agent_identity_revision: AtomicU64,
     agent_task_lock: tokio::sync::Mutex<()>,
+    basis_points_access: RwLock<Option<basis_points_access::CachedBasisPointsAccess>>,
+    basis_points_access_refresh: tokio::sync::Mutex<()>,
     routing_cookies: routing_cookies::RoutingCookies,
 }
 
@@ -216,7 +232,8 @@ pub(crate) struct ExecutorRoute {
     /// request. This is request-local provenance, not route configuration.
     pub(crate) account_token_generation: Option<u64>,
     pub(crate) client_context_id: Option<String>,
-    pub(crate) wire_api: WireApi,
+    /// Client contract. The adapter maps it to the upstream protocol.
+    pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
     pub(crate) cache_write_ttl: CacheWriteTtl,
@@ -224,9 +241,15 @@ pub(crate) struct ExecutorRoute {
     pub(crate) upstream_url: Url,
     pub(crate) upstream_headers: HeaderMap,
     pub(crate) account_transport: AccountTransport,
+    pub(crate) client_transport: crate::UsageTransport,
     pub(crate) source_model: String,
+    /// Source-local capability evidence for the selected route. OAuth account
+    /// routes currently rely on the shared reference catalog and keep this
+    /// unset until the account endpoint reports model capabilities.
+    pub(crate) route_capability: Option<crate::ModelEndpointCapability>,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
+    pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +260,9 @@ struct SourceCandidateBinding {
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
     cache_write_ttl: CacheWriteTtl,
+    /// Capability evidence for this exact upstream model route. Reference
+    /// metadata remains separate and is merged only during request admission.
+    capabilities: BTreeMap<String, crate::ModelEndpointCapability>,
 }
 
 pub(crate) struct PreparedAuthorization {
@@ -271,6 +297,10 @@ pub(crate) enum AuthorizedRequestError {
     Transport(reqwest::Error),
     NotReplayable,
     DispatchBudgetExhausted,
+    ModelAccess(crate::providers::chatgpt::ModelDiscoveryFailure),
+    ModelUnavailable,
+    ReasoningUnavailable,
+    ProgressTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,11 +338,15 @@ impl RuntimeHttpClients {
 
 impl GatewayRuntime {
     pub async fn discover_models(&self) -> Result<Vec<String>> {
-        let source = self.sources.values().next().ok_or_else(|| {
+        let provider_source = self.sources.values().next().ok_or_else(|| {
             Error::Validation("at least one provider source is required".to_string())
         })?;
-        discover_models_with_client(&self.discovery_client, source, source.protocol_bindings())
-            .await
+        discover_models_with_client(
+            &self.discovery_client,
+            provider_source,
+            provider_source.protocol_bindings(),
+        )
+        .await
     }
 
     pub(crate) fn record_success_with_metrics(
@@ -332,6 +366,22 @@ impl GatewayRuntime {
         )
     }
 
+    /// Returns a non-secret fingerprint for the OAuth credential currently
+    /// installed in an account slot. Basis Points attachment IDs belong to a
+    /// credential session, so they must not survive an access-token rotation.
+    pub(crate) async fn basis_points_credential_fingerprint(
+        &self,
+        candidate_id: &str,
+    ) -> Option<[u8; 32]> {
+        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let tokens = account.token_authority.tokens(candidate_id).await?;
+        let mut digest = Sha256::new();
+        digest.update(b"zenith-relay-basis-points-attachment-v1");
+        digest.update(tokens.generation().to_be_bytes());
+        digest.update(tokens.access_token().as_bytes());
+        Some(digest.finalize().into())
+    }
+
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
         crate::poison::mutex(&self.scheduler)
     }
@@ -341,6 +391,12 @@ impl GatewayRuntime {
 pub(crate) enum AccountTransport {
     NativeResponses,
     ExcelBasisPoints,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorizationIdentityPolicy {
+    RelayCodex,
+    PreserveUpstream,
 }
 
 impl ChatGptAccountExecutor {

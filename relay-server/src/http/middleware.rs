@@ -55,18 +55,18 @@ impl ManagementAuth {
         }
         if failures
             .get(&ip)
-            .is_some_and(|state| state.blocked_until_ms > now_ms)
+            .is_some_and(|failure_state| failure_state.blocked_until_ms > now_ms)
         {
             return AuthResult::Blocked;
         }
-        let state = failures.entry(ip).or_insert(FailureState {
+        let failure_state = failures.entry(ip).or_insert(FailureState {
             failures: 0,
             blocked_until_ms: 0,
         });
-        state.failures = state.failures.saturating_add(1);
-        if state.failures >= MAX_FAILURES {
-            state.blocked_until_ms = now_ms.saturating_add(BLOCK_MS);
-            state.failures = 0;
+        failure_state.failures = failure_state.failures.saturating_add(1);
+        if failure_state.failures >= MAX_FAILURES {
+            failure_state.blocked_until_ms = now_ms.saturating_add(BLOCK_MS);
+            failure_state.failures = 0;
         }
         AuthResult::Denied
     }
@@ -81,21 +81,21 @@ enum AuthResult {
 
 pub async fn require_management(
     State(auth): State<ManagementAuth>,
-    request: Request,
+    incoming_request: Request,
     next: Next,
 ) -> Response {
-    let ip = request
+    let ip = incoming_request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|value| value.0.ip())
+        .map(|connect_info| connect_info.0.ip())
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let token = request
+    let token = incoming_request
         .headers()
         .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|authorization_header| authorization_header.to_str().ok())
+        .and_then(|authorization_header| authorization_header.strip_prefix("Bearer "));
     match auth.authorize(ip, token, crate::state::now_ms()) {
-        AuthResult::Allowed => next.run(request).await,
+        AuthResult::Allowed => next.run(incoming_request).await,
         AuthResult::Denied => auth_error(
             StatusCode::UNAUTHORIZED,
             error_codes::MANAGEMENT_UNAUTHORIZED,

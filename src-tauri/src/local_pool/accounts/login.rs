@@ -1,3 +1,4 @@
+use super::authority::{ProcessAccountLocks, ProcessLockConfig};
 use super::credentials::{totp_code, CredentialStore, StoredCodexCredentials};
 use super::exports::normalize_one_account_id;
 use super::import_orchestrator::credential_local_error;
@@ -70,11 +71,25 @@ pub fn reveal_local_account_login(
 }
 
 #[tauri::command]
-pub fn update_local_account_login(
+pub async fn update_local_account_login(
     input: AccountLoginUpdate,
     state: State<'_, DesktopState>,
 ) -> CommandResult<AccountLoginDetails> {
     let account_id = normalize_one_account_id(input.account_id)?;
+    let locks =
+        ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())
+            .map_err(|_| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "account credential lock is unavailable",
+                )
+            })?;
+    let _lock = locks.acquire(&account_id).await.map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::Conflict,
+            "account credentials are being refreshed",
+        )
+    })?;
     let credentials = load_account_credentials(&account_id, &state)?;
     let updated = credentials
         .replace_login_notes(input.email, input.phone, input.password, input.totp_secret)

@@ -14,9 +14,9 @@ pub(crate) fn active_managed_account_id(
 ) -> Result<Option<String>> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
-    if let Some(path) = account_backup_for_profile(codex_home, backup_root)? {
-        let snapshot = read_optional_bytes(&path)?;
-        return Ok(parse_account_backup_snapshot(&snapshot, &path)?
+    if let Some(backup_path) = account_backup_for_profile(codex_home, backup_root)? {
+        let backup_bytes = read_optional_bytes(&backup_path)?;
+        return Ok(parse_account_backup_snapshot(&backup_bytes, &backup_path)?
             .map(|backup| backup.managed_account_id));
     }
     Ok(local_backup(codex_home, backup_root)?.and_then(|backup| backup.bound_oauth_account_id))
@@ -33,22 +33,24 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
             fs::read_to_string(&backup_path).map_err(|error| io_error_at(&backup_path, error))?;
         let backup = parse_account_backup(&backup_content, &backup_path)?;
         let config_path = profile_dir.join(CONFIG_FILE);
-        let config = read_optional_bytes(&config_path)?;
-        let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+        let config_bytes = read_optional_bytes(&config_path)?;
+        let document =
+            parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
         let auth_path = profile_dir.join(AUTH_FILE);
-        let auth = read_optional_bytes(&auth_path)?;
+        let auth_bytes = read_optional_bytes(&auth_path)?;
         binding.active = account_managed_config_matches(&document)
-            && account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?;
+            && account_auth_matches_snapshot(&auth_bytes, &auth_path, &backup.managed_access_hash)?;
     }
     if let Some(backup) = local_backup(codex_home, backup_root)? {
         let profile_dir = canonical_profile_dir(codex_home)?;
         let config_path = profile_dir.join(CONFIG_FILE);
-        let config = read_optional_bytes(&config_path)?;
-        let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+        let config_bytes = read_optional_bytes(&config_path)?;
+        let document =
+            parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
         let auth_path = profile_dir.join(AUTH_FILE);
-        let auth = read_optional_bytes(&auth_path)?;
+        let auth_bytes = read_optional_bytes(&auth_path)?;
         let active = managed_config_matches(&document, &backup)
-            && managed_auth_matches_snapshot(&auth, &auth_path, &backup)?;
+            && managed_auth_matches_snapshot(&auth_bytes, &auth_path, &backup)?;
         bindings.push(ProfileBinding {
             profile_dir: profile_dir.to_string_lossy().into_owned(),
             credential_kind: backup.credential_kind(),
@@ -63,8 +65,9 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
     } else if codex_home.exists() {
         let profile_dir = canonical_profile_dir(codex_home)?;
         let config_path = profile_dir.join(CONFIG_FILE);
-        let config = read_optional_bytes(&config_path)?;
-        let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+        let config_bytes = read_optional_bytes(&config_path)?;
+        let document =
+            parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
         if document_has_provider(&document) {
             bindings.push(ProfileBinding {
                 profile_dir: profile_dir.to_string_lossy().into_owned(),
@@ -84,16 +87,19 @@ pub fn account_bindings(backup_root: &Path) -> Result<Vec<ProfileBinding>> {
         return Ok(Vec::new());
     }
     let mut bindings = Vec::new();
-    for entry in fs::read_dir(backup_root).map_err(io_error)? {
-        let entry = entry.map_err(io_error)?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with(ACCOUNT_BACKUP_PREFIX) || !name.ends_with(".json") {
+    for directory_entry in fs::read_dir(backup_root).map_err(io_error)? {
+        let directory_entry = directory_entry.map_err(io_error)?;
+        let backup_file_name = directory_entry.file_name();
+        let backup_file_name = backup_file_name.to_string_lossy();
+        if !backup_file_name.starts_with(ACCOUNT_BACKUP_PREFIX)
+            || !backup_file_name.ends_with(".json")
+        {
             continue;
         }
-        let path = entry.path();
-        let content = fs::read_to_string(&path).map_err(|error| io_error_at(&path, error))?;
-        let backup = parse_account_backup(&content, &path)?;
+        let backup_path = directory_entry.path();
+        let backup_text =
+            fs::read_to_string(&backup_path).map_err(|error| io_error_at(&backup_path, error))?;
+        let backup = parse_account_backup(&backup_text, &backup_path)?;
         bindings.push(binding_from_backup(&backup, false));
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
@@ -155,12 +161,12 @@ pub fn sync_local_gateway_binding(
     let profile_dir = canonical_profile_dir(codex_home)?;
     let config_path = profile_dir.join(CONFIG_FILE);
     let auth_path = profile_dir.join(AUTH_FILE);
-    let config = read_optional_bytes(&config_path)?;
-    let auth = read_optional_bytes(&auth_path)?;
-    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-    let auth_matches_previous = managed_auth_matches_snapshot(&auth, &auth_path, &backup)?;
+    let config_bytes = read_optional_bytes(&config_path)?;
+    let auth_bytes = read_optional_bytes(&auth_path)?;
+    let document = parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
+    let auth_matches_previous = managed_auth_matches_snapshot(&auth_bytes, &auth_path, &backup)?;
     let auth_matches_next =
-        account_auth_matches_tokens(&auth, &auth_path, tokens, provider_account_id)?;
+        account_auth_matches_tokens(&auth_bytes, &auth_path, tokens, provider_account_id)?;
     if !managed_config_matches(&document, &backup) || (!auth_matches_previous && !auth_matches_next)
     {
         return Ok(false);
@@ -179,7 +185,7 @@ pub fn sync_local_gateway_binding(
     let credential = account_auth_content(tokens, provider_account_id)?;
     projection::update_auth_with_rollback(
         &auth_path,
-        &auth,
+        &auth_bytes,
         &credential,
         (&backup_path, &updated_backup, &backup_bytes),
     )
@@ -222,11 +228,11 @@ pub(crate) fn refresh_managed_model_catalog(
     let profile_dir = canonical_profile_dir(codex_home)?;
     let config_path = profile_dir.join(CONFIG_FILE);
     let auth_path = profile_dir.join(AUTH_FILE);
-    let config = read_optional_bytes(&config_path)?;
-    let auth = read_optional_bytes(&auth_path)?;
-    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    let config_bytes = read_optional_bytes(&config_path)?;
+    let auth_bytes = read_optional_bytes(&auth_path)?;
+    let document = parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
     if !managed_config_matches(&document, &backup)
-        || !managed_auth_matches_snapshot(&auth, &auth_path, &backup)?
+        || !managed_auth_matches_snapshot(&auth_bytes, &auth_path, &backup)?
     {
         return Ok(false);
     }

@@ -1,7 +1,6 @@
 use super::{AccountSummary, ModelSummary, SourceSummary};
 use crate::{
-    CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter,
-    SourceProtocolResolution, WireApi,
+    CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,9 +55,7 @@ impl ModelProtocolIndex {
                 allowed: source.allowed_models.iter().cloned().collect(),
                 excluded: source.excluded_models.iter().cloned().collect(),
             };
-            for binding in
-                SourceProtocolResolution::resolved_protocol_bindings(source).unwrap_or_default()
-            {
+            for binding in source.routed_bindings() {
                 let upstream = binding
                     .adapter
                     .upstream_protocol(binding.wire_api)
@@ -249,7 +246,7 @@ mod tests {
             }]}
         }))
         .unwrap();
-        let expected = source
+        let rejected = source
             .protocol_config
             .resolve(
                 &source.base_url,
@@ -261,6 +258,19 @@ mod tests {
         let mut other = source.clone();
         other.id = "second-source".into();
         other.protocol_config.capabilities.clear();
+        assert!(rejected.is_empty());
+        assert!(ModelProtocolIndex::new(std::slice::from_ref(&source), &[])
+            .routes_for("future-model")
+            .is_empty());
+        let expected = other
+            .protocol_config
+            .resolve(
+                &other.base_url,
+                &other.models,
+                &other.protocol_bindings,
+                other.wire_api,
+            )
+            .unwrap();
         let index = ModelProtocolIndex::new(&[source, other], &[]);
         let routes = index.routes_for("future-model");
         assert_eq!(routes, index.routes_for("FUTURE-MODEL"));

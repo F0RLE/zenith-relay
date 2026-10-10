@@ -13,8 +13,8 @@ test("source setup saves automatic routing without exposing adapter controls", a
   await dialog.getByLabel("Upstream API key").fill("sk-automatic-test");
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   await expect(dialog.locator(".source-model-mode")).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
-  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Add source", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Add source", exact: true }).click();
 
   const input = await page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__;
@@ -45,7 +45,7 @@ test("legacy native protocol bindings remain editable without a routing panel", 
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
-  await page.locator(".source-table tbody tr").first().getByRole("button", { name: "Edit", exact: true }).click();
+  await page.locator(".source-card").first().getByRole("button", { name: "Edit", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   await expect(dialog.getByRole("tab", { name: "General", exact: true })).toBeVisible();

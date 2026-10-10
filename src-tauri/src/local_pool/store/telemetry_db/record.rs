@@ -63,22 +63,22 @@ impl TelemetryDb {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let previous = previous_usage_log(&transaction, &event.request_id)?;
-        let accepted = previous
+        let previous_usage = previous_usage_log(&transaction, &event.request_id)?;
+        let accepted = previous_usage
             .as_ref()
-            .is_none_or(|previous| i64::from(event.attempt) >= previous.attempt);
+            .is_none_or(|previous_usage| i64::from(event.attempt) >= previous_usage.attempt);
         let changed = accepted
             && transaction
                 .execute(
                 "INSERT INTO request_logs (
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
-                    requested_model, resolved_model, wire_api, success, http_status,
+                    requested_model, resolved_model, wire_api, transport, success, http_status,
                     error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
                     requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
                     usage_aggregate_recorded, client_context_id, upstream_error_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, 1, ?30, ?31)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, 1, ?31, ?32)
                 ON CONFLICT(request_id) DO UPDATE SET
                     created_at = CURRENT_TIMESTAMP,
                     attempt = excluded.attempt,
@@ -89,6 +89,7 @@ impl TelemetryDb {
                     requested_model = excluded.requested_model,
                     resolved_model = excluded.resolved_model,
                     wire_api = excluded.wire_api,
+                    transport = excluded.transport,
                     success = excluded.success,
                     http_status = excluded.http_status,
                     error_category = excluded.error_category,
@@ -123,6 +124,7 @@ impl TelemetryDb {
                     event.requested_model,
                     event.resolved_model,
                     event.wire_api.as_str(),
+                    event.transport.as_str(),
                     event.success,
                     event.http_status,
                     event.error_category,
@@ -152,8 +154,11 @@ impl TelemetryDb {
             .map_err(db_error)?
             > 0;
         if changed {
-            if let Some(previous) = previous.as_ref().filter(|previous| previous.aggregated) {
-                apply_aggregate_delta(&transaction, &previous.aggregate, -1)?;
+            if let Some(previous_usage) = previous_usage
+                .as_ref()
+                .filter(|previous_usage| previous_usage.aggregated)
+            {
+                apply_aggregate_delta(&transaction, &previous_usage.aggregate, -1)?;
             }
             apply_aggregate_delta(&transaction, &UsageAggregate::from_event(event), 1)?;
         }
@@ -161,7 +166,8 @@ impl TelemetryDb {
         // conflict-update path. Only run retention after a new request row;
         // otherwise replacing a request whose old id is divisible by 256
         // would rescan and rewrite the usage database repeatedly.
-        let archived = previous.is_none() && changed && transaction.last_insert_rowid() % 256 == 0;
+        let archived =
+            previous_usage.is_none() && changed && transaction.last_insert_rowid() % 256 == 0;
         if archived {
             transaction
                 .execute_batch(ARCHIVE_USAGE_SQL)
@@ -171,9 +177,9 @@ impl TelemetryDb {
         if archived {
             self.clear_cached_usage_totals()?;
         } else if changed {
-            let previous_totals = previous
+            let previous_totals = previous_usage
                 .as_ref()
-                .map(|previous| usage_totals_from_sample(previous.totals));
+                .map(|previous_usage| usage_totals_from_sample(previous_usage.totals));
             self.update_cached_usage_totals(previous_totals, usage_totals_from_event(event))?;
         }
         drop(connection);
@@ -221,7 +227,7 @@ fn previous_usage_log(
                 CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
                 input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
-                output_tokens, total_tokens, success, latency_ms, ttft_ms, generation_ms,
+                output_tokens, total_tokens, applied_service_tier, success, latency_ms, ttft_ms, generation_ms,
                 reasoning_tokens
              FROM request_logs WHERE request_id = ?1",
             [request_id],
@@ -231,11 +237,11 @@ fn previous_usage_log(
                     aggregated: row.get(1)?,
                     aggregate: UsageAggregate::from_row(row, 2)?,
                     totals: UsageTotalsSample {
-                        success: row.get(11)?,
-                        latency_ms: non_negative_i64(row.get(12)?),
-                        ttft_ms: row.get::<_, Option<i64>>(13)?.map(non_negative_i64),
-                        generation_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_i64),
-                        reasoning_tokens: row.get::<_, Option<i64>>(15)?.map(non_negative_i64),
+                        success: row.get(12)?,
+                        latency_ms: non_negative_i64(row.get(13)?),
+                        ttft_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_i64),
+                        generation_ms: row.get::<_, Option<i64>>(15)?.map(non_negative_i64),
+                        reasoning_tokens: row.get::<_, Option<i64>>(16)?.map(non_negative_i64),
                         input_tokens: row.get::<_, Option<i64>>(5)?.map(non_negative_i64),
                         cached_input_tokens: row.get::<_, Option<i64>>(6)?.map(non_negative_i64),
                         cache_write_input_tokens: row
@@ -251,6 +257,6 @@ fn previous_usage_log(
         .map_err(db_error)
 }
 
-fn non_negative_i64(value: i64) -> u64 {
-    value.max(0) as u64
+fn non_negative_i64(signed_count: i64) -> u64 {
+    signed_count.max(0) as u64
 }

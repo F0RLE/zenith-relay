@@ -28,15 +28,15 @@ pub(in crate::gateway) fn candidate_protocols(wire_api: WireApi) -> &'static [Wi
     }
 }
 
-pub(in crate::gateway) fn chat_request_is_text_or_image_only(value: &Value) -> bool {
-    let Some(request) = value.as_object() else {
+pub(in crate::gateway) fn chat_request_is_text_or_image_only(request_payload: &Value) -> bool {
+    let Some(request_fields) = request_payload.as_object() else {
         return false;
     };
-    if request.contains_key("audio") {
+    if request_fields.contains_key("audio") {
         return false;
     }
-    if let Some(modalities) = request.get("modalities") {
-        let Some(modalities) = modalities.as_array() else {
+    if let Some(modality_value) = request_fields.get("modalities") {
+        let Some(modalities) = modality_value.as_array() else {
             return false;
         };
         if modalities
@@ -46,21 +46,21 @@ pub(in crate::gateway) fn chat_request_is_text_or_image_only(value: &Value) -> b
             return false;
         }
     }
-    request
+    request_fields
         .get("messages")
         .and_then(Value::as_array)
         .is_none_or(|messages| messages.iter().all(chat_message_is_text_or_image_only))
 }
 
-fn chat_message_is_text_or_image_only(message: &Value) -> bool {
-    let Some(message) = message.as_object() else {
+fn chat_message_is_text_or_image_only(message_value: &Value) -> bool {
+    let Some(message_fields) = message_value.as_object() else {
         return false;
     };
-    match message.get("content") {
+    match message_fields.get("content") {
         None | Some(Value::Null) | Some(Value::String(_)) => true,
-        Some(Value::Array(parts)) => parts.iter().all(|part| {
+        Some(Value::Array(content_parts)) => content_parts.iter().all(|content_part| {
             matches!(
-                part.get("type").and_then(Value::as_str),
+                content_part.get("type").and_then(Value::as_str),
                 Some("text" | "image_url")
             )
         }),

@@ -24,8 +24,8 @@ export function accountPlanOptions(accounts: readonly AccountSummary[], unknown:
   const options = new Map<string, AccountPlanOption>();
   for (const account of accounts) {
     const option = accountPlanOption(account.subscription.planType, unknown);
-    const current = options.get(option.id);
-    options.set(option.id, { ...option, count: (current?.count ?? 0) + 1 });
+    const existingOption = options.get(option.id);
+    options.set(option.id, { ...option, count: (existingOption?.count ?? 0) + 1 });
   }
   return [...options.values()].sort(compareAccountPlans);
 }
@@ -64,8 +64,8 @@ export function filterAndSortAccounts(
 
 export function visiblePlanCounts(accounts: readonly AccountSummary[], unknown: string) {
   return accounts.reduce((counts, account) => {
-    const id = accountPlanOption(account.subscription.planType, unknown).id;
-    counts.set(id, (counts.get(id) ?? 0) + 1);
+    const planId = accountPlanOption(account.subscription.planType, unknown).id;
+    counts.set(planId, (counts.get(planId) ?? 0) + 1);
     return counts;
   }, new Map<string, number>());
 }

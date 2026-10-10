@@ -58,39 +58,42 @@ pub struct ToolUseDiagnostics {
 }
 
 impl ToolUseDiagnostics {
-    pub fn observe_output_item(&mut self, item: &Value) {
-        let output = output_observation_from_item(item);
-        self.tool_call_count = self.tool_call_count.saturating_add(output.tool_call_count);
-        self.text_output |= output.text_output;
+    pub fn observe_output_item(&mut self, output_item: &Value) {
+        let item_observation = output_observation_from_item(output_item);
+        self.tool_call_count = self
+            .tool_call_count
+            .saturating_add(item_observation.tool_call_count);
+        self.text_output |= item_observation.text_output;
     }
 
-    pub fn observe_stream_payload(&mut self, value: &Value) {
-        if let Some(response) = value.get("response") {
-            self.set_terminal_response(response);
+    pub fn observe_stream_payload(&mut self, event_payload: &Value) {
+        if let Some(response_payload) = event_payload.get("response") {
+            self.set_terminal_response(response_payload);
             return;
         }
-        if value.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
-            if let Some(item) = value.get("item") {
-                self.observe_output_item(item);
+        if event_payload.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
+            if let Some(output_item) = event_payload.get("item") {
+                self.observe_output_item(output_item);
             }
         }
-        if let Some(content_block) = value.get("content_block") {
+        if let Some(content_block) = event_payload.get("content_block") {
             self.observe_output_item(content_block);
         }
-        let output = output_observation_from_chat_choices(value);
-        self.tool_call_count = self.tool_call_count.max(output.tool_call_count);
-        self.text_output |= output.text_output;
+        let choice_observation = output_observation_from_chat_choices(event_payload);
+        self.tool_call_count = self.tool_call_count.max(choice_observation.tool_call_count);
+        self.text_output |= choice_observation.text_output;
     }
 
-    pub fn set_terminal_response(&mut self, value: &Value) {
-        let output = output_observation(value);
-        let terminal_output_is_empty =
-            output.inspected && output.tool_call_count == 0 && !output.text_output;
-        if output.inspected
+    pub fn set_terminal_response(&mut self, response_payload: &Value) {
+        let response_observation = output_observation(response_payload);
+        let terminal_output_is_empty = response_observation.inspected
+            && response_observation.tool_call_count == 0
+            && !response_observation.text_output;
+        if response_observation.inspected
             && !(terminal_output_is_empty && (self.tool_call_count > 0 || self.text_output))
         {
-            self.tool_call_count = output.tool_call_count;
-            self.text_output = output.text_output;
+            self.tool_call_count = response_observation.tool_call_count;
+            self.text_output = response_observation.text_output;
         }
         self.finish();
     }
@@ -130,87 +133,96 @@ struct OutputObservation {
     text_output: bool,
 }
 
-fn output_observation(value: &Value) -> OutputObservation {
-    let response = value.get("response").unwrap_or(value);
-    if let Some(items) = response.get("output").and_then(Value::as_array) {
-        let mut output = OutputObservation {
+fn output_observation(response_payload: &Value) -> OutputObservation {
+    let response_object = response_payload.get("response").unwrap_or(response_payload);
+    if let Some(output_items) = response_object.get("output").and_then(Value::as_array) {
+        let mut response_observation = OutputObservation {
             inspected: true,
             ..OutputObservation::default()
         };
-        for item in items {
-            merge_output_observation(&mut output, output_observation_from_item(item));
+        for output_item in output_items {
+            merge_output_observation(
+                &mut response_observation,
+                output_observation_from_item(output_item),
+            );
         }
-        return output;
+        return response_observation;
     }
-    if let Some(content) = response.get("content").and_then(Value::as_array) {
-        let mut output = OutputObservation {
+    if let Some(content_blocks) = response_object.get("content").and_then(Value::as_array) {
+        let mut response_observation = OutputObservation {
             inspected: true,
             ..OutputObservation::default()
         };
-        for item in content {
-            merge_output_observation(&mut output, output_observation_from_item(item));
+        for content_block in content_blocks {
+            merge_output_observation(
+                &mut response_observation,
+                output_observation_from_item(content_block),
+            );
         }
-        return output;
+        return response_observation;
     }
-    output_observation_from_chat_choices(response)
+    output_observation_from_chat_choices(response_object)
 }
 
-fn output_observation_from_item(item: &Value) -> OutputObservation {
-    let mut output = OutputObservation::default();
-    match item.get("type").and_then(Value::as_str) {
+fn output_observation_from_item(output_item: &Value) -> OutputObservation {
+    let mut item_observation = OutputObservation::default();
+    match output_item.get("type").and_then(Value::as_str) {
         Some("function_call" | "custom_tool_call" | "tool_use") => {
-            output.tool_call_count = 1;
+            item_observation.tool_call_count = 1;
         }
         Some("message") => {
-            output.text_output = message_has_text(item);
+            item_observation.text_output = message_has_text(output_item);
         }
         Some("output_text" | "text") => {
-            output.text_output = true;
+            item_observation.text_output = true;
         }
         _ => {}
     }
-    output
+    item_observation
 }
 
-fn output_observation_from_chat_choices(value: &Value) -> OutputObservation {
-    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+fn output_observation_from_chat_choices(response_payload: &Value) -> OutputObservation {
+    let Some(choices) = response_payload.get("choices").and_then(Value::as_array) else {
         return OutputObservation::default();
     };
-    let mut output = OutputObservation {
+    let mut response_observation = OutputObservation {
         inspected: true,
         ..OutputObservation::default()
     };
     for choice in choices {
-        let message = choice
+        let message_payload = choice
             .get("message")
             .or_else(|| choice.get("delta"))
             .unwrap_or(choice);
-        output.tool_call_count = output.tool_call_count.saturating_add(
-            message
+        response_observation.tool_call_count = response_observation.tool_call_count.saturating_add(
+            message_payload
                 .get("tool_calls")
                 .and_then(Value::as_array)
                 .map_or(0, |calls| calls.len().min(u16::MAX as usize) as u16),
         );
-        if message.get("function_call").is_some() {
-            output.tool_call_count = output.tool_call_count.saturating_add(1);
+        if message_payload.get("function_call").is_some() {
+            response_observation.tool_call_count =
+                response_observation.tool_call_count.saturating_add(1);
         }
-        output.text_output |= message_has_text(message);
+        response_observation.text_output |= message_has_text(message_payload);
     }
-    output
+    response_observation
 }
 
-fn merge_output_observation(target: &mut OutputObservation, next: OutputObservation) {
-    target.inspected |= next.inspected;
-    target.tool_call_count = target.tool_call_count.saturating_add(next.tool_call_count);
-    target.text_output |= next.text_output;
+fn merge_output_observation(target: &mut OutputObservation, incoming: OutputObservation) {
+    target.inspected |= incoming.inspected;
+    target.tool_call_count = target
+        .tool_call_count
+        .saturating_add(incoming.tool_call_count);
+    target.text_output |= incoming.text_output;
 }
 
-fn message_has_text(value: &Value) -> bool {
-    match value.get("content") {
+fn message_has_text(message_payload: &Value) -> bool {
+    match message_payload.get("content") {
         Some(Value::String(content)) => !content.is_empty(),
-        Some(Value::Array(items)) => items.iter().any(|item| {
+        Some(Value::Array(content_blocks)) => content_blocks.iter().any(|content_block| {
             matches!(
-                item.get("type").and_then(Value::as_str),
+                content_block.get("type").and_then(Value::as_str),
                 Some("output_text" | "text")
             )
         }),

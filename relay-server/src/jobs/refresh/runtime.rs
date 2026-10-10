@@ -18,8 +18,8 @@ pub(super) async fn synchronize(
     health_changed: bool,
 ) -> Result<(), String> {
     let _configuration = state.configuration_lock.lock().await;
-    let (account, current) = state.store.account_refresh_scope(&fence.account_id)?;
-    if &current != fence {
+    let (account, stored_fence) = state.store.account_refresh_scope(&fence.account_id)?;
+    if &stored_fence != fence {
         return Err("account changed during refresh".into());
     }
     let Some(runtime) = state.runtime()? else {
@@ -31,7 +31,9 @@ pub(super) async fn synchronize(
     let credential = state
         .vault
         .load(&account.secret_ref)?
-        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+        .and_then(|credential_json| {
+            serde_json::from_str::<AccountCredential>(&credential_json).ok()
+        });
     let secret_available = credential.is_some();
     let proxy_available = credential
         .as_ref()

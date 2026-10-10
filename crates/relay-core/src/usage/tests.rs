@@ -32,6 +32,7 @@ fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: crate::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: false,
@@ -230,22 +231,22 @@ fn tool_diagnostics_marks_text_only_completion_when_tools_were_offered() {
 
 #[test]
 fn tool_policy_diagnostics_read_old_records_and_round_trip_without_false_availability() {
-    let mut old: ToolUseDiagnostics = serde_json::from_value(json!({
+    let mut legacy_diagnostics: ToolUseDiagnostics = serde_json::from_value(json!({
         "clientToolCount":73,"forwardedToolCount":0,"toolCallCount":0,"textOutput":true,"terminalOutput":"text"
     })).unwrap();
-    assert_eq!(old.client_schema_bytes, None);
-    assert_eq!(old.policy_mode, None);
-    assert_eq!(old.filtered_tool_count, 0);
-    assert!(!old.tools_were_available_but_not_called());
-    old.policy_mode = Some(crate::ToolPolicyMode::PassThrough);
-    old.policy_outcome = Some(crate::ToolPolicyOutcome::PassThrough);
-    old.client_schema_bytes = Some(12345);
-    old.forwarded_schema_bytes = Some(2);
-    old.filtered_tool_count = 73;
-    let json = serde_json::to_value(&old).unwrap();
+    assert_eq!(legacy_diagnostics.client_schema_bytes, None);
+    assert_eq!(legacy_diagnostics.policy_mode, None);
+    assert_eq!(legacy_diagnostics.filtered_tool_count, 0);
+    assert!(!legacy_diagnostics.tools_were_available_but_not_called());
+    legacy_diagnostics.policy_mode = Some(crate::ToolPolicyMode::PassThrough);
+    legacy_diagnostics.policy_outcome = Some(crate::ToolPolicyOutcome::PassThrough);
+    legacy_diagnostics.client_schema_bytes = Some(12345);
+    legacy_diagnostics.forwarded_schema_bytes = Some(2);
+    legacy_diagnostics.filtered_tool_count = 73;
+    let json = serde_json::to_value(&legacy_diagnostics).unwrap();
     assert_eq!(
         serde_json::from_value::<ToolUseDiagnostics>(json).unwrap(),
-        old
+        legacy_diagnostics
     );
     assert!(ToolUseDiagnostics {
         filtered_tool_count: 2,

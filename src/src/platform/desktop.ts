@@ -38,7 +38,11 @@ export function getSystemLocale() {
   return invoke<string | null>("get_system_locale");
 }
 
-export function openApiKeyPage(provider: "zenith" | "openai" | "openrouter") {
+export type ApiKeyPageProvider =
+  | "zenith" | "openai" | "openrouter" | "anthropic" | "gemini"
+  | "deepseek" | "groq" | "mistral" | "moonshot" | "kimi" | "minimax";
+
+export function openApiKeyPage(provider: ApiKeyPageProvider) {
   return invoke<void>("open_api_key_page", { provider });
 }
 
@@ -50,10 +54,12 @@ export function toggleMaximizeWindow() {
   return getCurrentWindow().toggleMaximize();
 }
 
-export async function toggleFullscreenWindow() {
-  const currentWindow = getCurrentWindow();
-  const fullscreen = await currentWindow.isFullscreen();
-  return currentWindow.setFullscreen(!fullscreen);
+export async function watchWindowFullscreen(onChange: (fullscreen: boolean) => void) {
+  const window = getCurrentWindow();
+  const refresh = () => window.isFullscreen().then(onChange).catch(() => undefined);
+  const unlisten = await window.onResized(() => { void refresh(); });
+  await refresh();
+  return unlisten;
 }
 
 export function closeWindow() {
@@ -80,10 +86,10 @@ export function revealWindowAfterBackgroundColor(color: string) {
   }
 }
 
-export function recordPerformance(name: string, durationMs: number, context?: string) {
+export function recordPerformance(metricName: string, durationMs: number, context?: string) {
   if (!Number.isFinite(durationMs) || durationMs < 0) return Promise.resolve();
   return invoke<void>("record_local_performance_sample", {
-    name,
+    name: metricName,
     durationMs,
     context,
   }).catch(() => undefined);

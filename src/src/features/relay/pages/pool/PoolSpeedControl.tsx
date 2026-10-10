@@ -42,9 +42,9 @@ export function PoolSpeedControl({
     group.querySelector<HTMLButtonElement>("[aria-checked='true']")?.focus();
   }, [selected]);
   const move = (offset: number) => {
-    const current = available.findIndex(({ tier }) => tier === selected);
-    const next = available[Math.min(available.length - 1, Math.max(0, current + offset))];
-    if (next) selectTier(next.tier);
+    const selectedIndex = available.findIndex(({ tier }) => tier === selected);
+    const nextTier = available[Math.min(available.length - 1, Math.max(0, selectedIndex + offset))];
+    if (nextTier) selectTier(nextTier.tier);
   };
 
   return <div

@@ -1,7 +1,7 @@
 use super::{
-    enrich_reasoning_metadata_with_models_dev_details, payload_hash, validate_payload,
-    MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataError, CACHE_FORMAT, RETRY_DELAYS_MS,
-    SOURCES, URLS,
+    enrich_reasoning_metadata_with_models_dev_details, metadata_payload_hash,
+    validate_metadata_payload, MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataError,
+    CACHE_FORMAT, RETRY_DELAYS_MS, SOURCES, URLS,
 };
 use crate::pricing::{CatalogRefreshDeadline, CatalogRefreshKind, CatalogStatus};
 use reqwest::header;
@@ -23,18 +23,22 @@ pub(super) struct SourceEnvelope {
     pub(super) payload: Arc<RawValue>,
 }
 impl SourceEnvelope {
-    pub(super) fn new(index: usize, payload: Value, now: u64) -> Result<Self, ModelMetadataError> {
-        if !valid_payload(index, &payload) {
+    pub(super) fn new(
+        index: usize,
+        source_payload: Value,
+        now: u64,
+    ) -> Result<Self, ModelMetadataError> {
+        if !valid_source_payload(index, &source_payload) {
             return Err(ModelMetadataError::InvalidCatalog);
         }
         Ok(Self {
             source_url: URLS[index].into(),
-            revision: payload_hash(&payload)?,
+            revision: metadata_payload_hash(&source_payload)?,
             etag: None,
             last_modified: None,
             fetched_at_ms: now,
             stale: false,
-            payload: serde_json::value::to_raw_value(&payload)
+            payload: serde_json::value::to_raw_value(&source_payload)
                 .map(Arc::from)
                 .map_err(|_| ModelMetadataError::InvalidCatalog)?,
         })
@@ -43,15 +47,17 @@ impl SourceEnvelope {
         if self.source_url != URLS[index] || self.fetched_at_ms == 0 {
             return Err(ModelMetadataError::InvalidCache);
         }
-        let payload = self
-            .parse_payload()
+        let parsed_payload = self
+            .parse_source_payload()
             .map_err(|_| ModelMetadataError::InvalidCache)?;
-        if self.revision != payload_hash(&payload)? || !valid_payload(index, &payload) {
+        if self.revision != metadata_payload_hash(&parsed_payload)?
+            || !valid_source_payload(index, &parsed_payload)
+        {
             return Err(ModelMetadataError::InvalidCache);
         }
-        Ok(payload)
+        Ok(parsed_payload)
     }
-    pub(super) fn parse_payload(&self) -> Result<Value, ModelMetadataError> {
+    pub(super) fn parse_source_payload(&self) -> Result<Value, ModelMetadataError> {
         serde_json::from_str(self.payload.get()).map_err(|_| ModelMetadataError::InvalidCatalog)
     }
     pub(super) fn validators(&mut self, headers: &header::HeaderMap) {
@@ -59,8 +65,11 @@ impl SourceEnvelope {
             (&mut self.etag, header::ETAG),
             (&mut self.last_modified, header::LAST_MODIFIED),
         ] {
-            if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
-                *target = Some(value.into());
+            if let Some(header_value) = headers
+                .get(name)
+                .and_then(|header_value| header_value.to_str().ok())
+            {
+                *target = Some(header_value.into());
             }
         }
     }
@@ -90,8 +99,10 @@ impl SourceState {
                     CatalogStatus::Unloaded
                 }
             },
-            |e| {
-                if e.stale || now.saturating_sub(e.fetched_at_ms) >= max_age {
+            |source_envelope| {
+                if source_envelope.stale
+                    || now.saturating_sub(source_envelope.fetched_at_ms) >= max_age
+                {
                     CatalogStatus::Stale
                 } else {
                     CatalogStatus::Current
@@ -121,11 +132,11 @@ impl SourceState {
             };
         }
         CatalogRefreshDeadline {
-            at_ms: self.envelope.as_ref().map_or(now, |e| {
-                if e.stale {
+            at_ms: self.envelope.as_ref().map_or(now, |source_envelope| {
+                if source_envelope.stale {
                     now
                 } else {
-                    e.fetched_at_ms.saturating_add(max_age)
+                    source_envelope.fetched_at_ms.saturating_add(max_age)
                 }
             }),
             kind: CatalogRefreshKind::Scheduled,
@@ -165,27 +176,32 @@ pub(super) struct CacheBundle {
 }
 impl CacheBundle {
     pub(super) fn new(states: &[SourceState; 4]) -> Result<Self, ModelMetadataError> {
-        let merged_payload = merged_payload(states)?;
+        let merged_payload = build_merged_metadata_payload(states)?;
         Ok(Self {
             format: CACHE_FORMAT.into(),
             schema_version: 2,
             sources: states
                 .iter()
                 .enumerate()
-                .filter_map(|(i, s)| s.envelope.clone().map(|e| (SOURCES[i].into(), e)))
+                .filter_map(|(source_index, source_state)| {
+                    source_state
+                        .envelope
+                        .clone()
+                        .map(|source_envelope| (SOURCES[source_index].into(), source_envelope))
+                })
                 .collect(),
-            merged_revision: payload_hash(&merged_payload)?,
+            merged_revision: metadata_payload_hash(&merged_payload)?,
             merged_payload,
         })
     }
 }
-fn merged_payload(states: &[SourceState; 4]) -> Result<Value, ModelMetadataError> {
+fn build_merged_metadata_payload(states: &[SourceState; 4]) -> Result<Value, ModelMetadataError> {
     let mut parsed: [Option<Value>; 4] = std::array::from_fn(|_| None);
     for (slot, state) in parsed.iter_mut().zip(states) {
         *slot = state
             .envelope
             .as_ref()
-            .map(SourceEnvelope::parse_payload)
+            .map(SourceEnvelope::parse_source_payload)
             .transpose()?;
     }
     Ok(merge_payloads(&parsed))
@@ -193,12 +209,12 @@ fn merged_payload(states: &[SourceState; 4]) -> Result<Value, ModelMetadataError
 
 pub(super) fn merge_payloads(parsed: &[Option<Value>; 4]) -> Value {
     let empty = serde_json::json!({});
-    let payload = |index: usize| parsed[index].as_ref();
+    let source_payload = |source_index: usize| parsed[source_index].as_ref();
     enrich_reasoning_metadata_with_models_dev_details(
-        payload(0).unwrap_or(&empty),
-        payload(1),
-        payload(2),
-        payload(3),
+        source_payload(0).unwrap_or(&empty),
+        source_payload(1),
+        source_payload(2),
+        source_payload(3),
     )
 }
 pub(super) fn build_catalog(
@@ -206,15 +222,21 @@ pub(super) fn build_catalog(
     now: u64,
     max_age: u64,
 ) -> ModelMetadataCatalog {
-    let Ok(payload) = merged_payload(states) else {
+    let Ok(merged_catalog_payload) = build_merged_metadata_payload(states) else {
         return ModelMetadataCatalog::empty();
     };
-    catalog_from_payload(states, &payload, payload_hash(&payload).ok(), now, max_age)
+    catalog_from_payload(
+        states,
+        &merged_catalog_payload,
+        metadata_payload_hash(&merged_catalog_payload).ok(),
+        now,
+        max_age,
+    )
 }
 
 pub(super) fn catalog_from_payload(
     states: &[SourceState; 4],
-    payload: &Value,
+    merged_catalog_payload: &Value,
     revision: Option<String>,
     now: u64,
     max_age: u64,
@@ -222,27 +244,41 @@ pub(super) fn catalog_from_payload(
     let statuses: BTreeMap<_, _> = states
         .iter()
         .enumerate()
-        .map(|(i, s)| {
+        .map(|(source_index, source_state)| {
             (
-                SOURCES[i].into(),
+                SOURCES[source_index].into(),
                 MetadataSourceStatus {
-                    revision: s.envelope.as_ref().map(|e| e.revision.clone()),
-                    fetched_at_ms: s.envelope.as_ref().map(|e| e.fetched_at_ms),
-                    stale: s
+                    revision: source_state
                         .envelope
                         .as_ref()
-                        .is_none_or(|e| e.stale || now.saturating_sub(e.fetched_at_ms) >= max_age),
+                        .map(|source_envelope| source_envelope.revision.clone()),
+                    fetched_at_ms: source_state
+                        .envelope
+                        .as_ref()
+                        .map(|source_envelope| source_envelope.fetched_at_ms),
+                    stale: source_state
+                        .envelope
+                        .as_ref()
+                        .is_none_or(|source_envelope| {
+                            source_envelope.stale
+                                || now.saturating_sub(source_envelope.fetched_at_ms) >= max_age
+                        }),
                 },
             )
         })
         .collect();
     let stale = statuses.values().any(|s| s.stale);
-    let mut catalog = ModelMetadataCatalog::from_payload(
-        payload,
+    let mut catalog = ModelMetadataCatalog::from_metadata_payload(
+        merged_catalog_payload,
         revision,
         states
             .iter()
-            .filter_map(|s| s.envelope.as_ref().map(|e| e.fetched_at_ms))
+            .filter_map(|source_state| {
+                source_state
+                    .envelope
+                    .as_ref()
+                    .map(|source_envelope| source_envelope.fetched_at_ms)
+            })
             .max(),
         stale,
     )
@@ -252,43 +288,48 @@ pub(super) fn catalog_from_payload(
     catalog
 }
 
-pub(super) fn valid_payload(index: usize, payload: &Value) -> bool {
+pub(super) fn valid_source_payload(index: usize, source_payload: &Value) -> bool {
     let valid_id = |id: &str| !id.trim().is_empty() && id.len() <= super::super::MAX_STRING_LENGTH;
     match index {
-        0 => validate_payload(payload).is_ok(),
-        1 => payload.as_object().is_some_and(|providers| {
+        0 => validate_metadata_payload(source_payload).is_ok(),
+        1 => source_payload.as_object().is_some_and(|providers| {
             !providers.is_empty()
                 && providers.len() <= super::super::MAX_RECORDS
                 && providers.values().all(|provider| {
                     provider
                         .get("models")
                         .and_then(Value::as_object)
-                        .is_some_and(|models| {
-                            !models.is_empty()
-                                && models.len() <= super::super::MAX_RECORDS
-                                && models
-                                    .iter()
-                                    .all(|(id, value)| valid_id(id) && value.is_object())
+                        .is_some_and(|models_by_id| {
+                            !models_by_id.is_empty()
+                                && models_by_id.len() <= super::super::MAX_RECORDS
+                                && models_by_id.iter().all(|(model_id, model_metadata)| {
+                                    valid_id(model_id) && model_metadata.is_object()
+                                })
                         })
                 })
         }),
-        2 => payload
+        2 => source_payload
             .get("data")
             .and_then(Value::as_array)
-            .is_some_and(|items| {
-                !items.is_empty()
-                    && items.len() <= super::super::MAX_RECORDS
-                    && items
-                        .iter()
-                        .all(|item| item.get("id").and_then(Value::as_str).is_some_and(valid_id))
+            .is_some_and(|model_records| {
+                !model_records.is_empty()
+                    && model_records.len() <= super::super::MAX_RECORDS
+                    && model_records.iter().all(|model_record| {
+                        model_record
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(valid_id)
+                    })
             }),
-        3 => payload.as_object().is_some_and(|items| {
-            !items.is_empty()
-                && items.len() <= super::super::MAX_RECORDS
-                && items
-                    .iter()
-                    .all(|(id, value)| valid_id(id) && value.is_object())
-                && items.keys().any(|id| id != "sample_spec")
+        3 => source_payload.as_object().is_some_and(|model_entries| {
+            !model_entries.is_empty()
+                && model_entries.len() <= super::super::MAX_RECORDS
+                && model_entries.iter().all(|(model_id, model_metadata)| {
+                    valid_id(model_id) && model_metadata.is_object()
+                })
+                && model_entries
+                    .keys()
+                    .any(|model_id| model_id != "sample_spec")
         }),
         _ => false,
     }

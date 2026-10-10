@@ -6,6 +6,76 @@ fn catalog(raw: &str) -> ModelMetadataCatalog {
 }
 
 #[test]
+fn equivalent_reference_records_publish_reasoning_without_merging_identity() {
+    use serde_json::json;
+
+    let id = "synthetic-future";
+    let first = format!("source-a/{id}");
+    let second = format!("source-b/{id}");
+    let record = json!({
+        "name": "Synthetic Future",
+        "family": "future",
+        "reasoning": true,
+        "reasoning_effort_levels": ["low", "high", "max"],
+        "default_reasoning_effort": "high"
+    });
+    let mut records = json!({});
+    records[&first] = record.clone();
+    records[&second] = record;
+
+    let metadata = catalog(&records.to_string());
+    assert!(metadata.resolve(id).is_some());
+    assert_eq!(metadata.resolve(&first).unwrap().source_model_id, first);
+    assert_eq!(metadata.resolve(&second).unwrap().source_model_id, second);
+    let mut card = json!({"slug": id});
+    metadata.apply_codex_capabilities(id, &mut card);
+    assert_eq!(card["default_reasoning_level"], "high");
+    assert_eq!(
+        card["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "low"},
+            {"effort": "high", "description": "high"},
+            {"effort": "max", "description": "max"}
+        ])
+    );
+
+    records[&second]["reasoning_effort_levels"] = json!(["high"]);
+    assert!(catalog(&records.to_string()).resolve(id).is_none());
+
+    records[&second] = records[&first].clone();
+    let third = format!("other/{id}");
+    records[&third] = records[&first].clone();
+    assert!(catalog(&records.to_string()).resolve(id).is_some());
+
+    records[&third]["name"] = json!("Different Model");
+    assert!(catalog(&records.to_string()).resolve(id).is_none());
+}
+
+#[test]
+fn equivalent_records_with_different_canonical_ids_remain_ambiguous() {
+    use serde_json::json;
+
+    let mut records = json!({
+        "source-a/model": {
+            "name": "Model",
+            "family": "family",
+            "canonical_model_id": "provider/model-a",
+            "reasoning": true
+        },
+        "source-b/model": {
+            "name": "Model",
+            "family": "family",
+            "canonical_model_id": "provider/model-b",
+            "reasoning": true
+        }
+    });
+    assert!(catalog(&records.to_string()).resolve("model").is_none());
+
+    records["source-b/model"]["canonical_model_id"] = json!("provider/model-a");
+    assert!(catalog(&records.to_string()).resolve("model").is_some());
+}
+
+#[test]
 fn merges_openrouter_reasoning_levels_over_litellm_and_models_dev() {
     let models = serde_json::json!({
         "openai/gpt-test": {"reasoning": true}
@@ -66,7 +136,7 @@ fn parses_reasoning_method_and_filters_unrecognized_efforts() {
         "reasoning": {"type": "effort", "effort": {"values": ["low", "HIGH", "vendor-private", "x".repeat(2_000)]}, "default_effort": "high"},
         "supported_parameters": ["reasoning"]
     }]});
-    let catalog = ModelMetadataCatalog::from_payload(
+    let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, Some(&openrouter), None),
         None,
         None,
@@ -98,6 +168,30 @@ fn parses_models_dev_reasoning_options() {
         capabilities.reasoning_effort_levels,
         ["low", "medium", "high", "xhigh"]
     );
+}
+
+#[test]
+fn keeps_budget_reasoning_separate_from_effort_levels() {
+    let catalog = catalog(
+        r#"{
+        "anthropic/claude-sonnet": {
+            "name": "Claude Sonnet",
+            "reasoning": true,
+            "reasoning_options": [
+                {"type": "budget_tokens", "min": 1024, "max": 32000, "default": 8192}
+            ]
+        }
+    }"#,
+    );
+    let capabilities = catalog.capabilities_for("claude-sonnet");
+    assert_eq!(
+        capabilities.reasoning_method,
+        Some(ReasoningMethod::BudgetTokens)
+    );
+    assert!(capabilities.reasoning_effort_levels.is_empty());
+    assert_eq!(capabilities.reasoning_budget_min_tokens, Some(1024));
+    assert_eq!(capabilities.reasoning_budget_max_tokens, Some(32_000));
+    assert_eq!(capabilities.reasoning_budget_default_tokens, Some(8_192));
 }
 
 #[test]
@@ -174,7 +268,7 @@ fn recognizes_litellm_camel_case_effort_flags_without_openrouter() {
         "supportsLowReasoningEffort": true,
         "supportsHighReasoningEffort": true
     }});
-    let catalog = ModelMetadataCatalog::from_payload(
+    let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, None, Some(&litellm)),
         None,
         None,
@@ -214,7 +308,7 @@ fn matches_decimal_and_dashed_model_versions_before_litellm_fallback() {
         "claude-opus-4-8": {"supports_max_reasoning_effort": true}
     });
 
-    let catalog = ModelMetadataCatalog::from_payload(
+    let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, Some(&openrouter), Some(&litellm)),
         None,
         None,

@@ -101,10 +101,10 @@ impl CandidateScope {
         self.source_ids
             .as_ref()
             .is_some_and(|ids| ids.contains(&candidate.source_id))
-            || candidate.account_id.as_ref().is_some_and(|id| {
+            || candidate.account_id.as_ref().is_some_and(|account_id| {
                 self.account_ids
                     .as_ref()
-                    .is_some_and(|ids| ids.contains(id))
+                    .is_some_and(|account_ids| account_ids.contains(account_id))
             })
     }
 }
@@ -169,6 +169,14 @@ impl RuntimeCandidate {
         scope: &CandidateScope,
     ) -> bool {
         self.is_configured(model, allowed_protocols, scope) && self.health.is_eligible()
+    }
+
+    pub(crate) fn is_discovery_visible(&self, scope: &CandidateScope) -> bool {
+        self.enabled
+            && !self.draining
+            && self.secret_available
+            && self.health.is_eligible()
+            && scope.includes(self)
     }
 
     pub(crate) fn is_configured(

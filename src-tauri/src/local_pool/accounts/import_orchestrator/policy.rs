@@ -10,9 +10,9 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::{normalize_bounded_model_ids, ModelIdListError};
 
 pub(in crate::local_pool::accounts) fn ensure_account_import_item(
-    item: &ParsedImportItem,
+    import_item: &ParsedImportItem,
 ) -> ItemResult<()> {
-    if item.secrets().api_key().is_some() {
+    if import_item.secrets().api_key().is_some() {
         Err(ImportItemError::new(
             error_codes::USE_SOURCE_IMPORT,
             "API keys must be imported as compatible API sources",
@@ -68,16 +68,16 @@ pub(in crate::local_pool::accounts) fn merge_existing_account(
 pub(in crate::local_pool::accounts) fn preserve_newer_account_state(
     account: &mut LocalAccountRecord,
     before_refresh: &LocalAccountRecord,
-    current: &LocalAccountRecord,
+    latest_account: &LocalAccountRecord,
 ) {
-    if current.account.auth_state != before_refresh.account.auth_state {
-        account.account.auth_state = current.account.auth_state;
+    if latest_account.account.auth_state != before_refresh.account.auth_state {
+        account.account.auth_state = latest_account.account.auth_state;
     }
-    if current.account.health != before_refresh.account.health {
-        account.account.health = current.account.health;
+    if latest_account.account.health != before_refresh.account.health {
+        account.account.health = latest_account.account.health;
     }
-    if current.account.last_error_code != before_refresh.account.last_error_code {
-        account.account.last_error_code = current.account.last_error_code.clone();
+    if latest_account.account.last_error_code != before_refresh.account.last_error_code {
+        account.account.last_error_code = latest_account.account.last_error_code.clone();
     }
 }
 

@@ -5,9 +5,9 @@ use serde_json::{json, Value};
 impl MessagesStreamBridge {
     pub(in crate::protocol::adapter::stream::messages::events) fn handle_block_delta(
         &mut self,
-        value: &Value,
+        upstream_event: &Value,
     ) {
-        let Some(index) = value
+        let Some(index) = upstream_event
             .get("index")
             .and_then(Value::as_u64)
             .map(|index| index as usize)
@@ -15,7 +15,7 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
-        let Some(delta) = value.get("delta").and_then(Value::as_object) else {
+        let Some(delta) = upstream_event.get("delta").and_then(Value::as_object) else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
@@ -24,11 +24,11 @@ impl MessagesStreamBridge {
             return;
         }
         if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
-            let Some(delta) = delta.get("text").and_then(Value::as_str) else {
+            let Some(delta_text) = delta.get("text").and_then(Value::as_str) else {
                 self.fail(AdapterError::upstream_stream_invalid());
                 return;
             };
-            if delta.is_empty() {
+            if delta_text.is_empty() {
                 return;
             }
             let needs_content_part = match self.assistant_blocks.get(&index) {
@@ -64,13 +64,13 @@ impl MessagesStreamBridge {
                     self.fail(AdapterError::upstream_stream_invalid());
                     return;
                 };
-                text.push_str(delta);
+                text.push_str(delta_text);
                 (*output_index, *content_index)
             };
             let Some(text_output) = self
                 .text_output
                 .as_ref()
-                .filter(|output| output.output_index == output_index)
+                .filter(|text_output| text_output.output_index == output_index)
             else {
                 self.fail(AdapterError::upstream_stream_invalid());
                 return;
@@ -79,7 +79,7 @@ impl MessagesStreamBridge {
                 text_output.item_id.clone(),
                 output_index,
                 content_index,
-                delta.to_string(),
+                delta_text.to_string(),
             );
             return;
         }
@@ -99,35 +99,39 @@ impl MessagesStreamBridge {
                     },
                     Some("input_json_delta"),
                 ) => {
-                    let Some(delta) = delta.get("partial_json").and_then(Value::as_str) else {
+                    let Some(arguments_delta) = delta.get("partial_json").and_then(Value::as_str)
+                    else {
                         self.fail(AdapterError::upstream_stream_invalid());
                         return;
                     };
-                    arguments.push_str(delta);
+                    arguments.push_str(arguments_delta);
                     if *kind == ResponsesToolKind::Function {
                         StreamDelta::Tool {
                             item_id: id.clone(),
                             output_index: *output_index,
-                            delta: delta.to_string(),
+                            delta: arguments_delta.to_string(),
                         }
                     } else {
                         StreamDelta::NoOutput
                     }
                 }
                 (StreamBlock::Thinking { thinking, .. }, Some("thinking_delta")) => {
-                    let Some(delta) = delta.get("thinking").and_then(Value::as_str) else {
+                    let Some(thinking_delta) = delta.get("thinking").and_then(Value::as_str) else {
                         self.fail(AdapterError::upstream_stream_invalid());
                         return;
                     };
-                    thinking.push_str(delta);
+                    thinking.push_str(thinking_delta);
                     StreamDelta::NoOutput
                 }
                 (StreamBlock::Thinking { signature, .. }, Some("signature_delta")) => {
-                    let Some(delta) = delta.get("signature").and_then(Value::as_str) else {
+                    let Some(signature_delta) = delta.get("signature").and_then(Value::as_str)
+                    else {
                         self.fail(AdapterError::upstream_stream_invalid());
                         return;
                     };
-                    signature.get_or_insert_with(String::new).push_str(delta);
+                    signature
+                        .get_or_insert_with(String::new)
+                        .push_str(signature_delta);
                     StreamDelta::NoOutput
                 }
                 _ => {

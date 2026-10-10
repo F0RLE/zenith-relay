@@ -1,7 +1,7 @@
 use crate::local_pool::{
     accounts::{
         credentials::{credential_local_error, CredentialStore},
-        oauth::CodexOAuthClient,
+        oauth::{CodexOAuthClient, OAuthClientKind},
         oauth_flow::{OAuthFlowStart, OAuthFlowStatus},
         proxy::{
             common_proxy_url, effective_proxy_url, ensure_account_proxy, is_proxy_id, ProxyPool,
@@ -36,6 +36,7 @@ pub async fn start_codex_oauth(
     open_browser: Option<bool>,
     account_id: Option<String>,
     proxy_id: Option<String>,
+    client_kind: Option<OAuthClientKind>,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
@@ -56,12 +57,14 @@ pub async fn start_codex_oauth(
         None => None,
     };
     let target_account_id = validate_oauth_target(&state, account_id.as_deref())?;
+    let client_kind = oauth_client_kind(target_account_id.as_deref(), client_kind)?;
     let client_proxy_url = match requested_proxy_url {
         Some(url) => Some(url),
         None => oauth_proxy_url(&state, target_account_id.as_deref())?,
     };
     let proxy = parsed_proxy(client_proxy_url.as_deref())?;
-    let oauth = CodexOAuthClient::new_with_proxy(proxy.as_ref()).map_err(oauth_error)?;
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(client_kind, proxy.as_ref())
+        .map_err(oauth_error)?;
     let flow = state.oauth_flow();
     let start = flow
         .start_for_account(
@@ -82,13 +85,9 @@ pub async fn start_codex_oauth(
         }
     };
     if open_browser.unwrap_or(true) && start.status == OAuthFlowStatus::Pending {
-        if let Err(error) = window::open_sign_in_window(
-            &app,
-            &authorization_url,
-            start.target_account_id.as_deref(),
-            proxy_url.as_deref(),
-        )
-        .await
+        if let Err(error) =
+            window::open_sign_in_window(&app, &authorization_url, &start, proxy_url.as_deref())
+                .await
         {
             let _ = flow.cancel(&start.login_id).await;
             return Err(error.into());
@@ -117,15 +116,31 @@ pub async fn resume_codex_oauth(
     let authorization_url = validated_authorization_url(&start)?;
     if start.status == OAuthFlowStatus::Pending {
         let proxy_url = sign_in_flow_proxy_url(&state, &start)?;
-        window::open_sign_in_window(
-            &app,
-            &authorization_url,
-            start.target_account_id.as_deref(),
-            proxy_url.as_deref(),
-        )
-        .await?;
+        window::open_sign_in_window(&app, &authorization_url, &start, proxy_url.as_deref()).await?;
     }
     Ok(start)
+}
+
+fn oauth_client_kind(
+    account_id: Option<&str>,
+    requested: Option<OAuthClientKind>,
+) -> Result<OAuthClientKind, LocalPoolError> {
+    let stored = account_id
+        .map(|account_id| CredentialStore::from_backend(NativeSecretBackend).load(account_id))
+        .transpose()
+        .map_err(credential_local_error)?
+        .flatten();
+    if let Some(stored) = stored {
+        let kind = stored.oauth_client_kind();
+        if requested.is_some_and(|requested| requested != kind) {
+            return Err(LocalPoolError::new(
+                crate::local_pool::error::ErrorCode::Conflict,
+                "Reauthenticate with the original OAuth client. Add another connection to use a different client.",
+            ));
+        }
+        return Ok(kind);
+    }
+    Ok(requested.unwrap_or_default())
 }
 
 fn oauth_proxy_url(
@@ -147,7 +162,10 @@ fn oauth_proxy_url(
 }
 
 fn normalized_proxy_id(proxy_id: Option<&str>) -> Result<Option<String>, LocalPoolError> {
-    let Some(proxy_id) = proxy_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(proxy_id) = proxy_id
+        .map(str::trim)
+        .filter(|proxy_id_text| !proxy_id_text.is_empty())
+    else {
         return Ok(None);
     };
     if !is_proxy_id(proxy_id) {
@@ -198,8 +216,8 @@ fn sign_in_flow_proxy_url(
 
 fn parsed_proxy(proxy_url: Option<&str>) -> Result<Option<ProxyConfig>, LocalPoolError> {
     proxy_url
-        .map(|value| {
-            ProxyConfig::parse(value).map_err(|_| {
+        .map(|proxy_url_text| {
+            ProxyConfig::parse(proxy_url_text).map_err(|_| {
                 LocalPoolError::new(
                     crate::local_pool::error::ErrorCode::InvalidState,
                     "stored proxy URL is invalid",

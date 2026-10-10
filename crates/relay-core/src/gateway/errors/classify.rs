@@ -15,33 +15,34 @@ pub(in crate::gateway) struct UpstreamErrorClassification {
 
 pub(in crate::gateway) fn classify_upstream_error(
     status: StatusCode,
-    body: Option<&[u8]>,
+    response_body: Option<&[u8]>,
 ) -> UpstreamErrorClassification {
-    let Some(body) = body else {
+    let Some(response_body) = response_body else {
         return classify_upstream_error_text(status, "");
     };
-    match serde_json::from_slice::<Value>(body) {
-        Ok(value) => classify_upstream_error_value(status, &value),
-        Err(_) => classify_upstream_error_text(status, &normalized_error_text(body)),
+    match serde_json::from_slice::<Value>(response_body) {
+        Ok(error_payload) => classify_upstream_error_value(status, &error_payload),
+        Err(_) => classify_upstream_error_text(status, &normalized_error_text(response_body)),
     }
 }
 
 pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
-    value: &Value,
+    error_payload: &Value,
 ) -> UpstreamErrorClassification {
-    if zenith_gateway_invalid_request_value(value) {
+    if zenith_gateway_invalid_request_value(error_payload) {
         return UpstreamErrorClassification {
-            // This gateway envelope hides the actual cause, including route
-            // and model access failures. It does not prove invalid client input.
-            category: error_codes::UPSTREAM_CANDIDATE_REJECTED,
-            message: upstream_failure_message(error_codes::UPSTREAM_CANDIDATE_REJECTED),
+            // The legacy gateway envelope does not prove a route failure or
+            // a repairable continuation. Return the rejection without cooling
+            // the candidate or replaying the same request on another route.
+            category: error_codes::UPSTREAM_INVALID_REQUEST,
+            message: upstream_failure_message(error_codes::UPSTREAM_INVALID_REQUEST),
         };
     }
-    classify_upstream_error_text(status, &upstream_error_text(value))
+    classify_upstream_error_text(status, &upstream_error_text(error_payload))
 }
 
-pub(crate) fn is_deactivated_workspace_value(value: &Value) -> bool {
+pub(crate) fn is_deactivated_workspace_value(error_payload: &Value) -> bool {
     [
         "/detail/code",
         "/error/code",
@@ -49,17 +50,17 @@ pub(crate) fn is_deactivated_workspace_value(value: &Value) -> bool {
         "/response/error/code",
     ]
     .into_iter()
-    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
     .any(|code| code.eq_ignore_ascii_case("deactivated_workspace"))
 }
 
-pub(crate) fn is_deactivated_workspace(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
+pub(crate) fn is_deactivated_workspace(response_body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(response_body)
         .ok()
-        .is_some_and(|value| is_deactivated_workspace_value(&value))
+        .is_some_and(|error_payload| is_deactivated_workspace_value(&error_payload))
 }
 
-pub(super) fn upstream_error_text(value: &Value) -> String {
+pub(super) fn upstream_error_text(error_payload: &Value) -> String {
     const PATHS: &[&str] = &[
         "/code",
         "/type",
@@ -96,15 +97,15 @@ pub(super) fn upstream_error_text(value: &Value) -> String {
         "/header/message",
     ];
     let mut text = String::new();
-    for value in PATHS
+    for error_text in PATHS
         .iter()
-        .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+        .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
     {
         if !text.is_empty() {
             text.push(' ');
         }
         text.extend(
-            value
+            error_text
                 .chars()
                 .take(4_096)
                 .map(|character| character.to_ascii_lowercase()),
@@ -121,6 +122,6 @@ pub(super) fn normalized_error_text(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub(super) fn text_has_any(text: &str, values: &[&str]) -> bool {
-    values.iter().any(|value| text.contains(value))
+pub(super) fn text_has_any(text: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| text.contains(marker))
 }

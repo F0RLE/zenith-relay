@@ -22,40 +22,40 @@ impl GatewayRuntime {
             return false;
         }
         let mut quotas = crate::poison::mutex(&self.passive_quotas);
-        let Some(state) = quotas.get_mut(candidate_id) else {
+        let Some(passive_quota_state) = quotas.get_mut(candidate_id) else {
             return false;
         };
         let Some(merged) = crate::providers::chatgpt::merge_codex_quota_headers(
-            &state.snapshot,
+            &passive_quota_state.snapshot,
             headers,
             observed_at_ms,
         ) else {
             return false;
         };
-        if merged == state.snapshot {
+        if merged == passive_quota_state.snapshot {
             return false;
         }
         let previous_quota = CandidateQuota::from_snapshot(
-            &state.snapshot,
+            &passive_quota_state.snapshot,
             observed_at_ms,
             self.quota_stale_after_ms,
         );
         let quota =
             CandidateQuota::from_snapshot(&merged, observed_at_ms, self.quota_stale_after_ms);
-        state.force_persist |= previous_quota != quota
+        passive_quota_state.force_persist |= previous_quota != quota
             && matches!(
                 (previous_quota, quota),
                 (CandidateQuota::Exhausted, _) | (_, CandidateQuota::Exhausted)
             );
-        state.snapshot = merged;
-        state.dirty = true;
+        passive_quota_state.snapshot = merged;
+        passive_quota_state.dirty = true;
         let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
             quota,
-            state.snapshot.updated_at_ms,
-            state.snapshot.limiting_reset_at_ms(),
-            state.snapshot.available_credits_micro_units,
-            state.snapshot.provider_credits_unlimited,
+            passive_quota_state.snapshot.updated_at_ms,
+            passive_quota_state.snapshot.limiting_reset_at_ms(),
+            passive_quota_state.snapshot.available_credits_micro_units,
+            passive_quota_state.snapshot.provider_credits_unlimited,
         );
         drop(quotas);
         if updated {
@@ -79,7 +79,9 @@ impl GatewayRuntime {
         let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
-            .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
+            .map(|passive_quota_state| {
+                reconcile_passive_quota_snapshot(passive_quota_state, snapshot, observed_at_ms)
+            })
             .unwrap_or_else(|| snapshot.clone());
         let quota =
             CandidateQuota::from_snapshot(&effective, observed_at_ms, self.quota_stale_after_ms);
@@ -154,7 +156,9 @@ impl GatewayRuntime {
         let mut quotas = crate::poison::mutex(&self.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
-            .map(|state| reconcile_passive_quota_snapshot(state, snapshot, observed_at_ms))
+            .map(|passive_quota_state| {
+                reconcile_passive_quota_snapshot(passive_quota_state, snapshot, observed_at_ms)
+            })
             .unwrap_or_else(|| snapshot.clone());
         let quota_state = CandidateQuotaState {
             quota: CandidateQuota::from_snapshot(
@@ -196,18 +200,18 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Option<QuotaSnapshot> {
         let mut quotas = crate::poison::mutex(&self.passive_quotas);
-        let state = quotas.get_mut(candidate_id)?;
-        if !state.dirty
-            || (!state.force_persist
-                && now_ms.saturating_sub(state.last_persist_hint_ms)
+        let passive_quota_state = quotas.get_mut(candidate_id)?;
+        if !passive_quota_state.dirty
+            || (!passive_quota_state.force_persist
+                && now_ms.saturating_sub(passive_quota_state.last_persist_hint_ms)
                     < PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS)
         {
             return None;
         }
-        state.dirty = false;
-        state.force_persist = false;
-        state.last_persist_hint_ms = now_ms;
-        Some(state.snapshot.clone())
+        passive_quota_state.dirty = false;
+        passive_quota_state.force_persist = false;
+        passive_quota_state.last_persist_hint_ms = now_ms;
+        Some(passive_quota_state.snapshot.clone())
     }
 
     pub(crate) fn apply_usage_event(&self, event: &UsageEvent, observed_at_ms: u64) {
@@ -221,9 +225,12 @@ impl GatewayRuntime {
             self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
             return;
         }
+        if event.is_basis_points_transport_failure() {
+            return;
+        }
 
         let category = event.error_category.as_deref().unwrap_or_default();
-        let model = if category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
+        let model_id = if category == error_codes::IMAGE_GENERATION_NOT_ENABLED {
             event.requested_model.as_deref()
         } else {
             event
@@ -239,7 +246,7 @@ impl GatewayRuntime {
         // there is no route at all. Native account capabilities are stable
         // enough to retain the explicit block until their catalog is refreshed.
         if event.account_id.is_some() && super::models::is_model_capability_failure(category) {
-            self.block_candidate_capability(candidate_id, model);
+            self.block_candidate_capability(candidate_id, model_id);
             return;
         }
         if event.account_id.is_none() {
@@ -274,29 +281,29 @@ impl GatewayRuntime {
             return false;
         }
         let mut quotas = crate::poison::mutex(&self.passive_quotas);
-        let Some(state) = quotas.get_mut(candidate_id) else {
+        let Some(passive_quota_state) = quotas.get_mut(candidate_id) else {
             return false;
         };
-        if !state
+        if !passive_quota_state
             .snapshot
             .note_reported_window_exhaustion(observed_at_ms)
         {
             return false;
         }
-        state.dirty = true;
-        state.force_persist = true;
+        passive_quota_state.dirty = true;
+        passive_quota_state.force_persist = true;
         let quota = CandidateQuota::from_snapshot(
-            &state.snapshot,
+            &passive_quota_state.snapshot,
             observed_at_ms,
             self.quota_stale_after_ms,
         );
         let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
             quota,
-            state.snapshot.updated_at_ms,
-            state.snapshot.limiting_reset_at_ms(),
-            state.snapshot.available_credits_micro_units,
-            state.snapshot.provider_credits_unlimited,
+            passive_quota_state.snapshot.updated_at_ms,
+            passive_quota_state.snapshot.limiting_reset_at_ms(),
+            passive_quota_state.snapshot.available_credits_micro_units,
+            passive_quota_state.snapshot.provider_credits_unlimited,
         );
         drop(quotas);
         if updated {
@@ -311,23 +318,31 @@ impl GatewayRuntime {
 /// same timestamp is retained because it may contain response headers that
 /// have not reached durable storage yet.
 fn reconcile_passive_quota_snapshot(
-    state: &mut super::super::PassiveQuotaState,
+    passive_quota_state: &mut super::super::PassiveQuotaState,
     incoming: &QuotaSnapshot,
     observed_at_ms: u64,
 ) -> QuotaSnapshot {
     let incoming_at = incoming.updated_at_ms.unwrap_or(observed_at_ms);
-    let current_at = state.snapshot.updated_at_ms.unwrap_or_default();
-    let incoming_wins = match (incoming.updated_at_ms, state.snapshot.updated_at_ms) {
+    let current_at = passive_quota_state
+        .snapshot
+        .updated_at_ms
+        .unwrap_or_default();
+    let incoming_wins = match (
+        incoming.updated_at_ms,
+        passive_quota_state.snapshot.updated_at_ms,
+    ) {
         (Some(incoming_at), Some(current_at)) if incoming_at < current_at => false,
-        (Some(incoming_at), Some(current_at)) if incoming_at == current_at => !state.dirty,
+        (Some(incoming_at), Some(current_at)) if incoming_at == current_at => {
+            !passive_quota_state.dirty
+        }
         (None, Some(_)) => false,
         _ => incoming_at >= current_at,
     };
     if incoming_wins {
-        state.snapshot = incoming.clone();
-        state.dirty = false;
-        state.force_persist = false;
-        state.last_persist_hint_ms = incoming.updated_at_ms.unwrap_or(observed_at_ms);
+        passive_quota_state.snapshot = incoming.clone();
+        passive_quota_state.dirty = false;
+        passive_quota_state.force_persist = false;
+        passive_quota_state.last_persist_hint_ms = incoming.updated_at_ms.unwrap_or(observed_at_ms);
     }
-    state.snapshot.clone()
+    passive_quota_state.snapshot.clone()
 }

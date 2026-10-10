@@ -34,9 +34,8 @@ pub trait TokenRefreshAdapter: Send + Sync {
         account_id: &'a str,
         refresh_token: &'a str,
         now_ms: u64,
-        revision: &'a TokenDispatchRevision,
+        _revision: &'a TokenDispatchRevision,
     ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
-        let _ = revision;
         self.refresh(account_id, refresh_token, now_ms)
     }
 }
@@ -54,9 +53,8 @@ pub trait TokenPersistenceAdapter: Send + Sync {
         &'a self,
         account_id: &'a str,
         tokens: &'a TokenSet,
-        revision: &'a TokenDispatchRevision,
+        _revision: &'a TokenDispatchRevision,
     ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
-        let _ = revision;
         self.persist(account_id, tokens)
     }
 
@@ -70,9 +68,8 @@ pub trait TokenPersistenceAdapter: Send + Sync {
         &'a self,
         account_id: &'a str,
         auth_state: AccountAuthState,
-        revision: &'a TokenDispatchRevision,
+        _revision: &'a TokenDispatchRevision,
     ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
-        let _ = revision;
         self.persist_auth_state(account_id, auth_state)
     }
 
@@ -125,7 +122,7 @@ impl TokenSlotEntry {
         Self {
             slot: AsyncMutex::new(slot),
             revision: Arc::new(RwLock::new(DispatchRevisionState {
-                value: 0,
+                revision_number: 0,
                 active: true,
             })),
         }
@@ -133,8 +130,8 @@ impl TokenSlotEntry {
 
     fn bump(&self) {
         let mut revision = crate::poison::write(&self.revision);
-        revision.value = revision
-            .value
+        revision.revision_number = revision
+            .revision_number
             .checked_add(1)
             .expect("token revision exhausted");
     }
@@ -145,10 +142,10 @@ impl TokenSlotEntry {
     }
 
     fn snapshot(&self) -> TokenDispatchRevision {
-        let expected = crate::poison::read(&self.revision).value;
+        let expected_revision = crate::poison::read(&self.revision).revision_number;
         TokenDispatchRevision {
             state: self.revision.clone(),
-            expected,
+            expected_revision,
         }
     }
 }
@@ -268,10 +265,10 @@ async fn persist_auth_state(
     Ok(())
 }
 
-fn token_set_is_newer(current: &TokenSet, candidate: &TokenSet) -> bool {
-    current.generation() > candidate.generation()
-        || (current.generation() == candidate.generation()
-            && current.issued_at_ms() > candidate.issued_at_ms())
+fn token_set_is_newer(existing_tokens: &TokenSet, candidate_tokens: &TokenSet) -> bool {
+    existing_tokens.generation() > candidate_tokens.generation()
+        || (existing_tokens.generation() == candidate_tokens.generation()
+            && existing_tokens.issued_at_ms() > candidate_tokens.issued_at_ms())
 }
 
 mod prepare;

@@ -15,10 +15,12 @@ const SESSION_HEADERS: &[&str] = &[
 ];
 
 fn client_session_id(headers: &HeaderMap) -> Option<&str> {
-    SESSION_HEADERS.iter().find_map(|name| {
-        let value = headers.get(*name)?.to_str().ok()?.trim();
-        (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
-            .then_some(value)
+    SESSION_HEADERS.iter().find_map(|header_name| {
+        let session_id = headers.get(*header_name)?.to_str().ok()?.trim();
+        (!session_id.is_empty()
+            && session_id.len() <= 256
+            && !session_id.chars().any(char::is_control))
+        .then_some(session_id)
     })
 }
 

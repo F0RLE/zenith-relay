@@ -4,6 +4,7 @@ pub(super) fn build_sources(
     sources: Vec<RuntimeSource>,
     registry: &mut ModelRegistry,
     scheduler: &mut PoolScheduler,
+    reference_catalog: Option<&crate::model_metadata::ModelMetadataCatalog>,
 ) -> Result<SourceRuntimeParts> {
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
@@ -23,14 +24,18 @@ pub(super) fn build_sources(
         if executors.contains_key(&source.source.id) {
             return Err(Error::Validation("source ids must be unique".to_string()));
         }
-        let bindings = source.protocol_config.resolve(
+        let bindings = source.protocol_config.resolve_with_catalog(
             &source.source.base_url,
             &source.source.models,
             &source.protocol_bindings,
             source.source.wire_api,
+            reference_catalog,
         )?;
         let source_id = source.source.id.clone();
         let connector = SourceConnector::new(&source.source, &bindings)?;
+        let discovered_capabilities = source
+            .protocol_config
+            .effective_capabilities(&source.source.base_url, &source.source.models);
         let rules = model_rules(&source.allowed_models, &source.excluded_models);
         for binding in &bindings {
             let models = normalized_set(binding.model_ids.iter());
@@ -84,6 +89,26 @@ pub(super) fn build_sources(
                     adapter: binding.adapter,
                     reasoning_mode: binding.reasoning_mode,
                     cache_write_ttl: binding.cache_write_ttl,
+                    capabilities: discovered_capabilities
+                        .iter()
+                        .filter(|capability| {
+                            capability.upstream_wire_api
+                                == binding
+                                    .adapter
+                                    .upstream_protocol(binding.wire_api)
+                                    .wire_api()
+                                && binding.model_ids.iter().any(|model| {
+                                    crate::model_id_key(model)
+                                        == crate::model_id_key(&capability.model_id)
+                                })
+                        })
+                        .map(|capability| {
+                            (
+                                crate::model_id_key(&capability.model_id),
+                                capability.clone(),
+                            )
+                        })
+                        .collect(),
                 },
             );
         }

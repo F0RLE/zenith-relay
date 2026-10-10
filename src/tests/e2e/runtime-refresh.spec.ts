@@ -49,7 +49,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Sources", exact: true }).click();
-    await expect(page.getByRole("row").filter({ hasText: "Example compatible API" })).toBeVisible();
+    await expect(page.locator(".source-card").filter({ hasText: "Example compatible API" })).toBeVisible();
 
     await holdNextSnapshot(page, mode);
     await emitTauriEvent(page, "zenith-state-changed", null);
@@ -59,11 +59,11 @@ for (const mode of ["local", "remote"] as const) {
     await editor.getByLabel("Name", { exact: true }).fill("Updated source");
     await editor.getByRole("button", { name: "Save", exact: true }).click();
     await expect(editor).toBeHidden();
-    await expect(page.getByRole("row").filter({ hasText: "Updated source" })).toBeVisible();
+    await expect(page.locator(".source-card").filter({ hasText: "Updated source" })).toBeVisible();
 
     await releaseSnapshot(page);
-    await expect(page.getByRole("row").filter({ hasText: "Updated source" })).toBeVisible();
-    await expect(page.getByRole("row").filter({ hasText: "Example compatible API" })).toHaveCount(0);
+    await expect(page.locator(".source-card").filter({ hasText: "Updated source" })).toBeVisible();
+    await expect(page.locator(".source-card").filter({ hasText: "Example compatible API" })).toHaveCount(0);
   });
 }
 
@@ -127,7 +127,7 @@ for (const trigger of ["interval", "focus"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("tab", { name: "Sources", exact: true }).click();
-    await expect(page.getByRole("row").filter({ hasText: "Example compatible API" })).toBeVisible();
+    await expect(page.locator(".source-card").filter({ hasText: "Example compatible API" })).toBeVisible();
     await page.evaluate(() => {
       const internals = (window as unknown as HeldSnapshotWindow).__TAURI_INTERNALS__;
       const invoke = internals.invoke.bind(internals);
@@ -142,7 +142,7 @@ for (const trigger of ["interval", "focus"] as const) {
     });
     if (trigger === "interval") await page.clock.fastForward(60_000);
     else await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect(page.getByRole("row").filter({ hasText: "Changed on server" })).toBeVisible();
+    await expect(page.locator(".source-card").filter({ hasText: "Changed on server" })).toBeVisible();
   });
 }
 

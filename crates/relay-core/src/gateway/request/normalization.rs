@@ -31,7 +31,7 @@ impl ServiceTierPolicy {
             owner: ServiceTierOwner::Client,
             client_tier: request
                 .as_object()
-                .and_then(|object| object.get("service_tier"))
+                .and_then(|request_fields| request_fields.get("service_tier"))
                 .cloned(),
         }
     }
@@ -125,36 +125,39 @@ pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServic
 /// it does not control.
 ///
 /// `priority` is the upstream OpenAI spelling for Fast. Standard deliberately
-/// remains implicit, matching the Codex/Cockpit behavior and preserving
+/// remains implicit, matching native Codex behavior and preserving
 /// arbitrary client-owned values such as `flex`.
 pub(in crate::gateway) fn apply_default_service_tier_if_missing(
     request: &mut Value,
     default: DefaultServiceTier,
 ) {
-    let Some(object) = request.as_object_mut() else {
+    let Some(request_fields) = request.as_object_mut() else {
         return;
     };
-    if object.contains_key("service_tier") {
+    if request_fields.contains_key("service_tier") {
         return;
     }
-    let value = match default {
+    let service_tier = match default {
         DefaultServiceTier::Standard => return,
         DefaultServiceTier::Fast => "priority",
         DefaultServiceTier::Ultrafast => "ultrafast",
     };
-    object.insert("service_tier".to_string(), Value::String(value.to_string()));
+    request_fields.insert(
+        "service_tier".to_string(),
+        Value::String(service_tier.to_string()),
+    );
 }
 
 pub(in crate::gateway) fn normalize_account_request(
-    object: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
     // This transport normalization preserves native account settings. The
     // request execution layer applies Relay's pool speed policy later, while
     // Responses Lite alone requires `context=all_turns` here.
-    object.insert("store".to_string(), Value::Bool(false));
-    object.insert("stream".to_string(), Value::Bool(true));
-    normalize_account_request_common(object, responses_lite);
+    request_fields.insert("store".to_string(), Value::Bool(false));
+    request_fields.insert("stream".to_string(), Value::Bool(true));
+    normalize_account_request_common(request_fields, responses_lite);
 }
 
 /// Normalize the legacy non-streaming account compaction contract.
@@ -166,12 +169,12 @@ pub(in crate::gateway) fn normalize_account_request(
 /// endpoint. All other request fields remain client-owned so newly introduced
 /// Codex options are not silently discarded.
 pub(in crate::gateway) fn normalize_compact_account_request(
-    object: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
-    object.remove("store");
-    object.remove("stream");
-    normalize_account_request_common(object, responses_lite);
+    request_fields.remove("store");
+    request_fields.remove("stream");
+    normalize_account_request_common(request_fields, responses_lite);
 }
 
 pub(in crate::gateway) use shape::{

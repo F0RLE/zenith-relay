@@ -113,8 +113,8 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
 pub struct UpdateRoutingInput {
     pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
     expected_pool_routing: Option<zenith_relay_core::PoolRoutingPolicy>,
-    #[serde(default)]
-    basis_points_enabled: Option<bool>,
+    #[serde(default, rename = "basisPointsEnabled")]
+    _legacy_basis_points_enabled: Option<serde::de::IgnoredAny>,
     max_retry_candidates: u8,
     #[serde(default)]
     default_service_tier: DefaultServiceTier,
@@ -172,8 +172,8 @@ pub async fn set_local_pool_membership(
         let catalog_app = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = catalog_app.state::<DesktopState>();
-            let result = super::profiles::refresh_active_client_catalogs(&state).await;
-            super::record_catalog_refresh_result(&state, &result);
+            let refresh_result = super::profiles::refresh_active_client_catalogs(&state).await;
+            super::record_catalog_refresh_result(&state, &refresh_result);
             let _ = catalog_app.emit("zenith-state-changed", ());
         });
     }
@@ -218,9 +218,7 @@ async fn update_local_routing_at(
             .map_err(|message| LocalPoolError::new(ErrorCode::Conflict, message))?;
         gateway.pool_routing = Some(policy);
     }
-    if let Some(value) = input.basis_points_enabled {
-        gateway.basis_points_enabled = value;
-    }
+    gateway.basis_points_enabled = false;
     gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {
         codex::sync_default_service_tier(codex_home, gateway.default_service_tier)?;
@@ -240,7 +238,6 @@ async fn update_local_routing_at(
             state.store()?.replace_gateway(old_gateway)?;
             return Err(LocalPoolError::invalid_state(error).into());
         }
-        runtime.set_basis_points_enabled(gateway.basis_points_enabled);
         runtime.set_default_service_tier(default_service_tier);
     }
     if let Err(error) = codex::sync_default_service_tier(codex_home, default_service_tier) {
@@ -249,7 +246,6 @@ async fn update_local_routing_at(
             runtime
                 .set_pool_routing_policy(current_pool, old_gateway.max_retry_candidates)
                 .map_err(LocalPoolError::invalid_state)?;
-            runtime.set_basis_points_enabled(old_gateway.basis_points_enabled);
             runtime.set_default_service_tier(old_gateway.default_service_tier);
         }
         return Err(error.into());

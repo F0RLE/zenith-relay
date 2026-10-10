@@ -51,13 +51,10 @@ impl Store {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        for (key, value) in [
+        for (metadata_key, metadata_value) in [
             ("tool_policy", tool_policy),
             ("pool_routing", pool_routing),
-            (
-                "basis_points_enabled",
-                policy.basis_points_enabled.to_string(),
-            ),
+            ("basis_points_enabled", false.to_string()),
             (
                 "max_retry_candidates",
                 policy.max_retry_candidates.to_string(),
@@ -75,7 +72,7 @@ impl Store {
             transaction
                 .execute(
                     "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![key, value],
+                    params![metadata_key, metadata_value],
                 )
                 .map_err(db_error)?;
         }
@@ -99,10 +96,10 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)
             .map_err(ConfigurationReplaceError::Store)?;
-        let previous = configuration_settings_from_connection(&transaction)
+        let previous_settings = configuration_settings_from_connection(&transaction)
             .map_err(ConfigurationReplaceError::Store)?;
         let previous_revision =
-            configuration_revision(&previous).map_err(ConfigurationReplaceError::Store)?;
+            configuration_revision(&previous_settings).map_err(ConfigurationReplaceError::Store)?;
         if previous_revision != expected_revision {
             return Err(ConfigurationReplaceError::Stale {
                 current_revision: previous_revision,
@@ -115,7 +112,7 @@ impl Store {
             .map_err(ConfigurationReplaceError::Store)?;
         self.notify_refresh_changed();
         Ok(ConfigurationReplacement {
-            previous,
+            previous: previous_settings,
             previous_revision,
             revision: configuration_revision(settings).map_err(ConfigurationReplaceError::Store)?,
         })
@@ -148,46 +145,46 @@ pub(super) fn configuration_settings_from_connection(
 ) -> Result<ConfigurationPresetSettings, String> {
     let sources = persist::list_records_from::<SourceRecord>(connection, "sources")?
         .into_iter()
-        .map(|record| SourcePresetRule {
+        .map(|source_record| SourcePresetRule {
             legacy_protocol_mode: None,
-            id: record.id,
-            name: record.name,
-            base_url: record.base_url,
-            pricing_provider: record.pricing_provider,
-            official_provider_family: record.official_provider_family,
-            wire_api: record.wire_api,
-            protocol_bindings: record.protocol_bindings,
-            enabled: record.enabled,
-            in_pool: record.in_pool,
-            allowed_models: record.allowed_models,
-            excluded_models: record.excluded_models,
-            priority: record.priority,
-            weight: record.weight,
-            recovery_delay_seconds: record.recovery_delay_seconds,
-            model_price_overrides: record.model_price_overrides,
+            id: source_record.id,
+            name: source_record.name,
+            base_url: source_record.base_url,
+            pricing_provider: source_record.pricing_provider,
+            official_provider_family: source_record.official_provider_family,
+            wire_api: source_record.wire_api,
+            protocol_bindings: source_record.protocol_bindings,
+            enabled: source_record.enabled,
+            in_pool: source_record.in_pool,
+            allowed_models: source_record.allowed_models,
+            excluded_models: source_record.excluded_models,
+            priority: source_record.priority,
+            weight: source_record.weight,
+            recovery_delay_seconds: source_record.recovery_delay_seconds,
+            model_price_overrides: source_record.model_price_overrides,
         })
         .collect();
     let accounts = persist::list_records_from::<ServerAccountRecord>(connection, "accounts")?
         .into_iter()
-        .map(|record| AccountPresetRule {
-            id: record.id,
-            identity_hint: record.identity_hint,
-            enabled: record.enabled,
-            in_pool: record.in_pool,
-            allowed_models: record.allowed_models,
-            excluded_models: record.excluded_models,
-            priority: record.priority,
-            weight: record.weight,
-            proxy_id: record.proxy_id,
-            bypass_common_proxy: record.bypass_common_proxy,
+        .map(|account_record| AccountPresetRule {
+            id: account_record.id,
+            identity_hint: account_record.identity_hint,
+            enabled: account_record.enabled,
+            in_pool: account_record.in_pool,
+            allowed_models: account_record.allowed_models,
+            excluded_models: account_record.excluded_models,
+            priority: account_record.priority,
+            weight: account_record.weight,
+            proxy_id: account_record.proxy_id,
+            bypass_common_proxy: account_record.bypass_common_proxy,
         })
         .collect();
     let request_timeout_seconds = persist::metadata_from(
         connection,
         "quota_request_timeout_seconds",
     )?
-    .map_or(Ok(DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS), |value| {
-        value
+    .map_or(Ok(DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS), |timeout_text| {
+        timeout_text
             .parse::<u64>()
             .map_err(|_| "quota request timeout is invalid".to_string())
     })?;
@@ -196,16 +193,17 @@ pub(super) fn configuration_settings_from_connection(
     let hidden_models = normalize_validated_model_ids(
         persist::metadata_from(connection, "hidden_model_ids")?.map_or(
             Ok(Vec::new()),
-            |value| {
-                serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())
+            |hidden_models_json| {
+                serde_json::from_str(&hidden_models_json)
+                    .map_err(|_| "hidden model list is invalid".to_string())
             },
         )?,
     )?;
     let model_price_overrides = normalize_model_price_overrides(
         persist::metadata_from(connection, "model_price_overrides")?.map_or(
             Ok(BTreeMap::new()),
-            |value| {
-                serde_json::from_str(&value)
+            |price_overrides_json| {
+                serde_json::from_str(&price_overrides_json)
                     .map_err(|_| "model price overrides are invalid".to_string())
             },
         )?,
@@ -221,9 +219,9 @@ pub(super) fn configuration_settings_from_connection(
         quota: PresetQuotaPolicy {
             request_timeout_seconds,
             account_proxy_required: persist::metadata_from(connection, "account_proxy_required")?
-                .is_some_and(|value| value == "true"),
+                .is_some_and(|enabled_text| enabled_text == "true"),
             common_proxy_id: persist::metadata_from(connection, "common_proxy_id")?
-                .filter(|value| !value.is_empty()),
+                .filter(|proxy_id| !proxy_id.is_empty()),
         },
         hidden_models,
         model_price_overrides,
@@ -232,8 +230,8 @@ pub(super) fn configuration_settings_from_connection(
         model_service_tier_overrides: normalize_model_service_tier_overrides(
             persist::metadata_from(connection, "model_service_tier_overrides")?.map_or(
                 Ok(BTreeMap::new()),
-                |value| {
-                    serde_json::from_str(&value)
+                |service_tier_overrides_json| {
+                    serde_json::from_str(&service_tier_overrides_json)
                         .map_err(|_| "model service tier overrides are invalid".to_string())
                 },
             )?,
@@ -242,8 +240,8 @@ pub(super) fn configuration_settings_from_connection(
         model_display_order: normalize_model_ids(
             persist::metadata_from(connection, "model_display_order")?.map_or(
                 Ok(Vec::<String>::new()),
-                |value| {
-                    serde_json::from_str(&value)
+                |display_order_json| {
+                    serde_json::from_str(&display_order_json)
                         .map_err(|_| "model display order is invalid".to_string())
                 },
             )?,

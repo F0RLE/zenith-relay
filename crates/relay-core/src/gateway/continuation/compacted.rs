@@ -8,47 +8,47 @@ pub(super) fn reset_compacted_history(request: &mut Value) -> bool {
     if !request
         .get("previous_response_id")
         .and_then(Value::as_str)
-        .is_some_and(|id| !id.trim().is_empty())
+        .is_some_and(|response_id| !response_id.trim().is_empty())
         || !has_compacted_history(request)
     {
         return false;
     }
     request
         .as_object_mut()
-        .is_some_and(|object| object.remove("previous_response_id").is_some())
+        .is_some_and(|request_object| request_object.remove("previous_response_id").is_some())
 }
 
 fn has_compacted_history(request: &Value) -> bool {
     if request
         .get("conversation")
-        .is_some_and(|value| !value.is_null())
+        .is_some_and(|conversation_value| !conversation_value.is_null())
     {
         return false;
     }
-    let Some(input) = request.get("input").and_then(Value::as_array) else {
+    let Some(history_items) = request.get("input").and_then(Value::as_array) else {
         return false;
     };
     let mut has_checkpoint = false;
     let mut pending_calls = BTreeMap::new();
     let mut seen_calls = BTreeSet::new();
-    for item in input {
-        let Some(object) = item.as_object() else {
+    for history_item in history_items {
+        let Some(item_object) = history_item.as_object() else {
             return false;
         };
-        match object.get("type").and_then(Value::as_str) {
+        match item_object.get("type").and_then(Value::as_str) {
             Some(item_type) if crate::protocol::is_compaction_checkpoint_type(item_type) => {
-                if nonempty_string(item, "encrypted_content").is_none() {
+                if nonempty_string(history_item, "encrypted_content").is_none() {
                     return false;
                 }
                 has_checkpoint = true;
             }
             None | Some("message") => {
                 if !matches!(
-                    object.get("role").and_then(Value::as_str),
+                    item_object.get("role").and_then(Value::as_str),
                     Some("user" | "assistant" | "developer" | "system")
-                ) || !super::replay::message_has_plaintext_content(object)
-                    || super::replay::is_tool_state_item(item)
-                    || super::replay::contains_encrypted_content(item)
+                ) || !super::replay::message_has_plaintext_content(item_object)
+                    || super::replay::is_tool_state_item(history_item)
+                    || super::replay::contains_encrypted_content(history_item)
                 {
                     return false;
                 }
@@ -56,21 +56,23 @@ fn has_compacted_history(request: &Value) -> bool {
             Some("reasoning") => {
                 // Retained reasoning is portable only with its actual payload,
                 // not a provider-side item ID. It is never itself a checkpoint.
-                if nonempty_string(item, "encrypted_content").is_none() {
+                if nonempty_string(history_item, "encrypted_content").is_none() {
                     return false;
                 }
             }
             Some(kind @ ("function_call" | "custom_tool_call")) => {
-                let Some(call_id) = nonempty_string(item, "call_id") else {
+                let Some(call_id) = nonempty_string(history_item, "call_id") else {
                     return false;
                 };
-                let payload = if kind == "function_call" {
+                let argument_field_name = if kind == "function_call" {
                     "arguments"
                 } else {
                     "input"
                 };
-                if nonempty_string(item, "name").is_none()
-                    || !item.get(payload).is_some_and(Value::is_string)
+                if nonempty_string(history_item, "name").is_none()
+                    || !history_item
+                        .get(argument_field_name)
+                        .is_some_and(Value::is_string)
                     || !seen_calls.insert(call_id)
                 {
                     return false;
@@ -78,7 +80,7 @@ fn has_compacted_history(request: &Value) -> bool {
                 pending_calls.insert(call_id, kind);
             }
             Some(kind @ ("function_call_output" | "custom_tool_call_output")) => {
-                let Some(call_id) = nonempty_string(item, "call_id") else {
+                let Some(call_id) = nonempty_string(history_item, "call_id") else {
                     return false;
                 };
                 let expected = if kind == "function_call_output" {
@@ -87,9 +89,9 @@ fn has_compacted_history(request: &Value) -> bool {
                     "custom_tool_call"
                 };
                 if pending_calls.remove(call_id) != Some(expected)
-                    || !item
-                        .get("output")
-                        .is_some_and(|output| output.is_string() || output.is_array())
+                    || !history_item.get("output").is_some_and(|output_value| {
+                        output_value.is_string() || output_value.is_array()
+                    })
                 {
                     return false;
                 }
@@ -100,10 +102,11 @@ fn has_compacted_history(request: &Value) -> bool {
     has_checkpoint && pending_calls.is_empty()
 }
 
-fn nonempty_string<'a>(item: &'a Value, field: &str) -> Option<&'a str> {
-    item.get(field)
+fn nonempty_string<'a>(json_value: &'a Value, field: &str) -> Option<&'a str> {
+    json_value
+        .get(field)
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
+        .filter(|text| !text.trim().is_empty())
 }
 
 #[cfg(test)]

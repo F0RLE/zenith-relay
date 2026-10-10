@@ -30,14 +30,14 @@ export function revealableAccountIds(accounts: readonly AccountSummary[], canRev
 }
 
 export function replaceRevealedAccountIdentities(
-  current: Readonly<Record<string, string>>,
+  currentIdentities: Readonly<Record<string, string>>,
   mode: RelayMode,
   identities: readonly RevealedAccountIdentity[],
 ): Record<string, string> {
   const prefix = `${mode}:`;
-  const next = Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix)));
-  for (const identity of identities) next[`${prefix}${identity.accountId}`] = identity.identity;
-  return next;
+  const updatedIdentities = Object.fromEntries(Object.entries(currentIdentities).filter(([key]) => !key.startsWith(prefix)));
+  for (const identity of identities) updatedIdentities[`${prefix}${identity.accountId}`] = identity.identity;
+  return updatedIdentities;
 }
 
 export function displayAccountIdentity({

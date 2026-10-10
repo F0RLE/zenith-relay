@@ -46,6 +46,7 @@ pub struct UsageExportRow {
     #[serde(default)]
     pub(super) effective_reasoning_effort: Option<String>,
     pub(super) connection: String,
+    pub(super) transport: zenith_relay_core::UsageTransport,
     pub(super) latency_ms: u64,
     pub(super) ttft_ms: Option<u64>,
     pub(super) input_tokens: Option<u64>,
@@ -138,7 +139,7 @@ pub fn open_relay_folder(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
-    let path = match folder {
+    let folder_path = match folder {
         RelayFolder::Data => state.data_root(),
         RelayFolder::Logs => state.logs_root(),
         RelayFolder::ErrorLogs => state.error_logs_root(),
@@ -147,9 +148,9 @@ pub fn open_relay_folder(
         RelayFolder::ProfileBackups => state.profile_backup_root(),
         RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
     };
-    fs::create_dir_all(&path).map_err(io_error)?;
+    fs::create_dir_all(&folder_path).map_err(io_error)?;
     app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
+        .open_path(folder_path.to_string_lossy(), None::<&str>)
         .map_err(|error| io_error(error.to_string()))
 }
 
@@ -288,6 +289,7 @@ mod tests {
             requested_reasoning_effort: Some("max".into()),
             effective_reasoning_effort: Some("low".into()),
             connection: "account".into(),
+            transport: zenith_relay_core::UsageTransport::Http,
             latency_ms: 1,
             ttft_ms: Some(1),
             input_tokens: Some(1),

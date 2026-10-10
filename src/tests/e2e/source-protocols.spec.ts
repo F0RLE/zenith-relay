@@ -22,7 +22,7 @@ test("native Messages source can launch OpenCode while direct ChatGPT is disable
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Launch", exact: true }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Launch", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Where do you want to launch this source?" });
   await expect(dialog.getByRole("button", { name: "ChatGPT", exact: true })).toBeDisabled();
   await dialog.getByRole("button", { name: "OpenCode", exact: true }).click();
@@ -40,7 +40,7 @@ test("adding an unknown source to the pool completes without format selection", 
   await add.getByLabel("Name", { exact: true }).fill("Manual API");
   await add.getByLabel("API address").fill("https://manual.example.test/v1");
   await add.getByLabel("Upstream API key").fill("synthetic-key");
-  await add.getByRole("button", { name: "Save", exact: true }).click();
+  await add.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
   await expect(page.locator(".pool-member-card").filter({ hasText: "Manual API" })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);

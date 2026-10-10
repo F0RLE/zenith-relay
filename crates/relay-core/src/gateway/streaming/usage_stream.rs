@@ -18,12 +18,21 @@ pub(super) struct UsageStream<S> {
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
     pub(super) sse_pending: Vec<u8>,
+    sse_forward_pending: Vec<u8>,
+    sse_forward_mode: SseForwardMode,
     pub(super) output_pending: VecDeque<Bytes>,
     // Track yielded bytes, not parsed deltas: even an incomplete SSE frame is
     // already owned by the client and cannot be replaced by a synthetic response.
     client_visible_output: bool,
     pub(super) heartbeat: Pin<Box<Sleep>>,
     pub(super) terminated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SseForwardMode {
+    Detect,
+    Normal,
+    Error,
 }
 
 impl<S> UsageStream<S> {
@@ -53,6 +62,8 @@ impl<S> UsageStream<S> {
             cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
+            sse_forward_pending: Vec::new(),
+            sse_forward_mode: SseForwardMode::Detect,
             output_pending: VecDeque::new(),
             client_visible_output: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
@@ -102,6 +113,7 @@ where
         let this = self.as_mut().get_mut();
         loop {
             if let Some(bytes) = this.output_pending.pop_front() {
+                this.client_visible_output |= !bytes.is_empty();
                 return Poll::Ready(Some(Ok(bytes)));
             }
             if this.terminated {
@@ -111,30 +123,49 @@ where
                 Poll::Ready(Some(Ok(bytes))) => {
                     let now = TokioInstant::now();
                     this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
-                    let (valid, forward_len) = if this.native_gemini {
-                        (this.ingest_native_gemini(&bytes), bytes.len())
+                    let origin = this
+                        .event
+                        .as_ref()
+                        .map(UsageStream::<S>::stream_error_origin)
+                        .unwrap_or(crate::ErrorOrigin::Relay);
+                    let valid = if this.native_gemini {
+                        this.ingest_native_gemini(&bytes)
                     } else {
                         this.ingest_sse(&bytes)
                     };
+                    if valid {
+                        let forwarded = this.forward_sse_bytes(&bytes, origin);
+                        if !forwarded.is_empty() {
+                            this.client_visible_output = true;
+                            return Poll::Ready(Some(Ok(Bytes::from(forwarded))));
+                        }
+                    } else {
+                        this.sse_forward_pending.clear();
+                        this.sse_forward_mode = SseForwardMode::Detect;
+                    }
                     if let Some(failure) = this.output_pending.pop_front() {
+                        this.client_visible_output |= !failure.is_empty();
                         return Poll::Ready(Some(Ok(failure)));
                     }
                     if !valid {
                         return Poll::Ready(None);
                     }
-                    let forwarded = bytes.slice(..forward_len);
-                    this.client_visible_output |= !forwarded.is_empty();
-                    if !forwarded.is_empty() {
-                        return Poll::Ready(Some(Ok(forwarded)));
-                    }
                 }
                 Poll::Ready(Some(Err(error))) => {
+                    this.sse_forward_pending.clear();
+                    this.sse_forward_mode = SseForwardMode::Detect;
                     if this.fail_stream(error_codes::UPSTREAM_STREAM) {
                         continue;
                     }
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
+                    if !this.sse_forward_pending.is_empty() {
+                        let pending = std::mem::take(&mut this.sse_forward_pending);
+                        this.sse_forward_mode = SseForwardMode::Detect;
+                        this.client_visible_output = true;
+                        return Poll::Ready(Some(Ok(Bytes::from(pending))));
+                    }
                     if this.native_gemini {
                         if !this.sse_pending.is_empty() {
                             this.fail_stream(error_codes::STREAM_INCOMPLETE);
@@ -166,6 +197,7 @@ where
                     // Chunks are forwarded immediately, so a heartbeat is safe
                     // only between complete SSE events, never inside a frame.
                     if this.sse_pending.is_empty()
+                        && this.sse_forward_pending.is_empty()
                         && this.heartbeat.as_mut().poll(context).is_ready()
                     {
                         this.heartbeat

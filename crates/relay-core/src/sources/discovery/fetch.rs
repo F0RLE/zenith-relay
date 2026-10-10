@@ -52,21 +52,23 @@ pub(super) async fn discover_protocol_bindings_with_client(
 
     for binding in bindings {
         let (authorization_name, authorization) = source.authorization_for_binding(binding);
-        let request = client
+        let model_catalog_request = client
             .get(connector.models_url.clone())
             .headers(connector.protocol_headers_for_binding(binding))
             .header(authorization_name.clone(), authorization.clone());
-        let (mut response, first_permit) =
-            match scope.send(client, request, HttpClass::Ordinary).await {
-                Ok(value) => value,
-                Err(_) => {
-                    last_error = Some(Error::ManagementHttpUnavailable);
-                    continue;
-                }
-            };
+        let (mut model_catalog_response, first_permit) = match scope
+            .send(client, model_catalog_request, HttpClass::Ordinary)
+            .await
+        {
+            Ok(response_with_permit) => response_with_permit,
+            Err(_) => {
+                last_error = Some(Error::ManagementHttpUnavailable);
+                continue;
+            }
+        };
         let mut permit = Some(first_permit);
-        hints.observe(response.headers());
-        if response.status() == reqwest::StatusCode::NOT_FOUND
+        hints.observe(model_catalog_response.headers());
+        if model_catalog_response.status() == reqwest::StatusCode::NOT_FOUND
             && resolved_base_url.is_none()
             && root_v1_fallback_allowed(&connector, binding)
         {
@@ -74,15 +76,15 @@ pub(super) async fn discover_protocol_bindings_with_client(
             // while waiting for a separate /v1 retry at the same origin.
             drop(permit.take());
             if let Some(v1_connector) = connector.with_appended_v1(bindings) {
-                let retry = client
+                let retry_request = client
                     .get(v1_connector.models_url.clone())
                     .headers(v1_connector.protocol_headers_for_binding(binding))
                     .header(authorization_name, authorization);
-                if let Ok((candidate, candidate_permit)) =
-                    scope.send(client, retry, HttpClass::Ordinary).await
+                if let Ok((candidate_response, candidate_permit)) =
+                    scope.send(client, retry_request, HttpClass::Ordinary).await
                 {
-                    hints.observe(candidate.headers());
-                    if candidate.status().is_success() {
+                    hints.observe(candidate_response.headers());
+                    if candidate_response.status().is_success() {
                         resolved_base_url = Some(
                             v1_connector
                                 .base_url
@@ -91,26 +93,29 @@ pub(super) async fn discover_protocol_bindings_with_client(
                                 .to_string(),
                         );
                         connector = v1_connector;
-                        response = candidate;
+                        model_catalog_response = candidate_response;
                         permit = Some(candidate_permit);
                     }
                 }
             }
         }
-        if !response.status().is_success() {
-            last_error = Some(Error::UpstreamStatus(response.status().as_u16()));
+        if !model_catalog_response.status().is_success() {
+            last_error = Some(Error::UpstreamStatus(
+                model_catalog_response.status().as_u16(),
+            ));
             continue;
         }
-        let body = match collect_limited(response, MAX_MODEL_CATALOG_BODY_BYTES).await {
-            Ok(body) => body,
-            Err(error) => {
-                last_error = Some(error);
-                continue;
-            }
-        };
+        let model_catalog_bytes =
+            match collect_limited(model_catalog_response, MAX_MODEL_CATALOG_BODY_BYTES).await {
+                Ok(body_bytes) => body_bytes,
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
         drop(permit);
-        let body: Value = match serde_json::from_slice(&body) {
-            Ok(body) => body,
+        let model_catalog_json: Value = match serde_json::from_slice(&model_catalog_bytes) {
+            Ok(catalog_json) => catalog_json,
             Err(_) => {
                 last_error = Some(Error::InvalidUpstreamResponse(
                     "upstream model response is invalid",
@@ -118,19 +123,23 @@ pub(super) async fn discover_protocol_bindings_with_client(
                 continue;
             }
         };
-        let upstream_models =
-            match parse_upstream_models(binding.adapter.upstream_protocol(binding.wire_api), &body)
-            {
-                Some(models) => models,
-                None => {
-                    last_error = Some(Error::InvalidUpstreamResponse(
-                        "upstream model response is invalid",
-                    ));
-                    continue;
-                }
-            };
+        let upstream_models = match parse_upstream_models(
+            binding.adapter.upstream_protocol(binding.wire_api),
+            &model_catalog_json,
+        ) {
+            Some(models) => models,
+            None => {
+                last_error = Some(Error::InvalidUpstreamResponse(
+                    "upstream model response is invalid",
+                ));
+                continue;
+            }
+        };
         successful_responses += 1;
-        capabilities.extend(catalog_capabilities(&body, crate::unix_time_ms()));
+        capabilities.extend(catalog_capabilities(
+            &model_catalog_json,
+            crate::unix_time_ms(),
+        ));
 
         // Inventory and price metadata are independent of legacy route lists.
         for (model, price) in &upstream_models {
@@ -252,27 +261,27 @@ pub(super) fn merge_route_model_price(
     {
         return None;
     }
-    let cache_write_5m = match (
+    let short_cache_write_price = match (
         left.cache_write_5m_micro_usd_per_million,
         right.cache_write_5m_micro_usd_per_million,
     ) {
         (Some(left), Some(right)) if left != right => return None,
-        (Some(value), _) | (_, Some(value)) => Some(value),
+        (Some(price), _) | (_, Some(price)) => Some(price),
         (None, None) => None,
     };
-    let cache_write_1h = match (
+    let long_cache_write_price = match (
         left.cache_write_1h_micro_usd_per_million,
         right.cache_write_1h_micro_usd_per_million,
     ) {
         (Some(left), Some(right)) if left != right => return None,
-        (Some(value), _) | (_, Some(value)) => Some(value),
+        (Some(price), _) | (_, Some(price)) => Some(price),
         (None, None) => None,
     };
     Some(ApiModelPriceOverride {
         input_micro_usd_per_million: left.input_micro_usd_per_million,
         cached_input_micro_usd_per_million: left.cached_input_micro_usd_per_million,
-        cache_write_5m_micro_usd_per_million: cache_write_5m,
-        cache_write_1h_micro_usd_per_million: cache_write_1h,
+        cache_write_5m_micro_usd_per_million: short_cache_write_price,
+        cache_write_1h_micro_usd_per_million: long_cache_write_price,
         output_micro_usd_per_million: left.output_micro_usd_per_million,
     })
 }
@@ -287,27 +296,27 @@ fn root_v1_fallback_allowed(connector: &SourceConnector, binding: &SourceProtoco
 
 pub(super) fn parse_upstream_models(
     protocol: UpstreamProtocol,
-    body: &Value,
+    catalog_payload: &Value,
 ) -> Option<Vec<(String, Option<ApiModelPriceOverride>)>> {
-    let models = match protocol {
-        UpstreamProtocol::GeminiGenerateContent => body
+    let model_records = match protocol {
+        UpstreamProtocol::GeminiGenerateContent => catalog_payload
             .get("models")
-            .or_else(|| body.get("data"))?
+            .or_else(|| catalog_payload.get("data"))?
             .as_array()?,
         UpstreamProtocol::Responses
         | UpstreamProtocol::ChatCompletions
-        | UpstreamProtocol::Messages => body
+        | UpstreamProtocol::Messages => catalog_payload
             .get("data")
-            .or_else(|| body.get("models"))?
+            .or_else(|| catalog_payload.get("models"))?
             .as_array()?,
     };
-    let mut seen = HashSet::new();
+    let mut seen_model_ids = HashSet::new();
     Some(
-        models
+        model_records
             .iter()
-            .filter_map(|model| {
-                let id = match protocol {
-                    UpstreamProtocol::GeminiGenerateContent => model
+            .filter_map(|model_record| {
+                let model_id = match protocol {
+                    UpstreamProtocol::GeminiGenerateContent => model_record
                         .get("supportedGenerationMethods")
                         .and_then(Value::as_array)
                         .filter(|methods| {
@@ -315,23 +324,36 @@ pub(super) fn parse_upstream_models(
                                 .iter()
                                 .any(|method| method.as_str() == Some("generateContent"))
                         })
-                        .and_then(|_| model.get("name").or_else(|| model.get("id")))?
+                        .and_then(|_| model_record.get("name").or_else(|| model_record.get("id")))?
                         .as_str()
-                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
+                        .map(|raw_model_name| {
+                            raw_model_name
+                                .strip_prefix("models/")
+                                .unwrap_or(raw_model_name)
+                        }),
                     UpstreamProtocol::Responses
                     | UpstreamProtocol::ChatCompletions
-                    | UpstreamProtocol::Messages => model
+                    | UpstreamProtocol::Messages => model_record
                         .get("id")
-                        .or_else(|| model.get("name"))?
+                        .or_else(|| model_record.get("name"))?
                         .as_str()
-                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
+                        .map(|raw_model_name| {
+                            raw_model_name
+                                .strip_prefix("models/")
+                                .unwrap_or(raw_model_name)
+                        }),
                 }?;
-                seen.insert(crate::model_id_key(id)).then(|| {
-                    (
-                        id.to_string(),
-                        detected_model_price(model, protocol == UpstreamProtocol::Messages),
-                    )
-                })
+                seen_model_ids
+                    .insert(crate::model_id_key(model_id))
+                    .then(|| {
+                        (
+                            model_id.to_string(),
+                            detected_model_price(
+                                model_record,
+                                protocol == UpstreamProtocol::Messages,
+                            ),
+                        )
+                    })
             })
             .collect(),
     )

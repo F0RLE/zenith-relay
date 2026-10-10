@@ -5,14 +5,14 @@ use super::*;
 
 pub(super) fn update_auth_with_rollback(
     auth_path: &Path,
-    auth: &Option<Vec<u8>>,
+    auth_snapshot: &Option<Vec<u8>>,
     credential: &str,
     backup: (&Path, &str, &Option<Vec<u8>>),
 ) -> Result<bool> {
     let update = (|| {
-        let updated = merge_auth(snapshot_text(auth, auth_path)?, Some(credential))?
+        let updated = merge_auth(snapshot_text(auth_snapshot, auth_path)?, Some(credential))?
             .ok_or_else(|| LocalPoolError::invalid_state("updated credential is missing"))?;
-        replace_if_unchanged(auth_path, auth, &updated)
+        replace_if_unchanged(auth_path, auth_snapshot, &updated)
     })();
     update
         .map(|()| true)
@@ -47,14 +47,44 @@ pub(super) fn save(
     Ok(secret_ref)
 }
 
+/// Fork an existing undo record with a new managed config projection while
+/// preserving its original user config and auth snapshots. A new secret
+/// reference keeps the old record intact until the caller commits its file
+/// changes and can roll back safely.
+pub(super) fn fork_with_config_after(
+    secret_ref: &str,
+    config_after: &str,
+    secrets: &impl SecretBackend,
+) -> Result<String> {
+    let mut projection = load(secret_ref, secrets)?;
+    projection.config_after = config_after.to_owned();
+    let next_ref = format!("profile:codex:projection:{}", uuid::Uuid::new_v4());
+    secrets.save(
+        &next_ref,
+        &serde_json::to_string(&projection).map_err(LocalPoolError::invalid_state)?,
+    )?;
+    Ok(next_ref)
+}
+
+pub(super) fn config_after(secret_ref: &str, secrets: &impl SecretBackend) -> Result<String> {
+    Ok(load(secret_ref, secrets)?.config_after)
+}
+
+pub(super) fn config_before(
+    secret_ref: &str,
+    secrets: &impl SecretBackend,
+) -> Result<Option<String>> {
+    Ok(load(secret_ref, secrets)?.config_before)
+}
+
 fn load(secret_ref: &str, secrets: &impl SecretBackend) -> Result<Projection> {
-    let content = secrets.load(secret_ref)?.ok_or_else(|| {
+    let projection_json = secrets.load(secret_ref)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "Profile undo record is missing",
         )
     })?;
-    let projection: Projection = serde_json::from_str(&content).map_err(|_| {
+    let projection: Projection = serde_json::from_str(&projection_json).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "Profile undo record is invalid",
@@ -76,15 +106,16 @@ pub(super) fn update_websockets(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let mut projection = load(secret_ref, secrets)?;
-    let mut after = parse_config(&projection.config_after)?;
-    if !set_managed_websockets(&mut after, provider_id, enabled) {
+    let mut config_document = parse_config(&projection.config_after)?;
+    if !set_managed_websockets(&mut config_document, provider_id, enabled) {
         return Err(profile_restore_blocked());
     }
     // Update only our setting: current user-added fields must never become
     // part of the managed projection and disappear on restore.
-    projection.config_after = after.to_string();
-    let content = serde_json::to_string(&projection).map_err(LocalPoolError::invalid_state)?;
-    secrets.save(secret_ref, &content)
+    projection.config_after = config_document.to_string();
+    let projection_json =
+        serde_json::to_string(&projection).map_err(LocalPoolError::invalid_state)?;
+    secrets.save(secret_ref, &projection_json)
 }
 
 /// Record the Ultra picker switch on an existing undo snapshot. A later
@@ -94,17 +125,18 @@ pub(super) fn record_show_ultra_picker(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let mut projection = load(secret_ref, secrets)?;
-    let mut after = parse_config(&projection.config_after)?;
-    if desktop_bool(&after, DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY) == Some(true) {
+    let mut config_document = parse_config(&projection.config_after)?;
+    if desktop_bool(&config_document, DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY) == Some(true) {
         return Ok(());
     }
-    enable_show_ultra_picker(&mut after);
-    if desktop_bool(&after, DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY) != Some(true) {
+    enable_show_ultra_picker(&mut config_document);
+    if desktop_bool(&config_document, DESKTOP_SHOW_ULTRA_IN_MODEL_PICKER_KEY) != Some(true) {
         return Ok(());
     }
-    projection.config_after = after.to_string();
-    let content = serde_json::to_string(&projection).map_err(LocalPoolError::invalid_state)?;
-    secrets.save(secret_ref, &content)
+    projection.config_after = config_document.to_string();
+    let projection_json =
+        serde_json::to_string(&projection).map_err(LocalPoolError::invalid_state)?;
+    secrets.save(secret_ref, &projection_json)
 }
 
 mod auth;

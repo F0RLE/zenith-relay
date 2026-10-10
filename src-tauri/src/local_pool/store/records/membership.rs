@@ -6,36 +6,42 @@ use crate::local_pool::models::{
 
 impl LocalPoolStore {
     pub fn upsert_source(&mut self, source: ProviderSourceRecord) -> Result<()> {
-        let mut next = self.sources.clone();
-        if let Some(current) = next.iter_mut().find(|current| current.id == source.id) {
-            *current = source;
+        let mut updated_sources = self.sources.clone();
+        if let Some(existing_source) = updated_sources
+            .iter_mut()
+            .find(|candidate| candidate.id == source.id)
+        {
+            *existing_source = source;
         } else {
-            next.push(source);
+            updated_sources.push(source);
         }
-        self.replace_records(next, self.keys.clone())
+        self.replace_records(updated_sources, self.keys.clone())
     }
 
     pub fn upsert_key(&mut self, key: LocalGatewayKeyRecord) -> Result<()> {
-        let mut next = self.keys.clone();
-        if let Some(current) = next.iter_mut().find(|current| current.id == key.id) {
-            *current = key;
+        let mut updated_keys = self.keys.clone();
+        if let Some(existing_key) = updated_keys
+            .iter_mut()
+            .find(|candidate| candidate.id == key.id)
+        {
+            *existing_key = key;
         } else {
-            next.push(key);
+            updated_keys.push(key);
         }
-        self.replace_records(self.sources.clone(), next)
+        self.replace_records(self.sources.clone(), updated_keys)
     }
 
     pub fn upsert_account(&mut self, account: LocalAccountRecord) -> Result<()> {
-        let mut next = self.accounts.clone();
-        if let Some(current) = next
+        let mut updated_accounts = self.accounts.clone();
+        if let Some(existing_account) = updated_accounts
             .iter_mut()
-            .find(|current| current.account.id == account.account.id)
+            .find(|candidate| candidate.account.id == account.account.id)
         {
-            *current = account;
+            *existing_account = account;
         } else {
-            next.push(account);
+            updated_accounts.push(account);
         }
-        self.replace_accounts_and_keys(next, self.keys.clone())
+        self.replace_accounts_and_keys(updated_accounts, self.keys.clone())
     }
 
     /// Restores one account only when its current record still belongs to the
@@ -47,19 +53,20 @@ impl LocalPoolStore {
     /// newer observation while restoring the transaction's previous record.
     pub fn restore_account_if_current(
         &mut self,
-        previous: &LocalAccountRecord,
-        attempted: &LocalAccountRecord,
+        previous_account: &LocalAccountRecord,
+        attempted_account: &LocalAccountRecord,
     ) -> Result<bool> {
-        let Some(current) = self.account(&attempted.account.id).cloned() else {
+        let Some(stored_account) = self.account(&attempted_account.account.id).cloned() else {
             return Ok(false);
         };
-        if !current.matches_rollback_snapshot(attempted) {
+        if !stored_account.matches_rollback_snapshot(attempted_account) {
             return Ok(false);
         }
-        let mut restored = previous.clone();
-        restored.client_auth_status = current.client_auth_status;
-        restored.last_client_login_redirect_at_ms = current.last_client_login_redirect_at_ms;
-        self.upsert_account(restored)?;
+        let mut restored_account = previous_account.clone();
+        restored_account.client_auth_status = stored_account.client_auth_status;
+        restored_account.last_client_login_redirect_at_ms =
+            stored_account.last_client_login_redirect_at_ms;
+        self.upsert_account(restored_account)?;
         Ok(true)
     }
 
@@ -69,7 +76,9 @@ impl LocalPoolStore {
         let mut changed = false;
         let mut accounts = self.accounts.clone();
         for account in &mut accounts {
-            if account_ids.iter().any(|id| id == &account.account.id)
+            if account_ids
+                .iter()
+                .any(|account_id| account_id == &account.account.id)
                 && (account.account.health
                     != zenith_relay_core::accounts::AccountHealthState::Blocked
                     || account.account.last_error_code.as_deref() != Some("deactivated_workspace"))

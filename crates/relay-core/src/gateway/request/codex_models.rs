@@ -8,7 +8,7 @@ use crate::catalog::{
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{configured_codex_client_version, valid_codex_client_version};
-use crate::runtime::AuthenticatedKey;
+use crate::runtime::{AuthenticatedKey, AuthorizationIdentityPolicy};
 use crate::{
     codex_model_is_picker_eligible_for, is_valid_model_id, routed_codex_catalog_entry,
     GatewayRuntime, WireApi,
@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
+const MAX_CODEX_MODELS_BODY_BYTES: usize = crate::transport::MAX_MODEL_CATALOG_BODY_BYTES;
 const CODEX_MODELS_FETCH_CONCURRENCY: usize = 4;
 const CODEX_MODELS_FETCH_BUDGET: Duration = Duration::from_secs(12);
 
@@ -45,7 +45,7 @@ pub(in crate::gateway) async fn models(
     uri: Uri,
 ) -> Response<Body> {
     if let Some(protocol) = crate::gateway::catalog::catalog_protocol(&headers) {
-        return crate::gateway::catalog::native_catalog(&runtime, &headers, protocol, None);
+        return crate::gateway::catalog::native_catalog(&runtime, &headers, protocol, None).await;
     }
     if !valid_local_host(&headers) {
         return invalid_host();
@@ -56,7 +56,7 @@ pub(in crate::gateway) async fn models(
     let client_version = uri.query().and_then(|query| {
         url::form_urlencoded::parse(query.as_bytes())
             .find(|(key, _)| key == "client_version")
-            .map(|(_, value)| value.into_owned())
+            .map(|(_, query_value)| query_value.into_owned())
     });
     let protocols = match client_version.as_deref() {
         // Codex always executes selected models through /v1/responses.  Do
@@ -69,6 +69,7 @@ pub(in crate::gateway) async fn models(
         // discovery contract and must not be presented as an OpenAI model.
         None => allowed_openai_model_protocols(&runtime, &key),
     };
+    runtime.refresh_basis_points_access(&key).await;
     let models = runtime.visible_models(&key, &protocols, now_ms());
     if let Some(client_version) = client_version.as_deref() {
         if !valid_codex_client_version(client_version) {
@@ -86,8 +87,8 @@ pub(in crate::gateway) async fn models(
     }
     Json(json!({
         "object": "list",
-        "data": models.into_iter().map(|id| json!({
-            "id": id,
+        "data": models.into_iter().map(|model_id| json!({
+            "id": model_id,
             "object": "model",
             "owned_by": "zenith-relay",
         })).collect::<Vec<_>>()
@@ -143,8 +144,8 @@ async fn codex_account_model_manifests(
     loop {
         tokio::select! {
             _ = &mut deadline => break,
-            result = fetches.next() => match result {
-                Some(result) => completed.push(result),
+            manifest_result = fetches.next() => match manifest_result {
+                Some(manifest_result) => completed.push(manifest_result),
                 None => break,
             },
         }
@@ -167,7 +168,10 @@ async fn codex_account_model_manifests(
     let stale = runtime.stale_codex_model_manifests(
         candidate_ids
             .iter()
-            .filter(|candidate_id| !live_candidate_ids.contains(candidate_id.as_str()))
+            .filter(|candidate_id| {
+                !runtime.is_basis_points_account(candidate_id)
+                    && !live_candidate_ids.contains(candidate_id.as_str())
+            })
             .map(String::as_str),
     );
     live_manifests.into_iter().chain(stale).collect()
@@ -179,6 +183,11 @@ async fn fetch_codex_account_manifest(
     mut url: url::Url,
     client_versions: &[String],
 ) -> Option<Value> {
+    if runtime.is_basis_points_account(candidate_id) {
+        return runtime
+            .fresh_basis_points_access(candidate_id)
+            .map(|access| access.manifest());
+    }
     for client_version in client_versions {
         url.query_pairs_mut()
             .clear()
@@ -191,10 +200,13 @@ async fn fetch_codex_account_manifest(
             .send_authorized_request(
                 candidate_id,
                 request,
-                Some(client_version.as_str()),
-                None,
-                None,
-                None,
+                crate::runtime::AuthorizationDispatch {
+                    client_version: Some(client_version.as_str()),
+                    identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                    turn_scope: None,
+                    budget: None,
+                    lease: None,
+                },
             )
             .await
         else {
@@ -203,16 +215,16 @@ async fn fetch_codex_account_manifest(
         if !response.response.status().is_success() {
             continue;
         }
-        let Ok(body) =
+        let Ok(manifest_body) =
             crate::transport::collect_limited(response.response, MAX_CODEX_MODELS_BODY_BYTES).await
         else {
             continue;
         };
-        let Ok(upstream) = serde_json::from_slice::<Value>(&body) else {
+        let Ok(manifest_document) = serde_json::from_slice::<Value>(&manifest_body) else {
             continue;
         };
-        if upstream_codex_models(&upstream).is_some() {
-            return Some(upstream);
+        if upstream_codex_models(&manifest_document).is_some() {
+            return Some(manifest_document);
         }
     }
     None

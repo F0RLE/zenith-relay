@@ -25,10 +25,10 @@ export function memberName(member: PoolMember) {
   return member.kind === "source" ? member.name : member.identityHint || member.label;
 }
 
-export function toggle(values: string[], value: string) {
-  return values.includes(value)
-    ? values.filter((item) => item !== value)
-    : [...values, value];
+export function toggle(selectedIds: string[], idToToggle: string) {
+  return selectedIds.includes(idToToggle)
+    ? selectedIds.filter((selectedId) => selectedId !== idToToggle)
+    : [...selectedIds, idToToggle];
 }
 
 export function compareStableText(left: string, right: string) {

@@ -27,8 +27,8 @@ pub fn parse_import(
         ));
     }
     let source_file = validate_source_file(source_file)?;
-    let (format, entries, warnings, description) = parse_entries(input)?;
-    if entries.len() > MAX_IMPORT_ITEMS {
+    let (format, input_entries, warnings, description) = parse_entries(input)?;
+    if input_entries.len() > MAX_IMPORT_ITEMS {
         return Err(ImportError::new(
             ImportErrorCode::TooManyItems,
             "import content exceeds the item limit",
@@ -37,19 +37,24 @@ pub fn parse_import(
 
     let existing = existing_identity_keys
         .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
+        .map(|identity_key| identity_key.trim().to_ascii_lowercase())
+        .filter(|identity_key| !identity_key.is_empty())
         .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
-    let mut rows = Vec::with_capacity(entries.len());
-    let mut items = Vec::with_capacity(entries.len());
+    let mut rows = Vec::with_capacity(input_entries.len());
+    let mut parsed_items = Vec::with_capacity(input_entries.len());
 
-    for entry in entries {
-        match entry.value {
-            Some(value) => {
-                match parse_item(&value, entry.ordinal, format, source_file.as_deref()) {
+    for input_entry in input_entries {
+        match input_entry.import_value {
+            Some(import_value) => {
+                match parse_item(
+                    &import_value,
+                    input_entry.ordinal,
+                    format,
+                    source_file.as_deref(),
+                ) {
                     Ok(mut parsed) => {
-                        let identity_key = parsed.item.identity_key.to_ascii_lowercase();
+                        let identity_key = parsed.parsed_item.identity_key.to_ascii_lowercase();
                         if !seen.insert(identity_key.clone()) {
                             parsed.preview.status = ImportPreviewStatus::Invalid;
                             parsed.preview.error = Some(ImportIssue::new(
@@ -67,10 +72,10 @@ pub fn parse_import(
                             parsed.preview.existing = true;
                         }
                         rows.push(parsed.preview);
-                        items.push(parsed.item);
+                        parsed_items.push(parsed.parsed_item);
                     }
                     Err(issue) => rows.push(invalid_row(
-                        entry.ordinal,
+                        input_entry.ordinal,
                         format,
                         source_file.as_deref(),
                         issue,
@@ -78,10 +83,10 @@ pub fn parse_import(
                 }
             }
             None => rows.push(invalid_row(
-                entry.ordinal,
+                input_entry.ordinal,
                 format,
                 source_file.as_deref(),
-                entry.issue.unwrap_or_else(|| {
+                input_entry.issue.unwrap_or_else(|| {
                     ImportIssue::new(ImportIssueCode::MalformedJson, "malformed JSON item")
                 }),
             )),
@@ -95,7 +100,7 @@ pub fn parse_import(
             rows,
             warnings,
         },
-        items,
+        items: parsed_items,
     })
 }
 
@@ -108,7 +113,7 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
     }
 
     let mut total_bytes = 0usize;
-    let mut values = Vec::new();
+    let mut import_values = Vec::new();
     for document in documents {
         total_bytes = total_bytes.checked_add(document.len()).ok_or_else(|| {
             ImportError::new(
@@ -123,32 +128,36 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
             ));
         }
         if document.trim().is_empty() {
-            values.push(malformed_import_value());
-            check_item_count(values.len())?;
+            import_values.push(malformed_import_value());
+            check_item_count(import_values.len())?;
             continue;
         }
 
-        let entries = match parse_entries(document) {
-            Ok((_, entries, _, _)) => entries,
+        let document_entries = match parse_entries(document) {
+            Ok((_, parsed_entries, _, _)) => parsed_entries,
             Err(error)
                 if matches!(
                     error.code,
                     ImportErrorCode::EmptyInput | ImportErrorCode::MalformedJson
                 ) =>
             {
-                values.push(malformed_import_value());
-                check_item_count(values.len())?;
+                import_values.push(malformed_import_value());
+                check_item_count(import_values.len())?;
                 continue;
             }
             Err(error) => return Err(error),
         };
-        for entry in entries {
-            values.push(entry.value.unwrap_or_else(malformed_import_value));
-            check_item_count(values.len())?;
+        for input_entry in document_entries {
+            import_values.push(
+                input_entry
+                    .import_value
+                    .unwrap_or_else(malformed_import_value),
+            );
+            check_item_count(import_values.len())?;
         }
     }
 
-    let combined = serde_json::to_string(&values).map_err(|_| {
+    let combined = serde_json::to_string(&import_values).map_err(|_| {
         ImportError::new(
             ImportErrorCode::MalformedJson,
             "failed to combine import documents",
@@ -182,6 +191,7 @@ fn invalid_row(
         label: format!("Item {}", ordinal + 1),
         identity: "unknown".to_string(),
         auth_mode: ImportAuthMode::Unknown,
+        oauth_client_kind: None,
         source_name: format_name(format).to_string(),
         quota_status: ImportQuotaStatus::Skipped,
         status: ImportPreviewStatus::Invalid,
@@ -218,19 +228,23 @@ fn validate_source_file(source_file: Option<&str>) -> Result<Option<String>, Imp
 
 pub(in crate::accounts::import) fn ensure_depth(root: &Value) -> Result<(), ImportError> {
     let mut stack = vec![(root, 1usize)];
-    while let Some((value, depth)) = stack.pop() {
+    while let Some((json_value, depth)) = stack.pop() {
         if depth > MAX_JSON_DEPTH {
             return Err(ImportError::new(
                 ImportErrorCode::JsonTooDeep,
                 "import JSON exceeds the nesting limit",
             ));
         }
-        match value {
-            Value::Array(values) => {
-                stack.extend(values.iter().map(|value| (value, depth + 1)));
+        match json_value {
+            Value::Array(array_items) => {
+                stack.extend(array_items.iter().map(|array_item| (array_item, depth + 1)));
             }
-            Value::Object(values) => {
-                stack.extend(values.values().map(|value| (value, depth + 1)));
+            Value::Object(object_fields) => {
+                stack.extend(
+                    object_fields
+                        .values()
+                        .map(|field_value| (field_value, depth + 1)),
+                );
             }
             _ => {}
         }
@@ -249,8 +263,8 @@ pub(in crate::accounts::import) fn check_item_count(count: usize) -> Result<(), 
     }
 }
 
-fn format_name(value: ImportFormat) -> &'static str {
-    match value {
+fn format_name(import_format: ImportFormat) -> &'static str {
+    match import_format {
         ImportFormat::JsonObject => "json_object",
         ImportFormat::JsonArray => "json_array",
         ImportFormat::JsonLines => "json_lines",

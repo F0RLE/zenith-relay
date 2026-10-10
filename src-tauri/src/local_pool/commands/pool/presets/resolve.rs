@@ -19,7 +19,7 @@ use super::super::super::connections::validate_source_record;
 use super::CommandResult;
 
 pub(super) struct PreparedLocalPreset {
-    pub(super) current: ConfigurationPreset,
+    pub(super) existing: ConfigurationPreset,
     pub(super) resolved: ConfigurationPreset,
     pub(super) target: ConfigurationPreset,
 }
@@ -49,13 +49,13 @@ pub(super) fn prepare_local_configuration_preset(
     state: &DesktopState,
     preset: ConfigurationPreset,
 ) -> CommandResult<PreparedLocalPreset> {
-    let current = super::local_configuration_preset(state)?;
+    let existing = super::local_configuration_preset(state)?;
     let mut resolved = normalize_configuration_preset(preset)
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     resolve_local_preset_references(state, &mut resolved.settings)?;
     resolved = normalize_configuration_preset(resolved)
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    if resolved.settings.quota.common_proxy_id != current.settings.quota.common_proxy_id {
+    if resolved.settings.quota.common_proxy_id != existing.settings.quota.common_proxy_id {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "configuration preset references a different common proxy",
@@ -65,11 +65,11 @@ pub(super) fn prepare_local_configuration_preset(
     let target = ConfigurationPreset {
         format: CONFIGURATION_PRESET_FORMAT.to_string(),
         schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
-        settings: merge_configuration_preset_settings(&current.settings, &resolved.settings)
+        settings: merge_configuration_preset_settings(&existing.settings, &resolved.settings)
             .map_err(|message| LocalPoolError::new(ErrorCode::NotFound, message))?,
     };
     Ok(PreparedLocalPreset {
-        current,
+        existing,
         resolved,
         target,
     })
@@ -85,7 +85,7 @@ fn resolve_local_preset_references(
     };
     let mut member_ids = std::collections::BTreeMap::new();
     for rule in &mut settings.sources {
-        let source = resolve_local_source_reference(&sources, rule).ok_or_else(|| {
+        let source_record = resolve_local_source_reference(&sources, rule).ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::NotFound,
                 format!(
@@ -94,15 +94,17 @@ fn resolve_local_preset_references(
                 ),
             )
         })?;
-        validate_source_record(state, source)?;
+        validate_source_record(state, source_record)?;
         member_ids.insert(
             (zenith_relay_core::PoolMemberKind::Source, rule.id.clone()),
-            source.id.clone(),
+            source_record.id.clone(),
         );
-        rule.id = source.id.clone();
-        rule.name = source.name.clone();
-        rule.base_url = source.base_url.trim_end_matches('/').to_string();
-        rule.wire_api = source.wire_api;
+        rule.apply_resolved_identity(
+            &source_record.id,
+            &source_record.name,
+            &source_record.base_url,
+            source_record.wire_api,
+        );
     }
     settings
         .sources
@@ -124,7 +126,7 @@ fn resolve_local_preset_references(
         })?;
         let proxy_id = credential
             .proxy_url()
-            .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok());
+            .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok());
         if rule.proxy_id != proxy_id || rule.bypass_common_proxy != credential.bypass_common_proxy()
         {
             return Err(LocalPoolError::new(

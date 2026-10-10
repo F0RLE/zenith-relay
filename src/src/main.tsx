@@ -35,8 +35,10 @@ window.addEventListener("zenith-startup-ready", revealStartupShell, { once: true
 // import failure can be investigated after the window is gone.
 let lastReportedRendererError = "";
 let lastReportedRendererErrorAt = 0;
-function reportRendererError(source: string, value: unknown, stack?: string) {
-  const message = redactFeedbackText(value instanceof Error ? value.message : String(value));
+function reportRendererError(source: string, errorValue: unknown, stack?: string) {
+  const message = redactFeedbackText(
+    errorValue instanceof Error ? errorValue.message : String(errorValue),
+  );
   if (!message) return;
   const now = Date.now();
   const fingerprint = `${source}:${message}`;
@@ -55,8 +57,8 @@ window.addEventListener("error", (event) => {
   reportRendererError("window-error", event.error ?? event.message, event.error?.stack);
 });
 window.addEventListener("unhandledrejection", (event) => {
-  const reason = event.reason;
-  reportRendererError("unhandled-rejection", reason, reason instanceof Error ? reason.stack : undefined);
+  const rejectionReason = event.reason;
+  reportRendererError("unhandled-rejection", rejectionReason, rejectionReason instanceof Error ? rejectionReason.stack : undefined);
 });
 
 function reportInterruptedAccountImportConfirmation() {

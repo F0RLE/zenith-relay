@@ -74,8 +74,8 @@ pub fn prepare(root: &Path, public_base_url: &str) -> Result<DeploymentPlan> {
     })
 }
 
-fn validate_public_base_url(value: &str) -> Result<String> {
-    let url = Url::parse(value.trim()).map_err(|_| {
+fn validate_public_base_url(base_url_text: &str) -> Result<String> {
+    let url = Url::parse(base_url_text.trim()).map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "remote public URL is invalid")
     })?;
     if url.scheme() != "https"

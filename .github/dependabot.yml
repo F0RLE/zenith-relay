@@ -25,7 +25,7 @@ updates:
           - i18next
           - react-i18next
   - package-ecosystem: cargo
-    directory: /
+    directory: /src-tauri
     schedule:
       interval: weekly
       day: monday
@@ -39,6 +39,30 @@ updates:
           - tauri-*
           - tauri-build
           - keyring
+  - package-ecosystem: cargo
+    directory: /crates/relay-core
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:20"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /relay-server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:25"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker
+    directory: /relay-server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:35"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: /
     schedule:

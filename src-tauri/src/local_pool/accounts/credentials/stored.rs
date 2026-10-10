@@ -4,12 +4,13 @@ use super::wire::{
     CredentialWire, CREDENTIAL_VERSION, MAX_EMAIL_BYTES, MAX_ID_BYTES, MAX_PLAN_BYTES,
     MAX_TOKEN_BYTES,
 };
+use crate::local_pool::accounts::oauth::OAuthClientKind;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
 use std::fmt;
 use zenith_relay_core::accounts::access_token_is_usable;
 use zenith_relay_core::omit_blank;
-use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
+use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, BasisPointsCapturedHeaders};
 
 mod login;
 mod refresh;
@@ -21,6 +22,7 @@ pub use refresh::CredentialRefresh;
 #[derive(Clone)]
 pub struct StoredCodexCredentials {
     version: u32,
+    oauth_client_kind: OAuthClientKind,
     local_account_id: String,
     access_token: String,
     refresh_token: Option<String>,
@@ -40,6 +42,7 @@ pub struct StoredCodexCredentials {
     proxy_url: Option<String>,
     bypass_common_proxy: bool,
     agent_identity: Option<AgentIdentityCredential>,
+    basis_points_headers: Option<BasisPointsCapturedHeaders>,
 }
 
 impl StoredCodexCredentials {
@@ -70,6 +73,7 @@ impl StoredCodexCredentials {
         validate_optional(plan_type.as_deref(), MAX_PLAN_BYTES)?;
         Ok(Self {
             version: CREDENTIAL_VERSION,
+            oauth_client_kind: OAuthClientKind::Codex,
             local_account_id: local_account_id.to_string(),
             access_token,
             refresh_token: omit_blank(refresh_token),
@@ -89,6 +93,7 @@ impl StoredCodexCredentials {
             proxy_url: None,
             bypass_common_proxy: false,
             agent_identity: None,
+            basis_points_headers: None,
         })
     }
 
@@ -113,6 +118,7 @@ impl StoredCodexCredentials {
         validate_optional(plan_type.as_deref(), MAX_PLAN_BYTES)?;
         Ok(Self {
             version: CREDENTIAL_VERSION,
+            oauth_client_kind: OAuthClientKind::Codex,
             local_account_id: local_account_id.to_string(),
             access_token: String::new(),
             refresh_token: None,
@@ -132,11 +138,21 @@ impl StoredCodexCredentials {
             proxy_url: None,
             bypass_common_proxy: false,
             agent_identity: Some(agent_identity),
+            basis_points_headers: None,
         })
     }
 
     pub fn local_account_id(&self) -> &str {
         &self.local_account_id
+    }
+
+    pub fn oauth_client_kind(&self) -> OAuthClientKind {
+        self.oauth_client_kind
+    }
+
+    pub fn with_oauth_client_kind(mut self, kind: OAuthClientKind) -> Self {
+        self.oauth_client_kind = kind;
+        self
     }
 
     pub fn access_token(&self) -> &str {
@@ -171,6 +187,26 @@ impl StoredCodexCredentials {
 
     pub fn is_agent_identity(&self) -> bool {
         self.agent_identity.is_some()
+    }
+
+    pub fn basis_points_headers(&self) -> Option<&BasisPointsCapturedHeaders> {
+        self.basis_points_headers.as_ref()
+    }
+
+    pub fn with_basis_points_headers(
+        mut self,
+        headers: Option<BasisPointsCapturedHeaders>,
+    ) -> Result<Self, CredentialError> {
+        if let Some(headers) = headers.as_ref() {
+            headers.validate().map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored Basis Points headers are invalid",
+                )
+            })?;
+        }
+        self.basis_points_headers = headers;
+        Ok(self)
     }
 
     pub fn has_oauth(&self) -> bool {
@@ -255,6 +291,7 @@ impl fmt::Debug for StoredCodexCredentials {
         formatter
             .debug_struct("StoredCodexCredentials")
             .field("version", &self.version)
+            .field("oauth_client_kind", &self.oauth_client_kind)
             .field("local_account_id", &self.local_account_id)
             .field("access_token", &"[redacted]")
             .field(
@@ -289,33 +326,38 @@ impl fmt::Debug for StoredCodexCredentials {
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[redacted]"))
             .field("bypass_common_proxy", &self.bypass_common_proxy)
             .field("agent_identity", &self.agent_identity)
+            .field(
+                "basis_points_headers",
+                &self.basis_points_headers.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
 
 impl From<&StoredCodexCredentials> for CredentialWire {
-    fn from(value: &StoredCodexCredentials) -> Self {
+    fn from(credentials: &StoredCodexCredentials) -> Self {
         Self {
-            version: value.version,
-            local_account_id: value.local_account_id.clone(),
-            access_token: value.access_token.clone(),
-            refresh_token: value.refresh_token.clone(),
-            id_token: value.id_token.clone(),
-            expires_at_ms: value.expires_at_ms,
-            issued_at_ms: value.issued_at_ms,
-            generation: value.generation,
-            email: value.email.clone(),
-            phone: value.phone.clone(),
-            password: value.password.clone(),
-            totp_secret: value.totp_secret.clone(),
-            provider_account_id: value.provider_account_id.clone(),
-            provider_user_id: value.provider_user_id.clone(),
-            organization_id: value.organization_id.clone(),
-            plan_type: value.plan_type.clone(),
-            account_is_fedramp: value.account_is_fedramp,
-            proxy_url: value.proxy_url.clone(),
-            bypass_common_proxy: value.bypass_common_proxy,
-            agent_identity: value
+            version: credentials.version,
+            oauth_client_kind: credentials.oauth_client_kind,
+            local_account_id: credentials.local_account_id.clone(),
+            access_token: credentials.access_token.clone(),
+            refresh_token: credentials.refresh_token.clone(),
+            id_token: credentials.id_token.clone(),
+            expires_at_ms: credentials.expires_at_ms,
+            issued_at_ms: credentials.issued_at_ms,
+            generation: credentials.generation,
+            email: credentials.email.clone(),
+            phone: credentials.phone.clone(),
+            password: credentials.password.clone(),
+            totp_secret: credentials.totp_secret.clone(),
+            provider_account_id: credentials.provider_account_id.clone(),
+            provider_user_id: credentials.provider_user_id.clone(),
+            organization_id: credentials.organization_id.clone(),
+            plan_type: credentials.plan_type.clone(),
+            account_is_fedramp: credentials.account_is_fedramp,
+            proxy_url: credentials.proxy_url.clone(),
+            bypass_common_proxy: credentials.bypass_common_proxy,
+            agent_identity: credentials
                 .agent_identity
                 .as_ref()
                 .map(|agent| AgentIdentityWire {
@@ -323,6 +365,7 @@ impl From<&StoredCodexCredentials> for CredentialWire {
                     runtime_id: agent.runtime_id().to_string(),
                     task_id: agent.task_id().map(str::to_string),
                 }),
+            basis_points_headers: credentials.basis_points_headers.clone(),
         }
     }
 }
@@ -348,7 +391,7 @@ impl StoredCodexCredentials {
             ));
         }
         self.proxy_url = proxy_url
-            .map(|value| zenith_relay_core::normalize_proxy_url(&value))
+            .map(|proxy_url| zenith_relay_core::normalize_proxy_url(&proxy_url))
             .transpose()
             .map_err(|_| {
                 CredentialError::new(
@@ -372,6 +415,7 @@ impl StoredCodexCredentials {
     /// rotation for the same local account.
     pub fn matches_snapshot(&self, other: &Self) -> bool {
         self.version == other.version
+            && self.oauth_client_kind == other.oauth_client_kind
             && self.local_account_id == other.local_account_id
             && self.access_token == other.access_token
             && self.refresh_token == other.refresh_token
@@ -390,6 +434,7 @@ impl StoredCodexCredentials {
             && self.account_is_fedramp == other.account_is_fedramp
             && self.proxy_url == other.proxy_url
             && self.bypass_common_proxy == other.bypass_common_proxy
+            && self.basis_points_headers == other.basis_points_headers
             && match (&self.agent_identity, &other.agent_identity) {
                 (None, None) => true,
                 (Some(left), Some(right)) => {
@@ -401,9 +446,9 @@ impl StoredCodexCredentials {
             }
     }
 
-    pub fn snapshots_match(current: Option<&Self>, expected: Option<&Self>) -> bool {
-        match (current, expected) {
-            (Some(current), Some(expected)) => current.matches_snapshot(expected),
+    pub fn snapshots_match(stored: Option<&Self>, expected: Option<&Self>) -> bool {
+        match (stored, expected) {
+            (Some(stored), Some(expected)) => stored.matches_snapshot(expected),
             (None, None) => true,
             _ => false,
         }
@@ -412,6 +457,7 @@ impl StoredCodexCredentials {
     pub fn snapshot(&self) -> StoredCredentialSnapshot {
         StoredCredentialSnapshot {
             version: self.version,
+            oauth_client_kind: self.oauth_client_kind,
             local_account_id: self.local_account_id.clone(),
             identity: self.email.as_deref().map(mask_email),
             has_refresh_token: self.refresh_token.is_some(),
@@ -432,6 +478,7 @@ impl StoredCodexCredentials {
 #[serde(rename_all = "camelCase")]
 pub struct StoredCredentialSnapshot {
     pub version: u32,
+    pub oauth_client_kind: OAuthClientKind,
     pub local_account_id: String,
     pub identity: Option<String>,
     pub has_refresh_token: bool,

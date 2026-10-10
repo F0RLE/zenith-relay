@@ -30,11 +30,11 @@ pub(super) fn reconcile(
     state: &DesktopState,
     store: &LocalPoolStore,
     activity: &BTreeSet<String>,
-    current: &mut BTreeSet<RefreshIdentity>,
+    active_refresh_ids: &mut BTreeSet<RefreshIdentity>,
 ) -> Result<()> {
     for source in store.sources() {
         let (_, fence) = store.source_refresh_scope(&source.id)?;
-        current.insert(fence.identity());
+        active_refresh_ids.insert(fence.identity());
         for kind in [RefreshKind::Models, RefreshKind::Balance] {
             register(state, source, fence.clone(), kind, true, activity)?;
         }
@@ -76,24 +76,29 @@ fn register(
                 Box::pin(async move {
                     let Some(owner) = weak.upgrade() else {
                         return RefreshResult {
-                            value: Err(LocalPoolError::invalid_state("refresh owner stopped")),
+                            refresh_value: Err(LocalPoolError::invalid_state(
+                                "refresh owner stopped",
+                            )),
                             outcome: RefreshOutcome::NoProgress,
                         };
                     };
                     let state = DesktopState { owner };
-                    let value = execute::execute(&state, &fence, job.kind, job.manual).await;
-                    let outcome = match &value {
+                    let refresh_read = execute::execute(&state, &fence, job.kind, job.manual).await;
+                    let outcome = match &refresh_read {
                         Ok(RefreshRead::SourceModels(source))
                             if source.last_test_status.as_deref() == Some("ok") =>
                         {
                             RefreshOutcome::Success
                         }
-                        Ok(RefreshRead::SourceStats(stats)) => {
-                            source_stats_outcome(&stats.stats, state.refresh.now_ms())
+                        Ok(RefreshRead::SourceStats(source_stats)) => {
+                            source_stats_outcome(&source_stats.stats, state.refresh.now_ms())
                         }
                         _ => RefreshOutcome::retry_after(state.refresh.now_ms(), None),
                     };
-                    RefreshResult { value, outcome }
+                    RefreshResult {
+                        refresh_value: refresh_read,
+                        outcome,
+                    }
                 })
             },
         )
@@ -145,14 +150,14 @@ pub(crate) async fn request_models(
         )?;
         fence
     };
-    let result = state
+    let models_refresh_result = state
         .refresh
         .request(&fence.identity(), RefreshKind::Models)
         .await
         .map_err(wait_error)?;
     let _mutation = state.setup_guard().await;
     state.store()?.ensure_source_refresh_current(&fence)?;
-    match result.as_ref().clone()? {
+    match models_refresh_result.as_ref().clone()? {
         RefreshRead::SourceModels(source) => Ok(*source),
         _ => Err(LocalPoolError::invalid_state(
             "unexpected source models result",
@@ -173,14 +178,14 @@ pub(crate) async fn request_stats(
             return Ok(stats);
         }
     }
-    let result = state
+    let stats_refresh_result = state
         .refresh
         .request(&fence.identity(), RefreshKind::Balance)
         .await
         .map_err(wait_error)?;
     let _mutation = state.setup_guard().await;
     ensure_stats_current(state, &fence, &base_url)?;
-    match result.as_ref().clone()? {
+    match stats_refresh_result.as_ref().clone()? {
         RefreshRead::SourceStats(observation) => {
             observation.current(&base_url).cloned().ok_or_else(|| {
                 LocalPoolError::new(ErrorCode::Conflict, "source changed during refresh")
@@ -215,7 +220,7 @@ fn ensure_stats_current(
     store.ensure_source_refresh_current(fence)?;
     if store
         .source(&fence.source_id)
-        .is_none_or(|record| record.base_url != base_url)
+        .is_none_or(|source_record| source_record.base_url != base_url)
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,

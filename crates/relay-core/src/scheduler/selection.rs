@@ -162,14 +162,18 @@ impl PoolScheduler {
     ) -> Option<Selection> {
         let mut rotation_request = self.prepare_rotation_request(&request, operation)?;
         if let Some(allowed) = &mut rotation_request.allowed_candidates {
-            allowed.retain(|id| self.lane_allows(&self.candidates[id], lane));
+            allowed.retain(|candidate_id| self.lane_allows(&self.candidates[candidate_id], lane));
         }
         let owner = rotation_request.owner.clone();
         let selected = self.rotation.select(&rotation_request, request.now_ms)?;
         let reason = if owner.is_none()
             && !selected.recovery
             && self.rotation.mode() == RotationMode::Automatic
-            && selected.reason != super::rotation::RotationSelectionReason::QuotaHeadroom
+            && !matches!(
+                selected.reason,
+                super::rotation::RotationSelectionReason::QuotaHeadroom
+                    | super::rotation::RotationSelectionReason::ProviderCredits
+            )
             && rotation_request.preferred.as_deref() == Some(selected.candidate_id.as_str())
         {
             SelectionReason::PromptCacheAffinity
@@ -184,7 +188,10 @@ impl PoolScheduler {
                 super::rotation::RotationSelectionReason::QuotaHeadroom => {
                     SelectionReason::QuotaHeadroom
                 }
-                super::rotation::RotationSelectionReason::PrimaryFirst => {
+                super::rotation::RotationSelectionReason::ProviderCredits => {
+                    SelectionReason::ProviderCredits
+                }
+                super::rotation::RotationSelectionReason::ManualPriority => {
                     SelectionReason::ManualPriority
                 }
                 super::rotation::RotationSelectionReason::WeightedRotation => {

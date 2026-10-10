@@ -9,8 +9,11 @@ impl PoolScheduler {
             .as_ref()
             .map(|policy| match policy.mode {
                 crate::PoolRoutingMode::Automatic => RotationMode::Automatic,
-                crate::PoolRoutingMode::InOrder => RotationMode::InOrder,
-                crate::PoolRoutingMode::RoundRobin => RotationMode::RoundRobin,
+                // Both previously exposed manual choices now use one cycling
+                // mode. Their saved member order remains the manual priority.
+                crate::PoolRoutingMode::InOrder | crate::PoolRoutingMode::RoundRobin => {
+                    RotationMode::Manual
+                }
                 // `set_pool_routing` validates activation before storing the
                 // policy. Smart is therefore a storage/import compatibility
                 // value only and must never silently select a runtime mode.
@@ -30,34 +33,38 @@ impl PoolScheduler {
         &self,
         candidate: &RuntimeCandidate,
     ) -> Option<RotationCandidate> {
-        let first_model = candidate.models.iter().next()?.clone();
-        let first_key = Self::rotation_route_key(&first_model, RotationOperation::Text);
-        let mut result = RotationCandidate::new(&candidate.id, first_key, first_model);
-        result.capacity_key = members::member_key(candidate);
-        result.priority = self
+        let primary_model = candidate.models.iter().next()?.clone();
+        let primary_route_key = Self::rotation_route_key(&primary_model, RotationOperation::Text);
+        let mut rotation_candidate =
+            RotationCandidate::new(&candidate.id, primary_route_key, primary_model);
+        rotation_candidate.capacity_key = members::member_key(candidate);
+        rotation_candidate.priority = self
             .member_policy(candidate)
             .map_or(candidate.priority, |(rank, _)| {
                 -i32::try_from(rank).unwrap_or(i32::MAX)
             });
-        result.weight = self.member_weight(candidate).clamp(1, 100);
-        result.capacity_limit = self
+        rotation_candidate.weight = self.member_weight(candidate).clamp(1, 100);
+        rotation_candidate.capacity_limit = self
             .member_policy(candidate)
             .and_then(|(_, member)| (member.max_concurrency > 0).then_some(member.max_concurrency))
             .unwrap_or_default();
-        result.enabled = candidate.enabled;
-        result.draining = candidate.draining;
-        result.routes.clear();
-        result.route_rates.clear();
+        rotation_candidate.provider_credits_micro_units = candidate.provider_credits_micro_units;
+        rotation_candidate.provider_credits_unlimited = candidate.provider_credits_unlimited;
+        rotation_candidate.provider_credits_observed_at_ms = candidate.quota_updated_at_ms;
+        rotation_candidate.enabled = candidate.enabled;
+        rotation_candidate.draining = candidate.draining;
+        rotation_candidate.routes.clear();
+        rotation_candidate.route_rates.clear();
         for model in &candidate.models {
             if crate::runtime::is_image_model_id(model) {
-                result.add_route(
+                rotation_candidate.add_route(
                     Self::rotation_route_key(model, RotationOperation::Image),
                     model,
                     RotationOperation::Image,
                 );
                 continue;
             }
-            result.add_route(
+            rotation_candidate.add_route(
                 Self::rotation_route_key(model, RotationOperation::Text),
                 model,
                 RotationOperation::Text,
@@ -65,21 +72,21 @@ impl PoolScheduler {
             if candidate.kind == CandidateKind::OAuthAccount
                 && candidate.protocol == WireApi::Responses
             {
-                result.add_route(
+                rotation_candidate.add_route(
                     Self::rotation_route_key(model, RotationOperation::Compaction),
                     model,
                     RotationOperation::Compaction,
                 );
             }
         }
-        Some(result)
+        Some(rotation_candidate)
     }
 
     pub(super) fn sync_all_rotation_candidates(&mut self) {
         self.rotation
             .set_quota_stale_after_ms(self.quota_stale_after_ms);
-        let current_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
-        let stale_ids = self
+        let current_candidate_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
+        let leased_candidate_ids = self
             .rotation_leases
             .values()
             .map(|lease| lease.candidate_id.clone())
@@ -91,9 +98,9 @@ impl PoolScheduler {
             let Some(rotation_candidate) = self.rotation_candidate(candidate) else {
                 continue;
             };
-            let id = rotation_candidate.id.clone();
+            let candidate_id = rotation_candidate.id.clone();
             let _ = self.rotation.upsert(rotation_candidate);
-            let auth = if candidate.health.is_eligible() {
+            let auth_state = if candidate.health.is_eligible() {
                 RotationAuthState::Ready
             } else {
                 RotationAuthState::Blocked
@@ -101,6 +108,7 @@ impl PoolScheduler {
             let routing_quota = self.routing_quota(candidate);
             let (quota, remaining) = match routing_quota {
                 CandidateQuota::Unknown => (RotationQuotaState::Unknown, None),
+                CandidateQuota::CreditFallback => (RotationQuotaState::Unknown, None),
                 CandidateQuota::Available(0) => (
                     RotationQuotaState::Exhausted {
                         reset_at_ms: candidate.quota_reset_at_ms,
@@ -119,35 +127,46 @@ impl PoolScheduler {
                 ),
             };
             let global_not_before_ms = candidate.cooldowns.get("*").copied().filter(|_| {
-                self.cooldown_reasons.get(&(id.clone(), "*".into()))
+                self.cooldown_reasons
+                    .get(&(candidate_id.clone(), "*".into()))
                     != Some(&CooldownReason::Transient)
             });
-            let rate = global_not_before_ms.map_or(RotationRateState::Ready, |not_before_ms| {
-                RotationRateState::Limited { not_before_ms }
-            });
+            let global_rate = global_not_before_ms
+                .map_or(RotationRateState::Ready, |not_before_ms| {
+                    RotationRateState::Limited { not_before_ms }
+                });
             let _ = self.rotation.sync_candidate_state(
-                &id,
+                &candidate_id,
                 candidate.enabled,
                 candidate.draining,
-                auth,
+                auth_state,
                 quota,
-                rate,
+                global_rate,
             );
-            let _ =
-                self.rotation
-                    .set_quota_remaining(&id, remaining, candidate.quota_updated_at_ms);
+            let _ = self.rotation.set_quota_remaining(
+                &candidate_id,
+                remaining,
+                candidate.quota_updated_at_ms,
+            );
+            let _ = self.rotation.set_provider_credits(
+                &candidate_id,
+                candidate.provider_credits_micro_units,
+                candidate.provider_credits_unlimited,
+                candidate.quota_updated_at_ms,
+            );
             for model in &candidate.models {
                 let not_before_ms = candidate
                     .cooldowns
                     .iter()
                     .filter(|(scope, _)| scope.as_str() == "*" || scope.eq_ignore_ascii_case(model))
                     .filter(|(scope, _)| {
-                        self.cooldown_reasons.get(&(id.clone(), (*scope).clone()))
+                        self.cooldown_reasons
+                            .get(&(candidate_id.clone(), (*scope).clone()))
                             != Some(&CooldownReason::Transient)
                     })
                     .map(|(_, not_before_ms)| *not_before_ms)
                     .max();
-                let rate = not_before_ms.map_or(RotationRateState::Ready, |not_before_ms| {
+                let route_rate = not_before_ms.map_or(RotationRateState::Ready, |not_before_ms| {
                     RotationRateState::Limited { not_before_ms }
                 });
                 for operation in [
@@ -156,16 +175,21 @@ impl PoolScheduler {
                     RotationOperation::Image,
                 ] {
                     let route_key = Self::rotation_route_key(model, operation);
-                    let _ = self
-                        .rotation
-                        .sync_candidate_route_rate(&id, &route_key, rate);
+                    let _ = self.rotation.sync_candidate_route_rate(
+                        &candidate_id,
+                        &route_key,
+                        route_rate,
+                    );
                 }
             }
         }
         for stale in self
             .rotation
             .candidate_ids()
-            .filter(|id| !current_ids.contains(id) && !stale_ids.contains(id))
+            .filter(|candidate_id| {
+                !current_candidate_ids.contains(candidate_id)
+                    && !leased_candidate_ids.contains(candidate_id)
+            })
             .collect::<Vec<_>>()
         {
             let _ = self.rotation.remove(&stale);
@@ -178,79 +202,87 @@ impl PoolScheduler {
         candidate_id: Option<&str>,
         model: &str,
         operation: RotationOperation,
-        allowed: BTreeSet<String>,
+        allowed_candidate_ids: BTreeSet<String>,
     ) -> RotationRequest {
-        let mut request = RotationRequest::new(
+        let mut rotation_request = RotationRequest::new(
             request_id.unwrap_or_else(RotationEngine::next_request_id),
             Self::rotation_route_key(model, operation),
             model,
         )
         .with_operation(operation)
-        .with_allowed_candidates(allowed);
+        .with_allowed_candidates(allowed_candidate_ids);
         if let Some(candidate_id) = candidate_id {
-            request = request.with_owner(candidate_id);
+            rotation_request = rotation_request.with_owner(candidate_id);
         }
-        request
+        rotation_request
     }
 
     pub(super) fn prepare_rotation_request(
         &mut self,
-        request: &SelectionRequest<'_>,
+        selection_request: &SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> Option<RotationRequest> {
         if self.retired {
             return None;
         }
         self.sync_all_rotation_candidates();
-        let mut allowed = BTreeSet::new();
+        let mut allowed_candidate_ids = BTreeSet::new();
         for candidate in self.candidates.values() {
-            if request.tried.contains(&candidate.id)
+            if selection_request.tried.contains(&candidate.id)
                 || !self.rotation_visible(
                     candidate,
-                    request.model,
-                    request.allowed_protocols,
-                    request.scope,
-                    request.now_ms,
+                    selection_request.model,
+                    selection_request.allowed_protocols,
+                    selection_request.scope,
+                    selection_request.now_ms,
                 )
             {
                 continue;
             }
-            allowed.insert(candidate.id.clone());
+            allowed_candidate_ids.insert(candidate.id.clone());
         }
-        let owner = request.response_affinity_key.and_then(|key| {
+        let affinity_candidate_id = selection_request.response_affinity_key.and_then(|key| {
             self.response_affinity
-                .get(key, request.now_ms)
+                .get(key, selection_request.now_ms)
                 .map(str::to_owned)
         });
-        if owner
+        if affinity_candidate_id
             .as_deref()
-            .is_some_and(|candidate_id| !allowed.contains(candidate_id))
+            .is_some_and(|candidate_id| !allowed_candidate_ids.contains(candidate_id))
         {
             return None;
         }
         // One physical member has one vote; prefer its native protocol route
         // before engine selection so aliases cannot alter weight or capacity.
         let mut members = BTreeMap::new();
-        for id in &allowed {
-            let candidate = &self.candidates[id];
-            let entry = members
+        for candidate_id in &allowed_candidate_ids {
+            let candidate = &self.candidates[candidate_id];
+            let preferred_candidate = members
                 .entry(members::member_key(candidate))
                 .or_insert(candidate);
-            if self.compare_member_routes(candidate, entry).is_gt() {
-                *entry = candidate;
+            if self
+                .compare_member_routes(candidate, preferred_candidate)
+                .is_gt()
+            {
+                *preferred_candidate = candidate;
             }
         }
-        if owner.is_none() {
-            allowed = members
+        if affinity_candidate_id.is_none() {
+            allowed_candidate_ids = members
                 .into_values()
                 .map(|candidate| candidate.id.clone())
                 .collect();
         }
-        let mut rotation_request =
-            self.rotation_request(None, owner.as_deref(), request.model, operation, allowed);
-        rotation_request.preferred = request.prompt_affinity_key.and_then(|key| {
+        let mut rotation_request = self.rotation_request(
+            None,
+            affinity_candidate_id.as_deref(),
+            selection_request.model,
+            operation,
+            allowed_candidate_ids,
+        );
+        rotation_request.preferred = selection_request.prompt_affinity_key.and_then(|key| {
             self.prompt_affinity
-                .get(key, request.now_ms)
+                .get(key, selection_request.now_ms)
                 .map(str::to_owned)
         });
         Some(rotation_request)
@@ -287,7 +319,10 @@ impl PoolScheduler {
         match candidate.quota {
             CandidateQuota::Available(remaining) => remaining.saturating_sub(reserve),
             CandidateQuota::Unknown if reserve == 0 => 1,
-            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => 0,
+            CandidateQuota::Unknown
+            | CandidateQuota::CreditFallback
+            | CandidateQuota::Exhausted
+            | CandidateQuota::Stale => 0,
         }
     }
 

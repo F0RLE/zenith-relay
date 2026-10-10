@@ -1,10 +1,7 @@
 use super::prelude::*;
+use super::recovery::mark_adapter_failure;
 use super::recovery::{
     adapter_error_response, adapter_error_response_for_origin, replay_native_tool_continuation,
-};
-use super::retry::{
-    basis_points_relay_error_response, handle_basis_points_relay_retry, mark_adapter_failure,
-    BasisPointsRelayRetryContext,
 };
 use super::translate::{
     translate_basis_points_completed, translate_completed_response, CompletedBasisPointsResponse,
@@ -32,25 +29,20 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) status: StatusCode,
     pub(super) response_headers: &'a HeaderMap,
     pub(super) account_route: bool,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) requires_affinity_owner: &'a mut bool,
     pub(super) has_unpaired_tool_output: &'a mut bool,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_failure_origin: &'a mut ErrorOrigin,
     pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
     pub(super) has_previous_response_id: bool,
-    pub(super) basis_points_route: bool,
     pub(super) basis_points_request: &'a Option<Value>,
     pub(super) stream: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) basis_points_relay_retry_attempted: &'a mut bool,
-    pub(super) basis_points_relay_retry_parameter: &'a mut Option<&'static str>,
     pub(super) tried: &'a mut HashSet<String>,
-    pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) response_affinity_hit: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
@@ -80,25 +72,20 @@ pub(super) async fn complete_buffered_response(
         status,
         response_headers,
         account_route,
-        wire_api,
+        client_wire_api,
         request,
         adapter_is_passthrough,
         repairs,
-        response_affinity_key,
         requires_affinity_owner,
         has_unpaired_tool_output,
         last_failure,
         last_failure_origin,
         last_preserved_upstream_error,
         has_previous_response_id,
-        basis_points_route,
         basis_points_request,
         stream,
         adapter_request,
-        basis_points_relay_retry_attempted,
-        basis_points_relay_retry_parameter,
         tried,
-        last_adapter_error,
         selected_error_origin,
         response_affinity_hit,
         prompt_affinity_key,
@@ -136,14 +123,13 @@ pub(super) async fn complete_buffered_response(
             request,
             response_headers,
             status,
-            wire_api,
+            client_wire_api,
             stream,
             account_route,
             response_affinity_hit,
             has_previous_response_id,
             selected_error_origin,
             native_replay_attempted,
-            response_affinity_key,
             requires_affinity_owner,
             has_unpaired_tool_output,
             tried,
@@ -161,7 +147,6 @@ pub(super) async fn complete_buffered_response(
     let mut event = usage(true, status.as_u16(), None);
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
-    let basis_points_retry_body = basis_points_route.then(|| bytes.clone());
     let translated = if let Some(responses_request) = basis_points_request.as_ref() {
         translate_basis_points_completed(adapter_request, &bytes, responses_request, stream)
     } else {
@@ -180,34 +165,6 @@ pub(super) async fn complete_buffered_response(
     } = match translated {
         Ok(response) => response,
         Err(error) => {
-            if basis_points_route {
-                match handle_basis_points_relay_retry(
-                    error,
-                    basis_points_retry_body.as_deref().unwrap_or_default(),
-                    event,
-                    BasisPointsRelayRetryContext {
-                        attempted: basis_points_relay_retry_attempted,
-                        parameter: basis_points_relay_retry_parameter,
-                        runtime,
-                        tried,
-                        candidate_id: &route.candidate_id,
-                        lease,
-                        last_adapter_error,
-                    },
-                ) {
-                    Ok(()) => return CompletionStep::Continue,
-                    Err(pair) => {
-                        let (error, event) = *pair;
-                        return CompletionStep::Respond(basis_points_relay_error_response(
-                            error,
-                            event,
-                            runtime,
-                            lease,
-                            selected_error_origin,
-                        ));
-                    }
-                }
-            }
             emit_usage(runtime, mark_adapter_failure(event, &error));
             lease.settle_rotation_terminal(now_ms());
             return CompletionStep::Respond(adapter_error_response_for_origin(
@@ -260,7 +217,7 @@ pub(super) async fn complete_buffered_response(
             now_ms(),
         );
     }
-    if wire_api == WireApi::Responses {
+    if client_wire_api == WireApi::Responses {
         bind_responses_turn(
             runtime,
             &key.id,
@@ -299,9 +256,10 @@ fn buffered_client_response(
     selected_error_origin: ErrorOrigin,
 ) -> CompletionStep {
     if let Some(stream_body) = basis_points_stream {
-        let mut response = proxy_sse_response(status, response_headers, Body::from(stream_body));
-        relay_account_response_header(forwarded_headers, response_headers, &mut response);
-        return CompletionStep::Respond(response);
+        let mut stream_response =
+            proxy_sse_response(status, response_headers, Body::from(stream_body));
+        relay_account_response_header(forwarded_headers, response_headers, &mut stream_response);
+        return CompletionStep::Respond(stream_response);
     }
     if account_route || !adapter_is_passthrough {
         if summarize && client_stream {
@@ -314,18 +272,22 @@ fn buffered_client_response(
                     ));
                 }
             };
-            let mut response =
+            let mut stream_response =
                 proxy_sse_response(status, response_headers, Body::from(stream_body));
             if account_route && adapter_is_passthrough {
-                relay_account_response_header(forwarded_headers, response_headers, &mut response);
+                relay_account_response_header(
+                    forwarded_headers,
+                    response_headers,
+                    &mut stream_response,
+                );
             }
-            return CompletionStep::Respond(response);
+            return CompletionStep::Respond(stream_response);
         }
-        let mut response = proxy_json_response(status, response_headers, Body::from(bytes));
+        let mut json_response = proxy_json_response(status, response_headers, Body::from(bytes));
         if account_route && adapter_is_passthrough {
-            relay_account_response_header(forwarded_headers, response_headers, &mut response);
+            relay_account_response_header(forwarded_headers, response_headers, &mut json_response);
         }
-        return CompletionStep::Respond(response);
+        return CompletionStep::Respond(json_response);
     }
     CompletionStep::Respond(proxy_response(status, response_headers, Body::from(bytes)))
 }
@@ -340,14 +302,13 @@ struct CompletedBodyRead<'a> {
     request: &'a mut Value,
     response_headers: &'a HeaderMap,
     status: StatusCode,
-    wire_api: WireApi,
+    client_wire_api: WireApi,
     stream: bool,
     account_route: bool,
     response_affinity_hit: bool,
     has_previous_response_id: bool,
     selected_error_origin: ErrorOrigin,
     native_replay_attempted: &'a mut bool,
-    response_affinity_key: &'a mut Option<String>,
     requires_affinity_owner: &'a mut bool,
     has_unpaired_tool_output: &'a mut bool,
     tried: &'a mut HashSet<String>,
@@ -362,30 +323,32 @@ async fn read_completed_body(
     read: &mut CompletedBodyRead<'_>,
     usage: &impl Fn(bool, u16, Option<String>) -> UsageEvent,
 ) -> Result<Vec<u8>, CompletionStep> {
-    match collect_upstream_response(
-        upstream,
-        read.account_route,
-        (read.account_route && read.runtime.block_degraded_routes_enabled())
-            .then_some(read.route.source_model.as_str()),
-    )
-    .await
+    let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
+        .then_some(read.route.source_model.as_str());
+    let collected = if read.route.account_transport
+        == crate::runtime::AccountTransport::ExcelBasisPoints
     {
+        super::super::super::response::collect_basis_points_response(upstream, expected_model).await
+    } else {
+        collect_upstream_response(upstream, read.account_route, expected_model).await
+    };
+    match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
             let mut failure = upstream_failure.failure;
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
-            let state = if matches!(
+            let failure_state = if matches!(
                 failure.category,
-                error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE
+                error_codes::UPSTREAM_BODY | error_codes::STREAM_IDLE_TIMEOUT
             ) {
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
             } else {
-                settle_attempt_failure(
+                settle_route_failure(
                     read.runtime,
                     read.lease,
-                    read.source_model,
+                    read.route,
                     &failure,
                     read.response_headers,
                 )
@@ -395,11 +358,12 @@ async fn read_completed_body(
                 failure.status.as_u16(),
                 Some(failure.category.to_string()),
             );
+            populate_tokens(&mut event, &upstream_failure.partial_body);
             event.upstream_error = upstream_failure.upstream_error.map(|mut details| {
                 details.http_status = Some(read.status.as_u16());
                 details
             });
-            if read.wire_api == WireApi::Responses
+            if read.client_wire_api == WireApi::Responses
                 && failure.execution.certainty == ExecutionCertainty::NotSent
                 && read.response_affinity_hit
                 && read.has_previous_response_id
@@ -415,8 +379,7 @@ async fn read_completed_body(
                     read.native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        clear_materialized_continuation(
-                            read.response_affinity_key,
+                        retain_materialized_continuation_owner(
                             read.requires_affinity_owner,
                             read.has_unpaired_tool_output,
                         );
@@ -435,9 +398,10 @@ async fn read_completed_body(
                     }
                 }
             }
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
+                || route_forbids_fallback(read.route, failure.status, failure.category)
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return Err(CompletionStep::Respond(attempt_error_response(

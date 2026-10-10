@@ -17,14 +17,15 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            let source = self
+            let provider_source = self
                 .sources
                 .get(&binding.source_id)
                 .ok_or(ExecutorPrepareError::Authentication)?;
-            let source_binding = source
+            let source_binding = provider_source
                 .binding_for(binding.binding_key)
                 .ok_or(ExecutorPrepareError::Authentication)?;
-            let (header_name, authorization) = source.authorization_for_binding(source_binding);
+            let (header_name, authorization) =
+                provider_source.authorization_for_binding(source_binding);
             return Ok(PreparedAuthorization {
                 header_name,
                 authorization,
@@ -198,26 +199,26 @@ impl ChatGptAccountExecutor {
         if !self.active.load(Ordering::Acquire) {
             return Err(ExecutorPrepareError::Authentication);
         }
-        let (current, ready) = self.current_agent_identity(expected_task_id)?;
+        let (agent_identity, ready) = self.current_agent_identity(expected_task_id)?;
         if ready {
-            return Ok(current);
+            return Ok(agent_identity);
         }
 
         let _guard = self.agent_task_lock.lock().await;
-        let (current, ready) = self.current_agent_identity(expected_task_id)?;
+        let (agent_identity, ready) = self.current_agent_identity(expected_task_id)?;
         if ready {
-            return Ok(current);
+            return Ok(agent_identity);
         }
-        let task_id = current
+        let task_id = agent_identity
             .register_task(&self.clients.http)
             .await
             .map_err(classify_agent_identity_error)?;
         let task_id = self
             .persistence_adapter
-            .persist_agent_task_id_for_identity(&self.id, &current, &task_id)
+            .persist_agent_task_id_for_identity(&self.id, &agent_identity, &task_id)
             .await
             .map_err(|_| ExecutorPrepareError::Persistence)?;
-        let updated = current
+        let updated = agent_identity
             .with_task_id(task_id)
             .map_err(|_| ExecutorPrepareError::InvalidCredential)?;
         if !self.active.load(Ordering::Acquire) {
@@ -236,15 +237,15 @@ impl ChatGptAccountExecutor {
         &self,
         expected_task_id: Option<&str>,
     ) -> std::result::Result<(AgentIdentityCredential, bool), ExecutorPrepareError> {
-        let current = self
+        let agent_identity = self
             .agent_identity
             .read()
             .map_err(|_| ExecutorPrepareError::Transient)?
             .clone()
             .ok_or(ExecutorPrepareError::Authentication)?;
-        let ready = current.task_id().is_some()
-            && expected_task_id.is_none_or(|expected| current.task_id() != Some(expected));
-        Ok((current, ready))
+        let ready = agent_identity.task_id().is_some()
+            && expected_task_id.is_none_or(|expected| agent_identity.task_id() != Some(expected));
+        Ok((agent_identity, ready))
     }
 }
 
@@ -262,15 +263,15 @@ pub(super) async fn inspect_agent_identity_unauthorized(
     let status = response.status();
     let version = response.version();
     let headers = response.headers().clone();
-    let body = response
+    let response_body = response
         .bytes()
         .await
         .map_err(AuthorizedRequestError::Transport)?;
-    let invalid = is_agent_identity_task_invalid_response(status.as_u16(), &body);
+    let invalid = is_agent_identity_task_invalid_response(status.as_u16(), &response_body);
     let mut restored = axum::http::Response::builder()
         .status(status)
         .version(version)
-        .body(reqwest::Body::from(body))
+        .body(reqwest::Body::from(response_body))
         .map_err(|_| AuthorizedRequestError::NotReplayable)?;
     *restored.headers_mut() = headers;
     Ok((reqwest::Response::from(restored), invalid))

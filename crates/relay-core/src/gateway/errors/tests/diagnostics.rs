@@ -29,6 +29,10 @@ async fn generated_errors_keep_the_original_diagnostic_category() {
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["code"], "invalid_request");
     assert_eq!(
+        body["error"]["message"],
+        "Provider: upstream rejected the request"
+    );
+    assert_eq!(
         body["error"]["zenith_relay"]["category"],
         "upstream_invalid_request"
     );
@@ -50,18 +54,81 @@ async fn adapter_failures_are_reported_as_relay_errors() {
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["zenith_relay"]["origin"], "relay");
     assert_eq!(
+        body["error"]["message"],
+        "Relay: upstream rejected the translated request"
+    );
+    assert_eq!(
         body["error"]["zenith_relay"]["category"],
         "adapter_upstream_error"
     );
 }
 
+#[test]
+fn upstream_error_body_prefixes_the_selected_origin_once_and_keeps_diagnostics() {
+    for (origin, expected) in [
+        (ErrorOrigin::Account, "Account: invalid request"),
+        (ErrorOrigin::Provider, "Provider: invalid request"),
+        (ErrorOrigin::Relay, "Relay: invalid request"),
+    ] {
+        let original = br#"{"error":{"code":"bad_request","type":"validation_error","message":"Provider: invalid request"},"request_id":"synthetic-1"}"#;
+        let body = prefix_error_body(original, origin);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["message"], expected);
+        assert_eq!(value["error"]["code"], "bad_request");
+        assert_eq!(value["error"]["type"], "validation_error");
+        assert_eq!(value["request_id"], "synthetic-1");
+        assert_eq!(prefix_error_body(&body, origin), body);
+    }
+}
+
+#[test]
+fn scalar_upstream_error_text_is_prefixed_without_rewriting_error_codes() {
+    let body = prefix_error_body(
+        br#"{"error":"upstream connection closed"}"#,
+        ErrorOrigin::Account,
+    );
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"], "Account: upstream connection closed");
+
+    let body = prefix_error_body(
+        br#"{"error":"invalid_grant","error_description":"token is no longer valid"}"#,
+        ErrorOrigin::Account,
+    );
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"], "invalid_grant");
+    assert_eq!(
+        value["error_description"],
+        "Account: token is no longer valid"
+    );
+
+    let body = prefix_error_body(
+        br#"{"error":{"code":"invalid_grant"}}"#,
+        ErrorOrigin::Account,
+    );
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_grant");
+    assert_eq!(value.get("message"), None);
+
+    let body = prefix_error_body(
+        br#"{"errors":[{"message":"Provider: request rejected"}]}"#,
+        ErrorOrigin::Relay,
+    );
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["errors"][0]["message"], "Relay: request rejected");
+
+    assert_eq!(
+        ErrorOrigin::Relay.prefix_message(" Account: Provider: request rejected"),
+        "Relay: request rejected"
+    );
+}
+
 #[tokio::test]
-async fn native_provider_error_body_is_not_rewritten_for_diagnostics() {
+async fn proxy_error_response_prefixes_message_and_attaches_diagnostics() {
     let original = br#"{"error":{"code":"bad_request","message":"upstream rejected request"}}"#;
     let response = crate::gateway::response::proxy_error_response(
         StatusCode::BAD_REQUEST,
         &reqwest::header::HeaderMap::new(),
-        Body::from(original.to_vec()),
+        original,
         ErrorOrigin::Provider,
         "upstream_invalid_request",
         Some("relay-request-2"),
@@ -82,7 +149,12 @@ async fn native_provider_error_body_is_not_rewritten_for_diagnostics() {
         Some("upstream_invalid_request")
     );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), original);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert_eq!(
+        body["error"]["message"],
+        "Provider: upstream rejected request"
+    );
 }
 
 #[test]

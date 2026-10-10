@@ -14,47 +14,52 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   const summaries = new Map<string, ModelSummary>();
   const order: string[] = [];
   const catalog = new Map(
-    Object.entries(runtime.gateway.modelCatalog ?? {}).map(([id, identity]) => [modelIdKey(id), identity]),
+    Object.entries(runtime.gateway.modelCatalog ?? {}).map(([modelId, identity]) => [modelIdKey(modelId), identity]),
   );
-  const add = (id: string, summary?: ModelSummary) => {
-    const normalized = modelIdKey(id);
-    if (!normalized) return;
-    if (!summaries.has(normalized)) order.push(normalized);
-    const next = summary ? normalizeModelSummary(summary) : fallbackModelSummary(id.trim());
-    const identity = catalog.get(normalized);
+  const add = (modelId: string, incomingModelSummary?: ModelSummary) => {
+    const normalizedModelId = modelIdKey(modelId);
+    if (!normalizedModelId) return;
+    if (!summaries.has(normalizedModelId)) order.push(normalizedModelId);
+    const incomingSummary = incomingModelSummary
+      ? normalizeModelSummary(incomingModelSummary)
+      : fallbackModelSummary(modelId.trim());
+    const identity = catalog.get(normalizedModelId);
     // A source/account model can arrive before the derived gateway row. Keep
     // its catalog provider so the pool view still groups it correctly.
-    if (identity && !next.catalogProvider) {
-      next.catalogProvider = identity.catalogProvider ?? null;
-      next.catalogFamily = identity.catalogFamily ?? null;
+    if (identity && !incomingSummary.catalogProvider) {
+      incomingSummary.catalogProvider = identity.catalogProvider ?? null;
+      incomingSummary.catalogFamily = identity.catalogFamily ?? null;
     }
-    const existing = summaries.get(normalized);
-    summaries.set(normalized, existing ? mergeModelSummary(existing, next) : next);
+    const existingSummary = summaries.get(normalizedModelId);
+    summaries.set(normalizedModelId, existingSummary
+      ? mergeModelSummary(existingSummary, incomingSummary)
+      : incomingSummary);
   };
 
   for (const model of runtime.gateway.models ?? []) add(model.id, model);
-  for (const id of runtime.gateway.visibleModelIds) add(id);
+  for (const modelId of runtime.gateway.visibleModelIds) add(modelId);
+  // Match the pool/runtime inventory: native accounts establish the order of
+  // shared IDs, then API sources append their remaining models.
+  for (const account of runtime.accounts) {
+    for (const modelId of account.models) add(modelId);
+  }
   for (const source of runtime.sources) {
-    for (const id of source.models) add(id);
+    for (const modelId of source.models) add(modelId);
     // A partially migrated source can have the model only on its binding.
     for (const binding of source.protocolBindings ?? []) {
-      for (const id of binding.modelIds) add(id);
+      for (const modelId of binding.modelIds) add(modelId);
     }
   }
-  for (const account of runtime.accounts) {
-    for (const id of account.models) add(id);
-  }
-
   const memberCount = new Map<string, number>();
   for (const member of [...runtime.sources, ...runtime.accounts]) {
-    const ids = new Set(member.models.map((id) => modelIdKey(id)).filter(Boolean));
-    for (const id of ids) memberCount.set(id, (memberCount.get(id) ?? 0) + 1);
+    const memberModelIds = new Set(member.models.map((modelId) => modelIdKey(modelId)).filter(Boolean));
+    for (const modelId of memberModelIds) memberCount.set(modelId, (memberCount.get(modelId) ?? 0) + 1);
   }
 
-  return order.map((id) => {
-    const model = summaries.get(id)!;
-    const count = memberCount.get(id);
-    return count == null ? model : { ...model, memberCount: count };
+  return order.map((modelId) => {
+    const modelSummary = summaries.get(modelId)!;
+    const count = memberCount.get(modelId);
+    return count == null ? modelSummary : { ...modelSummary, memberCount: count };
   });
 }
 
@@ -68,8 +73,8 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
 export function currentPoolModelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   const memberCounts = new Map<string, number>();
   const addMember = (ids: string[]) => {
-    for (const id of new Set(ids.map((id) => modelIdKey(id)).filter(Boolean))) {
-      memberCounts.set(id, (memberCounts.get(id) ?? 0) + 1);
+    for (const modelId of new Set(ids.map((modelId) => modelIdKey(modelId)).filter(Boolean))) {
+      memberCounts.set(modelId, (memberCounts.get(modelId) ?? 0) + 1);
     }
   };
   for (const source of runtime.sources) {
@@ -103,31 +108,31 @@ function normalizeModelSummary(model: ModelSummary): ModelSummary {
   };
 }
 
-function mergeModelSummary(existing: ModelSummary, incoming: ModelSummary): ModelSummary {
-  const merged = { ...existing };
-  const preferIncoming = <T>(current: T | null | undefined, next: T | null | undefined) =>
-    current == null || current === "" ? next : current;
-  const unionArray = <T>(current: readonly T[] | undefined, next: readonly T[] | undefined) =>
-    [...new Set([...(current ?? []), ...(next ?? [])])];
-  const unionReasoningLevels = (current: readonly string[] | undefined, next: readonly string[] | undefined) =>
-    sortReasoningEfforts([...(current ?? []), ...(next ?? [])]);
-  const unionImagePrices = (current: ModelSummary["imageRequestPrices"], next: ModelSummary["imageRequestPrices"]) => {
+function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: ModelSummary): ModelSummary {
+  const merged = { ...existingSummary };
+  const preferIncoming = <T>(existingValue: T | null | undefined, incomingValue: T | null | undefined) =>
+    existingValue == null || existingValue === "" ? incomingValue : existingValue;
+  const unionArray = <T>(existingValues: readonly T[] | undefined, incomingValues: readonly T[] | undefined) =>
+    [...new Set([...(existingValues ?? []), ...(incomingValues ?? [])])];
+  const unionReasoningLevels = (existingLevels: readonly string[] | undefined, incomingLevels: readonly string[] | undefined) =>
+    sortReasoningEfforts([...(existingLevels ?? []), ...(incomingLevels ?? [])]);
+  const unionImagePrices = (existingPrices: ModelSummary["imageRequestPrices"], incomingPrices: ModelSummary["imageRequestPrices"]) => {
     const prices = new Map<string, NonNullable<ModelSummary["imageRequestPrices"]>[number]>();
-    for (const price of [...(current ?? []), ...(next ?? [])]) {
+    for (const price of [...(existingPrices ?? []), ...(incomingPrices ?? [])]) {
       const key = `${price.operation}:${price.quality}:${price.size}:${price.microUsd}`;
       if (!prices.has(key)) prices.set(key, price);
     }
     return [...prices.values()];
   };
   const mergeProtocolRoutes = (
-    current: ModelSummary["protocolRoutes"],
-    next: ModelSummary["protocolRoutes"],
+    existingRoutes: ModelSummary["protocolRoutes"],
+    incomingRoutes: ModelSummary["protocolRoutes"],
   ): NonNullable<ModelSummary["protocolRoutes"]> => {
     const routes = new Map<string, NonNullable<ModelSummary["protocolRoutes"]>[number]>();
-    for (const route of [...(current ?? []), ...(next ?? [])]) {
+    for (const route of [...(existingRoutes ?? []), ...(incomingRoutes ?? [])]) {
       const key = `${route.clientWireApi}:${route.upstreamWireApi}`;
-      const previous = routes.get(key);
-      if (!previous) {
+      const existingRoute = routes.get(key);
+      if (!existingRoute) {
         routes.set(key, {
           ...route,
           features: { ...route.features },
@@ -136,64 +141,68 @@ function mergeModelSummary(existing: ModelSummary, incoming: ModelSummary): Mode
         continue;
       }
       routes.set(key, {
-        ...previous,
-        features: { ...previous.features, ...route.features },
-        reasoningEfforts: unionReasoningLevels(previous.reasoningEfforts, route.reasoningEfforts),
+        ...existingRoute,
+        features: { ...existingRoute.features, ...route.features },
+        reasoningEfforts: unionReasoningLevels(existingRoute.reasoningEfforts, route.reasoningEfforts),
       });
     }
     return [...routes.values()];
   };
 
-  merged.memberCount = Math.max(existing.memberCount, incoming.memberCount);
-  merged.protocolRoutes = mergeProtocolRoutes(existing.protocolRoutes, incoming.protocolRoutes);
-  merged.codexDisplayName = existing.codexDisplayName === existing.id
-    ? incoming.codexDisplayName
-    : existing.codexDisplayName;
-  merged.catalogProvider = preferIncoming(existing.catalogProvider, incoming.catalogProvider) ?? null;
-  merged.catalogFamily = preferIncoming(existing.catalogFamily, incoming.catalogFamily) ?? null;
-  merged.catalogName = preferIncoming(existing.catalogName, incoming.catalogName) ?? null;
-  merged.catalogReleaseDate = preferIncoming(existing.catalogReleaseDate, incoming.catalogReleaseDate) ?? null;
-  merged.catalogLastUpdated = preferIncoming(existing.catalogLastUpdated, incoming.catalogLastUpdated) ?? null;
-  merged.catalogStatus = preferIncoming(existing.catalogStatus, incoming.catalogStatus) ?? null;
-  merged.catalogReasoning = preferIncoming(existing.catalogReasoning, incoming.catalogReasoning) ?? null;
-  merged.catalogReasoningMethod = preferIncoming(existing.catalogReasoningMethod, incoming.catalogReasoningMethod) ?? null;
-  merged.catalogReasoningEffortLevels = unionReasoningLevels(existing.catalogReasoningEffortLevels, incoming.catalogReasoningEffortLevels);
-  merged.catalogDefaultReasoningEffort = preferIncoming(existing.catalogDefaultReasoningEffort, incoming.catalogDefaultReasoningEffort) ?? null;
-  merged.catalogToolCall = preferIncoming(existing.catalogToolCall, incoming.catalogToolCall) ?? null;
-  merged.catalogStructuredOutput = preferIncoming(existing.catalogStructuredOutput, incoming.catalogStructuredOutput) ?? null;
-  merged.catalogAttachment = preferIncoming(existing.catalogAttachment, incoming.catalogAttachment) ?? null;
-  merged.catalogOpenWeights = preferIncoming(existing.catalogOpenWeights, incoming.catalogOpenWeights) ?? null;
-  merged.catalogInputModalities = unionArray(existing.catalogInputModalities, incoming.catalogInputModalities);
-  merged.catalogOutputModalities = unionArray(existing.catalogOutputModalities, incoming.catalogOutputModalities);
-  merged.catalogContextLimit = preferIncoming(existing.catalogContextLimit, incoming.catalogContextLimit) ?? null;
-  merged.catalogInputLimit = preferIncoming(existing.catalogInputLimit, incoming.catalogInputLimit) ?? null;
-  merged.catalogOutputLimit = preferIncoming(existing.catalogOutputLimit, incoming.catalogOutputLimit) ?? null;
-  merged.inputMicroUsdPerMillion = preferIncoming(existing.inputMicroUsdPerMillion, incoming.inputMicroUsdPerMillion) ?? null;
-  merged.cachedInputMicroUsdPerMillion = preferIncoming(existing.cachedInputMicroUsdPerMillion, incoming.cachedInputMicroUsdPerMillion) ?? null;
-  merged.cacheWrite5mMicroUsdPerMillion = preferIncoming(existing.cacheWrite5mMicroUsdPerMillion, incoming.cacheWrite5mMicroUsdPerMillion) ?? null;
-  merged.cacheWrite1hMicroUsdPerMillion = preferIncoming(existing.cacheWrite1hMicroUsdPerMillion, incoming.cacheWrite1hMicroUsdPerMillion) ?? null;
-  merged.outputMicroUsdPerMillion = preferIncoming(existing.outputMicroUsdPerMillion, incoming.outputMicroUsdPerMillion) ?? null;
-  merged.imageRequestPrices = unionImagePrices(existing.imageRequestPrices, incoming.imageRequestPrices);
-  merged.reasoningLevels = unionReasoningLevels(existing.reasoningLevels, incoming.reasoningLevels);
-  merged.reasoningSupportedLevels = unionReasoningLevels(existing.reasoningSupportedLevels, incoming.reasoningSupportedLevels);
-  merged.reasoningAllowedLevels = unionReasoningLevels(existing.reasoningAllowedLevels, incoming.reasoningAllowedLevels);
-  merged.reasoningConfigurable = (existing.reasoningConfigurable ?? false) || (incoming.reasoningConfigurable ?? false);
-  merged.reasoningManualFallback = (existing.reasoningManualFallback ?? false) || (incoming.reasoningManualFallback ?? false);
-  merged.speedSupported = (existing.speedSupported ?? false) || (incoming.speedSupported ?? false);
-  merged.speedTiers = unionArray(existing.speedTiers, incoming.speedTiers);
-  merged.speedTier = existing.speedTier ?? incoming.speedTier ?? "standard";
-  merged.speedConfigurable = (existing.speedConfigurable ?? false) || (incoming.speedConfigurable ?? false);
+  merged.memberCount = Math.max(existingSummary.memberCount, incomingSummary.memberCount);
+  merged.protocolRoutes = mergeProtocolRoutes(existingSummary.protocolRoutes, incomingSummary.protocolRoutes);
+  merged.codexDisplayName = existingSummary.codexDisplayName === existingSummary.id
+    ? incomingSummary.codexDisplayName
+    : existingSummary.codexDisplayName;
+  merged.catalogProvider = preferIncoming(existingSummary.catalogProvider, incomingSummary.catalogProvider) ?? null;
+  merged.catalogSourceModelId = preferIncoming(existingSummary.catalogSourceModelId, incomingSummary.catalogSourceModelId) ?? null;
+  merged.catalogCanonicalModelId = preferIncoming(existingSummary.catalogCanonicalModelId, incomingSummary.catalogCanonicalModelId) ?? null;
+  merged.catalogFamily = preferIncoming(existingSummary.catalogFamily, incomingSummary.catalogFamily) ?? null;
+  merged.catalogName = preferIncoming(existingSummary.catalogName, incomingSummary.catalogName) ?? null;
+  merged.catalogReleaseDate = preferIncoming(existingSummary.catalogReleaseDate, incomingSummary.catalogReleaseDate) ?? null;
+  merged.catalogLastUpdated = preferIncoming(existingSummary.catalogLastUpdated, incomingSummary.catalogLastUpdated) ?? null;
+  merged.catalogStatus = preferIncoming(existingSummary.catalogStatus, incomingSummary.catalogStatus) ?? null;
+  merged.catalogReasoning = preferIncoming(existingSummary.catalogReasoning, incomingSummary.catalogReasoning) ?? null;
+  merged.catalogReasoningMethod = preferIncoming(existingSummary.catalogReasoningMethod, incomingSummary.catalogReasoningMethod) ?? null;
+  merged.catalogReasoningEffortLevels = unionReasoningLevels(existingSummary.catalogReasoningEffortLevels, incomingSummary.catalogReasoningEffortLevels);
+  merged.catalogDefaultReasoningEffort = preferIncoming(existingSummary.catalogDefaultReasoningEffort, incomingSummary.catalogDefaultReasoningEffort) ?? null;
+  merged.catalogToolCall = preferIncoming(existingSummary.catalogToolCall, incomingSummary.catalogToolCall) ?? null;
+  merged.catalogStructuredOutput = preferIncoming(existingSummary.catalogStructuredOutput, incomingSummary.catalogStructuredOutput) ?? null;
+  merged.catalogAttachment = preferIncoming(existingSummary.catalogAttachment, incomingSummary.catalogAttachment) ?? null;
+  merged.catalogOpenWeights = preferIncoming(existingSummary.catalogOpenWeights, incomingSummary.catalogOpenWeights) ?? null;
+  merged.catalogInputModalities = unionArray(existingSummary.catalogInputModalities, incomingSummary.catalogInputModalities);
+  merged.catalogOutputModalities = unionArray(existingSummary.catalogOutputModalities, incomingSummary.catalogOutputModalities);
+  merged.catalogContextLimit = preferIncoming(existingSummary.catalogContextLimit, incomingSummary.catalogContextLimit) ?? null;
+  merged.catalogInputLimit = preferIncoming(existingSummary.catalogInputLimit, incomingSummary.catalogInputLimit) ?? null;
+  merged.catalogOutputLimit = preferIncoming(existingSummary.catalogOutputLimit, incomingSummary.catalogOutputLimit) ?? null;
+  merged.inputMicroUsdPerMillion = preferIncoming(existingSummary.inputMicroUsdPerMillion, incomingSummary.inputMicroUsdPerMillion) ?? null;
+  merged.cachedInputMicroUsdPerMillion = preferIncoming(existingSummary.cachedInputMicroUsdPerMillion, incomingSummary.cachedInputMicroUsdPerMillion) ?? null;
+  merged.cacheWrite5mMicroUsdPerMillion = preferIncoming(existingSummary.cacheWrite5mMicroUsdPerMillion, incomingSummary.cacheWrite5mMicroUsdPerMillion) ?? null;
+  merged.cacheWrite1hMicroUsdPerMillion = preferIncoming(existingSummary.cacheWrite1hMicroUsdPerMillion, incomingSummary.cacheWrite1hMicroUsdPerMillion) ?? null;
+  merged.outputMicroUsdPerMillion = preferIncoming(existingSummary.outputMicroUsdPerMillion, incomingSummary.outputMicroUsdPerMillion) ?? null;
+  merged.imageRequestPrices = unionImagePrices(existingSummary.imageRequestPrices, incomingSummary.imageRequestPrices);
+  merged.reasoningLevels = unionReasoningLevels(existingSummary.reasoningLevels, incomingSummary.reasoningLevels);
+  merged.reasoningSupportedLevels = unionReasoningLevels(existingSummary.reasoningSupportedLevels, incomingSummary.reasoningSupportedLevels);
+  merged.reasoningAllowedLevels = unionReasoningLevels(existingSummary.reasoningAllowedLevels, incomingSummary.reasoningAllowedLevels);
+  merged.reasoningConfigurable = (existingSummary.reasoningConfigurable ?? false) || (incomingSummary.reasoningConfigurable ?? false);
+  merged.reasoningManualFallback = (existingSummary.reasoningManualFallback ?? false) || (incomingSummary.reasoningManualFallback ?? false);
+  merged.speedSupported = (existingSummary.speedSupported ?? false) || (incomingSummary.speedSupported ?? false);
+  merged.speedTiers = unionArray(existingSummary.speedTiers, incomingSummary.speedTiers);
+  merged.speedTier = existingSummary.speedTier ?? incomingSummary.speedTier ?? "standard";
+  merged.speedConfigurable = (existingSummary.speedConfigurable ?? false) || (incomingSummary.speedConfigurable ?? false);
   return merged;
 }
 
-function fallbackModelSummary(id: string): ModelSummary {
+function fallbackModelSummary(modelId: string): ModelSummary {
   return {
-    id,
+    id: modelId,
     enabled: true,
     memberCount: 0,
     codexVisible: false,
-    codexDisplayName: id,
+    codexDisplayName: modelId,
     catalogProvider: null,
+    catalogSourceModelId: null,
+    catalogCanonicalModelId: null,
     catalogFamily: null,
     catalogName: null,
     catalogReleaseDate: null,

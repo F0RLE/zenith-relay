@@ -12,42 +12,45 @@ use std::collections::BTreeSet;
 /// object and captures the exact native assistant blocks for the next turn.
 pub fn translate_messages_response(
     request: MessagesBridgeRequest,
-    upstream: &Value,
+    upstream_response: &Value,
 ) -> AdapterResult<MessagesBridgeResponse> {
     let (status, incomplete_reason) =
-        messages_response_terminal(upstream.get("stop_reason").and_then(Value::as_str))?;
-    let upstream_id = upstream
+        messages_response_terminal(upstream_response.get("stop_reason").and_then(Value::as_str))?;
+    let upstream_id = upstream_response
         .get("id")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|id| !id.is_empty())
+        .filter(|response_id_value| !response_id_value.is_empty())
         .ok_or_else(AdapterError::upstream_response_invalid)?;
-    let content = upstream
+    let message_content = upstream_response
         .get("content")
         .and_then(Value::as_array)
         .ok_or_else(AdapterError::upstream_response_invalid)?
         .clone();
-    validate_messages_tool_calls(&request.state, &content)?;
-    let (mut output, _) =
-        responses_output_from_messages_content(&content, &request.state, status == "incomplete")?;
+    validate_messages_tool_calls(&request.bridge_state, &message_content)?;
+    let (mut response_items, _) = responses_output_from_messages_content(
+        &message_content,
+        &request.bridge_state,
+        status == "incomplete",
+    )?;
     let response_id = bridged_response_id_scoped(request.response_scope(), upstream_id);
-    set_message_output_id(&mut output, &response_id);
-    let usage = responses_usage(upstream.get("usage"));
+    set_message_output_id(&mut response_items, &response_id);
+    let usage = responses_usage(upstream_response.get("usage"));
     let response_body = json!({
         "id": response_id,
         "object": "response",
-        "created_at": upstream
-            .get("created_at")
+        "created_at": upstream_response
+        .get("created_at")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
         "status": status,
         "incomplete_details": incomplete_reason.map(|reason| json!({"reason": reason})),
-        "model": request.state.model,
-        "output": output,
+        "model": request.bridge_state.model,
+        "output": response_items,
         "usage": usage,
     });
-    let mut continuation = request.state;
-    continuation.append_assistant_content(content);
+    let mut continuation = request.bridge_state;
+    continuation.append_assistant_content(message_content);
     Ok(MessagesBridgeResponse {
         response_body,
         response_id,
@@ -89,19 +92,22 @@ pub fn bridged_response_id_scoped(scope: &str, upstream_id: &str) -> String {
     format!("resp_bridge_{}", hex::encode(&digest[..12]))
 }
 
-pub(in crate::protocol::adapter) fn set_message_output_id(output: &mut [Value], response_id: &str) {
+pub(in crate::protocol::adapter) fn set_message_output_id(
+    response_items: &mut [Value],
+    response_id: &str,
+) {
     let mut message_index = 0_usize;
-    for item in output {
-        if item.get("type").and_then(Value::as_str) != Some("message") {
+    for response_item in response_items {
+        if response_item.get("type").and_then(Value::as_str) != Some("message") {
             continue;
         }
-        if let Some(object) = item.as_object_mut() {
-            let id = if message_index == 0 {
+        if let Some(object) = response_item.as_object_mut() {
+            let message_id = if message_index == 0 {
                 format!("msg_{response_id}")
             } else {
                 format!("msg_{response_id}_{message_index}")
             };
-            object.insert("id".to_string(), Value::String(id));
+            object.insert("id".to_string(), Value::String(message_id));
             message_index = message_index.saturating_add(1);
         }
     }
@@ -112,22 +118,22 @@ pub(in crate::protocol::adapter) fn set_message_output_id(output: &mut [Value], 
 /// upstream-invented tool name while preserving the exact name supplied by the
 /// client when the call is valid.
 pub(in crate::protocol::adapter) fn validate_messages_tool_calls(
-    state: &MessagesBridgeState,
-    content: &[Value],
+    bridge_state: &MessagesBridgeState,
+    message_content: &[Value],
 ) -> AdapterResult<()> {
     let mut call_ids = BTreeSet::new();
-    for block in content {
-        let block = block
+    for content_block in message_content {
+        let content_block = content_block
             .as_object()
             .ok_or_else(AdapterError::upstream_response_invalid)?;
-        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        if content_block.get("type").and_then(Value::as_str) != Some("tool_use") {
             continue;
         }
-        let id = nonempty_block_str(block, "id")?;
-        let name = nonempty_block_str(block, "name")?;
-        if !block.get("input").is_some_and(Value::is_object)
-            || !state.allows_tool_name(name)
-            || !call_ids.insert(id.to_string())
+        let call_id = nonempty_block_str(content_block, "id")?;
+        let tool_name = nonempty_block_str(content_block, "name")?;
+        if !content_block.get("input").is_some_and(Value::is_object)
+            || !bridge_state.allows_tool_name(tool_name)
+            || !call_ids.insert(call_id.to_string())
         {
             return Err(AdapterError::upstream_response_invalid());
         }
@@ -140,147 +146,159 @@ fn nonempty_block_str<'a>(block: &'a Map<String, Value>, key: &str) -> AdapterRe
         .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|text_value| !text_value.is_empty())
         .ok_or_else(AdapterError::upstream_response_invalid)
 }
 
 pub(in crate::protocol::adapter) fn responses_output_from_messages_content(
-    content: &[Value],
-    state: &MessagesBridgeState,
+    message_content: &[Value],
+    bridge_state: &MessagesBridgeState,
     allow_empty: bool,
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
-    let mut output = Vec::new();
+    let mut response_items = Vec::new();
     let mut preserved = Vec::new();
-    let mut text = Vec::new();
+    let mut text_blocks = Vec::new();
     let mut text_message_index = 0_usize;
-    let flush_text =
-        |output: &mut Vec<Value>, text: &mut Vec<Value>, text_message_index: &mut usize| {
-            if text.is_empty() {
-                return;
-            }
-            let index = *text_message_index;
-            *text_message_index = (*text_message_index).saturating_add(1);
-            output.push(json!({
-                "id": if index == 0 {
-                    "msg_bridge_output".to_string()
-                } else {
-                    format!("msg_bridge_output_{index}")
-                },
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": std::mem::take(text),
-            }));
-        };
-    for block in content {
-        let block = block
+    let flush_text = |response_items: &mut Vec<Value>,
+                      text_blocks: &mut Vec<Value>,
+                      text_message_index: &mut usize| {
+        if text_blocks.is_empty() {
+            return;
+        }
+        let index = *text_message_index;
+        *text_message_index = (*text_message_index).saturating_add(1);
+        response_items.push(json!({
+            "id": if index == 0 {
+                "msg_bridge_output".to_string()
+            } else {
+                format!("msg_bridge_output_{index}")
+            },
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": std::mem::take(text_blocks),
+        }));
+    };
+    for content_block in message_content {
+        let content_block = content_block
             .as_object()
             .ok_or_else(AdapterError::upstream_response_invalid)?;
-        match block.get("type").and_then(Value::as_str) {
+        match content_block.get("type").and_then(Value::as_str) {
             Some("text") => {
-                let value = block
+                let text_value = content_block
                     .get("text")
                     .and_then(Value::as_str)
                     .ok_or_else(AdapterError::upstream_response_invalid)?;
-                if !value.is_empty() {
-                    text.push(json!({"type": "output_text", "text": value, "annotations": []}));
+                if !text_value.is_empty() {
+                    text_blocks.push(
+                        json!({"type": "output_text", "text": text_value, "annotations": []}),
+                    );
                 }
-                preserved.push(Value::Object(block.clone()));
+                preserved.push(Value::Object(content_block.clone()));
             }
             Some("tool_use") => {
-                flush_text(&mut output, &mut text, &mut text_message_index);
-                let call_id = nonempty_block_str(block, "id")?;
-                let name = nonempty_block_str(block, "name")?;
-                let target = state
-                    .client_tool(name)
+                flush_text(
+                    &mut response_items,
+                    &mut text_blocks,
+                    &mut text_message_index,
+                );
+                let call_id = nonempty_block_str(content_block, "id")?;
+                let tool_name = nonempty_block_str(content_block, "name")?;
+                let target = bridge_state
+                    .client_tool(tool_name)
                     .ok_or_else(AdapterError::upstream_response_invalid)?;
-                let kind = target.kind;
+                let tool_kind = target.kind;
                 let client_name = target.name.clone();
                 let client_namespace = target.namespace.clone();
-                let input = block
+                let tool_input = content_block
                     .get("input")
-                    .filter(|value| value.is_object())
+                    .filter(|tool_input| tool_input.is_object())
                     .ok_or_else(AdapterError::upstream_response_invalid)?;
-                let mut item = match kind {
+                let mut response_item = match tool_kind {
                     ResponsesToolKind::Function => json!({
                         "id": call_id,
-                        "type": kind.response_item_type(),
+                        "type": tool_kind.response_item_type(),
                         "status": "completed",
                         "call_id": call_id,
                         "name": client_name.clone(),
-                        "arguments": serde_json::to_string(input).map_err(|_| AdapterError::upstream_response_invalid())?,
+                        "arguments": serde_json::to_string(tool_input).map_err(|_| AdapterError::upstream_response_invalid())?,
                     }),
                     ResponsesToolKind::Custom => json!({
                         "id": custom_tool_item_id(call_id),
-                        "type": kind.response_item_type(),
+                        "type": tool_kind.response_item_type(),
                         "status": "completed",
                         "call_id": call_id,
                         "name": client_name.clone(),
-                        "input": custom_tool_input(input)?,
+                        "input": custom_tool_input(tool_input)?,
                     }),
                 };
                 if let Some(namespace) = client_namespace {
-                    item.as_object_mut()
+                    response_item
+                        .as_object_mut()
                         .expect("Responses output item is an object")
                         .insert("namespace".to_string(), Value::String(namespace));
                 }
-                output.push(item);
-                preserved.push(Value::Object(block.clone()));
+                response_items.push(response_item);
+                preserved.push(Value::Object(content_block.clone()));
             }
             Some("thinking" | "redacted_thinking") => {
                 // The native block (including its signature) must survive in bridge
                 // state, but it is intentionally not exposed as fake Responses
                 // encrypted content.
-                preserved.push(Value::Object(block.clone()));
+                preserved.push(Value::Object(content_block.clone()));
             }
             _ => return Err(AdapterError::upstream_response_invalid()),
         }
     }
-    flush_text(&mut output, &mut text, &mut text_message_index);
-    if output.is_empty() && !allow_empty {
+    flush_text(
+        &mut response_items,
+        &mut text_blocks,
+        &mut text_message_index,
+    );
+    if response_items.is_empty() && !allow_empty {
         return Err(AdapterError::upstream_response_invalid());
     }
-    Ok((output, preserved))
+    Ok((response_items, preserved))
 }
 
-pub(in crate::protocol::adapter) fn custom_tool_input(input: &Value) -> AdapterResult<&str> {
-    let input = input
+pub(in crate::protocol::adapter) fn custom_tool_input(tool_input: &Value) -> AdapterResult<&str> {
+    let tool_object = tool_input
         .as_object()
         .ok_or_else(AdapterError::upstream_response_invalid)?;
-    if input.len() != 1 {
+    if tool_object.len() != 1 {
         return Err(AdapterError::upstream_response_invalid());
     }
-    input
+    tool_object
         .get("input")
         .and_then(Value::as_str)
         .ok_or_else(AdapterError::upstream_response_invalid)
 }
 
 pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Value {
-    let mut result = Map::new();
+    let mut usage_details = Map::new();
     if let Some(input_tokens) = usage
         .and_then(|usage| usage.get("input_tokens"))
         .and_then(Value::as_u64)
     {
-        result.insert("input_tokens".to_string(), Value::from(input_tokens));
+        usage_details.insert("input_tokens".to_string(), Value::from(input_tokens));
     }
     if let Some(output_tokens) = usage
         .and_then(|usage| usage.get("output_tokens"))
         .and_then(Value::as_u64)
     {
-        result.insert("output_tokens".to_string(), Value::from(output_tokens));
+        usage_details.insert("output_tokens".to_string(), Value::from(output_tokens));
     }
     if let Some(total_tokens) = usage
         .and_then(|usage| usage.get("total_tokens"))
         .and_then(Value::as_u64)
     {
-        result.insert("total_tokens".to_string(), Value::from(total_tokens));
+        usage_details.insert("total_tokens".to_string(), Value::from(total_tokens));
     }
     if let Some(cache_read) = usage
         .and_then(|usage| usage.get("cache_read_input_tokens"))
         .and_then(Value::as_u64)
     {
-        result.insert(
+        usage_details.insert(
             "input_tokens_details".to_string(),
             json!({"cached_tokens": cache_read}),
         );
@@ -289,7 +307,7 @@ pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Va
         .and_then(|usage| usage.get("cache_creation_input_tokens"))
         .and_then(Value::as_u64)
     {
-        result
+        usage_details
             .entry("input_tokens_details".to_string())
             .or_insert_with(|| json!({}))
             .as_object_mut()
@@ -297,7 +315,7 @@ pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Va
             .insert("cache_write_tokens".to_string(), Value::from(cache_write));
     }
     if let Some(cache_write_ttl) = usage.and_then(cache_write_ttl_from_usage) {
-        result
+        usage_details
             .entry("input_tokens_details".to_string())
             .or_insert_with(|| json!({}))
             .as_object_mut()
@@ -307,7 +325,21 @@ pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Va
                 Value::String(cache_write_ttl.to_string()),
             );
     }
-    Value::Object(result)
+    // Anthropic never reports a total and counts cache reads and writes outside
+    // `input_tokens`; the gateway counts them as input, so the total does too.
+    let counter = |field: &str| {
+        usage
+            .and_then(|usage| usage.get(field))
+            .and_then(Value::as_u64)
+    };
+    let derived_total = counter("input_tokens")
+        .zip(counter("output_tokens"))
+        .and_then(|(input, output)| input.checked_add(output))
+        .and_then(|total| total.checked_add(counter("cache_read_input_tokens").unwrap_or_default()))
+        .and_then(|total| {
+            total.checked_add(counter("cache_creation_input_tokens").unwrap_or_default())
+        });
+    super::super::responses_usage::complete(usage_details, derived_total)
 }
 
 fn cache_write_ttl_from_usage(usage: &Value) -> Option<&'static str> {

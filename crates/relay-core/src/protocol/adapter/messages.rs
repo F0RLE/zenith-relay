@@ -1,7 +1,7 @@
 use super::contracts::{
-    bridged_namespace_tool_name, custom_tool_item_id, prepare_bridge_state, request_tool_catalog,
-    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest, MessagesBridgeResponse,
-    MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
+    custom_tool_item_id, prepare_bridge_state, request_tool_catalog, AdapterError, AdapterResult,
+    ClientToolTarget, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
+    MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
 };
 mod request;
 mod response;

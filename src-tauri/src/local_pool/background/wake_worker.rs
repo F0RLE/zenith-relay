@@ -48,7 +48,7 @@ pub(super) async fn wake_loop(app: AppHandle) {
         state.wait_for_background_session_active().await;
         let wait_result = tokio::select! {
             _ = state.wait_for_background_session_inactive() => continue,
-            result = wait_for_automatic_wake(&state) => result,
+            wake_wait_result = wait_for_automatic_wake(&state) => wake_wait_result,
         };
         if let Err(error) = wait_result {
             crate::diagnostics::record_error(
@@ -80,8 +80,8 @@ pub(super) async fn wake_loop(app: AppHandle) {
             }
         };
         let state = app.state::<DesktopState>();
-        let result = run_wake_permits(&state, permits).await;
-        if let Err(error) = result {
+        let wake_run_result = run_wake_permits(&state, permits).await;
+        if let Err(error) = wake_run_result {
             crate::diagnostics::record_error(
                 "background-wake",
                 Some("execution_failed"),

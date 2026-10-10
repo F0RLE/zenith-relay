@@ -7,9 +7,11 @@ pub(super) struct AssembleImport<'a> {
     pub(super) ordinal: usize,
     pub(super) format: ImportFormat,
     pub(super) source_file: Option<&'a str>,
-    pub(super) object: &'a Map<String, Value>,
+    pub(super) import_object: &'a Map<String, Value>,
     pub(super) meta: Option<&'a Map<String, Value>>,
     pub(super) tags_value: Option<&'a Value>,
+    pub(super) basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
+    pub(super) oauth_client_kind: Option<OAuthClientKind>,
     pub(super) use_api_key: bool,
     pub(super) use_tokens: bool,
     pub(super) use_agent_identity: bool,
@@ -26,14 +28,18 @@ pub(super) struct AssembleImport<'a> {
     pub(super) warnings: Vec<ImportWarning>,
 }
 
-pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedItem, ImportIssue> {
+pub(super) fn assemble_parsed_item(
+    import_input: AssembleImport<'_>,
+) -> Result<ParsedItem, ImportIssue> {
     let AssembleImport {
         ordinal,
         format,
         source_file,
-        object,
+        import_object,
         meta,
         tags_value,
+        basis_points_headers,
+        oauth_client_kind,
         use_api_key,
         use_tokens,
         use_agent_identity,
@@ -67,7 +73,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
                 metadata_rejected,
             },
         mut warnings,
-    } = input;
+    } = import_input;
     let email_value = email.as_deref();
     let ImportIdentity {
         identity_key,
@@ -87,6 +93,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         chatgpt_user_id: chatgpt_user_id.as_deref(),
         email: email_value,
         base_url: base_url.as_deref(),
+        oauth_client_kind: oauth_client_kind.unwrap_or_default(),
     })?;
     let identity = email_value
         .map(mask_email)
@@ -97,7 +104,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         _ => format!("Account {}", ordinal + 1),
     };
     let label_value = string_field(
-        object,
+        import_object,
         &[
             "name",
             "label",
@@ -107,7 +114,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
             "apiProviderName",
         ],
     )
-    .or_else(|| meta.and_then(|data| string_field(data, &["name", "label"])));
+    .or_else(|| meta.and_then(|metadata_object| string_field(metadata_object, &["name", "label"])));
     let mut label = safe_label(label_value).unwrap_or_else(|| identity.clone());
     if label == "unknown" || label.is_empty() {
         label = fallback_label;
@@ -180,6 +187,12 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         } else {
             None
         },
+        basis_points_headers: if use_tokens {
+            basis_points_headers
+        } else {
+            None
+        },
+        oauth_client_kind: if use_tokens { oauth_client_kind } else { None },
     };
     let preview = ImportPreviewRow {
         item_id: item_id.clone(),
@@ -187,6 +200,11 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         label: label.clone(),
         identity,
         auth_mode,
+        oauth_client_kind: if use_tokens {
+            Some(oauth_client_kind.unwrap_or_default())
+        } else {
+            None
+        },
         source_name,
         quota_status: ImportQuotaStatus::Skipped,
         status: ImportPreviewStatus::Ready,
@@ -199,7 +217,7 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         existing: false,
         warnings,
     };
-    let item = ParsedImportItem {
+    let parsed_import_item = ParsedImportItem {
         item_id,
         identity_key,
         label,
@@ -219,5 +237,8 @@ pub(super) fn assemble_parsed_item(input: AssembleImport<'_>) -> Result<ParsedIt
         totp_secret: totp_secret.map(RedactedValue::new),
         secrets,
     };
-    Ok(ParsedItem { preview, item })
+    Ok(ParsedItem {
+        preview,
+        parsed_item: parsed_import_item,
+    })
 }

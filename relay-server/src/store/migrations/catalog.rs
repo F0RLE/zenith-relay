@@ -194,6 +194,16 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "039_remove_v1_routing_options",
         sql: include_str!("../../../migrations/039_remove_v1_routing_options.sql"),
     },
+    Migration {
+        version: 40,
+        name: "040_usage_price_schedule",
+        sql: include_str!("../../../migrations/040_usage_price_schedule.sql"),
+    },
+    Migration {
+        version: 41,
+        name: "041_usage_transport",
+        sql: include_str!("../../../migrations/041_usage_transport.sql"),
+    },
 ];
 
 pub(super) struct Migration {

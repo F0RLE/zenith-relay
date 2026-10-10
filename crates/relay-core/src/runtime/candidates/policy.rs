@@ -118,15 +118,15 @@ impl GatewayRuntime {
         let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == key_id) else {
             return false;
         };
-        let mut current = crate::poison::write(&key.scope);
-        if *current == scope {
+        let mut scope_guard = crate::poison::write(&key.scope);
+        if *scope_guard == scope {
             return true;
         }
-        *current = scope;
+        *scope_guard = scope;
         // The scope write lock makes this revision atomic with the permission
         // edit from the perspective of both reservation and final dispatch.
         key.scope_revision.fetch_add(1, Ordering::AcqRel);
-        drop(current);
+        drop(scope_guard);
         self.candidate_availability.notify_waiters();
         true
     }

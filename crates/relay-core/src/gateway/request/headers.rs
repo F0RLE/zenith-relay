@@ -8,19 +8,19 @@ pub(in crate::gateway) const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-s
 /// Credentials supplied by a Relay client authenticate only the local
 /// gateway. They must never be forwarded to a configured upstream source,
 /// which authenticates with its own stored credential.
-fn is_client_auth_header(name: &str) -> bool {
+fn is_client_auth_header(header_name: &str) -> bool {
     matches!(
-        name,
+        header_name,
         "authorization"
             | "proxy-authorization"
             | "cookie"
             | "set-cookie"
             | "x-auth-token"
             | "x-api-token"
-    ) || name.ends_with("-api-key")
+    ) || header_name.ends_with("-api-key")
 }
 
-const FORWARDED_CODEX_HEADERS: &[&str] = &[
+const FORWARDED_RESPONSES_HEADERS: &[&str] = &[
     "openai-beta",
     "originator",
     "session-id",
@@ -30,7 +30,6 @@ const FORWARDED_CODEX_HEADERS: &[&str] = &[
     "tracestate",
     "user-agent",
     "version",
-    "x-claude-code-session-id",
     "x-client-request-id",
     "x-codex-beta-features",
     "x-codex-installation-id",
@@ -80,17 +79,17 @@ const CODEX_VERSION_USER_AGENT_PREFIXES: &[&str] =
 /// leave this function.
 pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap) -> Option<String> {
     let mut digest = Sha256::new();
-    let (name, value) = CLIENT_CONTEXT_HEADERS.iter().find_map(|&name| {
+    let (header_name, context_value) = CLIENT_CONTEXT_HEADERS.iter().find_map(|&header_name| {
         client_headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
+            .get(header_name)
+            .and_then(|header_value| header_value.to_str().ok())
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| (name, value))
+            .filter(|context_value| !context_value.is_empty())
+            .map(|context_value| (header_name, context_value))
     })?;
-    digest.update(name.as_bytes());
+    digest.update(header_name.as_bytes());
     digest.update([0]);
-    digest.update(value.as_bytes());
+    digest.update(context_value.as_bytes());
     Some(format!("client_{}", hex::encode(&digest.finalize()[..12])))
 }
 
@@ -101,7 +100,7 @@ pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap)
 pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
     if headers
         .keys()
-        .any(|name| name.as_str().starts_with("x-codex-"))
+        .any(|header_name| header_name.as_str().starts_with("x-codex-"))
         || headers.contains_key("x-openai-internal-codex-responses-lite")
         || headers.contains_key("x-openai-subagent")
     {
@@ -109,12 +108,12 @@ pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
     }
     let originator_is_managed = headers
         .get("originator")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|header_value| header_value.to_str().ok())
         .map(str::trim)
-        .is_some_and(|value| {
+        .is_some_and(|originator| {
             MANAGED_CODEX_ORIGINATORS
                 .iter()
-                .any(|identity| value.eq_ignore_ascii_case(identity))
+                .any(|identity| originator.eq_ignore_ascii_case(identity))
         });
     if originator_is_managed {
         return true;
@@ -122,44 +121,51 @@ pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
 
     headers
         .get("user-agent")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| {
-            value == "codex_cli_rs"
+        .and_then(|header_value| header_value.to_str().ok())
+        .map(|user_agent| user_agent.trim().to_ascii_lowercase())
+        .is_some_and(|user_agent| {
+            user_agent == "codex_cli_rs"
                 || MANAGED_CODEX_USER_AGENT_PREFIXES
                     .iter()
-                    .any(|prefix| value.starts_with(prefix))
+                    .any(|prefix| user_agent.starts_with(prefix))
         })
+}
+
+pub(in crate::gateway) fn forwarded_responses_headers(client_headers: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for &header_name in FORWARDED_RESPONSES_HEADERS {
+        if let Some(header_value) = client_headers.get(header_name) {
+            headers.insert(HeaderName::from_static(header_name), header_value.clone());
+        }
+    }
+    headers
 }
 
 pub(in crate::gateway) fn forwarded_codex_headers(
     client_headers: &HeaderMap,
     fallback_session_id: &str,
 ) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for &name in FORWARDED_CODEX_HEADERS {
-        if let Some(value) = client_headers.get(name) {
-            headers.insert(HeaderName::from_static(name), value.clone());
-        }
-    }
-    if !headers.contains_key(CLAUDE_CODE_SESSION_HEADER) {
-        let session_id = [
-            "x-codex-session-id",
-            "session_id",
-            "x-session-id",
-            "session-id",
-            "thread-id",
-        ]
-        .iter()
-        .find_map(|name| client_headers.get(*name))
+    let mut headers = forwarded_responses_headers(client_headers);
+    let session_id = client_headers
+        .get(CLAUDE_CODE_SESSION_HEADER)
+        .or_else(|| {
+            [
+                "x-codex-session-id",
+                "session_id",
+                "x-session-id",
+                "session-id",
+                "thread-id",
+            ]
+            .iter()
+            .find_map(|header_name| client_headers.get(*header_name))
+        })
         .cloned()
         .or_else(|| HeaderValue::from_str(fallback_session_id).ok());
-        if let Some(session_id) = session_id {
-            headers.insert(
-                HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
-                session_id,
-            );
-        }
+    if let Some(session_id) = session_id {
+        headers.insert(
+            HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
+            session_id,
+        );
     }
     headers
 }
@@ -167,27 +173,27 @@ pub(in crate::gateway) fn forwarded_codex_headers(
 pub(in crate::gateway) fn codex_client_version(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("version")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|header_value| header_value.to_str().ok())
         .map(str::trim)
-        .filter(|value| valid_codex_client_version(value))
+        .filter(|version| valid_codex_client_version(version))
         .or_else(|| {
             headers
                 .get("user-agent")
-                .and_then(|value| value.to_str().ok())
+                .and_then(|header_value| header_value.to_str().ok())
                 .and_then(codex_version_from_user_agent)
         })
 }
 
-fn codex_version_from_user_agent(value: &str) -> Option<&str> {
-    let value = value.trim();
-    let lowercase = value.to_ascii_lowercase();
+fn codex_version_from_user_agent(user_agent_text: &str) -> Option<&str> {
+    let user_agent_text = user_agent_text.trim();
+    let lowercase = user_agent_text.to_ascii_lowercase();
     CODEX_VERSION_USER_AGENT_PREFIXES.iter().find_map(|prefix| {
         lowercase
             .strip_prefix(prefix)
-            .and_then(|_| value.get(prefix.len()..))
-            .and_then(|value| value.split_whitespace().next())
+            .and_then(|_| user_agent_text.get(prefix.len()..))
+            .and_then(|version_tail| version_tail.split_whitespace().next())
             .map(str::trim)
-            .filter(|value| valid_codex_client_version(value))
+            .filter(|version| valid_codex_client_version(version))
     })
 }
 
@@ -200,21 +206,21 @@ pub(in crate::gateway) fn apply_codex_routing_hint(
     model: &str,
     service_tier: DefaultServiceTier,
 ) {
-    let name = HeaderName::from_static("x-codex-routing-hint");
-    headers.remove(&name);
+    let header_name = HeaderName::from_static("x-codex-routing-hint");
+    headers.remove(&header_name);
     let tier = match service_tier {
         DefaultServiceTier::Standard => return,
         DefaultServiceTier::Fast => "priority",
         DefaultServiceTier::Ultrafast => "ultrafast",
     };
-    let model = model.trim();
-    if model.is_empty() {
+    let model_id = model.trim();
+    if model_id.is_empty() {
         return;
     }
-    let Ok(value) = HeaderValue::from_str(&format!("model={model};tier={tier}")) else {
+    let Ok(routing_hint) = HeaderValue::from_str(&format!("model={model_id};tier={tier}")) else {
         return;
     };
-    headers.insert(name, value);
+    headers.insert(header_name, routing_hint);
 }
 
 /// A Responses-to-Messages bridge receives a Codex/Responses client request,
@@ -225,9 +231,9 @@ pub(in crate::gateway) fn forwarded_bridge_messages_headers(
     client_headers: &HeaderMap,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for name in ["user-agent", CLAUDE_CODE_SESSION_HEADER] {
-        if let Some(value) = client_headers.get(name) {
-            headers.insert(HeaderName::from_static(name), value.clone());
+    for header_name in ["user-agent", CLAUDE_CODE_SESSION_HEADER] {
+        if let Some(header_value) = client_headers.get(header_name) {
+            headers.insert(HeaderName::from_static(header_name), header_value.clone());
         }
     }
     headers
@@ -237,8 +243,8 @@ pub(in crate::gateway) fn forwarded_bridge_messages_headers(
 /// harmless client identity header and never forward Claude/OpenAI metadata.
 pub(in crate::gateway) fn forwarded_bridge_gemini_headers(client_headers: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Some(value) = client_headers.get("user-agent") {
-        headers.insert(HeaderName::from_static("user-agent"), value.clone());
+    if let Some(user_agent) = client_headers.get("user-agent") {
+        headers.insert(HeaderName::from_static("user-agent"), user_agent.clone());
     }
     headers
 }
@@ -249,16 +255,17 @@ pub(in crate::gateway) fn forwarded_bridge_gemini_headers(client_headers: &Heade
 /// details needed by Claude Code.
 pub(in crate::gateway) fn forwarded_messages_headers(client_headers: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for (name, value) in client_headers {
-        let name = name.as_str();
-        let is_messages_metadata = name == "user-agent"
-            || name.starts_with("anthropic-")
-            || name.starts_with("x-claude-")
-            || name.starts_with("x-stainless-");
-        if is_messages_metadata && !is_client_auth_header(name) {
+    for (header_name, header_value) in client_headers {
+        let header_name = header_name.as_str();
+        let is_messages_metadata = header_name == "user-agent"
+            || header_name.starts_with("anthropic-")
+            || header_name.starts_with("x-claude-")
+            || header_name.starts_with("x-stainless-");
+        if is_messages_metadata && !is_client_auth_header(header_name) {
             headers.append(
-                HeaderName::from_bytes(name.as_bytes()).expect("request header name is valid"),
-                value.clone(),
+                HeaderName::from_bytes(header_name.as_bytes())
+                    .expect("request header name is valid"),
+                header_value.clone(),
             );
         }
     }

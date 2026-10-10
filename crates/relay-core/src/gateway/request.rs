@@ -14,8 +14,8 @@ pub(super) use background::codex_background_request_kind;
 pub(super) use dispatch::{chat_completions, gemini, messages, responses};
 pub(super) use responses_items::{
     contains_tool_call_output, remove_unpaired_responses_tool_call,
-    repair_legacy_responses_call_ids, response_tool_call_ids, tool_call_output_ids,
-    unpaired_tool_output_ids,
+    repair_legacy_responses_call_ids, response_tool_call_ids, responses_item_has_ciphertext,
+    tool_call_output_ids, unpaired_tool_output_ids,
 };
 pub(super) use routing::{
     candidate_protocols, chat_request_is_text_or_image_only, request_id, requested_reasoning_effort,
@@ -36,7 +36,7 @@ pub(super) use codex_models::models;
 pub(super) use headers::{
     apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
     forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_codex_headers,
-    forwarded_messages_headers, is_managed_codex_client,
+    forwarded_messages_headers, forwarded_responses_headers, is_managed_codex_client,
 };
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
 #[cfg(test)]
@@ -62,18 +62,12 @@ use std::sync::Arc;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-pub(super) const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
-
 // Legacy replay repair is deliberately fail-closed for unusually large or
-// adversarial histories. The normal request-body limit still applies, while
-// these bounds keep matching and temporary state predictable.
+// adversarial histories. These bounds keep matching and temporary state
+// predictable.
 const MAX_LEGACY_RESPONSES_REPAIR_ITEMS: usize = 4_096;
 const MAX_LEGACY_RESPONSES_PENDING_CALLS: usize = 256;
 const MAX_LEGACY_RESPONSES_NAME_CHARS: usize = 256;
-
-pub(super) const MAX_CLIENT_REQUEST_BODY_ERROR: &str = "request body exceeds 64 MiB";
-
-const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 

@@ -1,6 +1,7 @@
 use super::super::errors::{
-    responses_tool_call_links_rejected_value, upstream_failure_status,
-    zenith_gateway_invalid_request_value, AttemptFailure, PreservedUpstreamError,
+    responses_function_call_output_has_invalid_call_id_value,
+    responses_tool_call_links_rejected_value, upstream_failure_status, AttemptFailure,
+    PreservedUpstreamError,
 };
 use super::events::{is_empty_responses_incomplete, parse_sse_event, TerminalOutcome};
 use super::UpstreamStream;
@@ -14,8 +15,9 @@ pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(in crate::gateway) failure: AttemptFailure,
     pub(in crate::gateway) preserved: Option<PreservedUpstreamError>,
-    pub(in crate::gateway) zenith_gateway_invalid_request: bool,
+    pub(in crate::gateway) invalid_function_call_output_call_id: bool,
     pub(in crate::gateway) responses_tool_call_links_rejected: bool,
+    pub(in crate::gateway) partial_body: Vec<u8>,
 }
 
 impl From<AttemptFailure> for StreamBootstrapFailure {
@@ -25,8 +27,9 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
             failure,
             upstream_error: None,
             preserved: None,
-            zenith_gateway_invalid_request: false,
+            invalid_function_call_output_call_id: false,
             responses_tool_call_links_rejected: false,
+            partial_body: Vec::new(),
         }
     }
 }
@@ -68,26 +71,15 @@ pub(in crate::gateway) async fn bootstrap_stream(
     loop {
         match stream.next().await {
             Some(Ok(chunk)) => {
-                if chunk.len() > super::MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
-                }
-                // Bootstrap may contain a large Responses setup event before the
-                // first visible delta. Keep the same bounded budget as the
-                // regular SSE parser instead of rejecting valid upstream data
-                // at the old 256 KiB bootstrap threshold.
-                if buffered.len().saturating_add(chunk.len()) > super::MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
-                }
                 buffered.extend_from_slice(&chunk);
                 let mut ready_to_forward = false;
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
                     if expected_model.is_some_and(|expected| {
-                        event
-                            .payload
-                            .as_ref()
-                            .is_some_and(|value| super::served_model_is_rejected(value, expected))
+                        event.event_payload.as_ref().is_some_and(|served_model| {
+                            super::served_model_is_rejected(served_model, expected)
+                        })
                     }) {
                         // The served model is known, and this buffer has not
                         // reached the client. Drop the attempt, including a
@@ -125,14 +117,17 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             failure,
                             upstream_error: event.upstream_error,
                             preserved: event.preserved_error,
-                            zenith_gateway_invalid_request: event
-                                .payload
+                            invalid_function_call_output_call_id: event
+                                .event_payload
                                 .as_ref()
-                                .is_some_and(zenith_gateway_invalid_request_value),
+                                .is_some_and(
+                                    responses_function_call_output_has_invalid_call_id_value,
+                                ),
                             responses_tool_call_links_rejected: event
-                                .payload
+                                .event_payload
                                 .as_ref()
                                 .is_some_and(responses_tool_call_links_rejected_value),
+                            partial_body: buffered.clone(),
                         });
                     }
                     if event.output_item.is_some() && !event.is_compaction {
@@ -144,9 +139,17 @@ pub(in crate::gateway) async fn bootstrap_stream(
                     // failure, allowing the request executor to retry another
                     // candidate. A non-empty incomplete response remains a
                     // terminal client response (for example max output).
-                    if event.payload.as_ref().is_some_and(|payload| {
-                        is_empty_responses_incomplete(payload, saw_output, completed_output_items)
-                    }) {
+                    if event
+                        .event_payload
+                        .as_ref()
+                        .is_some_and(|terminal_payload| {
+                            is_empty_responses_incomplete(
+                                terminal_payload,
+                                saw_output,
+                                completed_output_items,
+                            )
+                        })
+                    {
                         return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into());
                     }
                     let terminal = event.outcome.is_some();

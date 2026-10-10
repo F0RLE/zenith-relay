@@ -23,24 +23,24 @@ pub use state::DesktopState;
 pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     applications::validate();
     let started = Instant::now();
-    let root = crate::platform::relay_dir(app)
+    let relay_root = crate::platform::relay_dir(app)
         .map_err(|message| error::LocalPoolError::new(error::ErrorCode::Io, message))?;
-    create_storage_directory(&root)?;
-    state::migrate_storage_layout(&root)?;
+    create_storage_directory(&relay_root)?;
+    state::migrate_storage_layout(&relay_root)?;
     let directory_ready = started.elapsed();
     let vault_started = Instant::now();
-    let paths = crate::storage_paths::StoragePaths::from_root(&root);
-    store::secret_store::initialize(&paths.vault_root(), &paths.migration_root())?;
+    let storage_paths = crate::storage_paths::StoragePaths::from_root(&relay_root);
+    store::secret_store::initialize(&storage_paths.vault_root(), &storage_paths.migration_root())?;
     let vault_ms = vault_started.elapsed().as_secs_f64() * 1_000.0;
     let secrets_ready = started.elapsed();
-    let state = DesktopState::open(root)?;
-    commands::pool::retire_user_gateway_keys(&state)?;
+    let desktop_state = DesktopState::open(relay_root)?;
+    commands::pool::retire_user_gateway_keys(&desktop_state)?;
     let state_ready = started.elapsed();
-    state.set_app_handle(app.clone());
-    let _ = state.record_performance("vault", vault_ms, Some("startup"));
-    let _ = state.record_performance(
+    desktop_state.set_app_handle(app.clone());
+    let _ = desktop_state.record_performance("vault", vault_ms, Some("startup"));
+    let _ = desktop_state.record_performance(
         "sqlite",
-        state.telemetry.open_duration_ms(),
+        desktop_state.telemetry.open_duration_ms(),
         Some("startup"),
     );
     if cfg!(debug_assertions) {
@@ -52,7 +52,7 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
             state_ready.as_millis(),
         );
     }
-    Ok(state)
+    Ok(desktop_state)
 }
 
 /// Starts observers only after `DesktopState` has been registered in Tauri.
@@ -85,9 +85,9 @@ fn layout_error(message: impl Into<String>) -> error::LocalPoolError {
 }
 
 pub(crate) fn random_urlsafe(bytes: usize) -> String {
-    let mut value = vec![0_u8; bytes];
-    rand::rng().fill_bytes(&mut value);
-    URL_SAFE_NO_PAD.encode(value)
+    let mut random_bytes = vec![0_u8; bytes];
+    rand::rng().fill_bytes(&mut random_bytes);
+    URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
 #[cfg(test)]

@@ -75,13 +75,13 @@ pub fn management_http_gate() -> Arc<ManagementHttpGate> {
 /// while an admission waiter is pending.
 #[derive(Clone, Default)]
 pub struct ManagementHttpScope {
-    current: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    freshness_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl ManagementHttpScope {
     pub fn checked(check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
-            current: Some(Arc::new(check)),
+            freshness_check: Some(Arc::new(check)),
         }
     }
 
@@ -93,7 +93,7 @@ impl ManagementHttpScope {
     ) -> Result<(reqwest::Response, HttpPermit), HttpSendError> {
         management_http_gate()
             .send_if_current(client, request, class, || {
-                self.current.as_ref().is_none_or(|check| check())
+                self.freshness_check.as_ref().is_none_or(|check| check())
             })
             .await
     }
@@ -174,33 +174,35 @@ impl ManagementHttpGate {
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
-                let mut state = crate::poison::mutex(&self.state);
+                let mut gate_state = crate::poison::mutex(&self.state);
                 if Instant::now() >= deadline {
                     return Err(HttpAdmissionError::TimedOut);
                 }
-                let turn = state
+                let turn = gate_state
                     .waiters
                     .iter()
-                    .find(|entry| self.capacity(&state, &entry.origin, entry.class));
-                if self.capacity(&state, &origin, class)
-                    && turn.is_none_or(|entry| {
-                        Some(entry.id) == waiting.as_ref().map(|w: &Waiting| w.id)
+                    .find(|waiter| self.capacity(&gate_state, &waiter.origin, waiter.class));
+                if self.capacity(&gate_state, &origin, class)
+                    && turn.is_none_or(|waiter| {
+                        Some(waiter.id) == waiting.as_ref().map(|waiting: &Waiting| waiting.id)
                     })
                 {
                     if let Some(mut waiter) = waiting.take() {
-                        state.waiters.retain(|entry| entry.id != waiter.id);
+                        gate_state
+                            .waiters
+                            .retain(|queued_waiter| queued_waiter.id != waiter.id);
                         waiter.active = false;
                     }
-                    state.total += 1;
+                    gate_state.total += 1;
                     if class == HttpClass::Ordinary {
-                        state.ordinary += 1;
+                        gate_state.ordinary += 1;
                     }
-                    let entry = state.origins.entry(origin.clone()).or_default();
-                    entry.0 += 1;
+                    let origin_counters = gate_state.origins.entry(origin.clone()).or_default();
+                    origin_counters.0 += 1;
                     if class == HttpClass::Ordinary {
-                        entry.1 += 1;
+                        origin_counters.1 += 1;
                     }
-                    drop(state);
+                    drop(gate_state);
                     self.changed.notify_waiters();
                     return Ok(HttpPermit {
                         gate: self.clone(),
@@ -212,9 +214,9 @@ impl ManagementHttpGate {
                     // An ordinary burst must not consume the last waiter
                     // slot needed by login or token recovery. Reserving only
                     // active permits would still reject Auth at a full queue.
-                    if state.waiters.len() >= self.limits.max_waiters
+                    if gate_state.waiters.len() >= self.limits.max_waiters
                         || (class == HttpClass::Ordinary
-                            && state.waiters.len()
+                            && gate_state.waiters.len()
                                 >= self
                                     .limits
                                     .max_waiters
@@ -222,19 +224,19 @@ impl ManagementHttpGate {
                     {
                         return Err(HttpAdmissionError::Full);
                     }
-                    state.next_id = state
+                    gate_state.next_id = gate_state
                         .next_id
                         .checked_add(1)
                         .ok_or(HttpAdmissionError::Full)?;
-                    let id = state.next_id;
-                    state.waiters.push_back(Waiter {
-                        id,
+                    let waiter_id = gate_state.next_id;
+                    gate_state.waiters.push_back(Waiter {
+                        id: waiter_id,
                         origin: origin.clone(),
                         class,
                     });
                     waiting = Some(Waiting {
                         gate: self.clone(),
-                        id,
+                        id: waiter_id,
                         active: true,
                     });
                 }
@@ -262,27 +264,28 @@ impl ManagementHttpGate {
         client: &reqwest::Client,
         request: reqwest::RequestBuilder,
         class: HttpClass,
-        current: impl Fn() -> bool,
+        is_current: impl Fn() -> bool,
     ) -> Result<(reqwest::Response, HttpPermit), HttpSendError> {
-        if !current() {
+        if !is_current() {
             return Err(HttpSendError::Stale);
         }
-        let request = request
+        let built_request = request
             .build()
             .map_err(|_| HttpSendError::Transport { timeout: false })?;
         let permit = self
-            .acquire(request.url(), class)
+            .acquire(built_request.url(), class)
             .await
             .map_err(HttpSendError::Admission)?;
-        if !current() {
+        if !is_current() {
             return Err(HttpSendError::Stale);
         }
-        let response = client
-            .execute(request)
-            .await
-            .map_err(|error| HttpSendError::Transport {
-                timeout: error.is_timeout(),
-            })?;
+        let response =
+            client
+                .execute(built_request)
+                .await
+                .map_err(|error| HttpSendError::Transport {
+                    timeout: error.is_timeout(),
+                })?;
         Ok((response, permit))
     }
 
@@ -301,32 +304,34 @@ impl Drop for Waiting {
         if !self.active {
             return;
         }
-        let mut state = crate::poison::mutex(&self.gate.state);
-        state.waiters.retain(|entry| entry.id != self.id);
-        drop(state);
+        let mut gate_state = crate::poison::mutex(&self.gate.state);
+        gate_state
+            .waiters
+            .retain(|queued_waiter| queued_waiter.id != self.id);
+        drop(gate_state);
         self.gate.changed.notify_waiters();
     }
 }
 
 impl Drop for HttpPermit {
     fn drop(&mut self) {
-        let mut state = crate::poison::mutex(&self.gate.state);
-        state.total -= 1;
+        let mut gate_state = crate::poison::mutex(&self.gate.state);
+        gate_state.total -= 1;
         if self.class == HttpClass::Ordinary {
-            state.ordinary -= 1;
+            gate_state.ordinary -= 1;
         }
-        let entry = state
+        let origin_counters = gate_state
             .origins
             .get_mut(&self.origin)
             .expect("permit origin is active");
-        entry.0 -= 1;
+        origin_counters.0 -= 1;
         if self.class == HttpClass::Ordinary {
-            entry.1 -= 1;
+            origin_counters.1 -= 1;
         }
-        if entry.0 == 0 {
-            state.origins.remove(&self.origin);
+        if origin_counters.0 == 0 {
+            gate_state.origins.remove(&self.origin);
         }
-        drop(state);
+        drop(gate_state);
         self.gate.changed.notify_waiters();
     }
 }

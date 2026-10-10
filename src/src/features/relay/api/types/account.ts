@@ -6,10 +6,16 @@ import type {
 } from "./pricing";
 import type { RefreshStatus } from "./source";
 
+export type OAuthClientKind = "codex" | "excel_bps";
+
 export type AccountSummary = {
   id: string;
   label: string;
   identityHint: string;
+  /** Shared provider credit ledger; absent on older servers. */
+  creditBalanceKey?: string | null;
+  /** Older records and servers use the Codex client. */
+  oauthClientKind?: OAuthClientKind;
   basisPointsAvailable?: boolean;
   basisPointsEnabled?: boolean;
   enabled: boolean;
@@ -111,6 +117,7 @@ export type ImportSession = {
       label: string;
       identity: string;
       authMode: string;
+      oauthClientKind?: OAuthClientKind;
       sourceName: string;
       quotaStatus: string;
       status: string;
@@ -133,6 +140,8 @@ export type ConfirmAccountImportResponse = {
     itemId: string;
     status: "succeeded" | "failed";
     account?: { account: { id: string } };
+    accountId?: string;
+    source?: { id: string };
     error?: { code: string; message: string };
   }>;
 };
@@ -162,6 +171,7 @@ export type OAuthFlow = {
   expiresAtMs: number;
   status: OAuthFlowStatus;
   targetAccountId?: string;
+  clientKind?: OAuthClientKind;
 };
 
 export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status">;

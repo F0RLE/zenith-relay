@@ -12,7 +12,7 @@ pub(super) enum GapAction {
 pub(super) struct SelectionGap<'a> {
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
-    pub(super) request: &'a mut ClientRequest,
+    pub(super) client_request: &'a mut ClientRequest,
     pub(super) tried: &'a mut HashSet<String>,
     pub(super) last_failure: &'a Option<GatewayFailure>,
     pub(super) http_fallback_origin: &'a Option<ErrorOrigin>,
@@ -29,20 +29,20 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
     let websocket_http_fallback_origin = gap.http_fallback_origin;
     let allow_previous_response_reset = gap.allow_previous_response_reset;
     let wait_for_candidate_availability = gap.wait_for_candidate_availability;
-    let request = &mut *gap.request;
+    let client_request = &mut *gap.client_request;
     let tried = &mut *gap.tried;
     let repairs = &mut *gap.repairs;
     let retry_window_expired = &mut *gap.retry_window_expired;
     let model_switch_reset_attempted = &mut repairs.model_switch_reset;
     let native_replay_attempted = &mut repairs.native_replay;
-    if let Some(reason) = request.budget.admission_stop_reason() {
+    if let Some(reason) = client_request.budget.admission_stop_reason() {
         return GapAction::Fail(GatewayFailure::admission(reason));
     }
-    if !request.requires_affinity_owner
+    if !client_request.requires_affinity_owner
         && runtime.release_unroutable_response_affinity(
             key,
-            &mut request.response_affinity_key,
-            &request.resolved_model,
+            &mut client_request.response_affinity_key,
+            &client_request.resolved_model,
             WEBSOCKET_PROTOCOLS,
             now_ms(),
         )
@@ -56,35 +56,35 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
     // continuation once so the new model can use a compatible owner;
     // temporary health, quota, and cooldown misses remain retryable.
     if allow_previous_response_reset
-        && request.has_previous_response_id()
-        && !request.has_unpaired_tool_output()
+        && client_request.has_previous_response_id()
+        && !client_request.has_unpaired_tool_output()
         && !*model_switch_reset_attempted
-        && (request
+        && (client_request
             .response_affinity_key
             .as_deref()
             .and_then(|affinity_key| {
                 runtime.response_affinity_owner_supports_model(
                     affinity_key,
-                    &request.resolved_model,
+                    &client_request.resolved_model,
                     WEBSOCKET_PROTOCOLS,
                     now_ms(),
                 )
             })
             == Some(false)
-            || request
+            || client_request
                 .response_affinity_key
                 .as_deref()
                 .and_then(|affinity_key| {
                     runtime.response_affinity_owner_supports_route(
                         key,
                         affinity_key,
-                        &request.resolved_model,
+                        &client_request.resolved_model,
                         WEBSOCKET_PROTOCOLS,
                         now_ms(),
                     )
                 })
                 == Some(false))
-        && request.drop_previous_response_id(runtime, &key.id)
+        && client_request.drop_previous_response_id(runtime, &key.id)
     {
         *model_switch_reset_attempted = true;
         return GapAction::Continue;
@@ -93,22 +93,22 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
     // cooldown changed after the previous turn. Use the bounded native
     // replay before waiting, then let the next selection choose any
     // compatible candidate (OAuth or API source).
-    if request.has_previous_response_id() && request.requires_affinity_owner {
-        if let Some(affinity_key) = request.response_affinity_key.clone() {
+    if client_request.has_previous_response_id() && client_request.requires_affinity_owner {
+        if let Some(affinity_key) = client_request.response_affinity_key.clone() {
             if let Some(owner_candidate_id) =
                 runtime.response_affinity_candidate(&affinity_key, now_ms())
             {
                 let owner_model = runtime
                     .executor_route(
                         &owner_candidate_id,
-                        &request.resolved_model,
+                        &client_request.resolved_model,
                         &key.scope_snapshot(),
                         WEBSOCKET_PROTOCOLS,
                         false,
                     )
                     .map(|route| route.source_model)
-                    .unwrap_or_else(|| request.resolved_model.clone());
-                match request.replay_native_continuation(
+                    .unwrap_or_else(|| client_request.resolved_model.clone());
+                match client_request.replay_native_continuation(
                     runtime,
                     &key.id,
                     &owner_candidate_id,
@@ -125,15 +125,15 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
             }
         }
     }
-    if request.requires_affinity_owner
-        && request
+    if client_request.requires_affinity_owner
+        && client_request
             .response_affinity_key
             .as_deref()
             .and_then(|affinity_key| {
                 runtime.response_affinity_owner_supports_route(
                     key,
                     affinity_key,
-                    &request.resolved_model,
+                    &client_request.resolved_model,
                     WEBSOCKET_PROTOCOLS,
                     now_ms(),
                 )
@@ -146,23 +146,23 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
         super::super::super::errors::retryable_recovery_wait(
             failure.status,
             failure.category,
-            request.has_previous_response_id(),
+            client_request.has_previous_response_id(),
         )
     });
     if websocket_http_fallback_origin.is_none()
         && may_wait_for_route
         && wait_for_recovery(
-            &request.budget,
+            &client_request.budget,
             &CandidateRetryContext {
                 runtime,
                 key,
-                resolved_model: &request.resolved_model,
+                resolved_model: &client_request.resolved_model,
                 protocols: WEBSOCKET_PROTOCOLS,
                 operation: crate::scheduler::rotation::RotationOperation::Text,
                 exclusions: &HashSet::new(),
             },
             &mut *tried,
-            request.response_affinity_key.as_deref(),
+            client_request.response_affinity_key.as_deref(),
         )
         .await
     {
@@ -176,12 +176,12 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
         if !runtime
             .wait_for_recovery_event(
                 key,
-                &request.resolved_model,
+                &client_request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
                 tried,
-                request.response_affinity_key.as_deref(),
+                client_request.response_affinity_key.as_deref(),
                 crate::scheduler::rotation::RotationOperation::Text,
-                &request.budget,
+                &client_request.budget,
                 None,
                 true,
             )
@@ -190,7 +190,7 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
             *retry_window_expired = true;
             return GapAction::Break;
         }
-        request.budget.begin_recovery_pass();
+        client_request.budget.begin_recovery_pass();
         return GapAction::Continue;
     }
     GapAction::Break

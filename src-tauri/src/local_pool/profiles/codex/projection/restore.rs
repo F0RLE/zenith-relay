@@ -50,14 +50,14 @@ pub(in crate::local_pool::profiles::codex) fn restore_from_backup(
 fn restore_config_text(
     before: Option<&str>,
     after: &str,
-    current: Option<&str>,
+    current_text: Option<&str>,
 ) -> Result<Option<String>> {
-    if current == Some(after) || current == before {
+    if current_text == Some(after) || current_text == before {
         return Ok(before.map(str::to_owned));
     }
     let before_doc = parse_config(before.unwrap_or_default())?;
     let after_doc = parse_config(after)?;
-    let mut current_doc = parse_config(current.unwrap_or_default())?;
+    let mut current_doc = parse_config(current_text.unwrap_or_default())?;
     restore_table(
         before_doc.as_table(),
         after_doc.as_table(),
@@ -71,77 +71,83 @@ fn restore_config_text(
     }
 }
 
-fn same(left: Option<&Item>, right: Option<&Item>) -> bool {
+fn same(left_item: Option<&Item>, right_item: Option<&Item>) -> bool {
     // Formatting is not an ownership change. Values have a canonical Display
     // after clearing surrounding decoration; tables are compared recursively.
-    match (left, right) {
+    match (left_item, right_item) {
         (None, None) => true,
-        (Some(left), Some(right)) => match (left.as_table_like(), right.as_table_like()) {
-            (Some(left), Some(right)) => {
-                left.len() == right.len()
-                    && left
-                        .iter()
-                        .all(|(key, item)| same(Some(item), right.get(key)))
+        (Some(left_item), Some(right_item)) => {
+            match (left_item.as_table_like(), right_item.as_table_like()) {
+                (Some(left_table), Some(right_table)) => {
+                    left_table.len() == right_table.len()
+                        && left_table
+                            .iter()
+                            .all(|(key, nested_item)| same(Some(nested_item), right_table.get(key)))
+                }
+                _ => match (left_item.as_str(), right_item.as_str()) {
+                    (Some(left_text), Some(right_text)) => left_text == right_text,
+                    _ => normalized(left_item) == normalized(right_item),
+                },
             }
-            _ => match (left.as_str(), right.as_str()) {
-                (Some(left), Some(right)) => left == right,
-                _ => normalized(left) == normalized(right),
-            },
-        },
+        }
         _ => false,
     }
 }
 
-fn normalized(item: &Item) -> String {
-    let mut item = item.clone();
-    if let Some(value) = item.as_value_mut() {
-        value.decor_mut().clear();
+fn normalized(toml_item: &Item) -> String {
+    let mut normalized_item = toml_item.clone();
+    if let Some(value_node) = normalized_item.as_value_mut() {
+        value_node.decor_mut().clear();
     }
-    item.to_string()
+    normalized_item.to_string()
 }
 
 fn restore_table(
-    before: &dyn toml_edit::TableLike,
-    after: &dyn toml_edit::TableLike,
-    current: &mut dyn toml_edit::TableLike,
+    saved_before: &dyn toml_edit::TableLike,
+    managed_after: &dyn toml_edit::TableLike,
+    current_config: &mut dyn toml_edit::TableLike,
 ) {
-    let keys: std::collections::BTreeSet<_> = before
+    let keys: std::collections::BTreeSet<_> = saved_before
         .iter()
-        .chain(after.iter())
+        .chain(managed_after.iter())
         .map(|(key, _)| key.to_owned())
         .collect();
     for key in keys {
-        let previous = before.get(&key);
-        let managed = after.get(&key);
-        if same(previous, managed) || same(current.get(&key), previous) {
+        let previous_value = saved_before.get(&key);
+        let managed_value = managed_after.get(&key);
+        if same(previous_value, managed_value) || same(current_config.get(&key), previous_value) {
             continue;
         }
-        if let (Some(managed), Some(existing)) = (
-            managed.and_then(Item::as_table_like),
-            current.get_mut(&key).and_then(Item::as_table_like_mut),
+        if let (Some(managed_table), Some(existing_table)) = (
+            managed_value.and_then(Item::as_table_like),
+            current_config
+                .get_mut(&key)
+                .and_then(Item::as_table_like_mut),
         ) {
             let empty = Table::new();
             restore_table(
-                previous.and_then(Item::as_table_like).unwrap_or(&empty),
-                managed,
-                existing,
+                previous_value
+                    .and_then(Item::as_table_like)
+                    .unwrap_or(&empty),
+                managed_table,
+                existing_table,
             );
-            if previous.is_none() && existing.is_empty() {
-                current.remove(&key);
+            if previous_value.is_none() && existing_table.is_empty() {
+                current_config.remove(&key);
             }
             continue;
         }
-        if !same(current.get(&key), managed) {
+        if !same(current_config.get(&key), managed_value) {
             // An external edit owns this leaf. Undo the other Relay-owned
             // leaves without replacing the user's newer value.
             continue;
         }
-        match previous {
-            Some(item) => {
-                current.insert(&key, item.clone());
+        match previous_value {
+            Some(previous_item) => {
+                current_config.insert(&key, previous_item.clone());
             }
             None => {
-                current.remove(&key);
+                current_config.remove(&key);
             }
         }
     }
@@ -156,18 +162,18 @@ mod tests {
         let before =
             "# mine\nmodel_provider = 'custom'\n[profiles.work]\nmodel_provider = 'work'\n";
         let after = "model_provider = 'relay'\n[profiles.work]\nmodel_provider = 'work'\n[model_providers.relay]\nbase_url = 'local'\n";
-        let current = format!("model = 'chosen'\n{after}");
-        let result = restore_config_text(Some(before), after, Some(&current))
+        let user_config_text = format!("model = 'chosen'\n{after}");
+        let restored_text = restore_config_text(Some(before), after, Some(&user_config_text))
             .unwrap()
             .unwrap();
-        let result = parse_config(&result).unwrap();
-        assert_eq!(result["model"].as_str(), Some("chosen"));
-        assert_eq!(result["model_provider"].as_str(), Some("custom"));
+        let restored_config = parse_config(&restored_text).unwrap();
+        assert_eq!(restored_config["model"].as_str(), Some("chosen"));
+        assert_eq!(restored_config["model_provider"].as_str(), Some("custom"));
         assert_eq!(
-            result["profiles"]["work"]["model_provider"].as_str(),
+            restored_config["profiles"]["work"]["model_provider"].as_str(),
             Some("work")
         );
-        assert!(result.get("model_providers").is_none());
+        assert!(restored_config.get("model_providers").is_none());
     }
 
     #[test]
@@ -236,19 +242,19 @@ mod tests {
 
     #[test]
     fn inline_provider_extension_survives_restore() {
-        let result = restore_config_text(
+        let restored_text = restore_config_text(
             None,
             "model_providers = {relay = {base_url = 'local'}}",
             Some("model_providers = {relay = {base_url = 'local', user_option = true}}"),
         )
         .unwrap()
         .unwrap();
-        let document = parse_config(&result).unwrap();
+        let restored_document = parse_config(&restored_text).unwrap();
         assert_eq!(
-            document["model_providers"]["relay"]["user_option"].as_bool(),
+            restored_document["model_providers"]["relay"]["user_option"].as_bool(),
             Some(true)
         );
-        assert!(document["model_providers"]["relay"]
+        assert!(restored_document["model_providers"]["relay"]
             .as_table_like()
             .unwrap()
             .get("base_url")

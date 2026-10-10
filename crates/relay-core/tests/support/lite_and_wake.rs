@@ -54,23 +54,23 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
         "parallel_tool_calls": true,
         "reasoning": {"effort": "high"}
     });
-    assert_eq!(
-        client
-            .post(format!("{}/v1/responses", gateway.base_url))
-            .bearer_auth(LOCAL_KEY)
-            .json(&request_body)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+    let first_response = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_response = first_response.json::<Value>().await.unwrap();
+    let mut explicit_lite_body = request_body.clone();
+    explicit_lite_body["previous_response_id"] = first_response["id"].clone();
     assert_eq!(
         client
             .post(format!("{}/v1/responses", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
             .header("x-openai-internal-codex-responses-lite", "true")
-            .json(&request_body)
+            .json(&explicit_lite_body)
             .send()
             .await
             .unwrap()

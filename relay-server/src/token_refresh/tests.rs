@@ -39,6 +39,9 @@ async fn old_persistence_cannot_write_a_replaced_login_or_auth_state() {
     record.secret_ref = "account:synthetic:new".into();
     state.store.save_account(&record).unwrap();
     let credential = crate::state::AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-new-access".into(),
         refresh_token: Some("synthetic-new-refresh".into()),
         id_token: None,

@@ -13,7 +13,7 @@ use zenith_relay_core::{
     },
     error_codes,
     providers::chatgpt::{
-        configured_codex_client_version, CodexModelsClient, ModelDiscoveryFailure,
+        configured_codex_client_version, AccountModelsClient, ModelDiscoveryFailure,
         ModelDiscoveryFailureCode,
     },
     scheduler::account_candidate_health,
@@ -26,37 +26,38 @@ pub(super) async fn read_models(
     state: &Arc<AppState>,
     fence: &crate::store::AccountRefreshFence,
 ) -> Result<super::refresh::AccountRead, String> {
-    let (checked, current) = state.store.account_refresh_scope(&fence.account_id)?;
-    if &current != fence {
+    let (account_snapshot, stored_fence) = state.store.account_refresh_scope(&fence.account_id)?;
+    if &stored_fence != fence {
         return Err("account changed during refresh".into());
     }
-    let account = &checked;
     let mut rejected_tokens = None;
     let mut model_result =
-        discover_account_models(state, account, fence, &mut rejected_tokens).await;
-    let reauth_state =
-        if model_discovery_was_unauthorized(&model_result) && rejected_tokens.is_some() {
-            match state
-                .recover_account_tokens_after_unauthorized(
-                    account,
-                    rejected_tokens.as_ref().expect("checked bearer tokens"),
-                )
-                .await
-            {
-                Ok(_) => {
-                    model_result =
-                        discover_account_models(state, account, fence, &mut rejected_tokens).await;
-                    None
-                }
-                Err(_) => state
-                    .token_authority
-                    .auth_state(&account.id)
-                    .await
-                    .filter(|auth_state| auth_state.requires_fresh_login()),
+        discover_account_models(state, &account_snapshot, fence, &mut rejected_tokens).await;
+    let reauth_state = if model_discovery_was_unauthorized(&model_result)
+        && rejected_tokens.is_some()
+    {
+        match state
+            .recover_account_tokens_after_unauthorized(
+                &account_snapshot,
+                rejected_tokens.as_ref().expect("validated bearer tokens"),
+            )
+            .await
+        {
+            Ok(_) => {
+                model_result =
+                    discover_account_models(state, &account_snapshot, fence, &mut rejected_tokens)
+                        .await;
+                None
             }
-        } else {
-            None
-        };
+            Err(_) => state
+                .token_authority
+                .auth_state(&account_snapshot.id)
+                .await
+                .filter(|auth_state| auth_state.requires_fresh_login()),
+        }
+    } else {
+        None
+    };
     let succeeded = model_result.is_ok();
     let retry_after_ms = model_result.as_ref().err().and_then(|failure| failure.2);
     if let Some(delay) = retry_after_ms {
@@ -95,8 +96,8 @@ pub(super) async fn read_models(
     })
 }
 
-fn apply_discovered_models(account: &mut ServerAccountRecord, result: ModelReadResult) {
-    match result {
+fn apply_discovered_models(account: &mut ServerAccountRecord, model_read_result: ModelReadResult) {
+    match model_read_result {
         Ok(models) => {
             accept_discovered_models(
                 &mut account.models,
@@ -121,8 +122,8 @@ fn apply_discovered_models(account: &mut ServerAccountRecord, result: ModelReadR
     }
 }
 
-fn model_discovery_was_unauthorized(result: &ModelReadResult) -> bool {
-    matches!(result, Err((code, _, _)) if code == error_codes::MODELS_UNAUTHORIZED)
+fn model_discovery_was_unauthorized(model_read_result: &ModelReadResult) -> bool {
+    matches!(model_read_result, Err((code, _, _)) if code == error_codes::MODELS_UNAUTHORIZED)
 }
 
 async fn discover_account_models(
@@ -155,15 +156,16 @@ async fn discover_account_models(
             None,
         )
     })?;
-    let client = CodexModelsClient::new_with_proxy_and_timeout_and_user_agent(
+    let models_client = AccountModelsClient::new_with_proxy_and_timeout_and_user_agent(
         proxy.as_ref(),
         Duration::from_secs(20),
         "Zenith Relay Server",
     )
     .map_err(|_| (error_codes::MODELS_CLIENT_INIT.to_string(), false, None))?
+    .with_oauth_client_kind(credential.oauth_client_kind)
     .with_http_scope(super::refresh::account_http_scope(state, fence));
     let client_version = configured_codex_client_version();
-    let mut result = client
+    let mut model_read_result = models_client
         .discover_authorized(
             authorization,
             &credential.chatgpt_account_id,
@@ -173,7 +175,7 @@ async fn discover_account_models(
     if rejected_tokens.is_none()
         && credential.is_agent_identity()
         && matches!(
-            result.as_ref(),
+            model_read_result.as_ref(),
             Err(ModelDiscoveryFailure {
                 code: ModelDiscoveryFailureCode::AgentTaskInvalid,
                 ..
@@ -189,7 +191,7 @@ async fn discover_account_models(
         )
         .await
         .map_err(|_| ("models_authorization_prepare".to_string(), true, None))?;
-        result = client
+        model_read_result = models_client
             .discover_authorized(
                 authorization,
                 &credential.chatgpt_account_id,
@@ -197,7 +199,7 @@ async fn discover_account_models(
             )
             .await;
     }
-    result.map_err(model_discovery_error)
+    model_read_result.map_err(model_discovery_error)
 }
 
 fn model_discovery_error(error: ModelDiscoveryFailure) -> ModelReadFailure {

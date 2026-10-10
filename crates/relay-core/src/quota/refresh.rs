@@ -83,38 +83,39 @@ pub struct QuotaRefreshResult {
 }
 
 impl QuotaRefreshData {
-    pub fn preserve_subscription_metadata(&mut self, previous: &Subscription) {
+    pub fn preserve_subscription_metadata(&mut self, previous_subscription: &Subscription) {
         let Some(subscription) = self.subscription.as_mut() else {
             return;
         };
         if subscription.plan_type.is_none() {
-            subscription.plan_type = previous.plan_type.clone();
+            subscription.plan_type = previous_subscription.plan_type.clone();
         }
         if subscription.active_until_ms.is_none()
             && !subscription_plan_changed(
-                previous.plan_type.as_deref(),
+                previous_subscription.plan_type.as_deref(),
                 subscription.plan_type.as_deref(),
             )
         {
-            subscription.active_until_ms = previous.active_until_ms;
+            subscription.active_until_ms = previous_subscription.active_until_ms;
         }
     }
 
     pub fn normalize(
         self,
-        previous: &QuotaSnapshot,
+        previous_snapshot: &QuotaSnapshot,
     ) -> Result<(QuotaSnapshot, Option<Subscription>), QuotaNormalizationError> {
         let primary = normalize_window(
             self.primary,
             QuotaWindowKind::Primary,
-            previous.primary.as_ref(),
+            previous_snapshot.primary.as_ref(),
         )?;
         let secondary = normalize_window(
             self.secondary,
             QuotaWindowKind::Secondary,
-            previous.secondary.as_ref(),
+            previous_snapshot.secondary.as_ref(),
         )?;
-        let supplemental = normalize_supplemental(self.supplemental, &previous.supplemental)?;
+        let supplemental =
+            normalize_supplemental(self.supplemental, &previous_snapshot.supplemental)?;
         Ok((
             QuotaSnapshot {
                 primary,
@@ -134,52 +135,54 @@ impl QuotaRefreshData {
     }
 }
 
-pub fn subscription_plan_changed(previous: Option<&str>, observed: Option<&str>) -> bool {
-    let Some(observed) = observed.map(str::trim).filter(|value| !value.is_empty()) else {
+pub fn subscription_plan_changed(previous_plan: Option<&str>, observed_plan: Option<&str>) -> bool {
+    let Some(observed_plan_name) = observed_plan.map(str::trim).filter(|plan| !plan.is_empty())
+    else {
         return false;
     };
-    previous
+    previous_plan
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none_or(|previous| {
-            normalize_subscription_plan(previous) != normalize_subscription_plan(observed)
+        .filter(|plan| !plan.is_empty())
+        .is_none_or(|previous_plan| {
+            normalize_subscription_plan(previous_plan)
+                != normalize_subscription_plan(observed_plan_name)
         })
 }
 
 fn normalize_supplemental(
     inputs: Vec<SupplementalQuotaWindowInput>,
-    previous: &[SupplementalQuotaWindow],
+    previous_windows: &[SupplementalQuotaWindow],
 ) -> Result<Vec<SupplementalQuotaWindow>, QuotaNormalizationError> {
     if inputs.len() > MAX_SUPPLEMENTAL_WINDOWS {
         return Err(QuotaNormalizationError::InvalidSupplementalWindow);
     }
-    let mut ids = HashSet::with_capacity(inputs.len());
+    let mut window_ids = HashSet::with_capacity(inputs.len());
     inputs
         .into_iter()
-        .map(|input| {
-            let id = input.id.trim();
-            let label = input.label.trim();
-            if id.is_empty()
-                || id.len() > 64
-                || !id.bytes().all(|byte| {
+        .map(|window_input| {
+            let quota_window_id = window_input.id.trim();
+            let label = window_input.label.trim();
+            if quota_window_id.is_empty()
+                || quota_window_id.len() > 64
+                || !quota_window_id.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_' | b'.')
                 })
-                || !ids.insert(id.to_string())
+                || !window_ids.insert(quota_window_id.to_string())
                 || label.is_empty()
                 || label.len() > 128
                 || label.chars().any(char::is_control)
             {
                 return Err(QuotaNormalizationError::InvalidSupplementalWindow);
             }
-            let previous_window = previous
+            let previous_window = previous_windows
                 .iter()
-                .find(|candidate| candidate.id == id)
+                .find(|candidate| candidate.id == quota_window_id)
                 .map(|candidate| &candidate.window);
             Ok(SupplementalQuotaWindow {
-                id: id.to_string(),
+                id: quota_window_id.to_string(),
                 label: label.to_string(),
-                service_tier: input.service_tier,
-                window: QuotaWindow::normalize(input.window, previous_window)?,
+                service_tier: window_input.service_tier,
+                window: QuotaWindow::normalize(window_input.window, previous_window)?,
             })
         })
         .collect()
@@ -197,17 +200,17 @@ pub trait QuotaAdapter: Send + Sync {
 }
 
 fn normalize_window(
-    input: Option<QuotaWindowInput>,
+    quota_window_input: Option<QuotaWindowInput>,
     expected: QuotaWindowKind,
-    previous: Option<&QuotaWindow>,
+    previous_window: Option<&QuotaWindow>,
 ) -> Result<Option<QuotaWindow>, QuotaNormalizationError> {
-    let Some(input) = input else {
+    let Some(quota_input) = quota_window_input else {
         return Ok(None);
     };
-    if input.kind != expected {
+    if quota_input.kind != expected {
         return Err(QuotaNormalizationError::MismatchedWindowKind);
     }
-    let window = QuotaWindow::normalize(input, previous)?;
+    let window = QuotaWindow::normalize(quota_input, previous_window)?;
     Ok((!window.is_empty_provider_placeholder()).then_some(window))
 }
 

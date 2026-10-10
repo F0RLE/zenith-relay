@@ -4,8 +4,6 @@ use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, Healt
 
 mod response;
 
-#[cfg(test)]
-pub(super) use response::responses_call_id_is_missing;
 pub(super) use response::responses_call_id_is_missing_text;
 pub(crate) use response::{
     previous_response_not_found, previous_response_not_found_value,
@@ -13,11 +11,15 @@ pub(crate) use response::{
     recoverable_response_affinity_miss, recoverable_response_model_switch,
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_call_output_has_invalid_call_id,
+    responses_function_call_output_has_invalid_call_id_value,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    zenith_gateway_invalid_request, zenith_gateway_invalid_request_value,
+    zenith_gateway_invalid_request_value,
 };
+
+#[cfg(test)]
+pub(super) use response::{responses_call_id_is_missing, zenith_gateway_invalid_request};
 
 impl AttemptFailure {
     /// Explicit provider rejections and connection failures have different
@@ -75,8 +77,32 @@ impl AttemptFailure {
         match error {
             AuthorizedRequestError::Prepare(error) => Self::prepare(error),
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
-            AuthorizedRequestError::NotReplayable => Self::body(),
+            AuthorizedRequestError::NotReplayable => Self::upstream_response_body_failure(),
             AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
+            AuthorizedRequestError::ModelAccess(failure) => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::BAD_GATEWAY,
+                category: failure.code.management_code(),
+                message: "Basis Points model access could not be verified",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ModelUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::NOT_ACCEPTABLE,
+                category: error_codes::UPSTREAM_MODEL_UNSUPPORTED,
+                message: "Basis Points access does not include this model",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ReasoningUnavailable => Self {
+                execution: ExecutionObservation::not_sent(),
+                status: StatusCode::BAD_REQUEST,
+                category: error_codes::ADAPTER_REASONING_UNSUPPORTED,
+                message: "Basis Points access does not include this reasoning level",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::ProgressTimeout => {
+                Self::stream(error_codes::STREAM_IDLE_TIMEOUT)
+            }
         }
     }
 
@@ -117,7 +143,7 @@ impl AttemptFailure {
         }
     }
 
-    pub(crate) fn body() -> Self {
+    pub(crate) fn upstream_response_body_failure() -> Self {
         Self {
             execution: ExecutionObservation::unknown(),
             status: StatusCode::BAD_GATEWAY,
@@ -141,14 +167,14 @@ impl AttemptFailure {
         }
     }
 
-    pub(crate) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
-        let classification = classify_upstream_error(status, body);
+    pub(crate) fn status_with_body(status: StatusCode, response_body: Option<&[u8]>) -> Self {
+        let classification = classify_upstream_error(status, response_body);
         Self {
             execution: rejection_execution(status, classification.category),
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
-            cooldown_hint: body.map(rate_limit_body_hint).unwrap_or_default(),
+            cooldown_hint: response_body.map(rate_limit_body_hint).unwrap_or_default(),
         }
     }
 
@@ -172,8 +198,10 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message: match category {
-                error_codes::UPSTREAM_BODY_TOO_LARGE => "upstream response is too large",
                 error_codes::UPSTREAM_BODY => "upstream response failed",
+                error_codes::STREAM_IDLE_TIMEOUT => {
+                    "Basis Points response stopped making progress; the request was not repeated"
+                }
                 _ => "upstream stream failed before client output",
             },
             cooldown_hint: RateLimitBodyHint::default(),

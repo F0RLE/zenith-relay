@@ -1,5 +1,4 @@
 use super::errors::api_error;
-use super::request::{MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR};
 use crate::error_codes;
 use axum::body::Body;
 use axum::http::{header::CONTENT_ENCODING, HeaderMap, Response, StatusCode};
@@ -9,31 +8,33 @@ use std::io::Read;
 /// Upper-biased envelope accounting without serializing another copy. Include
 /// parsed container allocations, repair/bridge copies and fixed request state;
 /// compressed length alone would severely undercharge arrays and uploads.
-pub(super) fn retained_request_bytes(value: &Value) -> usize {
-    retained_value_bytes(value)
+pub(super) fn retained_request_bytes(request_json: &Value) -> usize {
+    retained_value_bytes(request_json)
         .saturating_mul(3)
         .saturating_add(16 * 1024)
 }
 
-pub(super) fn retained_object_bytes(object: &Map<String, Value>) -> usize {
-    object.iter().fold(0usize, |bytes, (key, value)| {
-        bytes
-            .saturating_add(128)
-            .saturating_add(key.capacity())
-            .saturating_add(retained_value_bytes(value))
-    })
+pub(super) fn retained_object_bytes(request_fields: &Map<String, Value>) -> usize {
+    request_fields
+        .iter()
+        .fold(0usize, |bytes, (key, field_value)| {
+            bytes
+                .saturating_add(128)
+                .saturating_add(key.capacity())
+                .saturating_add(retained_value_bytes(field_value))
+        })
 }
 
-fn retained_value_bytes(value: &Value) -> usize {
-    let allocation = match value {
-        Value::String(value) => value.capacity(),
-        Value::Array(values) => values.iter().fold(
-            values
+fn retained_value_bytes(json_value: &Value) -> usize {
+    let allocation = match json_value {
+        Value::String(text) => text.capacity(),
+        Value::Array(items) => items.iter().fold(
+            items
                 .capacity()
                 .saturating_mul(std::mem::size_of::<Value>()),
-            |bytes, value| bytes.saturating_add(retained_value_bytes(value)),
+            |bytes, item| bytes.saturating_add(retained_value_bytes(item)),
         ),
-        Value::Object(object) => retained_object_bytes(object),
+        Value::Object(object_fields) => retained_object_bytes(object_fields),
         _ => 0,
     };
     allocation.saturating_add(std::mem::size_of::<Value>())
@@ -41,16 +42,15 @@ fn retained_value_bytes(value: &Value) -> usize {
 
 #[derive(Debug, PartialEq)]
 enum ReadError {
-    TooLarge,
     InvalidEncoding,
 }
 
-fn decode(bytes: &[u8], encoding: &str, limit: usize) -> Result<Vec<u8>, ReadError> {
-    let reader: Box<dyn Read + '_> = match encoding {
-        "gzip" => Box::new(flate2::read::MultiGzDecoder::new(bytes)),
+fn decode(encoded_body: &[u8], encoding: &str) -> Result<Vec<u8>, ReadError> {
+    let mut reader: Box<dyn Read + '_> = match encoding {
+        "gzip" => Box::new(flate2::read::MultiGzDecoder::new(encoded_body)),
         "zstd" => {
-            let mut decoder =
-                zstd::stream::read::Decoder::new(bytes).map_err(|_| ReadError::InvalidEncoding)?;
+            let mut decoder = zstd::stream::read::Decoder::new(encoded_body)
+                .map_err(|_| ReadError::InvalidEncoding)?;
             decoder
                 .window_log_max(26)
                 .map_err(|_| ReadError::InvalidEncoding)?;
@@ -58,25 +58,25 @@ fn decode(bytes: &[u8], encoding: &str, limit: usize) -> Result<Vec<u8>, ReadErr
         }
         _ => return Err(ReadError::InvalidEncoding),
     };
-    let mut output = Vec::new();
+    let mut decoded_request_body = Vec::new();
     reader
-        .take(limit as u64 + 1)
-        .read_to_end(&mut output)
+        .read_to_end(&mut decoded_request_body)
         .map_err(|_| ReadError::InvalidEncoding)?;
-    if output.len() > limit {
-        return Err(ReadError::TooLarge);
-    }
-    Ok(output)
+    Ok(decoded_request_body)
 }
 
 pub(super) async fn read_json_object(
     headers: &HeaderMap,
-    body: Body,
+    request_body: Body,
 ) -> Result<Map<String, Value>, Box<Response<Body>>> {
     let encodings = headers.get_all(CONTENT_ENCODING).iter().collect::<Vec<_>>();
     let encoding = match encodings.as_slice() {
         [] => "identity".to_string(),
-        [value] => value.to_str().unwrap_or("").trim().to_ascii_lowercase(),
+        [encoding_header] => encoding_header
+            .to_str()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase(),
         _ => String::new(),
     };
     if !matches!(encoding.as_str(), "identity" | "gzip" | "zstd") {
@@ -86,25 +86,20 @@ pub(super) async fn read_json_object(
             error_codes::REQUEST_ENCODING_UNSUPPORTED,
         )));
     }
-    let bytes = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES)
+    let encoded_request_body = axum::body::to_bytes(request_body, usize::MAX)
         .await
-        .map_err(|_| Box::new(too_large()))?;
-    let bytes = if encoding == "identity" {
-        bytes
+        .map_err(|_| Box::new(unread_body()))?;
+    let request_bytes = if encoding == "identity" {
+        encoded_request_body
     } else {
-        tokio::task::spawn_blocking(move || {
-            decode(&bytes, &encoding, MAX_CLIENT_REQUEST_BODY_BYTES)
-        })
-        .await
-        .map_err(|_| Box::new(invalid_encoding()))?
-        .map_err(|error| match error {
-            ReadError::TooLarge => Box::new(too_large()),
-            ReadError::InvalidEncoding => Box::new(invalid_encoding()),
-        })?
-        .into()
+        tokio::task::spawn_blocking(move || decode(&encoded_request_body, &encoding))
+            .await
+            .map_err(|_| Box::new(invalid_encoding()))?
+            .map_err(|_| Box::new(invalid_encoding()))?
+            .into()
     };
-    match serde_json::from_slice(&bytes) {
-        Ok(Value::Object(object)) => Ok(object),
+    match serde_json::from_slice(&request_bytes) {
+        Ok(Value::Object(request_fields)) => Ok(request_fields),
         _ => Err(Box::new(api_error(
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
@@ -113,11 +108,11 @@ pub(super) async fn read_json_object(
     }
 }
 
-fn too_large() -> Response<Body> {
+fn unread_body() -> Response<Body> {
     api_error(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        MAX_CLIENT_REQUEST_BODY_ERROR,
-        error_codes::REQUEST_TOO_LARGE,
+        StatusCode::BAD_REQUEST,
+        "request body could not be read",
+        error_codes::INVALID_REQUEST,
     )
 }
 
@@ -135,7 +130,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn compression_is_bounded_and_truncated_streams_are_rejected() {
+    fn truncated_compressed_streams_are_rejected() {
         let input = br#"{"model":"synthetic","input":"hello"}"#;
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gzip.write_all(input).unwrap();
@@ -146,10 +141,9 @@ mod tests {
                 zstd::stream::encode_all(input.as_slice(), 1).unwrap(),
             ),
         ] {
-            assert_eq!(decode(&bytes, encoding, input.len()).unwrap(), input);
-            assert_eq!(decode(&bytes, encoding, 8), Err(ReadError::TooLarge));
+            assert_eq!(decode(&bytes, encoding).unwrap(), input);
             assert_eq!(
-                decode(&bytes[..bytes.len() - 2], encoding, 100),
+                decode(&bytes[..bytes.len() - 2], encoding),
                 Err(ReadError::InvalidEncoding)
             );
         }

@@ -21,7 +21,7 @@ pub fn sync_default_service_tier(
                     .ok_or_else(|| {
                         LocalPoolError::new(
                             ErrorCode::InvalidState,
-                            "Codex desktop settings must be a table",
+                            "ChatGPT desktop settings must be a table",
                         )
                     })?
                     .remove(DESKTOP_DEFAULT_SERVICE_TIER_KEY);
@@ -35,7 +35,7 @@ pub fn sync_default_service_tier(
             let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
-                    "Codex desktop settings must be a table",
+                    "ChatGPT desktop settings must be a table",
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("priority");
@@ -48,7 +48,7 @@ pub fn sync_default_service_tier(
             let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
-                    "Codex desktop settings must be a table",
+                    "ChatGPT desktop settings must be a table",
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("ultrafast");
@@ -58,46 +58,46 @@ pub fn sync_default_service_tier(
     document[TOP_LEVEL_SERVICE_TIER_KEY] = value(top_level_service_tier);
     let next_config = document.to_string();
 
-    let mut state = match snapshot_text(&original_state, &state_path)? {
+    let mut global_state_document = match snapshot_text(&original_state, &state_path)? {
         Some(content) => serde_json::from_str::<Value>(content).map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                format!("Codex global state is not valid JSON: {error}"),
+                format!("ChatGPT global state is not valid JSON: {error}"),
             )
         })?,
         None => Value::Object(Default::default()),
     };
-    let state = state.as_object_mut().ok_or_else(|| {
+    let global_state = global_state_document.as_object_mut().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex global state must be a JSON object",
+            "ChatGPT global state must be a JSON object",
         )
     })?;
-    let persisted = state
+    let persisted_atom_state = global_state
         .entry(PERSISTED_ATOM_STATE_KEY.to_string())
         .or_insert_with(|| Value::Object(Default::default()));
-    if !persisted.is_object() {
-        *persisted = Value::Object(Default::default());
+    if !persisted_atom_state.is_object() {
+        *persisted_atom_state = Value::Object(Default::default());
     }
-    let persisted = persisted
+    let persisted_atom_state = persisted_atom_state
         .as_object_mut()
         .expect("persisted atom state was normalized to an object");
-    persisted.insert(
+    persisted_atom_state.insert(
         DESKTOP_DEFAULT_SERVICE_TIER_KEY.to_string(),
         desktop_service_tier.map_or(Value::Null, |tier| Value::String(tier.to_string())),
     );
-    persisted.insert(SERVICE_TIER_CHANGED_KEY.to_string(), Value::Bool(true));
-    let next_state = serde_json::to_string(state).map_err(|error| {
+    persisted_atom_state.insert(SERVICE_TIER_CHANGED_KEY.to_string(), Value::Bool(true));
+    let next_state = serde_json::to_string(global_state).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::Io,
-            format!("Codex global state could not be serialized: {error}"),
+            format!("ChatGPT global state could not be serialized: {error}"),
         )
     })?;
 
     let config_changed = original_config
         .as_deref()
-        .map_or(!next_config.is_empty(), |current| {
-            current != next_config.as_bytes()
+        .map_or(!next_config.is_empty(), |existing_config| {
+            existing_config != next_config.as_bytes()
         });
     if config_changed {
         replace_if_unchanged(&config_path, &original_config, &next_config)?;

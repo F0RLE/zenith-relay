@@ -106,20 +106,22 @@ async fn refresh_codex_client_release_from_endpoint(
     if !response.status().is_success() {
         return Err(CodexReleaseError::HttpStatus(response.status().as_u16()));
     }
-    let body = collect_response_body(response, MAX_RELEASE_RESPONSE_BYTES)
+    let release_response_body = collect_response_body(response, MAX_RELEASE_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
-            ResponseBodyError::Transport => CodexReleaseError::Transport,
+            ResponseBodyError::Timeout | ResponseBodyError::Transport => {
+                CodexReleaseError::Transport
+            }
             ResponseBodyError::TooLarge => CodexReleaseError::ResponseTooLarge,
         })?;
     drop(permit);
-    let version =
-        parse_stable_rust_release_response(&body).ok_or(CodexReleaseError::InvalidResponse)?;
+    let version = parse_stable_rust_release_response(&release_response_body)
+        .ok_or(CodexReleaseError::InvalidResponse)?;
     Ok(CodexRelease { version })
 }
 
-fn parse_stable_rust_release_response(body: &[u8]) -> Option<String> {
-    let release: GitHubRelease = serde_json::from_slice(body).ok()?;
+fn parse_stable_rust_release_response(release_response_body: &[u8]) -> Option<String> {
+    let release: GitHubRelease = serde_json::from_slice(release_response_body).ok()?;
     (!release.draft && !release.prerelease)
         .then(|| parse_stable_rust_release_tag(&release.tag_name))
         .flatten()

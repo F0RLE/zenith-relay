@@ -45,7 +45,7 @@ async fn delayed_refresh_of_a_removed_slot_cannot_persist_or_authorize_the_readd
         .register("account", expired, AccountAuthState::Active)
         .await
         .unwrap();
-    let old = {
+    let refresh_task = {
         let authority = authority.clone();
         let adapter = adapter.clone();
         let persistence = persistence.clone();
@@ -67,7 +67,7 @@ async fn delayed_refresh_of_a_removed_slot_cannot_persist_or_authorize_the_readd
         .unwrap();
     adapter.release.notify_one();
     assert!(matches!(
-        old.await.unwrap(),
+        refresh_task.await.unwrap(),
         Err(TokenAuthorityError::AccountNotFound)
     ));
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
@@ -139,7 +139,7 @@ async fn removed_slot_during_token_persistence_cannot_finish_preparation() {
         release: tokio::sync::Notify::new(),
         capture: CapturePersistence::default(),
     });
-    let old = {
+    let persistence_task = {
         let authority = authority.clone();
         let persistence = persistence.clone();
         tokio::spawn(async move {
@@ -168,7 +168,7 @@ async fn removed_slot_during_token_persistence_cannot_finish_preparation() {
         .unwrap();
     persistence.release.notify_one();
     assert!(matches!(
-        old.await.unwrap(),
+        persistence_task.await.unwrap(),
         Err(TokenAuthorityError::AccountNotFound)
     ));
     assert_eq!(persistence.capture.token_calls.load(Ordering::SeqCst), 1);
@@ -194,8 +194,8 @@ async fn waiting_registrations_cannot_report_success_on_a_removed_slot() {
             )
             .await
             .unwrap();
-        let old = lock(&authority.slots).get("account").cloned().unwrap();
-        let held = old.lock().await;
+        let registered_slot = lock(&authority.slots).get("account").cloned().unwrap();
+        let held = registered_slot.lock().await;
         let mut waiting = Box::pin(async {
             let candidate = TokenSet::new("stale", None, None, None, 2, 2).unwrap();
             match case {
@@ -249,8 +249,8 @@ async fn waiting_reads_cannot_return_credentials_from_a_removed_slot() {
         )
         .await
         .unwrap();
-    let old = lock(&authority.slots).get("account").cloned().unwrap();
-    let held = old.lock().await;
+    let initial_slot = lock(&authority.slots).get("account").cloned().unwrap();
+    let held = initial_slot.lock().await;
     let mut tokens = Box::pin(authority.tokens("account"));
     let mut auth_state = Box::pin(authority.auth_state("account"));
     assert!(matches!(poll!(tokens.as_mut()), Poll::Pending));

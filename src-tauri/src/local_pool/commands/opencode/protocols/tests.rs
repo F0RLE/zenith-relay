@@ -42,10 +42,17 @@ fn groups_new_models_by_native_sdk_and_preserves_existing_selection_and_options(
         config["provider"]["zenith-relay-gemini"]["options"]["baseURL"],
         "http://127.0.0.1:14998/v1beta"
     );
-    config.insert("model".into(), "zenith-relay/claude".into());
-    config.get_mut("provider").unwrap()["zenith-relay"]["models"]["claude"] =
+    // A previous Relay version pinned the native Messages model to the
+    // Responses SDK. It must move to its native group and keep user edits.
+    let providers = config.get_mut("provider").unwrap();
+    providers["zenith-relay-messages"]["models"]
+        .as_object_mut()
+        .unwrap()
+        .remove("claude");
+    providers["zenith-relay"]["models"]["claude"] =
         json!({"name":"My model","options":{"custom":true}});
-    config.get_mut("provider").unwrap()["zenith-relay"]["options"]["timeout"] = 45000.into();
+    providers["zenith-relay"]["options"]["timeout"] = 45000.into();
+    config.insert("model".into(), "zenith-relay/claude".into());
     apply(
         &mut config,
         "http://127.0.0.1:14998/v1",
@@ -53,19 +60,42 @@ fn groups_new_models_by_native_sdk_and_preserves_existing_selection_and_options(
         &models,
     )
     .unwrap();
-    assert_eq!(config["model"], "zenith-relay/claude");
-    assert_eq!(
-        config["provider"]["zenith-relay"]["models"]["claude"]["name"],
-        "My model"
-    );
-    assert_eq!(
-        config["provider"]["zenith-relay"]["models"]["claude"]["options"]["custom"],
-        true
-    );
+    assert_eq!(config["model"], "zenith-relay-messages/claude");
+    assert!(config["provider"]["zenith-relay"]["models"]
+        .get("claude")
+        .is_none());
+    let moved = &config["provider"]["zenith-relay-messages"]["models"]["claude"];
+    assert_eq!(moved["name"], "My model");
+    assert_eq!(moved["options"]["custom"], true);
     assert_eq!(
         config["provider"]["zenith-relay"]["options"]["timeout"],
         45000
     );
+}
+
+#[test]
+fn converted_only_models_keep_their_existing_provider() {
+    let mut bridged = model("bridged", WireApi::Messages);
+    bridged
+        .protocol_routes
+        .retain(|route| route.client_wire_api != WireApi::Messages);
+    let mut config = Map::from_iter([(
+        "provider".into(),
+        json!({"zenith-relay-chat":{"models":{"bridged":{}}}}),
+    )]);
+    apply(
+        &mut config,
+        "http://127.0.0.1:14998/v1",
+        "synthetic",
+        &[bridged],
+    )
+    .unwrap();
+    assert!(config["provider"]["zenith-relay-chat"]["models"]
+        .get("bridged")
+        .is_some());
+    assert!(config["provider"]["zenith-relay"]["models"]
+        .get("bridged")
+        .is_none());
 }
 
 #[test]
@@ -128,7 +158,8 @@ fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
     apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
     assert_eq!(config["model"], "user-provider/selected");
     let models = &config["provider"]["zenith-relay-messages"]["models"];
-    assert!(models.get("gpt-test").is_some());
+    // Refresh keeps the user's selection, while moving GPT to its native SDK.
+    assert!(models.get("gpt-test").is_none());
     assert_eq!(models["claude"]["tool_call"], true);
     assert_eq!(
         models["claude"]["variants"],
@@ -141,7 +172,8 @@ fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
     let fallback_models = config["provider"]["zenith-relay"]["models"]
         .as_object()
         .unwrap();
-    assert_eq!(fallback_models.len(), 2);
+    assert_eq!(fallback_models.len(), 3);
+    assert!(fallback_models.contains_key("gpt-test"));
     assert!(fallback_models.contains_key("gpt-other"));
     assert!(fallback_models.contains_key("chat-only"));
 }
@@ -174,4 +206,45 @@ fn unavailable_models_and_obsolete_generated_reasoning_variants_are_removed() {
         4096
     );
     assert!(!config["provider"].to_string().contains("unknown"));
+}
+
+#[test]
+fn native_model_migration_tolerates_malformed_managed_provider_fields() {
+    for target_provider in [
+        json!("invalid"),
+        json!({"models": "invalid", "name": "Custom"}),
+    ] {
+        let mut config = Map::from_iter([
+            ("model".into(), "zenith-relay/claude".into()),
+            (
+                "provider".into(),
+                json!({
+                    "zenith-relay": {"models": {"claude": {"name": "My Claude", "options": {"custom": true}}}},
+                    "zenith-relay-messages": target_provider.clone(),
+                    "user-provider": {"models": {"user-model": {"name": "Untouched"}}}
+                }),
+            ),
+        ]);
+        apply(
+            &mut config,
+            "http://127.0.0.1:14998/v1",
+            "synthetic",
+            &[model("claude", WireApi::Messages)],
+        )
+        .unwrap();
+        assert_eq!(config["model"], "zenith-relay-messages/claude");
+        let migrated = &config["provider"]["zenith-relay-messages"]["models"]["claude"];
+        assert_eq!(migrated["name"], "My Claude");
+        assert_eq!(migrated["options"]["custom"], true);
+        assert_eq!(
+            config["provider"]["user-provider"]["models"]["user-model"]["name"],
+            "Untouched"
+        );
+        if target_provider.is_object() {
+            assert_eq!(
+                config["provider"]["zenith-relay-messages"]["name"],
+                "Custom"
+            );
+        }
+    }
 }

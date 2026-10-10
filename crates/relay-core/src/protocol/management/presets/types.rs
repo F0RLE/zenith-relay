@@ -109,34 +109,34 @@ impl Serialize for ConfigurationPresetSettings {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct(
+        let mut serialized_preset = serializer.serialize_struct(
             "ConfigurationPresetSettings",
             6 + usize::from(self.model_reasoning_allowed_levels_present)
                 + usize::from(self.model_service_tier_overrides_present)
                 + usize::from(self.model_display_order_present),
         )?;
-        state.serialize_field("sources", &self.sources)?;
-        state.serialize_field("accounts", &self.accounts)?;
-        state.serialize_field("routing", &self.routing)?;
-        state.serialize_field("quota", &self.quota)?;
-        state.serialize_field("hiddenModels", &self.hidden_models)?;
-        state.serialize_field("modelPriceOverrides", &self.model_price_overrides)?;
+        serialized_preset.serialize_field("sources", &self.sources)?;
+        serialized_preset.serialize_field("accounts", &self.accounts)?;
+        serialized_preset.serialize_field("routing", &self.routing)?;
+        serialized_preset.serialize_field("quota", &self.quota)?;
+        serialized_preset.serialize_field("hiddenModels", &self.hidden_models)?;
+        serialized_preset.serialize_field("modelPriceOverrides", &self.model_price_overrides)?;
         if self.model_service_tier_overrides_present {
-            state.serialize_field(
+            serialized_preset.serialize_field(
                 "modelServiceTierOverrides",
                 &self.model_service_tier_overrides,
             )?;
         }
         if self.model_display_order_present {
-            state.serialize_field("modelDisplayOrder", &self.model_display_order)?;
+            serialized_preset.serialize_field("modelDisplayOrder", &self.model_display_order)?;
         }
         if self.model_reasoning_allowed_levels_present {
-            state.serialize_field(
+            serialized_preset.serialize_field(
                 "modelReasoningAllowedLevels",
                 &self.model_reasoning_allowed_levels,
             )?;
         }
-        state.end()
+        serialized_preset.end()
     }
 }
 
@@ -169,6 +169,21 @@ pub struct SourcePresetRule {
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
 }
 
+impl SourcePresetRule {
+    pub fn apply_resolved_identity(
+        &mut self,
+        source_id: &str,
+        source_name: &str,
+        base_url: &str,
+        wire_api: WireApi,
+    ) {
+        self.id = source_id.to_owned();
+        self.name = source_name.to_owned();
+        self.base_url = base_url.trim_end_matches('/').to_owned();
+        self.wire_api = wire_api;
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountPresetRule {
@@ -193,9 +208,8 @@ pub struct PresetRoutingPolicy {
     pub tool_policy: Option<crate::ToolPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
-    /// Use the explicitly labelled Excel/Basis Points route for compatible
-    /// OAuth accounts. This is a route preference, not a second pool member.
-    #[serde(default)]
+    /// Legacy storage field, ignored and omitted from portable presets.
+    #[serde(skip_serializing)]
     pub basis_points_enabled: bool,
     pub max_retry_candidates: u8,
     pub default_service_tier: DefaultServiceTier,

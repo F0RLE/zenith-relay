@@ -32,6 +32,7 @@ ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
 futures-util = "0.3.34"
 flate2 = "1.1.10"
 httpdate = "1.0.3"
+jsonschema = { version = "0.58.6", default-features = false }
 hex = "0.4.3"
 multer = "3.1.0"
 os_info = "3.15.0"
@@ -44,9 +45,9 @@ serde_json = { version = "1.0.151", features = ["raw_value"] }
 semver = "1.0.28"
 sha2 = "0.11.0"
 subtle = "2.6.1"
-tokio = { version = "1.53.1", features = ["macros", "time"] }
+tokio = { version = "1.53.2", features = ["macros", "time"] }
 url = "2.5.8"
 zstd = "0.14.0"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
+tokio = { version = "1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }

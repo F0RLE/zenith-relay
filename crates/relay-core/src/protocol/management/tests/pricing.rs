@@ -41,6 +41,10 @@ fn pool_model_price_keeps_messages_cache_creation_when_generic_route_wins_order(
         cache_write_5m: None,
         cache_write_1h: None,
         output: 2_000_000,
+        flex: crate::pricing::TokenRateSet::EMPTY,
+        priority: crate::pricing::TokenRateSet::EMPTY,
+        above_200k: crate::pricing::LongContextRates::EMPTY,
+        above_272k: crate::pricing::LongContextRates::EMPTY,
     };
     let messages_price = TokenPrice {
         cache_write_5m: Some(1_250_000),

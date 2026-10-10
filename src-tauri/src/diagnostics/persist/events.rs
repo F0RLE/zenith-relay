@@ -18,9 +18,9 @@ pub(in crate::diagnostics) fn record_event(
     message: &str,
     details: &[(&str, String)],
 ) {
-    let mut values = BTreeMap::new();
-    for (key, value) in details {
-        values.insert((*key).to_string(), safe_detail(value));
+    let mut sanitized_details = BTreeMap::new();
+    for (detail_key, detail_value) in details {
+        sanitized_details.insert((*detail_key).to_string(), safe_detail(detail_value));
     }
     let mut event = LogEvent {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -29,13 +29,13 @@ pub(in crate::diagnostics) fn record_event(
         platform: crate::platform::platform_name(),
         level,
         kind,
-        operation: operation.map(|value| safe_text(value, 120)),
+        operation: operation.map(|operation_name| safe_text(operation_name, 120)),
         // Error codes are machine-readable labels, not free-form messages.
         // Keep the bounded identifier visible so a user can correlate the
         // red status in the pool with the corresponding diagnostic entry.
         code: code.map(safe_code),
         message: safe_text(message, MAX_TEXT_BYTES),
-        details: values,
+        details: sanitized_details,
     };
     let Ok(mut line) = serde_json::to_vec(&event) else {
         return;
@@ -45,7 +45,9 @@ pub(in crate::diagnostics) fn record_event(
         event.details = event
             .details
             .iter()
-            .map(|(key, value)| (key.clone(), truncate_text(value, 512)))
+            .map(|(detail_key, detail_value)| {
+                (detail_key.clone(), truncate_text(detail_value, 512))
+            })
             .collect();
         line = match serde_json::to_vec(&event) {
             Ok(line) => line,
@@ -132,7 +134,7 @@ pub(in crate::diagnostics) fn write_panic_report(info: &PanicHookInfo<'_>) {
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string();
     let sequence = CRASH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let path = directory.join(format!("crash-{timestamp}-{sequence:04}.log"));
-    let payload = panic_payload(info);
+    let panic_message = panic_payload(info);
     let location = info
         .location()
         .map(|location| {
@@ -141,26 +143,29 @@ pub(in crate::diagnostics) fn write_panic_report(info: &PanicHookInfo<'_>) {
             // remains useful without exposing a local username or directory.
             let file = Path::new(location.file())
                 .file_name()
-                .and_then(|value| value.to_str())
+                .and_then(|file_name| file_name.to_str())
                 .unwrap_or("unknown");
             format!("{file}:{}:{}", location.line(), location.column())
         })
         .unwrap_or_else(|| "unknown".to_string());
     let breadcrumb = zenith_relay_core::poison::try_mutex(&state.breadcrumb)
-        .and_then(|value| value.clone())
+        .and_then(|breadcrumb| breadcrumb.clone())
         .or_else(|| read_latest_stage(&root));
     let mut report = String::new();
     report.push_str("Zenith Relay crash report\n");
     report.push_str("=========================\n");
     report.push_str(&format!("timestamp: {}\n", Utc::now().to_rfc3339()));
     report.push_str(&format!("location: {location}\n"));
-    report.push_str(&format!("panic: {}\n", safe_text(&payload, MAX_TEXT_BYTES)));
-    if let Some(value) = breadcrumb {
-        report.push_str(&format!("stage_timestamp: {}\n", value.timestamp));
-        report.push_str(&format!("operation: {}\n", value.operation));
-        report.push_str(&format!("stage: {}\n", value.stage));
-        for (key, detail) in value.details {
-            report.push_str(&format!("{key}: {detail}\n"));
+    report.push_str(&format!(
+        "panic: {}\n",
+        safe_text(&panic_message, MAX_TEXT_BYTES)
+    ));
+    if let Some(stage_record) = breadcrumb {
+        report.push_str(&format!("stage_timestamp: {}\n", stage_record.timestamp));
+        report.push_str(&format!("operation: {}\n", stage_record.operation));
+        report.push_str(&format!("stage: {}\n", stage_record.stage));
+        for (detail_key, detail_value) in stage_record.details {
+            report.push_str(&format!("{detail_key}: {detail_value}\n"));
         }
     }
     report.push_str("\nbacktrace:\n");
@@ -176,11 +181,11 @@ pub(in crate::diagnostics) fn write_panic_report(info: &PanicHookInfo<'_>) {
 }
 
 fn panic_payload(info: &PanicHookInfo<'_>) -> String {
-    if let Some(value) = info.payload().downcast_ref::<&str>() {
-        return (*value).to_string();
+    if let Some(panic_text) = info.payload().downcast_ref::<&str>() {
+        return (*panic_text).to_string();
     }
-    if let Some(value) = info.payload().downcast_ref::<String>() {
-        return value.clone();
+    if let Some(panic_message) = info.payload().downcast_ref::<String>() {
+        return panic_message.clone();
     }
     "panic payload is not a string".to_string()
 }

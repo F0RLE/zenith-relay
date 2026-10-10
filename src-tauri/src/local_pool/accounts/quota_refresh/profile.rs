@@ -32,6 +32,9 @@ pub(crate) async fn sync_managed_account_profile(
     let stored = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
+    if stored.oauth_client_kind() != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex {
+        return Ok(false);
+    }
     let provider_account_id = stored
         .provider_account_id()
         .map(str::to_string)
@@ -62,7 +65,7 @@ pub(crate) async fn sync_managed_account_profile(
     if identity
         .provider_account_id
         .as_deref()
-        .is_some_and(|value| value != provider_account_id)
+        .is_some_and(|refreshed_account_id| refreshed_account_id != provider_account_id)
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,

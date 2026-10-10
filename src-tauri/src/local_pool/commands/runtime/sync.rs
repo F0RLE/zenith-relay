@@ -13,8 +13,8 @@ use zenith_relay_core::{protocol::account_candidate_enabled, GatewayRuntime};
 pub(in crate::local_pool) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<DesktopState>();
-        let result = profiles::refresh_active_client_catalogs(&state).await;
-        record_catalog_refresh_result(&state, &result);
+        let catalog_refresh_result = profiles::refresh_active_client_catalogs(&state).await;
+        record_catalog_refresh_result(&state, &catalog_refresh_result);
         let _ = app.emit("zenith-state-changed", ());
     });
 }
@@ -185,8 +185,8 @@ pub(in crate::local_pool) async fn restart_or_rollback(
                     .await)
                 }
             };
-            if let Some(previous) = state.gateway.runtime().await {
-                previous.retire_for_replacement();
+            if let Some(previous_runtime) = state.gateway.runtime().await {
+                previous_runtime.retire_for_replacement();
             }
             state.gateway.stop().await;
             if let Err(restart) = state.gateway.start(restored, address.port()).await {
@@ -207,8 +207,8 @@ pub(in crate::local_pool) async fn restart_or_rollback(
     );
     // A delayed request may still hold the old Arc after the listener stops.
     // Failed activation rebuilds a fresh runtime from restored storage.
-    if let Some(previous) = state.gateway.runtime().await {
-        previous.retire_for_replacement();
+    if let Some(previous_runtime) = state.gateway.runtime().await {
+        previous_runtime.retire_for_replacement();
     }
     state.gateway.stop().await;
     crate::diagnostics::breadcrumb(
@@ -258,8 +258,8 @@ pub(in crate::local_pool) async fn restart_or_rollback(
         &[("port", next_port.to_string())],
     );
     crate::diagnostics::breadcrumb("gateway-runtime", "catalog_refresh_started", &[]);
-    let result = profiles::refresh_active_client_catalogs(state).await;
-    record_catalog_refresh_result(state, &result);
+    let catalog_refresh_result = profiles::refresh_active_client_catalogs(state).await;
+    record_catalog_refresh_result(state, &catalog_refresh_result);
     crate::diagnostics::record_operation("gateway-runtime", "restart_completed", &[]);
     Ok(())
 }

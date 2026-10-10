@@ -197,3 +197,81 @@ fn chat_bridge_keeps_apply_patch_as_a_custom_tool_call() {
         .to_string()
         .contains("function_call"));
 }
+#[test]
+fn chat_bridge_flattens_codex_namespaces_and_restores_them_on_output() {
+    let request = json!({
+        "model": "grok",
+        "input": [
+            {"type": "additional_tools", "tools": [{
+                "type": "namespace",
+                "name": "mcp__synthetic",
+                "description": "Synthetic server",
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look something up",
+                    "parameters": {"type": "object"},
+                    "defer_loading": true
+                }]
+            }]},
+            {"type": "message", "role": "user", "content": "go"}
+        ],
+        "tools": [
+            {"type": "web_search"},
+            {
+                "type": "function",
+                "name": "shell",
+                "parameters": {"type": "object"},
+                "allowed_callers": ["direct"]
+            }
+        ],
+        "tool_choice": {"type": "function", "namespace": "mcp__synthetic", "name": "lookup"}
+    });
+    let prepared = prepare(
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        &request,
+        false,
+    );
+    let tools = prepared.upstream_body()["tools"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(tools.len(), 2);
+    let flattened = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .find(|name| name.starts_with("relay_ns_"))
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        prepared.upstream_body()["tool_choice"]["function"]["name"],
+        flattened.as_str()
+    );
+    let upstream = json!({
+        "id": "chat_test",
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_ns",
+                    "type": "function",
+                    "function": {"name": flattened, "arguments": "{}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let translated = prepared
+        .translate_response_bytes(&serde_json::to_vec(&upstream).unwrap())
+        .unwrap()
+        .unwrap();
+    let item = &translated.response_body()["output"][0];
+    assert_eq!(item["type"], "function_call");
+    assert_eq!(item["name"], "lookup");
+    assert_eq!(item["namespace"], "mcp__synthetic");
+}

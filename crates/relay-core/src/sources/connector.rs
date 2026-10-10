@@ -129,9 +129,9 @@ impl SourceConnector {
     }
 
     fn gemini_endpoint(&self, model: &str, stream: bool) -> Option<Url> {
-        let model = model.strip_prefix("models/").unwrap_or(model);
-        if model.is_empty()
-            || !model
+        let model_id = model.strip_prefix("models/").unwrap_or(model);
+        if model_id.is_empty()
+            || !model_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
@@ -140,7 +140,7 @@ impl SourceConnector {
         let mut url = self.base_url.clone();
         {
             let mut segments = url.path_segments_mut().ok()?;
-            segments.pop_if_empty().push("models").push(model);
+            segments.pop_if_empty().push("models").push(model_id);
         }
         let path = format!(
             "{}:{}",
@@ -277,7 +277,7 @@ mod tests {
                 .protocol_headers(bindings[1].key())
                 .unwrap()
                 .get("anthropic-version")
-                .and_then(|value| value.to_str().ok()),
+                .and_then(|header_value| header_value.to_str().ok()),
             Some("2023-06-01")
         );
     }
@@ -292,9 +292,9 @@ mod tests {
             model_ids: vec!["gemini-test".to_string()],
         }];
         let connector = SourceConnector::new(&source(), &bindings).unwrap();
-        let (name, value) = connector.authorization_for_binding(&bindings[0]);
+        let (name, api_key) = connector.authorization_for_binding(&bindings[0]);
         assert_eq!(name, HeaderName::from_static("x-goog-api-key"));
-        assert_eq!(value, "source-secret");
+        assert_eq!(api_key, "source-secret");
         assert_eq!(
             connector
                 .endpoint(bindings[0].key(), "gemini-test", false)

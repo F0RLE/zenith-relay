@@ -2,11 +2,11 @@ use super::super::*;
 
 pub(in crate::local_pool::accounts) fn token_set_is_newer(
     candidate: &TokenSet,
-    current: &TokenSet,
+    existing_tokens: &TokenSet,
 ) -> bool {
-    candidate.generation() > current.generation()
-        || (candidate.generation() == current.generation()
-            && candidate.issued_at_ms() > current.issued_at_ms())
+    candidate.generation() > existing_tokens.generation()
+        || (candidate.generation() == existing_tokens.generation()
+            && candidate.issued_at_ms() > existing_tokens.issued_at_ms())
 }
 
 pub(in crate::local_pool::accounts) fn is_credential_refresh_error_code(code: &str) -> bool {
@@ -45,11 +45,13 @@ pub(in crate::local_pool::accounts) fn classify_manual_refresh_failure(
 pub(in crate::local_pool::accounts) async fn persist_manual_refresh_failure(
     state: &DesktopState,
     account_id: &str,
-    current: &StoredCodexCredentials,
+    failed_credentials: &StoredCodexCredentials,
     reason: ReauthReason,
     code: &str,
 ) -> LocalResult<()> {
-    let tokens = current.to_token_set().map_err(credential_local_error)?;
+    let tokens = failed_credentials
+        .to_token_set()
+        .map_err(credential_local_error)?;
     let auth_state = AccountAuthState::RequiresReauth(reason);
     // A manual refresh releases the cross-process credential lock before it
     // can await TokenAuthority. Persist the terminal result first, but only

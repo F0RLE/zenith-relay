@@ -5,9 +5,9 @@ use super::super::{
 use crate::WireApi;
 use serde_json::Value;
 
-pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
+pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     checked(
-        value,
+        request_body,
         &[
             "model",
             "stream",
@@ -23,20 +23,20 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             "output_config",
         ],
     )?;
-    let mut request = Request::default();
-    if let Some(system) = value.get("system") {
-        request.messages.push(Message {
+    let mut decoded_request = Request::default();
+    if let Some(system) = request_body.get("system") {
+        decoded_request.messages.push(Message {
             role: Role::System,
             blocks: super::content::text_blocks(system, WireApi::Messages)?,
         });
     }
-    for message in value
+    for message in request_body
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(AdapterError::invalid_request)?
     {
         checked(message, &["role", "content"])?;
-        request.messages.push(Message {
+        decoded_request.messages.push(Message {
             role: super::content::role(message)?,
             blocks: super::content::text_blocks(
                 message
@@ -46,30 +46,43 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             )?,
         });
     }
-    request.tools = super::content::tools(value.get("tools"), WireApi::Messages)?;
-    request.tool_choice = super::content::choice(value.get("tool_choice"), WireApi::Messages)?;
-    if let Some(choice) = value.get("tool_choice") {
+    decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Messages)?;
+    decoded_request.tool_choice =
+        super::content::choice(request_body.get("tool_choice"), WireApi::Messages)?;
+    if let Some(choice) = request_body.get("tool_choice") {
         checked(choice, &["type", "name", "disable_parallel_tool_use"])?;
-        request.parallel_tools =
+        decoded_request.parallel_tools =
             optional_bool(choice, "disable_parallel_tool_use")?.map(|disabled| !disabled);
     }
-    super::content::common(&mut request, value, "max_tokens", "top_p", "stop_sequences")?;
-    if let Some(output) = value.get("output_config").filter(|v| !v.is_null()) {
-        checked(output, &["format", "effort"])?;
-        request.output_format =
-            super::content::output_format(output.get("format").unwrap_or(&Value::Null))?;
-        request.reasoning = output
+    super::content::common(
+        &mut decoded_request,
+        request_body,
+        "max_tokens",
+        "top_p",
+        "stop_sequences",
+    )?;
+    if let Some(output_config) = request_body
+        .get("output_config")
+        .filter(|output_config_value| !output_config_value.is_null())
+    {
+        checked(output_config, &["format", "effort"])?;
+        decoded_request.output_format =
+            super::content::output_format(output_config.get("format").unwrap_or(&Value::Null))?;
+        decoded_request.reasoning = output_config
             .get("effort")
             .and_then(Value::as_str)
             .map(|effort| Reasoning::Effort(effort.into()));
     }
-    if let Some(thinking) = value.get("thinking").filter(|v| !v.is_null()) {
+    if let Some(thinking) = request_body
+        .get("thinking")
+        .filter(|thinking_value| !thinking_value.is_null())
+    {
         checked(thinking, &["type", "budget_tokens"])?;
         match required_text(thinking, "type")? {
-            "disabled" => request.reasoning = Some(Reasoning::Effort("none".into())),
-            "adaptive" if request.reasoning.is_some() => {}
+            "disabled" => decoded_request.reasoning = Some(Reasoning::Effort("none".into())),
+            "adaptive" if decoded_request.reasoning.is_some() => {}
             "enabled" => {
-                request.reasoning = Some(Reasoning::Budget(
+                decoded_request.reasoning = Some(Reasoning::Budget(
                     optional_u64(thinking, "budget_tokens")?
                         .ok_or_else(AdapterError::invalid_request)?,
                 ))
@@ -77,5 +90,5 @@ pub(super) fn decode(value: &Value) -> AdapterResult<Request> {
             _ => return Err(AdapterError::reasoning_unsupported()),
         }
     }
-    Ok(request)
+    Ok(decoded_request)
 }

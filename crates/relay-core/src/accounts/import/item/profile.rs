@@ -7,7 +7,7 @@ use crate::accounts::{
 };
 
 pub(super) struct ImportFieldSources<'a> {
-    pub(super) object: &'a Map<String, Value>,
+    pub(super) import_object: &'a Map<String, Value>,
     pub(super) credentials: &'a Map<String, Value>,
     pub(super) agent_identity: Option<&'a Map<String, Value>>,
     pub(super) account: Option<&'a Map<String, Value>>,
@@ -45,11 +45,11 @@ pub(super) fn read_import_profile(
     jwt: ImportedJwtMetadata,
 ) -> ImportProfile {
     let ImportFieldSources {
-        object,
+        import_object,
         credentials,
-        agent_identity: agent_identity_data,
+        agent_identity: agent_identity_object,
         account,
-        provider: provider_data,
+        provider: provider_object,
         identity,
         meta,
         subscription,
@@ -57,56 +57,56 @@ pub(super) fn read_import_profile(
         session_profile,
         header_account_id,
     } = sources;
-    let email = credential_string(object, credentials, None, EMAIL_FIELDS)
+    let email = credential_string(import_object, credentials, None, EMAIL_FIELDS)
         .or_else(|| {
             first_string_field(&[
-                (agent_identity_data, EMAIL_FIELDS),
+                (agent_identity_object, EMAIL_FIELDS),
                 (account, EMAIL_FIELDS),
                 (user, EMAIL_FIELDS),
                 (session_profile, EMAIL_FIELDS),
-                (provider_data, EMAIL_FIELDS),
+                (provider_object, EMAIL_FIELDS),
                 (identity, EMAIL_FIELDS),
             ])
             .map(str::to_string)
         })
         .or(jwt.email);
     let note_sources = [
-        agent_identity_data,
+        agent_identity_object,
         account,
         user,
         session_profile,
-        provider_data,
+        provider_object,
         identity,
         meta,
     ];
     let phone = login_note(
-        object,
+        import_object,
         credentials,
         &note_sources,
         PHONE_FIELDS,
         normalize_login_phone,
     );
     let password = login_note(
-        object,
+        import_object,
         credentials,
         &note_sources,
         PASSWORD_FIELDS,
         normalize_login_password,
     );
     let totp_secret = login_note(
-        object,
+        import_object,
         credentials,
         &note_sources,
         TOTP_SECRET_FIELDS,
         normalize_login_totp_secret,
     );
-    let account_id_value =
-        credential_str(object, credentials, None, ACCOUNT_ID_FIELDS).or_else(|| {
+    let account_id_value = credential_str(import_object, credentials, None, ACCOUNT_ID_FIELDS)
+        .or_else(|| {
             first_string_field(&[
-                (agent_identity_data, ACCOUNT_ID_FIELDS),
+                (agent_identity_object, ACCOUNT_ID_FIELDS),
                 (account, &["id"]),
                 (account, ACCOUNT_ID_FIELDS),
-                (provider_data, ACCOUNT_ID_FIELDS),
+                (provider_object, ACCOUNT_ID_FIELDS),
                 (meta, ACCOUNT_ID_FIELDS),
                 (identity, ACCOUNT_ID_FIELDS),
             ])
@@ -115,52 +115,62 @@ pub(super) fn read_import_profile(
         .or_else(|| safe_identifier(header_account_id))
         .or(jwt.account_id);
     let profile_sources = [
-        (agent_identity_data, USER_ID_FIELDS),
+        (agent_identity_object, USER_ID_FIELDS),
         (account, USER_ID_FIELDS),
-        (provider_data, USER_ID_FIELDS),
+        (provider_object, USER_ID_FIELDS),
         (meta, USER_ID_FIELDS),
         (identity, USER_ID_FIELDS),
     ];
-    let chatgpt_user_id_value = credential_str(object, credentials, None, USER_ID_FIELDS)
+    let chatgpt_user_id_value = credential_str(import_object, credentials, None, USER_ID_FIELDS)
         .or_else(|| first_string_field(&profile_sources));
     let chatgpt_user_id = safe_identifier(chatgpt_user_id_value)
         .or_else(|| safe_identifier(user.and_then(|user| string_field(user, &["id"]))))
         .or(jwt.user_id);
     let organization_sources = [
-        (agent_identity_data, ORGANIZATION_ID_FIELDS),
+        (agent_identity_object, ORGANIZATION_ID_FIELDS),
         (account, ORGANIZATION_ID_FIELDS),
-        (provider_data, ORGANIZATION_ID_FIELDS),
+        (provider_object, ORGANIZATION_ID_FIELDS),
         (meta, ORGANIZATION_ID_FIELDS),
         (identity, ORGANIZATION_ID_FIELDS),
     ];
-    let organization_id_value = credential_str(object, credentials, None, ORGANIZATION_ID_FIELDS)
-        .or_else(|| first_string_field(&organization_sources));
+    let organization_id_value =
+        credential_str(import_object, credentials, None, ORGANIZATION_ID_FIELDS)
+            .or_else(|| first_string_field(&organization_sources));
     let organization_id = safe_identifier(organization_id_value);
-    let plan_value = credential_value(object, credentials, None, PLAN_FIELDS).or_else(|| {
-        first_value_field(&[
-            (agent_identity_data, PLAN_FIELDS),
-            (account, PLAN_FIELDS),
-            (provider_data, PLAN_FIELDS),
-            (meta, PLAN_FIELDS),
-            (subscription, PLAN_FIELDS),
-        ])
-    });
-    let plan = safe_metadata(plan_value.and_then(Value::as_str)).or(jwt.plan_type);
-    let expires_at_value = credential_value(object, credentials, None, EXPIRES_AT_FIELDS)
-        .or_else(|| provider_data.and_then(|data| value_field(data, EXPIRES_AT_FIELDS)));
-    let expires_at = safe_expiry(expires_at_value).or(jwt.expires_at);
-    let subscription_expires_at_value =
-        credential_value(object, credentials, None, SUBSCRIPTION_EXPIRES_AT_FIELDS).or_else(|| {
+    let plan_value =
+        credential_value(import_object, credentials, None, PLAN_FIELDS).or_else(|| {
             first_value_field(&[
-                (account, SUBSCRIPTION_EXPIRES_AT_FIELDS),
-                (provider_data, SUBSCRIPTION_EXPIRES_AT_FIELDS),
-                (subscription, &["expiresAt", "expires_at"]),
+                (agent_identity_object, PLAN_FIELDS),
+                (account, PLAN_FIELDS),
+                (provider_object, PLAN_FIELDS),
+                (meta, PLAN_FIELDS),
+                (subscription, PLAN_FIELDS),
             ])
         });
+    let plan = safe_metadata(plan_value.and_then(Value::as_str)).or(jwt.plan_type);
+    let expires_at_value = credential_value(import_object, credentials, None, EXPIRES_AT_FIELDS)
+        .or_else(|| {
+            provider_object
+                .and_then(|provider_object| value_field(provider_object, EXPIRES_AT_FIELDS))
+        });
+    let expires_at = safe_expiry(expires_at_value).or(jwt.expires_at);
+    let subscription_expires_at_value = credential_value(
+        import_object,
+        credentials,
+        None,
+        SUBSCRIPTION_EXPIRES_AT_FIELDS,
+    )
+    .or_else(|| {
+        first_value_field(&[
+            (account, SUBSCRIPTION_EXPIRES_AT_FIELDS),
+            (provider_object, SUBSCRIPTION_EXPIRES_AT_FIELDS),
+            (subscription, &["expiresAt", "expires_at"]),
+        ])
+    });
     let subscription_expires_at =
         safe_expiry(subscription_expires_at_value).or(jwt.subscription_expires_at);
     let base_url_value = credential_value(
-        object,
+        import_object,
         credentials,
         None,
         &[
@@ -175,7 +185,7 @@ pub(super) fn read_import_profile(
     let base_url_supplied = base_url_value.is_some();
     let base_url = safe_base_url(base_url_value.and_then(Value::as_str));
     let protocol_value = credential_value(
-        object,
+        import_object,
         credentials,
         None,
         &[
@@ -188,18 +198,18 @@ pub(super) fn read_import_profile(
     );
     let protocol_supplied = protocol_value.is_some();
     let protocol = safe_protocol(protocol_value.and_then(Value::as_str));
-    let priority = credential_value(object, credentials, None, &["priority"])
+    let priority = credential_value(import_object, credentials, None, &["priority"])
         .and_then(Value::as_i64)
-        .and_then(|value| i32::try_from(value).ok());
+        .and_then(|priority_value| i32::try_from(priority_value).ok());
     let account_is_fedramp = credential_bool(
-        object,
+        import_object,
         credentials,
         &["chatgpt_account_is_fedramp", "chatgptAccountIsFedramp"],
     )
     .or_else(|| {
-        agent_identity_data.and_then(|data| {
+        agent_identity_object.and_then(|agent_identity_object| {
             value_field(
-                data,
+                agent_identity_object,
                 &["chatgpt_account_is_fedramp", "chatgptAccountIsFedramp"],
             )
             .and_then(Value::as_bool)
@@ -236,19 +246,19 @@ pub(super) fn read_import_profile(
 }
 
 fn login_note(
-    object: &Map<String, Value>,
+    import_object: &Map<String, Value>,
     credentials: &Map<String, Value>,
     extras: &[Option<&Map<String, Value>>],
     fields: &[&str],
     normalize: fn(&str) -> Option<String>,
 ) -> Option<String> {
-    credential_string(object, credentials, None, fields)
+    credential_string(import_object, credentials, None, fields)
         .or_else(|| {
-            extras.iter().find_map(|source| {
-                source
-                    .and_then(|data| string_field(data, fields))
+            extras.iter().find_map(|source_object| {
+                source_object
+                    .and_then(|source_object| string_field(source_object, fields))
                     .map(str::to_string)
             })
         })
-        .and_then(|value| normalize(&value))
+        .and_then(|login_note_text| normalize(&login_note_text))
 }

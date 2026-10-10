@@ -20,7 +20,6 @@ pub(super) use installed::bundled_codex_ultra_models;
 #[cfg(test)]
 use installed::{
     codex_cli_file_name, newest_installed_codex_executable, official_codex_ultra_rows,
-    read_cockpit_codex_catalog, ultra_rows_from_catalogs,
 };
 #[cfg(test)]
 use std::time::SystemTime;
@@ -48,17 +47,32 @@ mod ultra_tests {
     use super::*;
 
     #[test]
-    fn bundled_codex_metadata_uses_exact_models_and_only_orchestration_fields() {
+    fn bundled_codex_metadata_uses_exact_models_and_only_client_owned_fields() {
         let catalog = json!({"models": [
             {"slug": "gpt-future", "supported_reasoning_levels": [
                 {"effort": "max"}, {"effort": "ultra"}
             ], "multi_agent_version": "v2", "multi_agent_reasoning_effort": "xhigh",
                "base_instructions": "not a Relay instruction"},
+            {"slug": "gpt-short", "context_window": 272000, "max_context_window": 872000,
+               "auto_compact_token_limit": 244800, "effective_context_window_percent": 95,
+               "supported_reasoning_levels": [{"effort": "max"}]},
             {"slug": "gpt-other", "supported_reasoning_levels": [{"effort": "max"}]}
         ]});
         let official = official_codex_ultra_rows(&catalog);
         assert!(official.contains_key("gpt-future"));
         assert!(!official.contains_key("gpt-other"));
+        assert_eq!(official["gpt-short"]["context_window"], 272_000);
+        assert_eq!(
+            official["gpt-short"]["supported_reasoning_levels"],
+            json!([])
+        );
+        assert!(official["gpt-short"].get("max_context_window").is_none());
+        assert!(official["gpt-short"]
+            .get("auto_compact_token_limit")
+            .is_none());
+        assert!(official["gpt-short"]
+            .get("effective_context_window_percent")
+            .is_none());
         let mut relay = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
         relay["slug"] = json!("gpt-future");
         relay["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
@@ -145,19 +159,11 @@ mod ultra_tests {
     }
 
     #[test]
-    fn cli_catalog_wins_and_a_failed_cli_can_use_the_cockpit_file() {
+    fn installed_codex_cli_is_the_only_external_ultra_metadata_source() {
         let cli = json!({"models": [{"slug": "gpt-6-sol", "supported_reasoning_levels": [
             {"effort": "max"}
         ]}]});
-        let cockpit = json!({"models": [{
-            "slug": "gpt-6-sol",
-            "supported_reasoning_levels": [{"effort": "ultra"}],
-            "multi_agent_version": "v2"
-        }]});
-        assert!(ultra_rows_from_catalogs(Some(&cli), Some(&cockpit)).is_empty());
-        let rows = ultra_rows_from_catalogs(None, Some(&cockpit));
-        assert_eq!(rows["gpt-6-sol"]["multi_agent_version"], "v2");
-        assert!(rows["gpt-6-sol"].get("base_instructions").is_none());
+        assert!(official_codex_ultra_rows(&cli).is_empty());
 
         let root = std::env::temp_dir().join(format!(
             "relay-codex-bin-{}-{}",
@@ -195,18 +201,6 @@ mod ultra_tests {
             Some(newer_cli.as_path())
         );
 
-        let home = root.join("home");
-        fs::create_dir_all(&home).unwrap();
-        fs::write(
-            home.join("cockpit-model-catalog.json"),
-            serde_json::to_vec(&cockpit).unwrap(),
-        )
-        .unwrap();
-        let from_file = read_cockpit_codex_catalog(&home).unwrap();
-        assert_eq!(
-            official_codex_ultra_rows(&from_file)["gpt-6-sol"]["multi_agent_version"],
-            "v2"
-        );
         fs::remove_dir_all(root).unwrap();
     }
 }

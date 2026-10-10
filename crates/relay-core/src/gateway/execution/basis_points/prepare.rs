@@ -5,7 +5,8 @@ use super::codec::{
 };
 use super::history::translate_input_items;
 use super::response::has_encrypted_agent_message;
-use super::{FUNCTION_RELAY_ENCODING, TRANSPORT_RETRY_HINT, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
+use super::schema::{matches as schema_matches, parameter_schema, prompt_schema, validator};
+use super::{is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
 use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
@@ -46,20 +47,16 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
                     line.push_str(&format);
                 }
             }
-        } else if let Some(schema) = tool_parameter_schema(tool) {
-            line.push_str(". Its arguments are an object with ");
-            line.push_str(&describe_parameter_names(schema));
-            if let Ok(schema_text) = serde_json::to_string(schema) {
-                line.push_str(". JSON Schema: ");
-                line.push_str(&schema_text);
-            }
+        } else if let Some(schema) = parameter_schema(tool) {
+            line.push_str(". Arguments (names followed by ? are optional): ");
+            line.push_str(&prompt_schema(schema));
         }
         lines.push(line);
     }
     let choice = request
         .get("tool_choice")
-        .and_then(|value| serde_json::to_string(value).ok())
-        .map(|value| format!(" Client tool_choice: {value}."))
+        .and_then(|choice_value| serde_json::to_string(choice_value).ok())
+        .map(|serialized_choice| format!(" Client tool_choice: {serialized_choice}."))
         .unwrap_or_default();
     let parallel = request
         .get("parallel_tool_calls")
@@ -114,20 +111,20 @@ fn tool_relay_examples(tools: &[ClientTool]) -> String {
         } else {
             continue;
         };
-        let payload = if tool.kind == "function" {
+        let tool_code_payload = if tool.kind == "function" {
             let Some(arguments) = function_arguments else {
                 continue;
             };
-            let Some(schema) = tool_parameter_schema(tool) else {
+            let Some(schema) = parameter_schema(tool) else {
                 continue;
             };
-            if !schema_matches(&arguments, &Value::Object(schema.clone())) {
+            if !schema_matches(&arguments, schema) {
                 continue;
             }
-            let Ok(payload) = serde_json::to_string(&arguments) else {
+            let Ok(arguments_json) = serde_json::to_string(&arguments) else {
                 continue;
             };
-            payload
+            arguments_json
         } else {
             PATCH.to_string()
         };
@@ -136,7 +133,7 @@ fn tool_relay_examples(tools: &[ClientTool]) -> String {
             "extended_summary": "Relay one client tool through the external client",
             "destructive": false,
             "references": [tool.key()],
-            "code": payload,
+            "code": tool_code_payload,
         });
         let Ok(encoded) = serde_json::to_string(&outer) else {
             continue;
@@ -157,207 +154,44 @@ fn is_named_tool(tool: &ClientTool, bare: &str) -> bool {
     tool.name == bare || tool.name.ends_with(&suffix)
 }
 
-fn tool_parameter_schema(tool: &ClientTool) -> Option<&Map<String, Value>> {
-    ["parameters", "inputSchema", "input_schema"]
-        .into_iter()
-        .find_map(|key| tool.spec.get(key).and_then(Value::as_object))
-}
-
-fn describe_parameter_names(schema: &serde_json::Map<String, Value>) -> String {
-    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
-        return "the arguments required by the client".to_string();
-    };
-    if properties.is_empty() {
-        return "the arguments required by the client".to_string();
-    }
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<std::collections::BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let mut names = properties
-        .keys()
-        .map(|name| {
-            let suffix = if required.contains(name.as_str()) {
-                "required"
-            } else {
-                "optional"
-            };
-            format!("{name} ({suffix})")
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.join(", ")
-}
-
-fn schema_matches(value: &Value, schema: &Value) -> bool {
-    let Some(schema) = schema.as_object() else {
-        return false;
-    };
-    if schema.is_empty() {
-        return true;
-    }
-    if let Some(alternatives) = schema.get("type").and_then(Value::as_array) {
-        return alternatives.iter().any(|alternative| {
-            let mut copy = schema.clone();
-            copy.insert("type".to_string(), alternative.clone());
-            schema_matches(value, &Value::Object(copy))
-        });
-    }
-    match schema.get("type").and_then(Value::as_str) {
-        Some("object") => {
-            let Some(object) = value.as_object() else {
-                return false;
-            };
-            if schema
-                .get("required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| {
-                    required
-                        .iter()
-                        .any(|name| name.as_str().is_none_or(|name| !object.contains_key(name)))
-                })
-            {
-                return false;
-            }
-            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-                for (key, nested) in object {
-                    let nested_schema = properties.get(key).filter(|schema| schema.is_object());
-                    if let Some(nested_schema) = nested_schema {
-                        if !schema_matches(nested, nested_schema) {
-                            return false;
-                        }
-                        continue;
-                    }
-                    // A missing or non-object property schema is not validated.
-                    // `additionalProperties: false` still rejects that key,
-                    // matching the upstream object-schema check.
-                    if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
-                        return false;
-                    }
-                }
-            }
-        }
-        Some("array") => {
-            let Some(items) = value.as_array() else {
-                return false;
-            };
-            if let Some(item_schema) = schema.get("items").filter(|schema| schema.is_object()) {
-                if items.iter().any(|item| !schema_matches(item, item_schema)) {
-                    return false;
-                }
-            }
-        }
-        Some("string") if !value.is_string() => return false,
-        Some("integer" | "number") if !value.is_number() => return false,
-        Some("boolean") if !value.is_boolean() => return false,
-        Some("null") if !value.is_null() => return false,
-        _ => {}
-    }
-    if let Some(options) = schema.get("enum").and_then(Value::as_array) {
-        if !options.is_empty() && !options.iter().any(|option| option == value) {
-            return false;
-        }
-    }
-    true
-}
-
-/// The upstream Basis Points adapter regenerates one malformed client-tool
-/// relay before returning an error. Keep the same bounded recovery in Relay,
-/// but only for errors that prove the model emitted the transport envelope;
-/// malformed response bodies and missing terminal status are not retried.
-pub(in crate::gateway::execution) fn should_retry_tool_relay(
-    error: AdapterError,
-    body: &[u8],
-) -> bool {
-    if error.code() != crate::error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID {
-        return false;
-    }
-    let Some(parameter) = error.parameter() else {
-        return false;
-    };
-    if !(parameter.starts_with("output.run_officejs.") || parameter == "output.tool_call") {
-        return false;
-    }
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .is_some_and(|response| response.get("status").and_then(Value::as_str) == Some("completed"))
-}
-
-/// Claim the one-shot malformed-tool regeneration without duplicating its
-/// eligibility rules in the pooled and account-only execution loops.
-pub(in crate::gateway::execution) fn take_tool_relay_retry(
-    error: AdapterError,
-    body: &[u8],
-    attempted: &mut bool,
-    parameter: &mut Option<&'static str>,
-) -> bool {
-    if *attempted || !should_retry_tool_relay(error, body) {
-        return false;
-    }
-    *attempted = true;
-    *parameter = error.parameter();
-    true
-}
-
-/// Add the one-shot regeneration hint after the prepared input. The diagnostic
-/// contains only the adapter's safe parameter name; provider data and tool
-/// arguments never enter the prompt or logs.
-pub(in crate::gateway::execution) fn add_tool_relay_retry_hint(
-    body: &mut Value,
-    parameter: Option<&str>,
-) -> bool {
-    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let diagnostic = parameter.unwrap_or("output.run_officejs");
-    let hint = format!("{TRANSPORT_RETRY_HINT} {FUNCTION_RELAY_ENCODING} Diagnostic: {diagnostic}");
-    let message = text_message("developer", "input_text", hint);
-    // The adapter appends the correction after the prepared input. A trailing
-    // compaction trigger stays last so the hint does not become the trigger.
-    let insert_at = match input
-        .last()
-        .and_then(|item| item.get("type"))
-        .and_then(Value::as_str)
-    {
-        Some("compaction_trigger") if !input.is_empty() => input.len() - 1,
-        _ => input.len(),
-    };
-    input.insert(insert_at, message);
-    true
-}
-
 /// Prepare a client Responses request for the Basis Points executor.
 pub(in crate::gateway::execution) fn prepare_request(
     request: &Value,
 ) -> Result<Value, AdapterError> {
-    let object = request
+    let request_object = request
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
     // This transport does not implement server-side continuation. Dropping an
     // opaque predecessor would silently turn a continuation into a new chat.
-    if object
+    if request_object
         .get("previous_response_id")
-        .is_some_and(|value| !value.is_null())
+        .is_some_and(|previous_response_id_value| !previous_response_id_value.is_null())
     {
         return Err(AdapterError::parameter_unsupported_for(
             "previous_response_id",
         ));
     }
-    if has_encrypted_agent_message(object.get("input")) {
+    if has_encrypted_agent_message(request_object.get("input")) {
         return Err(AdapterError::parameter_unsupported_for(
             "input.agent_message.encrypted_content",
         ));
     }
-    validate_text_format(object.get("text"))?;
-    let all_tools = client_tools(request);
+    validate_text_format(request_object.get("text"))?;
+    let all_tools = client_tools(request)?;
+    if all_tools.iter().any(|tool| is_transport_tool(&tool.key())) {
+        return Err(AdapterError::invalid_request().with_parameter("tools"));
+    }
     let callable = selected_tools(request, &all_tools);
-    let tool_choice_requires_call = requires_tool_call(object.get("tool_choice"));
+    for tool in &callable {
+        if tool.kind == "function" {
+            if let Some(schema) = parameter_schema(tool) {
+                validator(schema).map_err(|_| {
+                    AdapterError::invalid_request().with_parameter("tools.parameters")
+                })?;
+            }
+        }
+    }
+    let tool_choice_requires_call = requires_tool_call(request_object.get("tool_choice"));
     if tool_choice_requires_call && callable.is_empty() {
         return Err(AdapterError::invalid_request().with_parameter("tool_choice"));
     }
@@ -365,46 +199,47 @@ pub(in crate::gateway::execution) fn prepare_request(
     // not forward client-only fields such as `max_output_tokens`, sampling
     // controls, `parallel_tool_calls` or response formatting options: the
     // provider validates the body strictly and answers with a generic 422.
-    let mut output = Map::new();
-    if let Some(model) = object.get("model") {
-        output.insert("model".to_string(), model.clone());
+    let mut upstream_request = Map::new();
+    if let Some(model) = request_object.get("model") {
+        upstream_request.insert("model".to_string(), model.clone());
     }
-    output.insert(
+    upstream_request.insert(
         "model_selection".to_string(),
         Value::String("explicit".to_string()),
     );
-    output.insert("store".to_string(), Value::Bool(false));
+    upstream_request.insert("store".to_string(), Value::Bool(false));
     // Keep the upstream transport mode aligned with the client request. The
     // runtime still buffers a Basis Points response before translating it, but
     // the provider contract itself accepts the same stream flag as the
     // official adapter.
-    output.insert(
+    upstream_request.insert(
         "stream".to_string(),
         Value::Bool(
-            object
+            request_object
                 .get("stream")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         ),
     );
-    if object
+    if request_object
         .get("context_management")
-        .is_some_and(|value| match value {
+        .is_some_and(|context_management_value| match context_management_value {
             Value::Null => true,
-            Value::Array(items) => items.is_empty(),
-            Value::Object(fields) => fields.is_empty(),
+            Value::Array(context_management_items) => context_management_items.is_empty(),
+            Value::Object(context_management_fields) => context_management_fields.is_empty(),
             _ => false,
         })
     {
         // Empty context policies are rejected by the provider; omit them.
-    } else if let Some(context_management) = object.get("context_management") {
-        output.insert("context_management".to_string(), context_management.clone());
+    } else if let Some(context_management) = request_object.get("context_management") {
+        upstream_request.insert("context_management".to_string(), context_management.clone());
     }
 
-    let mut input = translate_input_items(as_input_items(object.get("input")), &all_tools)?;
-    let metadata = basis_points_metadata(object, &input);
+    let mut input_items =
+        translate_input_items(as_input_items(request_object.get("input")), &all_tools)?;
+    let metadata = basis_points_metadata(request_object, &input_items);
     let mut prologue = Vec::new();
-    if let Some(instructions) = object.get("instructions").and_then(Value::as_str) {
+    if let Some(instructions) = request_object.get("instructions").and_then(Value::as_str) {
         if !instructions.trim().is_empty() {
             prologue.push(text_message(
                 "developer",
@@ -418,73 +253,63 @@ pub(in crate::gateway::execution) fn prepare_request(
         "input_text",
         tool_instructions(&callable, request),
     ));
-    input.splice(0..0, prologue);
-    output.insert("input".to_string(), Value::Array(input));
+    input_items.splice(0..0, prologue);
+    upstream_request.insert("input".to_string(), Value::Array(input_items));
 
-    if let Some(prompt_cache_key) = object
+    if let Some(prompt_cache_key) = request_object
         .get("prompt_cache_key")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|cache_key| !cache_key.is_empty())
     {
-        output.insert(
+        upstream_request.insert(
             "prompt_cache_key".to_string(),
             Value::String(prompt_cache_key.to_string()),
         );
     }
     let mut metadata_object = metadata.as_object().cloned().unwrap_or_default();
-    if let Some(Value::Object(custom)) = sanitized_metadata(object.get("metadata")) {
-        for (key, value) in custom {
-            metadata_object.insert(key, value);
+    if let Some(Value::Object(custom)) = sanitized_metadata(request_object.get("metadata")) {
+        for (metadata_key, metadata_value) in custom {
+            metadata_object.insert(metadata_key, metadata_value);
         }
     }
-    output.insert("metadata".to_string(), Value::Object(metadata_object));
+    upstream_request.insert("metadata".to_string(), Value::Object(metadata_object));
 
     // Basis Points does not accept a server-side `tools`/`tool_choice` body.
     // The official adapter supplies the client tool catalog in developer
     // instructions and lets the model emit the native run_officejs transport
     // call. Keeping these fields out of the strict upstream schema avoids a
     // generic 422 before generation.
-    output.insert(
-        "reasoning_effort".to_string(),
-        Value::String(basis_points_reasoning_effort(object)),
-    );
-    Ok(Value::Object(output))
+    if let Some(effort) = basis_points_reasoning_effort(request_object) {
+        upstream_request.insert("reasoning_effort".to_string(), Value::String(effort));
+    }
+    Ok(Value::Object(upstream_request))
 }
 
 /// Structured `text.format` is not implemented on this transport. Dropping it
 /// and returning ordinary text would look like a successful JSON response.
-fn validate_text_format(value: Option<&Value>) -> Result<(), AdapterError> {
-    let Some(value) = value.filter(|value| !value.is_null()) else {
+fn validate_text_format(text_value: Option<&Value>) -> Result<(), AdapterError> {
+    let Some(text_value) = text_value.filter(|text_config| !text_config.is_null()) else {
         return Ok(());
     };
-    let Some(text) = value.as_object() else {
+    let Some(text_object) = text_value.as_object() else {
         return Err(AdapterError::invalid_request().with_parameter("text"));
     };
-    let Some(format) = text.get("format").filter(|value| !value.is_null()) else {
+    let Some(format_value) = text_object
+        .get("format")
+        .filter(|format_config| !format_config.is_null())
+    else {
         return Ok(());
     };
-    let Some(format) = format.as_object() else {
+    let Some(format_object) = format_value.as_object() else {
         return Err(AdapterError::invalid_request().with_parameter("text.format"));
     };
-    match format.get("type").and_then(Value::as_str) {
-        Some("text") if format.len() == 1 => Ok(()),
+    match format_object.get("type").and_then(Value::as_str) {
+        Some("text") if format_object.len() == 1 => Ok(()),
         Some("text") => Err(AdapterError::invalid_request().with_parameter("text.format")),
         Some("json_object" | "json_schema") => {
             Err(AdapterError::parameter_unsupported_for("text.format"))
         }
         _ => Err(AdapterError::invalid_request().with_parameter("text.format")),
     }
-}
-
-/// Prepare the upstream body and attach the one-shot relay hint when a retry is already claimed.
-pub(in crate::gateway::execution) fn prepare_upstream(
-    request: &Value,
-    retry_parameter: Option<&str>,
-) -> Result<Value, AdapterError> {
-    let mut prepared = prepare_request(request)?;
-    if retry_parameter.is_some() {
-        add_tool_relay_retry_hint(&mut prepared, retry_parameter);
-    }
-    Ok(prepared)
 }

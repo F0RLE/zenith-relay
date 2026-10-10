@@ -10,7 +10,7 @@ export {
   transientCandidateTone,
 } from "../accountStatus";
 
-export { AccountPlanBadge, PageHeader, Tabs, accountErrorLabel } from "./ui/chrome";
+export { AccountBadges, AccountPlanBadge, PageHeader, Tabs, accountErrorLabel } from "./ui/chrome";
 export { ConfirmProvider, useConfirm } from "./ui/confirm";
 export { mergeDescribedBy, useTooltip } from "./ui/tooltip";
 export { Button, IconButton } from "./ui/buttons";

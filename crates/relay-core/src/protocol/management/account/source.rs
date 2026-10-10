@@ -1,4 +1,5 @@
 use super::{OperationalStatus, RefreshStatus};
+use crate::model_metadata::ModelMetadataCatalog;
 use crate::{
     ApiEquivalentSummary, ApiModelPriceOverride, SourceProtocolBinding, SourceProtocolConfig,
     SourceProtocolResolution, WireApi,
@@ -90,7 +91,34 @@ impl SourceSummary {
     /// Persisted legacy bindings do not restrict the automatic client surface.
     /// Relay selects a native upstream when available and otherwise adapts.
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
-        SourceProtocolResolution::resolved_models(self, Some(wire_api)).unwrap_or_default()
+        self.routed_models(Some(wire_api))
+    }
+
+    /// Bindings the owner resolved with its reference catalog when it built
+    /// this summary. A summary without them (older payloads, tests) resolves
+    /// from its own fields, so every projection reads one decision.
+    pub(crate) fn routed_bindings(&self) -> Vec<SourceProtocolBinding> {
+        match &self.resolved_protocol_bindings {
+            Some(bindings) => bindings.clone(),
+            None => SourceProtocolResolution::resolved_protocol_bindings(self).unwrap_or_default(),
+        }
+    }
+
+    fn routed_models(&self, client: Option<WireApi>) -> Vec<String> {
+        let routed = self
+            .routed_bindings()
+            .into_iter()
+            .filter(|binding| client.is_none_or(|client| binding.wire_api == client))
+            .flat_map(|binding| binding.model_ids)
+            .map(|model| crate::model_id_key(&model))
+            .collect::<BTreeSet<_>>();
+        crate::normalize_model_ids(
+            self.models
+                .iter()
+                .filter(|model| routed.contains(&crate::model_id_key(model)))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
@@ -101,7 +129,7 @@ impl SourceSummary {
     /// Native Gemini and Chat Completions sources must remain visible even
     /// though the desktop profile itself normally speaks Responses.
     pub fn models_for_any_wire_api(&self) -> Vec<String> {
-        SourceProtocolResolution::resolved_models(self, None).unwrap_or_default()
+        self.routed_models(None)
     }
 
     pub fn supports_any_wire_api(&self) -> bool {
@@ -113,55 +141,61 @@ impl SourceSummary {
     /// those routes, even when the same model is also exposed by Responses or
     /// another generic API route.
     pub fn models_with_cache_write_pricing(&self) -> BTreeSet<String> {
-        crate::cache_write_model_ids(
-            SourceProtocolResolution::resolved_protocol_bindings(self).unwrap_or_default(),
-        )
+        crate::cache_write_model_ids(self.routed_bindings())
     }
 
     /// Builds the shared summary fields from a stored source record.
     /// `last_error_code` and `refresh_revision` stay with the caller because
     /// the desktop and server records do not use the same column names.
+    /// `reference_catalog` supplies each model's native protocol group, so the
+    /// summary and the runtime resolve the same upstream protocol.
     pub fn from_stored_source(
-        record: &impl SourceSummaryRecord,
+        source_record: &impl SourceSummaryRecord,
         secret_available: bool,
         runtime_available: Option<bool>,
         api_equivalent: ApiEquivalentSummary,
         last_error_code: Option<String>,
         refresh_revision: Option<u64>,
+        reference_catalog: Option<&ModelMetadataCatalog>,
     ) -> Self {
         Self {
-            id: record.summary_id().to_string(),
-            name: record.summary_name().to_string(),
-            enabled: record.summary_enabled(),
-            in_pool: record.summary_in_pool(),
-            draining: record.summary_draining(),
+            id: source_record.summary_id().to_string(),
+            name: source_record.summary_name().to_string(),
+            enabled: source_record.summary_enabled(),
+            in_pool: source_record.summary_in_pool(),
+            draining: source_record.summary_draining(),
             operational_status: super::super::operational_status(
-                record.summary_enabled(),
+                source_record.summary_enabled(),
                 false,
-                !record.summary_draining() && secret_available,
+                !source_record.summary_draining() && secret_available,
                 runtime_available,
             ),
-            base_url: record.protocol_base_url().to_string(),
-            pricing_provider: record.summary_pricing_provider().map(str::to_string),
-            official_provider_family: record
+            base_url: source_record.protocol_base_url().to_string(),
+            pricing_provider: source_record.summary_pricing_provider().map(str::to_string),
+            official_provider_family: source_record
                 .summary_official_provider_family()
                 .map(str::to_string),
-            wire_api: record.protocol_fallback(),
-            protocol_config: record
+            wire_api: source_record.protocol_fallback(),
+            protocol_config: source_record
                 .source_protocol_config()
-                .with_effective_capabilities(record.protocol_base_url(), record.protocol_models()),
-            protocol_bindings: record.stored_protocol_bindings().to_vec(),
+                .with_effective_capabilities(
+                    source_record.protocol_base_url(),
+                    source_record.protocol_models(),
+                ),
+            protocol_bindings: source_record.stored_protocol_bindings().to_vec(),
             resolved_protocol_bindings: Some(
-                record.resolved_protocol_bindings().unwrap_or_default(),
+                source_record
+                    .resolved_protocol_bindings_with_catalog(reference_catalog)
+                    .unwrap_or_default(),
             ),
-            models: record.protocol_models().to_vec(),
-            allowed_models: record.summary_allowed_models().to_vec(),
-            excluded_models: record.summary_excluded_models().to_vec(),
-            priority: record.summary_priority(),
-            weight: record.summary_weight(),
-            recovery_delay_seconds: record.summary_recovery_delay_seconds(),
-            model_price_overrides: record.summary_model_price_overrides().clone(),
-            detected_model_prices: record.summary_detected_model_prices().clone(),
+            models: source_record.protocol_models().to_vec(),
+            allowed_models: source_record.summary_allowed_models().to_vec(),
+            excluded_models: source_record.summary_excluded_models().to_vec(),
+            priority: source_record.summary_priority(),
+            weight: source_record.summary_weight(),
+            recovery_delay_seconds: source_record.summary_recovery_delay_seconds(),
+            model_price_overrides: source_record.summary_model_price_overrides().clone(),
+            detected_model_prices: source_record.summary_detected_model_prices().clone(),
             api_equivalent,
             secret_available,
             last_error_code,

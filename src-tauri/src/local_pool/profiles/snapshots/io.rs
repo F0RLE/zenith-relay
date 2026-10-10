@@ -14,17 +14,17 @@ pub(super) fn snapshot_root(backup_root: &Path) -> PathBuf {
     backup_root.join(SNAPSHOT_DIR)
 }
 
-pub(super) fn metadata_path(backup_root: &Path, id: &str) -> Result<PathBuf> {
-    let id = parse_id(id)?;
-    Ok(snapshot_root(backup_root).join(format!("{id}.json")))
+pub(super) fn metadata_path(backup_root: &Path, snapshot_id: &str) -> Result<PathBuf> {
+    let normalized_snapshot_id = parse_snapshot_id(snapshot_id)?;
+    Ok(snapshot_root(backup_root).join(format!("{normalized_snapshot_id}.json")))
 }
 
-pub(super) fn parse_id(id: &str) -> Result<String> {
-    let parsed = Uuid::parse_str(id.trim()).map_err(|_| {
+pub(super) fn parse_snapshot_id(snapshot_id: &str) -> Result<String> {
+    let parsed = Uuid::parse_str(snapshot_id.trim()).map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT snapshot ID is invalid")
     })?;
     let normalized = parsed.to_string();
-    if normalized != id {
+    if normalized != snapshot_id {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "ChatGPT snapshot ID is invalid",
@@ -33,8 +33,8 @@ pub(super) fn parse_id(id: &str) -> Result<String> {
     Ok(normalized)
 }
 
-pub(super) fn payload_secret_ref(id: &str) -> String {
-    format!("profile:snapshot:{id}:payload")
+pub(super) fn payload_secret_ref(snapshot_id: &str) -> String {
+    format!("profile:snapshot:{snapshot_id}:payload")
 }
 
 pub(super) fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
@@ -48,8 +48,7 @@ pub(super) fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     fs::read(path).map_err(io_error)
 }
 
-pub(super) fn invalid_data(error: impl std::fmt::Display) -> LocalPoolError {
-    let _ = error;
+pub(super) fn invalid_data(_error: impl std::fmt::Display) -> LocalPoolError {
     LocalPoolError::new(
         ErrorCode::RecoveryRequired,
         "ChatGPT snapshot data is invalid",
@@ -84,7 +83,7 @@ pub(super) fn with_cleanup(error: LocalPoolError, cleanup: Result<()>) -> LocalP
 }
 
 pub(super) trait SnapshotSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()>;
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()>;
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
     fn delete(&self, secret_ref: &str) -> Result<()>;
 }
@@ -92,8 +91,8 @@ pub(super) trait SnapshotSecrets {
 pub(super) struct OsSnapshotSecrets;
 
 impl SnapshotSecrets for OsSnapshotSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
-        secret_store::save(secret_ref, value)
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
+        secret_store::save(secret_ref, secret_value)
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {

@@ -6,31 +6,32 @@ use sha2::{Digest, Sha256};
 
 impl QuotaWindow {
     pub fn normalize(
-        input: QuotaWindowInput,
-        previous: Option<&Self>,
+        quota_input: QuotaWindowInput,
+        previous_window: Option<&Self>,
     ) -> Result<Self, QuotaNormalizationError> {
-        let available_basis_points = input
+        let available_basis_points = quota_input
             .available_percent
             .map(percent_to_basis_points)
             .transpose()?;
-        let fully_available = input.explicitly_full.unwrap_or_else(|| {
-            available_basis_points.is_some_and(|value| value >= DEFAULT_FULL_THRESHOLD_BASIS_POINTS)
+        let fully_available = quota_input.explicitly_full.unwrap_or_else(|| {
+            available_basis_points
+                .is_some_and(|basis_points| basis_points >= DEFAULT_FULL_THRESHOLD_BASIS_POINTS)
         });
-        let reset_at_ms = input
+        let reset_at_ms = quota_input
             .reset
-            .map(|reset| reset.normalize_ms(input.observed_at_ms));
+            .map(|reset| reset.normalize_ms(quota_input.observed_at_ms));
         let full_transition_fingerprint = if fully_available {
-            previous
-                .filter(|previous| previous.is_fully_available())
-                .and_then(|previous| previous.full_transition_fingerprint.clone())
+            previous_window
+                .filter(|previous_window| previous_window.is_fully_available())
+                .and_then(|previous_window| previous_window.full_transition_fingerprint.clone())
                 .or_else(|| {
                     Some(cycle_fingerprint(
                         false,
-                        input.kind,
+                        quota_input.kind,
                         reset_at_ms,
-                        input.window_minutes,
-                        input.provider_cycle_id.as_deref(),
-                        input.observed_at_ms,
+                        quota_input.window_minutes,
+                        quota_input.provider_cycle_id.as_deref(),
+                        quota_input.observed_at_ms,
                     ))
                 })
         } else {
@@ -38,33 +39,35 @@ impl QuotaWindow {
         };
         let exhausted = available_basis_points == Some(0);
         let exhaustion_transition_fingerprint = if exhausted {
-            previous
-                .filter(|previous| previous.is_exhausted())
-                .and_then(|previous| previous.exhaustion_transition_fingerprint.clone())
+            previous_window
+                .filter(|previous_window| previous_window.is_exhausted())
+                .and_then(|previous_window| {
+                    previous_window.exhaustion_transition_fingerprint.clone()
+                })
                 .or_else(|| {
                     Some(cycle_fingerprint(
                         true,
-                        input.kind,
+                        quota_input.kind,
                         reset_at_ms,
-                        input.window_minutes,
-                        input.provider_cycle_id.as_deref(),
-                        input.observed_at_ms,
+                        quota_input.window_minutes,
+                        quota_input.provider_cycle_id.as_deref(),
+                        quota_input.observed_at_ms,
                     ))
                 })
         } else {
             None
         };
         Ok(Self {
-            kind: input.kind,
-            provider_cycle_id: input.provider_cycle_id,
-            window_start_ms: input.window_minutes.and_then(|minutes| {
+            kind: quota_input.kind,
+            provider_cycle_id: quota_input.provider_cycle_id,
+            window_start_ms: quota_input.window_minutes.and_then(|minutes| {
                 reset_at_ms.map(|reset| reset.saturating_sub(u64::from(minutes) * 60_000))
             }),
             available_basis_points,
-            explicitly_full: input.explicitly_full,
+            explicitly_full: quota_input.explicitly_full,
             reset_at_ms,
-            window_minutes: input.window_minutes,
-            observed_at_ms: input.observed_at_ms,
+            window_minutes: quota_input.window_minutes,
+            observed_at_ms: quota_input.observed_at_ms,
             full_transition_fingerprint,
             exhaustion_transition_fingerprint,
         })
@@ -73,7 +76,7 @@ impl QuotaWindow {
     pub fn is_fully_available(&self) -> bool {
         self.explicitly_full.unwrap_or_else(|| {
             self.available_basis_points
-                .is_some_and(|value| value >= DEFAULT_FULL_THRESHOLD_BASIS_POINTS)
+                .is_some_and(|basis_points| basis_points >= DEFAULT_FULL_THRESHOLD_BASIS_POINTS)
         })
     }
 
@@ -90,45 +93,51 @@ impl QuotaWindow {
                 .is_none_or(|reset_at_ms| reset_at_ms <= self.observed_at_ms)
     }
 
-    pub fn full_transition_from(&self, previous: Option<&Self>) -> Option<QuotaTransition> {
-        let previous = previous?;
-        (previous.kind == self.kind && !previous.is_fully_available() && self.is_fully_available())
-            .then(|| QuotaTransition {
-                window_kind: self.kind,
-                fingerprint: self.full_transition_fingerprint.clone().unwrap_or_else(|| {
+    pub fn full_transition_from(&self, previous_window: Option<&Self>) -> Option<QuotaTransition> {
+        let previous_window = previous_window?;
+        (previous_window.kind == self.kind
+            && !previous_window.is_fully_available()
+            && self.is_fully_available())
+        .then(|| QuotaTransition {
+            window_kind: self.kind,
+            fingerprint: self.full_transition_fingerprint.clone().unwrap_or_else(|| {
+                cycle_fingerprint(
+                    false,
+                    self.kind,
+                    self.reset_at_ms,
+                    self.window_minutes,
+                    None,
+                    self.observed_at_ms,
+                )
+            }),
+            transitioned_at_ms: self.observed_at_ms,
+        })
+    }
+
+    pub fn exhaustion_transition_from(
+        &self,
+        previous_window: Option<&Self>,
+    ) -> Option<QuotaTransition> {
+        let previous_window = previous_window?;
+        (previous_window.kind == self.kind
+            && !previous_window.is_exhausted()
+            && self.is_exhausted())
+        .then(|| QuotaTransition {
+            window_kind: self.kind,
+            fingerprint: self
+                .exhaustion_transition_fingerprint
+                .clone()
+                .unwrap_or_else(|| {
                     cycle_fingerprint(
-                        false,
+                        true,
                         self.kind,
                         self.reset_at_ms,
                         self.window_minutes,
-                        None,
+                        self.provider_cycle_id.as_deref(),
                         self.observed_at_ms,
                     )
                 }),
-                transitioned_at_ms: self.observed_at_ms,
-            })
-    }
-
-    pub fn exhaustion_transition_from(&self, previous: Option<&Self>) -> Option<QuotaTransition> {
-        let previous = previous?;
-        (previous.kind == self.kind && !previous.is_exhausted() && self.is_exhausted()).then(|| {
-            QuotaTransition {
-                window_kind: self.kind,
-                fingerprint: self
-                    .exhaustion_transition_fingerprint
-                    .clone()
-                    .unwrap_or_else(|| {
-                        cycle_fingerprint(
-                            true,
-                            self.kind,
-                            self.reset_at_ms,
-                            self.window_minutes,
-                            self.provider_cycle_id.as_deref(),
-                            self.observed_at_ms,
-                        )
-                    }),
-                transitioned_at_ms: self.observed_at_ms,
-            }
+            transitioned_at_ms: self.observed_at_ms,
         })
     }
 
@@ -157,11 +166,11 @@ impl QuotaWindow {
     }
 }
 
-fn percent_to_basis_points(value: f64) -> Result<u16, QuotaNormalizationError> {
-    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+fn percent_to_basis_points(percent: f64) -> Result<u16, QuotaNormalizationError> {
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
         return Err(QuotaNormalizationError::InvalidPercentage);
     }
-    Ok((value * 100.0).round() as u16)
+    Ok((percent * 100.0).round() as u16)
 }
 
 fn cycle_fingerprint(

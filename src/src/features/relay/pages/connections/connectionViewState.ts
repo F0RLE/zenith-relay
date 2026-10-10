@@ -18,21 +18,21 @@ export function connectionViews(mode: RelayMode, features: readonly string[]): C
 
 export function connectionInitialView(
   mode: RelayMode,
-  current: ConnectionView,
+  currentView: ConnectionView,
   requested: string | null,
   features: readonly string[] = [],
 ): ConnectionView {
   if (mode === "zenith") return "sources";
   const available = connectionViews(mode, features);
-  const requestedView = requested === "sources" ? "sources" : current;
+  const requestedView = requested === "sources" ? "sources" : currentView;
   return available.includes(requestedView) ? requestedView : available[0] ?? "remote";
 }
 
 export function reconcileRemoteConnectionView(
   mode: RelayMode,
   hasRuntime: boolean,
-  current: ConnectionView,
+  currentView: ConnectionView,
 ): ConnectionView {
-  if (mode !== "remote" || hasRuntime) return current;
+  if (mode !== "remote" || hasRuntime) return currentView;
   return "remote";
 }

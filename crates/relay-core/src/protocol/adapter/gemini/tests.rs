@@ -170,12 +170,16 @@ fn converts_thinking_and_usage() {
         prepared.upstream_body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
         16384
     );
-    let response = translate_gemini_response(prepared,&json!({"candidates":[{"content":{"parts":[{"thought":true,"text":"private"},{"text":"done"}]}}],"usageMetadata":{"thoughtsTokenCount":4}})).unwrap();
+    let response = translate_gemini_response(prepared,&json!({"candidates":[{"content":{"parts":[{"thought":true,"text":"private"},{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":6,"candidatesTokenCount":2,"thoughtsTokenCount":4}})).unwrap();
     assert_eq!(response.response_body["output"][0]["type"], "reasoning");
     assert_eq!(
         response.response_body["usage"]["output_tokens_details"]["reasoning_tokens"],
         4
     );
+    // Thought tokens are counted outside `candidatesTokenCount`; the client
+    // total must include them and be present together with input and output.
+    assert_eq!(response.response_body["usage"]["input_tokens"], 6);
+    assert_eq!(response.response_body["usage"]["total_tokens"], 12);
 }
 
 #[test]

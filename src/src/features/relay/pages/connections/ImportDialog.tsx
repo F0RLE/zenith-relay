@@ -13,8 +13,16 @@ import {
 } from "../../state/relayPreferences";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { useProxyPool } from "./useProxyPool";
+import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
+import { updatePoolMembership } from "../../poolMembership";
 
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
+type ImportedSelection = {
+  result: ConfirmAccountImportResponse;
+  addedToPool: boolean;
+  poolAccountIds: string[];
+  poolSourceIds: string[];
+};
 
 function selectedImportItemIds(session?: ImportSession) {
   return session?.preview.rows
@@ -34,13 +42,14 @@ export function ImportDialog({
   initialSession?: ImportSession;
   modeOverride?: RelayMode;
   defaultAddToPool?: boolean;
-  onImported?: () => void;
+  onImported?: (addedToPool: boolean) => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
   const { mode: currentMode, runtime, perform, busy } = useRelayState();
-  const mode = modeOverride ?? currentMode;
-  const { pool: proxyPool } = useProxyPool(mode === "local");
+  const relayMode = modeOverride ?? currentMode;
+  const confirmPoolAccounts = usePoolAccountWarning();
+  const { pool: proxyPool } = useProxyPool(relayMode === "local");
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(initialSession ?? null);
   const [ownedSessionId, setOwnedSessionId] = useState<string | null>(initialSession?.sessionId ?? null);
@@ -56,31 +65,35 @@ export function ImportDialog({
   const initialPreviewStarted = useRef(false);
   const mounted = useRef(true);
   const confirmInFlight = useRef(false);
+  const pendingSelection = useRef<ImportedSelection | null>(null);
+  const importedToPool = useRef(false);
   const closing = useRef(false);
-  const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  const canImportToPool = relayMode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
   const importOperationBusy = busy?.startsWith("import-") ?? false;
-  const acceptSession = (next: ImportSession) => {
-    setSession(next);
-    setOwnedSessionId(next.sessionId);
-    activeSessionId.current = next.sessionId;
+  const acceptSession = (updatedSession: ImportSession) => {
+    setSession(updatedSession);
+    setOwnedSessionId(updatedSession.sessionId);
+    activeSessionId.current = updatedSession.sessionId;
     setCommandFailed(false);
     setCompleted(null);
     setProgress(null);
-    setSelected(selectedImportItemIds(next));
+    pendingSelection.current = null;
+    importedToPool.current = false;
+    setSelected(selectedImportItemIds(updatedSession));
   };
   const cancel = async () => {
     if (importOperationBusy || confirmInFlight.current || closing.current) return;
     closing.current = true;
     const sessionId = session?.sessionId ?? ownedSessionId;
     try {
-      if (mode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId), undefined, { backgroundRefresh: true });
+      if (relayMode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId), undefined, { backgroundRefresh: true });
     } finally {
       activeSessionId.current = null;
       if (mounted.current) onClose();
     }
   };
   const preview = async () => {
-    if (mode === "local") {
+    if (relayMode === "local") {
       let startedSessionId: string | null = null;
       const captured = await captureOperationResult(
         (work) => perform("import-preview", work, undefined, { backgroundRefresh: true }),
@@ -103,7 +116,7 @@ export function ImportDialog({
         // repeated preview cannot accumulate stale state or crash cleanup.
         if (startedSessionId) {
           if (activeSessionId.current === startedSessionId) activeSessionId.current = null;
-          setOwnedSessionId((current) => current === startedSessionId ? null : current);
+          setOwnedSessionId((previousOwnedSessionId) => previousOwnedSessionId === startedSessionId ? null : previousOwnedSessionId);
           void relayCommands.cancelImport(startedSessionId).catch(() => undefined);
         }
         setCommandFailed(true);
@@ -126,7 +139,7 @@ export function ImportDialog({
       captured = await captureOperationResult(
         (work) => perform("import-files", work, undefined, { backgroundRefresh: true }),
         async () => {
-          const session = mode === "local"
+          const session = relayMode === "local"
             ? await relayCommands.previewImportFiles(paths)
             : await relayCommands.previewRemoteImportFiles(paths);
           if (session) {
@@ -140,15 +153,16 @@ export function ImportDialog({
       if (captured.ok && captured.value) acceptSession(captured.value);
       else if (!captured.ok) setCommandFailed(true);
     } finally {
-      if (!mounted.current && mode === "local" && createdSessionId) {
+      if (!mounted.current && relayMode === "local" && createdSessionId) {
         void relayCommands.cancelImport(createdSessionId).catch(() => undefined);
       }
       if (mounted.current) setFileLoading(false);
     }
   };
-  const finishConfirmedImport = (result: ConfirmAccountImportResponse | null) => {
+  const finishConfirmedImport = (importResult: ConfirmAccountImportResponse | null, addedToPool: boolean) => {
     if (!session) return;
-    const failures = collectImportFailures(result, session);
+    importedToPool.current ||= addedToPool;
+    const failures = collectImportFailures(importResult, session);
     setProgress(null);
     if (failures.length) {
       setSelected(failures.map((failure) => failure.itemId));
@@ -156,23 +170,80 @@ export function ImportDialog({
       return;
     }
     activeSessionId.current = null;
-    onImported?.();
+    onImported?.(importedToPool.current);
     if (mounted.current) onClose();
   };
-  const confirm = async (selectedIds = selected) => {
+  const confirm = async (selectedIds = selected, bypassWarning = false) => {
     if (!session || confirmInFlight.current || closing.current) return;
     confirmInFlight.current = true;
     const sessionId = session.sessionId;
     setCommandFailed(false);
-    setProgress({ sessionId, completed: 0, total: selectedIds.length, succeeded: 0, failed: 0 });
     try {
-      if (mode === "local") {
+      const finishSelection = async (selection: ImportedSelection) => {
+        if (selection.poolAccountIds.length || selection.poolSourceIds.length) {
+          const ok = await perform("import-pool-membership", () => updatePoolMembership(relayMode, {
+            accountIds: selection.poolAccountIds, sourceIds: selection.poolSourceIds, inPool: true,
+          }), undefined, { backgroundRefresh: true });
+          if (!mounted.current) return;
+          if (!ok) {
+            setProgress(null);
+            setCommandFailed(true);
+            return;
+          }
+          selection.addedToPool = true;
+          selection.poolAccountIds = [];
+          selection.poolSourceIds = [];
+        }
+        if (relayMode === "local" && assignProxy) {
+          const accountIds = selection.result.results.flatMap((item) => {
+            const id = item.account?.account.id ?? item.accountId;
+            return item.status === "succeeded" && id ? [id] : [];
+          });
+          if (accountIds.length) {
+            const ok = await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds), undefined, { backgroundRefresh: true });
+            if (!mounted.current) return;
+            if (!ok) {
+              setProgress(null);
+              setCommandFailed(true);
+              return;
+            }
+          }
+        }
+        pendingSelection.current = null;
+        finishConfirmedImport(selection.result, selection.addedToPool);
+      };
+      // The import session can already be complete when pool/proxy assignment
+      // fails. Retry those operations with the imported IDs, not credentials.
+      if (pendingSelection.current) {
+        await finishSelection(pendingSelection.current);
+        return;
+      }
+      const poolRows = session.preview.rows.filter((row) => selectedIds.includes(row.itemId) && row.authMode !== "api_key" && row.status !== "invalid");
+      const includeAllInPool = addToPool && await confirmPoolAccounts(poolRows, bypassWarning);
+      if (!mounted.current) return;
+      const includeBasisOnly = addToPool && !includeAllInPool;
+      const acceptImportedSelection = async (result: ConfirmAccountImportResponse) => {
+        const basisItemIds = new Set(poolRows.filter((row) => row.oauthClientKind === "excel_bps").map((row) => row.itemId));
+        const selection: ImportedSelection = {
+          result,
+          addedToPool: includeAllInPool && result.results.some((item) => item.status === "succeeded"),
+          poolAccountIds: includeBasisOnly ? result.results.flatMap((item) => {
+            const id = item.account?.account.id ?? item.accountId;
+            return item.status === "succeeded" && id && basisItemIds.has(item.itemId) ? [id] : [];
+          }) : [],
+          poolSourceIds: includeBasisOnly ? result.results.flatMap((item) => item.status === "succeeded" && item.source ? [item.source.id] : []) : [],
+        };
+        pendingSelection.current = selection;
+        await finishSelection(selection);
+      };
+      setProgress({ sessionId, completed: 0, total: selectedIds.length, succeeded: 0, failed: 0 });
+      if (relayMode === "local") {
         let captured: { ok: boolean; value: ConfirmAccountImportResponse | undefined } = { ok: false, value: undefined };
         beginAccountImportConfirmation();
         try {
           captured = await captureOperationResult(
             (work) => perform("import-confirm", work, undefined, { backgroundRefresh: true }),
-            () => relayCommands.confirmImport(sessionId, selectedIds, addToPool),
+            () => relayCommands.confirmImport(sessionId, selectedIds, includeAllInPool),
           );
         } finally {
           finishAccountImportConfirmation();
@@ -183,22 +254,14 @@ export function ImportDialog({
           setCommandFailed(true);
           return;
         }
-        if (assignProxy && captured.value) {
-          const accountIds = captured.value.results.flatMap((item) => item.status === "succeeded" && item.account ? [item.account.account.id] : []);
-          if (accountIds.length) await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds), undefined, { backgroundRefresh: true });
-        }
-        if (!mounted.current) return;
-        // Clear the cleanup marker before notifying a parent. Onboarding may
-        // replace the whole wizard immediately, and its unmount cleanup must
-        // not race a confirmation that has already committed.
-        finishConfirmedImport(captured.value ?? null);
+        if (captured.value) await acceptImportedSelection(captured.value);
         return;
       }
       const captured = await captureOperationResult(
         (work) => perform("import-confirm", work, "feedback.accountAdded", { backgroundRefresh: true }),
         async () => await relayCommands.remoteAction(
           { type: "confirm_account_batch_import" },
-          { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool },
+          { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool: includeAllInPool },
         ) as ConfirmAccountImportResponse,
       );
       if (!mounted.current) return;
@@ -207,7 +270,7 @@ export function ImportDialog({
         setCommandFailed(true);
         return;
       }
-      finishConfirmedImport(captured.value ?? null);
+      if (captured.value) await acceptImportedSelection(captured.value);
     } finally {
       confirmInFlight.current = false;
     }
@@ -226,7 +289,7 @@ export function ImportDialog({
     };
   }, []);
   useEffect(() => {
-    if (mode !== "local") return;
+    if (relayMode !== "local") return;
     let disposed = false;
     let stop: (() => void) | undefined;
     void relayCommands.onImportProgress((event) => {
@@ -239,21 +302,21 @@ export function ImportDialog({
       disposed = true;
       stop?.();
     };
-  }, [mode]);
+  }, [relayMode]);
   useEffect(() => {
     if (!initialPaths?.length || initialPreviewStarted.current) return;
     initialPreviewStarted.current = true;
     void chooseFiles(initialPaths);
   }, [initialPaths]);
   useEffect(() => () => {
-    if (mode === "local" && activeSessionId.current) {
+    if (relayMode === "local" && activeSessionId.current) {
       void relayCommands.cancelImport(activeSessionId.current).catch(() => undefined);
     }
-  }, [mode]);
+  }, [relayMode]);
   const importRows = session?.preview.rows ?? [];
-  const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
-    ? current.filter((id) => id !== itemId)
-    : [...current, itemId]);
+  const toggle = (itemId: string) => setSelected((previousSelectedItemIds) => previousSelectedItemIds.includes(itemId)
+    ? previousSelectedItemIds.filter((selectedItemId) => selectedItemId !== itemId)
+    : [...previousSelectedItemIds, itemId]);
   // Keep invalid rows selectable so the user can explicitly submit them and
   // receive a per-item failure result instead of losing the row silently.
   // Rust still validates the item and never imports unusable credentials.
@@ -266,7 +329,7 @@ export function ImportDialog({
   }, [someImportRowsSelected]);
   const toggleAll = (checked: boolean) => setSelected(checked ? importRowIds : []);
   const selectedAccountCount = session?.preview.rows.filter((row) => selected.includes(row.itemId) && row.authMode !== "api_key").length ?? 0;
-  const localProxyOptions = mode === "local";
+  const localProxyOptions = relayMode === "local";
   const footer = completed ? (
     <>
       <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.close")}</Button>
@@ -276,19 +339,25 @@ export function ImportDialog({
     <>
       <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.cancel")}</Button>
       {fileLoading ? null : session ? (
-        <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy} onClick={() => void confirm()}>{t("accounts.confirmImport", { count: selected.length })}</Button>
+        <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy} onClick={() => void confirm()}
+          data-relay-context-action onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!importOperationBusy && selected.length) void confirm(selected, true);
+          }}
+        >{t("accounts.confirmImport", { count: selected.length })}</Button>
       ) : (
         <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim() || importOperationBusy} onClick={preview}>{t("accounts.preview")}</Button>
       )}
     </>
   );
-  let body;
+  let importContent;
   if (busy === "import-confirm" && progress) {
-    body = <ImportProgressView mode={mode} progress={progress} />;
+    importContent = <ImportProgressView mode={relayMode} progress={progress} />;
   } else if (completed) {
-    body = <ImportFailureSummary failures={completed} />;
+    importContent = <ImportFailureSummary failures={completed} />;
   } else if (session) {
-    body = (
+    importContent = (
       <ImportPreview
         session={session}
         selected={selected}
@@ -309,14 +378,14 @@ export function ImportDialog({
       />
     );
   } else if (fileLoading || busy === "import-preview") {
-    body = <ImportFileStatus />;
+    importContent = <ImportFileStatus />;
   } else {
-    body = <ImportSourceForm mode={mode} choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
+    importContent = <ImportSourceForm mode={relayMode} choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
   }
   return (
     <Dialog className="account-import-dialog" title={t("accounts.import")} onClose={cancel} footer={footer}>
       {commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}
-      {body}
+      {importContent}
     </Dialog>
   );
 }
@@ -382,7 +451,7 @@ function ImportSourceForm({
   mode: RelayMode;
   choosingFiles: boolean;
   content: string;
-  onContent: (value: string) => void;
+  onContent: (contentValue: string) => void;
   onChooseFiles: () => void;
 }) {
   const { t } = useTranslation();
@@ -508,12 +577,12 @@ function ImportPreview({
 function collectImportFailures(response: ConfirmAccountImportResponse | null, session: ImportSession): ImportFailure[] {
   const rows = new Map(session.preview.rows.map((row) => [row.itemId, row]));
   return (response?.results ?? [])
-    .filter((item) => item.status === "failed")
-    .map((item) => {
-      const row = rows.get(item.itemId);
+    .filter((importResult) => importResult.status === "failed")
+    .map((importResult) => {
+      const row = rows.get(importResult.itemId);
       return {
-        itemId: item.itemId,
-        code: item.error?.code ?? "unknown",
+        itemId: importResult.itemId,
+        code: importResult.error?.code ?? "unknown",
         ...(row?.label ? { label: row.label } : {}),
         ...(row?.identity ? { identity: row.identity } : {}),
       };

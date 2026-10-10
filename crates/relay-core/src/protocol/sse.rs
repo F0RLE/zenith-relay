@@ -27,18 +27,18 @@ pub(crate) fn lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-pub(crate) fn data(event: &[u8]) -> Vec<u8> {
-    let mut data = Vec::new();
-    for (index, value) in lines(event)
+pub(crate) fn event_data(sse_event: &[u8]) -> Vec<u8> {
+    let mut data_bytes = Vec::new();
+    for (index, line_payload) in lines(sse_event)
         .filter_map(|line| line.strip_prefix(b"data:"))
         .enumerate()
     {
         if index > 0 {
-            data.push(b'\n');
+            data_bytes.push(b'\n');
         }
-        data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
+        data_bytes.extend_from_slice(line_payload.strip_prefix(b" ").unwrap_or(line_payload));
     }
-    data
+    data_bytes
 }
 
 fn line_end(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -89,7 +89,7 @@ pub(crate) fn push_pending_frames<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{consume_frames, data, event_end, lines};
+    use super::{consume_frames, event_data, event_end, lines};
 
     #[test]
     fn data_preserves_empty_lines_and_only_strips_one_optional_space() {
@@ -104,7 +104,7 @@ mod tests {
                 "",
             ]
             .join(ending);
-            assert_eq!(data(event.as_bytes()), b"\n text \n");
+            assert_eq!(event_data(event.as_bytes()), b"\n text \n");
         }
     }
 
@@ -167,12 +167,12 @@ mod tests {
                 pending.extend_from_slice(chunk);
                 while let Some(end) = event_end(&pending) {
                     let frame = pending.drain(..end).collect::<Vec<_>>();
-                    let data = lines(&frame)
+                    let event_data_lines = lines(&frame)
                         .filter_map(|line| line.strip_prefix(b"data:"))
                         .map(<[u8]>::to_vec)
                         .collect::<Vec<_>>();
-                    if !data.is_empty() {
-                        events.push(data);
+                    if !event_data_lines.is_empty() {
+                        events.push(event_data_lines);
                     }
                 }
             }

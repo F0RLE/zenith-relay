@@ -523,8 +523,8 @@ async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model()
     assert_eq!(model["use_responses_lite"], true);
     assert_eq!(model["supports_reasoning_summaries"], false);
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
-    assert!(model.get("context_window").is_none());
-    assert!(model.get("max_context_window").is_none());
+    assert_eq!(model["context_window"], 128_000);
+    assert_eq!(model["max_context_window"], 120_000);
 
     let source_requests_before = source_state.requests.lock().unwrap().len();
     assert_eq!(source_requests_before, 0);
@@ -596,12 +596,12 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
     register_ready(&authority, "ready-account", "ready-access").await;
-    let mut stale = account("stale-account", "stale-provider", &upstream, 10);
-    stale.models.push("gpt-extra".to_string());
+    let mut stale_account = account("stale-account", "stale-provider", &upstream, 10);
+    stale_account.models.push("gpt-extra".to_string());
     let ready = account("ready-account", "ready-provider", &upstream, 10);
     let (gateway, _, _, _) = spawn_mixed_gateway(
         Vec::new(),
-        vec![stale, ready],
+        vec![stale_account, ready],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),

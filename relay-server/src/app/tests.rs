@@ -103,8 +103,13 @@ fn snapshot_preserves_persisted_model_policy_and_missing_secret_warning() {
         vec!["account_secret_missing:account-missing"]
     );
 
-    let model = snapshot.gateway.models.first().unwrap();
-    assert_eq!(model.id, "gpt-5.4");
+    assert_eq!(snapshot.gateway.models[0].id, "gpt-account-test");
+    let model = snapshot
+        .gateway
+        .models
+        .iter()
+        .find(|model| model.id == "gpt-5.4")
+        .unwrap();
     assert!(!model.enabled);
     assert!(model.custom_price);
     assert_eq!(model.input_micro_usd_per_million, Some(1_000));
@@ -248,14 +253,14 @@ async fn membership_refresh_applies_saved_routing_without_losing_runtime_state()
     state.store.set_routing_policy(&routing).unwrap();
     state.rebuild_runtime().await.unwrap();
     let runtime = state.runtime().unwrap().unwrap();
-    let next = || {
+    let select_next_candidate = || {
         runtime
             .candidate_runtime_order_for_key(crate::state::SYSTEM_GATEWAY_KEY_ID)
             .into_iter()
             .find(|candidate| candidate.next_for_new_request)
             .map(|candidate| candidate.candidate_id)
     };
-    assert_eq!(next().as_deref(), Some("fallback"));
+    assert_eq!(select_next_candidate().as_deref(), Some("fallback"));
 
     let retry_at = now_ms() + 60_000;
     runtime.set_candidate_cooldown(&fallback.id, "gpt-test", retry_at);
@@ -264,7 +269,7 @@ async fn membership_refresh_applies_saved_routing_without_losing_runtime_state()
     assert!(state.refresh_internal_gateway_key_scopes(&runtime).unwrap());
 
     assert!(Arc::ptr_eq(&runtime, &state.runtime().unwrap().unwrap()));
-    assert_eq!(next().as_deref(), Some("primary"));
+    assert_eq!(select_next_candidate().as_deref(), Some("primary"));
     let snapshot = state.snapshot().unwrap();
     assert_eq!(snapshot.gateway.pool_routing, Some(policy));
     assert_eq!(
@@ -280,9 +285,9 @@ async fn membership_refresh_applies_saved_routing_without_losing_runtime_state()
     primary.in_pool = false;
     state.store.save_source(&primary).unwrap();
     assert!(state.refresh_internal_gateway_key_scopes(&runtime).unwrap());
-    assert!(next().is_none());
+    assert!(select_next_candidate().is_none());
     runtime.clear_candidate_cooldown(&fallback.id, "gpt-test");
-    assert_eq!(next().as_deref(), Some("fallback"));
+    assert_eq!(select_next_candidate().as_deref(), Some("fallback"));
     state.shutdown_runtime().await.unwrap();
 }
 
@@ -292,6 +297,9 @@ async fn account_snapshot_tracks_cooldown_recovery_and_missing_candidate() {
     let state = snapshot_test_state(&root);
     let account = snapshot_test_account("snapshot-account", "gpt-test");
     let credential = AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "synthetic-access".into(),
         refresh_token: None,
         id_token: None,
@@ -398,6 +406,7 @@ async fn usage_writer_is_reused_and_flushes_before_shutdown() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -496,6 +505,9 @@ fn free_accounts_route_like_other_pool_accounts() {
         bypass_common_proxy: false,
     };
     let credential = AccountCredential {
+        oauth_client_kind: Default::default(),
+        chatgpt_user_id: None,
+        basis_points_headers: None,
         access_token: "access".into(),
         refresh_token: None,
         id_token: None,
@@ -515,7 +527,6 @@ fn free_accounts_route_like_other_pool_accounts() {
             record.clone(),
             &credential,
             None,
-            false,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         )
         .enabled
@@ -542,7 +553,6 @@ fn free_accounts_route_like_other_pool_accounts() {
             exhausted,
             &credential,
             None,
-            false,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         )
         .enabled,
@@ -551,9 +561,9 @@ fn free_accounts_route_like_other_pool_accounts() {
     let summary = account_summary(
         &record,
         AccountSummaryInputs {
+            oauth_client_kind: Default::default(),
             secret_available: true,
             basis_points_available: true,
-            basis_points_enabled: false,
             proxy_mode: ProxyMode::Direct,
             proxy_available: true,
             api_equivalent: ApiEquivalentSummary::default(),

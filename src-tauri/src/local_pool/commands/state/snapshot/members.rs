@@ -22,12 +22,12 @@ pub(super) fn project_quota_window_usages(
 ) -> Result<BTreeMap<String, QuotaWindowUsage>, LocalPoolError> {
     let quota_windows = accounts
         .iter()
-        .filter_map(|record| {
+        .filter_map(|account_record| {
             let window = zenith_relay_core::protocol::api_equivalent_projection_window(
-                &record.account.quota,
+                &account_record.account.quota,
             )?;
             Some((
-                record.account.id.clone(),
+                account_record.account.id.clone(),
                 window.window_start_ms.unwrap_or_default(),
                 window.observed_at_ms,
             ))
@@ -37,21 +37,21 @@ pub(super) fn project_quota_window_usages(
         telemetry.account_api_equivalents_with_pricing(&quota_windows, catalog, pricing)?;
     Ok(accounts
         .iter()
-        .filter_map(|record| {
+        .filter_map(|account_record| {
             let window = zenith_relay_core::protocol::api_equivalent_projection_window(
-                &record.account.quota,
+                &account_record.account.quota,
             )?;
             let window_start_ms = window.window_start_ms.unwrap_or_default();
             let window_minutes = window.window_minutes.unwrap_or_default();
             Some((
-                record.account.id.clone(),
+                account_record.account.id.clone(),
                 QuotaWindowUsage {
                     kind: window.kind,
                     window_start_ms,
                     observed_at_ms: window.observed_at_ms,
                     window_minutes,
                     api_equivalent: quota_equivalents
-                        .get(&record.account.id)
+                        .get(&account_record.account.id)
                         .copied()
                         .unwrap_or_default(),
                 },
@@ -64,38 +64,44 @@ pub(super) fn project_source_summaries(
     inputs: &SnapshotInputs,
     routing_order: &[CandidateRuntimeSnapshot],
     equivalents: &UsageEquivalents,
+    reference_catalog: &zenith_relay_core::model_metadata::ModelMetadataCatalog,
 ) -> Result<Vec<SourceSummary>, LocalPoolError> {
     inputs
         .sources
         .iter()
-        .map(|record| {
-            let observation = inputs.source_refresh.get(&record.id);
+        .map(|source_record| {
+            let observation = inputs.source_refresh.get(&source_record.id);
             let mut summary = local_source_summary(
-                record,
-                observation.map(|value| value.revision),
+                source_record,
+                observation.map(|refresh_observation| refresh_observation.revision),
                 inputs
                     .source_secret_available
-                    .get(&record.id)
+                    .get(&source_record.id)
                     .copied()
                     .unwrap_or(false),
-                (inputs.running && record.enabled).then(|| {
-                    if record.in_pool {
-                        pooled_source_runtime_available(routing_order, &record.id)
+                (inputs.running && source_record.enabled).then(|| {
+                    if source_record.in_pool {
+                        pooled_source_runtime_available(routing_order, &source_record.id)
                     } else {
-                        source_runtime_available(routing_order, &record.id)
+                        source_runtime_available(routing_order, &source_record.id)
                     }
                 }),
                 equivalents
                     .sources
-                    .get(&record.id)
+                    .get(&source_record.id)
                     .copied()
                     .unwrap_or_default(),
+                reference_catalog,
             )?;
             summary.provider_stats = summary
                 .secret_available
-                .then(|| observation.and_then(|value| value.stats.clone()))
+                .then(|| {
+                    observation.and_then(|refresh_observation| refresh_observation.stats.clone())
+                })
                 .flatten();
-            summary.refresh_state = observation.map(|value| value.state).unwrap_or_default();
+            summary.refresh_state = observation
+                .map(|refresh_observation| refresh_observation.state)
+                .unwrap_or_default();
             Ok(summary)
         })
         .collect()
@@ -113,34 +119,41 @@ pub(super) fn project_account_summaries(
     inputs
         .accounts
         .iter()
-        .map(|record| {
+        .map(|account_record| {
             let mut summary = local_account_summary(
-                record,
+                account_record,
                 LocalAccountSummaryContext {
                     settings: &inputs.gateway,
                     credentials: inputs
                         .account_facts
-                        .get(&record.account.id)
+                        .get(&account_record.account.id)
                         .copied()
                         .flatten(),
                     common_proxy_available,
                     api_equivalent: equivalents
                         .accounts
-                        .get(&record.account.id)
+                        .get(&account_record.account.id)
                         .copied()
                         .unwrap_or_default(),
-                    quota_window_usage: quota_window_usages.get(&record.account.id).cloned(),
+                    quota_window_usage: quota_window_usages
+                        .get(&account_record.account.id)
+                        .cloned(),
                     now_ms: snapshot_at_ms,
-                    refreshing: state.quota_refresh_in_flight(&record.account.id)?,
-                    runtime_available: (inputs.running && record.account.in_pool).then(|| {
-                        oauth_account_runtime_available(routing_order, &record.account.id)
+                    refreshing: state.quota_refresh_in_flight(&account_record.account.id)?,
+                    runtime_available: (inputs.running && account_record.account.in_pool).then(
+                        || {
+                            oauth_account_runtime_available(
+                                routing_order,
+                                &account_record.account.id,
+                            )
                             .unwrap_or(false)
-                    }),
+                        },
+                    ),
                 },
             )?;
             summary.refresh_state = inputs
                 .account_refresh
-                .get(&record.account.id)
+                .get(&account_record.account.id)
                 .copied()
                 .unwrap_or_default();
             Ok(summary)
@@ -157,18 +170,18 @@ pub(super) fn append_missing_runtime_warnings(
     if !inputs.running {
         return;
     }
-    for record in &inputs.accounts {
-        if record.account.enabled
-            && record.account.in_pool
-            && !record.account.draining
-            && oauth_account_runtime_available(routing_order, &record.account.id).is_none()
+    for account_record in &inputs.accounts {
+        if account_record.account.enabled
+            && account_record.account.in_pool
+            && !account_record.account.draining
+            && oauth_account_runtime_available(routing_order, &account_record.account.id).is_none()
         {
             warnings.push(account_runtime_warning(
-                record,
+                account_record,
                 &inputs.gateway,
                 inputs
                     .account_facts
-                    .get(&record.account.id)
+                    .get(&account_record.account.id)
                     .copied()
                     .flatten(),
                 common_proxy_available,

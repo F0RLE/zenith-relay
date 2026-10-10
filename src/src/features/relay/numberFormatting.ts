@@ -29,6 +29,6 @@ export function getNumberFormatter(locale: string, options: FormatterOptions = {
   return formatter;
 }
 
-export function formatNumber(value: number, locale: string, options: FormatterOptions = {}) {
-  return getNumberFormatter(locale, options).format(value);
+export function formatNumber(numericValue: number, locale: string, options: FormatterOptions = {}) {
+  return getNumberFormatter(locale, options).format(numericValue);
 }

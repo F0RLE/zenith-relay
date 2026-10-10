@@ -6,11 +6,11 @@ pub(super) fn persist_usage_batch(
     batch: &[QueuedUsage],
     runtime: &tokio::runtime::Handle,
 ) {
-    let records = batch
+    let usage_records = batch
         .iter()
         .map(|queued| (&queued.event, queued.observed_at_ms))
         .collect::<Vec<_>>();
-    if state.store.record_usage_batch(&records).is_err() {
+    if state.store.record_usage_batch(&usage_records).is_err() {
         state
             .failed_usage_writes
             .fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -32,7 +32,7 @@ pub(super) fn persist_usage_batch(
             .update_account_with_refresh_identity(&account_id, |account| {
                 apply_queued_account_usage(state, &account_id, account, &events)
             }) {
-            Ok(Some(value)) => value,
+            Ok(Some(account_usage_hints)) => account_usage_hints,
             Ok(None) => continue,
             Err(_) => {
                 state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
@@ -76,18 +76,21 @@ fn apply_queued_account_usage(
         .load(&account.secret_ref)
         .ok()
         .flatten()
-        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
-    let access_state = credential
-        .as_ref()
-        .map_or(AccountAccessState::Failed, |value| {
-            if value.refresh_token.is_some() {
-                AccountAccessState::Refreshable
-            } else {
-                AccountAccessState::AccessOnly
-            }
+        .and_then(|credential_json| {
+            serde_json::from_str::<AccountCredential>(&credential_json).ok()
         });
-    let successful_auth_state = credential.as_ref().map(|value| {
-        if value.refresh_token.is_some() {
+    let access_state =
+        credential
+            .as_ref()
+            .map_or(AccountAccessState::Failed, |account_credential| {
+                if account_credential.refresh_token.is_some() {
+                    AccountAccessState::Refreshable
+                } else {
+                    AccountAccessState::AccessOnly
+                }
+            });
+    let successful_auth_state = credential.as_ref().map(|account_credential| {
+        if account_credential.refresh_token.is_some() {
             AccountAuthState::Active
         } else {
             AccountAuthState::DegradedAccessOnly

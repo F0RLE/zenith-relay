@@ -364,7 +364,6 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     rollback_deleted_account_side_effects(
         &state,
         &credentials,
-        &account_id,
         Some(&stored),
         previous_wake,
         old_automations,
@@ -594,6 +593,7 @@ fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
 #[test]
 fn prepared_credentials_debug_output_is_redacted() {
     let prepared = PreparedAccountCredentials {
+        oauth_client_kind: Default::default(),
         tokens: TokenSet::new(
             "access-private",
             Some("refresh-private".into()),

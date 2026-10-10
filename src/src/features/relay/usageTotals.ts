@@ -43,15 +43,15 @@ export function emptyUsageTotals(): UsageTotals {
 
 /** Aggregates local and remote telemetry with one accounting policy. */
 export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): UsageTotals {
-  const totals = emptyUsageTotals();
+  const usageTotals = emptyUsageTotals();
   for (const sample of samples) {
     const outputTokens = sample.success ? Math.max(0, sample.outputTokens ?? 0) : 0;
-    totals.requests += 1;
-    totals.successfulRequests += Number(sample.success);
-    totals.latencyMs += sample.latencyMs;
+    usageTotals.requests += 1;
+    usageTotals.successfulRequests += Number(sample.success);
+    usageTotals.latencyMs += sample.latencyMs;
     if (sample.ttftMs != null) {
-      totals.ttftMs += sample.ttftMs;
-      totals.ttftSamples += 1;
+      usageTotals.ttftMs += sample.ttftMs;
+      usageTotals.ttftSamples += 1;
     }
     const generation = measureTokenSpeed({
       success: sample.success,
@@ -60,45 +60,45 @@ export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): Us
       durationMs: sample.generationMs,
     });
     if (generation) {
-      totals.generationMs += generation.durationMs;
-      totals.generationSamples += 1;
-      totals.generationOutputTokens += generation.outputTokens;
+      usageTotals.generationMs += generation.durationMs;
+      usageTotals.generationSamples += 1;
+      usageTotals.generationOutputTokens += generation.outputTokens;
     }
-    totals.inputTokens += sample.inputTokens ?? 0;
+    usageTotals.inputTokens += sample.inputTokens ?? 0;
     if (sample.cachedInputTokens != null) {
-      totals.cachedInputTokens += sample.cachedInputTokens;
-      totals.cachedInputSamples += 1;
+      usageTotals.cachedInputTokens += sample.cachedInputTokens;
+      usageTotals.cachedInputSamples += 1;
     }
     if (sample.cacheWriteInputTokens != null) {
-      totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens;
-      totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1;
+      usageTotals.cacheWriteInputTokens = (usageTotals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens;
+      usageTotals.cacheWriteInputSamples = (usageTotals.cacheWriteInputSamples ?? 0) + 1;
     }
-    totals.reasoningTokens += sample.reasoningTokens ?? 0;
-    totals.outputTokens += sample.outputTokens ?? 0;
-    totals.totalTokens += sample.totalTokens ?? 0;
+    usageTotals.reasoningTokens += sample.reasoningTokens ?? 0;
+    usageTotals.outputTokens += sample.outputTokens ?? 0;
+    usageTotals.totalTokens += sample.totalTokens ?? 0;
     if (isReasonableTokenSpeed(outputTokens, sample.latencyMs)) {
-      totals.speedOutputTokens += outputTokens;
-      totals.speedDurationMs += sample.latencyMs;
+      usageTotals.speedOutputTokens += outputTokens;
+      usageTotals.speedDurationMs += sample.latencyMs;
     }
     if (sample.apiEquivalent) {
-      totals.apiEquivalent.microUsd += sample.apiEquivalent.microUsd;
-      totals.apiEquivalent.pricedTokens += sample.apiEquivalent.pricedTokens;
-      totals.apiEquivalent.unpricedTokens += sample.apiEquivalent.unpricedTokens;
+      usageTotals.apiEquivalent.microUsd += sample.apiEquivalent.microUsd;
+      usageTotals.apiEquivalent.pricedTokens += sample.apiEquivalent.pricedTokens;
+      usageTotals.apiEquivalent.unpricedTokens += sample.apiEquivalent.unpricedTokens;
     } else {
-      totals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
+      usageTotals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
     }
   }
-  return totals;
+  return usageTotals;
 }
 
-export function formatCompactNumber(value: number, locale: string) {
-  const notation = Math.abs(value) >= 1_000 ? "compact" : "standard";
+export function formatCompactNumber(numericValue: number, locale: string) {
+  const notation = Math.abs(numericValue) >= 1_000 ? "compact" : "standard";
   return getNumberFormatter(locale, {
     notation,
     maximumFractionDigits: 1,
-  }).format(value);
+  }).format(numericValue);
 }
 
-export function formatFullNumber(value: number, locale: string) {
-  return getNumberFormatter(locale, { maximumFractionDigits: 0 }).format(value);
+export function formatFullNumber(numericValue: number, locale: string) {
+  return getNumberFormatter(locale, { maximumFractionDigits: 0 }).format(numericValue);
 }

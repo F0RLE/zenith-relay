@@ -21,7 +21,7 @@ impl Store {
     pub fn common_proxy_configured(&self) -> Result<bool, String> {
         Ok(self
             .metadata("common_proxy_configured")?
-            .is_some_and(|value| value == "true"))
+            .is_some_and(|stored_value| stored_value == "true"))
     }
 
     pub fn set_common_proxy_configured(&self, configured: bool) -> Result<(), String> {
@@ -34,7 +34,7 @@ impl Store {
     pub fn common_proxy_id(&self) -> Result<Option<String>, String> {
         Ok(self
             .metadata("common_proxy_id")?
-            .filter(|value| !value.is_empty()))
+            .filter(|stored_value| !stored_value.is_empty()))
     }
 
     pub fn set_common_proxy_id(&self, proxy_id: Option<&str>) -> Result<(), String> {
@@ -42,7 +42,7 @@ impl Store {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        for (key, value) in [
+        for (metadata_key, metadata_value) in [
             ("common_proxy_id", proxy_id.unwrap_or_default()),
             (
                 "common_proxy_configured",
@@ -52,7 +52,7 @@ impl Store {
             transaction
                 .execute(
                     "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![key, value],
+                    params![metadata_key, metadata_value],
                 )
                 .map_err(db_error)?;
         }
@@ -64,7 +64,7 @@ impl Store {
     pub fn account_proxy_required(&self) -> Result<bool, String> {
         Ok(self
             .metadata("account_proxy_required")?
-            .is_some_and(|value| value == "true"))
+            .is_some_and(|stored_value| stored_value == "true"))
     }
 
     pub fn set_account_proxy_required(&self, required: bool) -> Result<(), String> {
@@ -77,8 +77,8 @@ impl Store {
     pub fn quota_request_timeout_seconds(&self) -> Result<u64, String> {
         let timeout = self.metadata("quota_request_timeout_seconds")?.map_or(
             Ok(DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS),
-            |value| {
-                value
+            |stored_value| {
+                stored_value
                     .parse::<u64>()
                     .map_err(|_| "quota request timeout is invalid".to_string())
             },
@@ -88,11 +88,12 @@ impl Store {
     }
 
     pub fn hidden_models(&self) -> Result<Vec<String>, String> {
-        let value = self
+        let model_ids_json = self
             .metadata("hidden_model_ids")?
             .unwrap_or_else(|| "[]".to_string());
         normalize_validated_model_ids(
-            serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())?,
+            serde_json::from_str(&model_ids_json)
+                .map_err(|_| "hidden model list is invalid".to_string())?,
         )
     }
 
@@ -106,11 +107,11 @@ impl Store {
     }
 
     pub fn model_price_overrides(&self) -> Result<BTreeMap<String, ApiModelPriceOverride>, String> {
-        let value = self
+        let price_overrides_json = self
             .metadata("model_price_overrides")?
             .unwrap_or_else(|| "{}".to_string());
         normalize_model_price_overrides(
-            serde_json::from_str(&value)
+            serde_json::from_str(&price_overrides_json)
                 .map_err(|_| "model price overrides are invalid".to_string())?,
         )
         .map_err(str::to_string)
@@ -151,11 +152,11 @@ impl Store {
     pub fn model_service_tier_overrides(
         &self,
     ) -> Result<BTreeMap<String, DefaultServiceTier>, String> {
-        let value = self
+        let service_tier_overrides_json = self
             .metadata("model_service_tier_overrides")?
             .unwrap_or_else(|| "{}".to_string());
         normalize_model_service_tier_overrides(
-            serde_json::from_str(&value)
+            serde_json::from_str(&service_tier_overrides_json)
                 .map_err(|_| "model service tier overrides are invalid".to_string())?,
         )
         .map_err(str::to_string)
@@ -175,11 +176,11 @@ impl Store {
     }
 
     pub fn model_display_order(&self) -> Result<Vec<String>, String> {
-        let value = self
+        let display_order_json = self
             .metadata("model_display_order")?
             .unwrap_or_else(|| "[]".to_string());
         Ok(normalize_model_ids(
-            serde_json::from_str::<Vec<String>>(&value)
+            serde_json::from_str::<Vec<String>>(&display_order_json)
                 .map_err(|_| "model display order is invalid".to_string())?,
         ))
     }

@@ -35,7 +35,7 @@ pub struct RefreshRegistration {
 }
 
 pub struct RefreshResult<T> {
-    pub value: T,
+    pub refresh_value: T,
     pub outcome: RefreshOutcome,
 }
 
@@ -44,7 +44,7 @@ type Work<T> = Arc<dyn Fn(RefreshJob) -> BoxFuture<'static, RefreshResult<T>> + 
 
 struct Entry<T> {
     work: Work<T>,
-    result: Option<watch::Sender<SharedResult<T>>>,
+    completion_sender: Option<watch::Sender<SharedResult<T>>>,
     cached: Option<Arc<T>>,
 }
 
@@ -61,7 +61,7 @@ pub struct RefreshService<T> {
     started: AtomicBool,
     finished: watch::Sender<bool>,
     progress: watch::Sender<u64>,
-    cache_value: fn(&T) -> bool,
+    is_cacheable: fn(&T) -> bool,
 }
 
 impl<T: Send + Sync + 'static> RefreshService<T> {
@@ -73,7 +73,7 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
     /// observation. Hosts decide which typed results contain observations.
     pub fn with_cache_policy(
         limits: RefreshLimits,
-        cache_value: fn(&T) -> bool,
+        is_cacheable: fn(&T) -> bool,
     ) -> Result<Arc<Self>, &'static str> {
         Ok(Arc::new(Self {
             state: Mutex::new(State {
@@ -86,7 +86,7 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
             started: AtomicBool::new(false),
             finished: watch::channel(false).0,
             progress: watch::channel(0).0,
-            cache_value,
+            is_cacheable,
         }))
     }
 
@@ -98,7 +98,7 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
 
     fn notify_progress(&self) {
         self.progress
-            .send_modify(|value| *value = value.wrapping_add(1));
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     pub fn now_ms(&self) -> u64 {
@@ -110,31 +110,37 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
         identity: &RefreshIdentity,
         kind: RefreshKind,
     ) -> Result<Arc<T>, RefreshWaitError> {
-        let mut receiver = {
-            let mut state = self.state.lock().expect("refresh state poisoned");
-            if state.stopped {
+        let mut watch_receiver = {
+            let mut service_state = self.state.lock().expect("refresh state poisoned");
+            if service_state.stopped {
                 return Err(RefreshWaitError::Stopped);
             }
-            if !state.coordinator.request_now(identity, kind, self.now_ms()) {
+            if !service_state
+                .coordinator
+                .request_now(identity, kind, self.now_ms())
+            {
                 return Err(RefreshWaitError::Stale);
             }
             let key = RefreshKey {
                 identity: identity.clone(),
                 kind,
             };
-            let entry = state.entries.get_mut(&key).ok_or(RefreshWaitError::Stale)?;
-            entry
-                .result
+            let refresh_entry = service_state
+                .entries
+                .get_mut(&key)
+                .ok_or(RefreshWaitError::Stale)?;
+            refresh_entry
+                .completion_sender
                 .get_or_insert_with(|| watch::channel(None).0)
                 .subscribe()
         };
         self.start();
         self.signal();
         loop {
-            if let Some(result) = receiver.borrow_and_update().as_ref() {
-                return result.clone();
+            if let Some(observation) = watch_receiver.borrow_and_update().as_ref() {
+                return observation.clone();
             }
-            receiver
+            watch_receiver
                 .changed()
                 .await
                 .map_err(|_| RefreshWaitError::Interrupted)?;
@@ -143,11 +149,11 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
 
     pub async fn shutdown(&self) {
         {
-            let mut state = self.state.lock().expect("refresh state poisoned");
-            state.stopped = true;
-            for (_, entry) in std::mem::take(&mut state.entries) {
-                if let Some(result) = entry.result {
-                    result.send_replace(Some(Err(RefreshWaitError::Stopped)));
+            let mut service_state = self.state.lock().expect("refresh state poisoned");
+            service_state.stopped = true;
+            for (_, refresh_entry) in std::mem::take(&mut service_state.entries) {
+                if let Some(completion_sender) = refresh_entry.completion_sender {
+                    completion_sender.send_replace(Some(Err(RefreshWaitError::Stopped)));
                 }
             }
         }
@@ -170,7 +176,7 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
 impl<T: Send + Sync + 'static> RefreshService<T> {
     pub fn cached(&self, identity: &RefreshIdentity, kind: RefreshKind) -> Option<Arc<T>> {
         self.cached_observation(identity, kind)
-            .map(|(value, _)| value)
+            .map(|(cached_observation, _)| cached_observation)
     }
 
     /// Cache and freshness are one observation, not two independently racing reads.
@@ -179,17 +185,19 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
         identity: &RefreshIdentity,
         kind: RefreshKind,
     ) -> Option<(Arc<T>, RefreshFreshness)> {
-        let state = self.state.lock().expect("refresh state poisoned");
-        let value = state
+        let service_state = self.state.lock().expect("refresh state poisoned");
+        let cached_observation = service_state
             .entries
             .get(&RefreshKey {
                 identity: identity.clone(),
                 kind,
             })
-            .and_then(|entry| entry.cached.clone())?;
+            .and_then(|refresh_entry| refresh_entry.cached.clone())?;
         Some((
-            value,
-            state.coordinator.freshness(identity, kind, self.now_ms()),
+            cached_observation,
+            service_state
+                .coordinator
+                .freshness(identity, kind, self.now_ms()),
         ))
     }
 
