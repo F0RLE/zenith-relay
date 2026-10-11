@@ -55,6 +55,14 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
             const triggerTypeName = t(triggerType.nameKey);
             const history = runtime.wakeHistory.filter((wakeEvent) => wakeEvent.taskId === task.id);
             const lastWakeEvent = history[history.length - 1];
+            const poolAccounts = eligibleAutomationAccounts(runtime.accounts);
+            const targetAccounts = task.accountSelector.kind === "account_ids"
+              ? selectedAutomationAccounts(poolAccounts, task.accountSelector.values)
+              : poolAccounts;
+            const availableModels = availableAutomationModels(runtime.gateway, targetAccounts, task.accountSelector.kind);
+            const modelUnavailable = triggerType.requiresModel
+              && task.modelPolicy.kind === "explicit"
+              && !resolveAutomationModel(availableModels, task.modelPolicy.value);
             return (
               <article className="automation-card" role="listitem" key={task.id}>
                 <header>
@@ -87,6 +95,7 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
                     <dd>
                       {t(triggerType.conditionKey)}
                       {triggerType.requiresModel ? <small>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</small> : null}
+                      {modelUnavailable ? <small className="automation-validation">{t("automations.selectedModelUnavailable")}</small> : null}
                     </dd>
                   </div>
                   <div>
@@ -131,6 +140,7 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
     : [...previousAccountIds, accountId]);
   const accountSelectionValid = automationAccountSelectionValid(selectorKind, poolAccounts, accountIds, selectedAccounts);
   const selectedModel = resolveAutomationModel(availableModels, modelId);
+  const modelUnavailable = Boolean(modelId.trim() && !selectedModel);
   const valid = automationFormValid(automationName, accountSelectionValid, triggerType.requiresModel, selectedModel);
   const selectorOptions = [
     { value: "all_eligible", label: t("automations.allEligible") },
@@ -140,7 +150,11 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const typeOptions = automationTypes
     .filter((option) => mode === "local" || option.triggerKind === triggerKind)
     .map((option) => ({ value: option.triggerKind, label: t(option.nameKey) }));
-  const modelOptions = availableModels.length ? availableModels.map((model) => ({ value: model, label: model })) : [{ value: "", label: t("automations.noPoolModels") }];
+  const modelOptions = [
+    ...(modelUnavailable ? [{ value: modelId, label: t("automations.unavailableModel", { model: modelId }) }] : []),
+    ...availableModels.map((model) => ({ value: model, label: model })),
+  ];
+  if (!modelOptions.length) modelOptions.push({ value: "", label: t("automations.noPoolModels") });
   const save = async () => {
     if (!valid) return;
     const now = Date.now();
@@ -209,7 +223,7 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
             <OptionMenu
               className="field-option-menu"
               label={t("common.model")}
-              value={selectedModel}
+              value={modelUnavailable ? modelId : selectedModel}
               onChange={setModelId}
               options={modelOptions}
               disabled={!availableModels.length}
@@ -248,7 +262,7 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
         />
       </label>
       {!accountSelectionValid ? <p role="alert" className="automation-validation">{t("automations.accountsRequired")}</p> : null}
-      {triggerType.requiresModel && accountSelectionValid && !selectedModel ? <p role="alert" className="automation-validation">{t("automations.modelUnavailable")}</p> : null}
+      {triggerType.requiresModel && accountSelectionValid && !selectedModel ? <p role="alert" className="automation-validation">{t(modelUnavailable ? "automations.selectedModelUnavailable" : "automations.modelUnavailable")}</p> : null}
     </div>
     </Dialog>
   );

@@ -19,8 +19,8 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
     enabled: true,
     inPool: true,
     draining: false,
-    authState: { state: "ready" },
-    health: "ready",
+    authState: { state: "active" },
+    health: "healthy",
     operationalStatus: "rotation",
     models: [],
     allowedModels: [],
@@ -49,7 +49,10 @@ describe("account status policy", () => {
 
   test("keeps account eligibility and error precedence explicit", () => {
     expect(isCodexOauthAccountEligible(account({ operationalStatus: "quotaWait" }))).toBeTrue();
-    expect(isCodexOauthAccountEligible(account({ inPool: false }))).toBeFalse();
+    expect(isCodexOauthAccountEligible(account({ inPool: false }))).toBeTrue();
+    expect(isCodexOauthAccountEligible(account({ oauthClientKind: "excel_bps" }))).toBeFalse();
+    expect(isCodexOauthAccountEligible(account({ draining: true }))).toBeFalse();
+    expect(accountErrorTranslationKey("basis_points_free_account_unsupported")).toBe("accounts.errors.basisPointsFreeUnsupported");
     expect(currentAccountErrorCode(account({ operationalStatus: "quotaWait", routingBlockReason: "quota_exhausted" }))).toBeNull();
     expect(currentAccountErrorCode(account({ quotaRefreshStatus: "failed", quota: { error: { code: "quota_timeout" } } }))).toBe("quota_timeout");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");

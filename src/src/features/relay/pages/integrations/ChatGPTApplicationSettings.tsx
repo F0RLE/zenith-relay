@@ -1,12 +1,14 @@
 import { ArrowRightLeft, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
+import { formatAccountPlan } from "../../accountPlans";
 import { isCodexOauthAccountEligible } from "../../accountStatus";
-import { Button, EmptyState, OptionMenu, SettingToggle, formatAccountPlan } from "../../components/Ui";
+import { Button, EmptyState, OptionMenu, SettingToggle } from "../../components/Ui";
 import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTasksControl";
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
+import { ChatGPTContextSettings } from "./ChatGPTContextSettings";
 
 export function ChatGPTApplicationSettings() {
   const { t } = useTranslation();
@@ -19,6 +21,7 @@ export function ChatGPTApplicationSettings() {
     <div className="integration-chatgpt-settings">
       <ChatGPTSetup />
       {showSettings ? <div className="gateway-settings-panel gateway-application-panel">
+        <ChatGPTContextSettings />
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
       </div> : null}

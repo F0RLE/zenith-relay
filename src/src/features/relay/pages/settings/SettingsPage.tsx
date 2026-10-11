@@ -13,7 +13,7 @@ type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "erro
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
-  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
@@ -74,6 +74,12 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>
+        <SettingToggle
+          label={t("settings.launchAfterConnect")}
+          description={t("settings.launchAfterConnectHint")}
+          checked={launchApplicationAfterConnect}
+          onChange={setLaunchApplicationAfterConnect}
+        />
         <div className="settings-control-row">
           <div>
             <strong>{t("settings.currentVersion")}</strong>
@@ -102,7 +108,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             className="settings-debug-toggle"
             label={t("settings.debugMode")}
             description={diagnosticSettings
-              ? t("settings.debugModeHint", { state: t(diagnosticSettings.debugEnabled ? "settings.debugModeOn" : "settings.debugModeOff") })
+              ? t("settings.debugModeHint")
               : t(diagnosticsUnavailable ? "settings.debugModeUnavailable" : "settings.debugModeLoading")}
             checked={debugMode.checked}
             disabled={diagnosticSettings === null}

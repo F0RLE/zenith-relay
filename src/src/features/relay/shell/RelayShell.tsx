@@ -25,7 +25,6 @@ const connectionsPage = lazyNamed(async () => (await import("../pages/connection
 const importDialog = lazyNamed(async () => (await import("../pages/connections/ImportDialog")).ImportDialog);
 const poolPage = lazyNamed(async () => (await import("../pages/pool/PoolPage")).PoolPage);
 const integrationsPage = lazyNamed(async () => (await import("../pages/integrations/IntegrationsPage")).IntegrationsPage);
-const gatewayPage = lazyNamed(async () => (await import("../pages/gateway/GatewayPage")).GatewayPage);
 const usagePage = lazyNamed(async () => (await import("../pages/usage/UsagePage")).UsagePage);
 const profilesPage = lazyNamed(async () => (await import("../pages/profiles/ProfilesPage")).ProfilesPage);
 const settingsPage = lazyNamed(async () => (await import("../pages/settings/SettingsPage")).SettingsPage);
@@ -36,7 +35,6 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "connections", icon: Cable },
   { id: "pool", icon: SlidersHorizontal },
   { id: "integrations", icon: Plug },
-  { id: "gateway", icon: Gauge },
   { id: "usage", icon: Activity },
   { id: "profiles", icon: ArchiveRestore },
   { id: "settings", icon: Settings },
@@ -65,7 +63,23 @@ export function RelayShell() {
     openUpdateDialog,
     closeUpdateDialog,
   } = useAppUpdates();
-  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "integrations", "gateway", "usage"] as PageId[]).includes(pageItem.id));
+  const visiblePages = pages.filter((pageItem) => mode !== "zenith" || !(["pool", "integrations", "usage"] as PageId[]).includes(pageItem.id));
+  const mainPages = visiblePages.filter(({ id }) => id !== "profiles" && id !== "settings");
+  const utilityPages = visiblePages.filter(({ id }) => id === "profiles" || id === "settings");
+  const navigationButton = ({ id: pageId, icon: Icon }: (typeof pages)[number]) => (
+    <button
+      key={pageId}
+      type="button"
+      className={page === pageId ? "active" : ""}
+      aria-label={t(`nav.${pageId}`)}
+      aria-current={page === pageId ? "page" : undefined}
+      data-relay-tooltip={collapsed ? t(`nav.${pageId}`) : undefined}
+      onClick={() => setPage(pageId)}
+    >
+      <Icon aria-hidden />
+      <span>{t(`nav.${pageId}`)}</span>
+    </button>
+  );
   const focusModePicker = useCallback(() => {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
@@ -80,7 +94,6 @@ export function RelayShell() {
       importDialog.preload();
       poolPage.preload();
       integrationsPage.preload();
-      gatewayPage.preload();
       usagePage.preload();
       profilesPage.preload();
       settingsPage.preload();
@@ -180,20 +193,8 @@ export function RelayShell() {
             </div>
           ) : null}
         </div>
-        <nav aria-label={t("nav.label")}>
-          {visiblePages.map(({ id: pageId, icon: Icon }) => (
-            <button
-              key={pageId}
-              type="button"
-              className={page === pageId ? "active" : ""}
-              aria-label={t(`nav.${pageId}`)}
-              aria-current={page === pageId ? "page" : undefined}
-              onClick={() => setPage(pageId)}
-            >
-              <Icon aria-hidden />
-              <span>{t(`nav.${pageId}`)}</span>
-            </button>
-          ))}
+        <nav className="sidebar-main-nav" aria-label={t("nav.label")}>
+          <div className="sidebar-nav-group">{mainPages.map(navigationButton)}</div>
         </nav>
         <div className="sidebar-bottom">
           {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} focusAfterClose={focusModePicker} /></div> : null}
@@ -210,6 +211,9 @@ export function RelayShell() {
               </button>
             </div>
           ) : null}
+          <nav className="sidebar-nav-utilities" aria-label={t("nav.utilities")}>
+            {utilityPages.map(navigationButton)}
+          </nav>
           <div className="sidebar-footer">
             <div className="sidebar-footer-row">
               <button
@@ -329,7 +333,6 @@ function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates 
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;
   if (page === "integrations") return <integrationsPage.Component />;
-  if (page === "gateway") return <gatewayPage.Component />;
   if (page === "usage") return <usagePage.Component />;
   if (page === "profiles") return <profilesPage.Component />;
   if (page === "help") return <helpCenter.Component />;

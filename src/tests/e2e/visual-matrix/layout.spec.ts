@@ -25,7 +25,7 @@ for (const viewport of viewports) {
     await accountSearch.fill("");
     await dialog.getByText("Business Workspace", { exact: true }).click();
     await dialog.getByRole("button", { name: "Добавить выбранные (1)" }).click();
-    await page.getByRole("dialog", { name: "Добавить обычный аккаунт в пул?", exact: true }).getByRole("button", { name: "Продолжить", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Добавить обычный аккаунт в пул?", exact: true })).toHaveCount(0);
 
     const memberActions = page.locator(".pool-member-card .pool-member-actions");
     await expect(memberActions.getByRole("button")).toHaveCount(3);
@@ -531,7 +531,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("req_synthetic_local");
-    await dialog.getByRole("tab", { name: "Route", exact: true }).click();
+    await dialog.locator(".request-technical-details > summary").click();
     await expect(dialog).toContainText("Selection reasonGreatest quota remaining");
     await expect(dialog).toContainText("Eligible participants4");
     await expect(dialog).toContainText("Quota at selection63.00%");

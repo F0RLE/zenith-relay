@@ -1,4 +1,5 @@
 import type { DefaultServiceTier } from "./common";
+import type { TokenPrice } from "./pricing";
 import type {
   CapabilityStatus,
   ProtocolFeature,
@@ -41,11 +42,13 @@ export type ModelSummary = {
   catalogContextLimit?: number | null;
   catalogInputLimit?: number | null;
   catalogOutputLimit?: number | null;
+  catalogCapabilities?: ModelCapabilities | null;
   inputMicroUsdPerMillion: number | null;
   cachedInputMicroUsdPerMillion?: number | null;
   cacheWrite5mMicroUsdPerMillion?: number | null;
   cacheWrite1hMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
+  tokenPrice?: TokenPrice | null;
   imageRequestPrices?: ImageRequestPrice[];
   customPrice: boolean;
   reasoningLevels?: string[];
@@ -54,7 +57,7 @@ export type ModelSummary = {
   reasoningConfigurable?: boolean;
   reasoningManualFallback?: boolean;
   speedSupported?: boolean;
-  /** Exact speed tiers confirmed by current routes, including standard. */
+  /** Reference speed tiers narrowed by configured routes, including standard. */
   speedTiers?: DefaultServiceTier[];
   speedTier?: DefaultServiceTier;
   speedConfigurable?: boolean;
@@ -65,4 +68,32 @@ export type ImageRequestPrice = {
   quality: string;
   size: string;
   microUsd: number;
+};
+
+/** Validated reference data. Route access and observed prices remain separate. */
+export type ModelCapabilities = {
+  reasoning?: boolean | null;
+  reasoningSource?: string | null;
+  reasoningMethod?: ModelSummary["catalogReasoningMethod"];
+  reasoningBudgetMinTokens?: number | null;
+  reasoningBudgetMaxTokens?: number | null;
+  reasoningBudgetDefaultTokens?: number | null;
+  reasoningEffortLevels: string[];
+  defaultReasoningEffort?: string | null;
+  reasoningModes: string[];
+  toolCall?: boolean | null;
+  structuredOutput?: boolean | null;
+  attachment?: boolean | null;
+  openWeights?: boolean | null;
+  temperature?: boolean | null;
+  promptCaching?: boolean | null;
+  parallelToolCall?: boolean | null;
+  toolChoice?: boolean | null;
+  streaming?: boolean | null;
+  serviceTiers: DefaultServiceTier[];
+  inputModalities: string[];
+  outputModalities: string[];
+  contextLimit?: number | null;
+  inputLimit?: number | null;
+  outputLimit?: number | null;
 };

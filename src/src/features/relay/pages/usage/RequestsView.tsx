@@ -8,8 +8,8 @@ import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
 import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatTiming, requestStatusLabel, formatServiceTier, formatWireApi } from "./usageReportFormat";
-import { SpeedValue, UsageModel, CompactNumber } from "./usageReportParts";
+import { compactRequestId, formatTiming, requestStatusLabel, formatServiceTier, formatWireApi } from "./usageReportFormat";
+import { SpeedValue, UsageModel, UsageConnection, CompactNumber } from "./usageReportParts";
 
 type RequestsViewProps = {
   rows: UsageRow[];
@@ -48,7 +48,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     protocol: { label: t("usage.protocol"), cell: (row) => <code>{formatWireApi(row.wireApi, t)}</code> },
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
-    connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
+    connection: { label: t("usage.poolMember"), cell: (row) => <UsageConnection row={row} /> },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
     speed: {
       label: t("usage.generationSpeedShort"),
@@ -70,9 +70,11 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
           className="request-link"
           aria-haspopup="dialog"
           aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`}
+          data-relay-tooltip={row.requestId ?? undefined}
           onClick={() => onSelect(row)}
         >
-          <code>{row.requestId ?? "-"}</code>
+          <code>{compactRequestId(row.requestId)}</code>
+          {row.attempt > 1 ? <small className="usage-request-sends">{t("usage.execution.sendCount", { count: row.attempt })}</small> : null}
         </button>
       ),
     },

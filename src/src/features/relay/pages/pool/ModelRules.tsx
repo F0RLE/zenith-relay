@@ -112,6 +112,8 @@ export function ModelRulesView() {
     }
   };
   const reorderModels = (sourceId: string, targetId: string) => {
+    const sourceGroup = modelGroups.find((group) => group.models.some((model) => model.id === sourceId));
+    if (!sourceGroup?.models.some((model) => model.id === targetId)) return;
     const reorderedModels = reorderById(orderedModels, sourceId, targetId);
     if (!reorderedModels) return;
     void saveModelOrder(reorderedModels);

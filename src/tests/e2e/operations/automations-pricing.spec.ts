@@ -152,7 +152,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
     const dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("Example compatible API");
-    await dialog.getByRole("tab", { name: "Route", exact: true }).click();
+    await dialog.locator(".request-technical-details > summary").click();
     await expect(dialog).toContainText("Weighted rotation");
     await expect(dialog.getByText("Quota at selection", { exact: true })).toHaveCount(0);
   });
@@ -166,6 +166,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
     const dialog = page.getByRole("dialog", { name: "Request details" });
+    await dialog.locator(".request-technical-details > summary").click();
     await expect(dialog.getByText("Requested model", { exact: true })).toBeVisible();
     await expect(dialog.getByText("Sent to source", { exact: true })).toBeVisible();
     await expect(dialog.getByText("public-alias", { exact: true })).toBeVisible();
@@ -188,7 +189,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(page.locator(".pool-controls").getByRole("checkbox")).toHaveCount(0);
     await page.getByRole("radio", { name: "Fast", exact: true }).click();
     await expect(page.getByRole("radio", { name: "Fast", exact: true })).toBeEnabled();
-    await page.getByRole("button", { name: "API", exact: true }).click();
+    await page.getByRole("button", { name: "Access", exact: true }).click();
     await expect(transport).toHaveCount(0);
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await expect(page.getByRole("radio", { name: "Fast", exact: true })).toBeChecked();
@@ -197,7 +198,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(transport).toHaveCount(0);
     await page.getByRole("tab", { name: "Sources", exact: true }).click();
     await expect(transport).toHaveCount(0);
-    await page.getByRole("button", { name: "API", exact: true }).click();
+    await page.getByRole("button", { name: "Access", exact: true }).click();
     await expect(transport).toHaveCount(0);
     const updates = await page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { basisPointsEnabled?: boolean; payload?: Record<string, unknown> } } }>;
@@ -211,6 +212,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
     const details = page.getByRole("dialog", { name: "Request details" });
+    await details.locator(".request-technical-details > summary").click();
     await expect(details.getByText("Excel / Basis Points", { exact: true })).toBeVisible();
   });
 }

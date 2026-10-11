@@ -1,7 +1,6 @@
 import type {
   DefaultServiceTier,
   ObservedServiceTier,
-  RelayMode,
   ToolPolicyMode,
 } from "./common";
 import type { ApiEquivalentSummary, PricingMetadata } from "./pricing";
@@ -43,6 +42,7 @@ export type RoutingDiagnostics = {
   dispatchesBefore: number;
   endpointKind?: string | null;
   cacheContext?: CacheContextDiagnostics | null;
+  attemptOutcome?: "completed" | "retry_selection" | "retry_repair" | "retry_authorization" | "returned_failure" | "execution_uncertain" | "client_disconnected" | null;
 };
 
 export type ToolUseDiagnostics = {
@@ -72,7 +72,7 @@ export type UpstreamErrorDetails = {
   redacted: boolean;
   truncated: boolean;
 };
-export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /** Fields shared by local SQLite and remote Relay usage events. */
 type UsageEventRecord = {
@@ -195,17 +195,6 @@ export type UsageExportRow = {
   appliedServiceTier?: ObservedServiceTier | null;
 };
 
-export type SupportExportContext = {
-  mode: RelayMode;
-  schemaVersion: number | null;
-  gatewayRunning: boolean;
-  sourceCount: number;
-  accountCount: number;
-  automationCount: number;
-  usageCount: number;
-  warningCount: number;
-};
-
 export type RemoteUsage = UsageEventRecord & {
   candidateKind: "account" | "source";
   candidateHint: string;
@@ -227,6 +216,7 @@ export type RemoteUsageQuery = {
   success?: boolean;
   errorCategory?: string;
   requestIdQuery?: string;
+  requestId?: string;
   /** Optional response projections; omitted keeps compatibility with older hosts. */
   includeEvents?: boolean;
   includeModels?: boolean;

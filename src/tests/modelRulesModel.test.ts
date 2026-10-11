@@ -45,9 +45,10 @@ describe("model rules model", () => {
     expect(reorderById(current, "missing", "a")).toBeNull();
   });
 
-  test("keeps the three speed modes for a configurable family", () => {
-    expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["standard"] }))).toEqual(["standard", "fast", "ultrafast"]);
+  test("keeps only the speed modes supplied by the runtime", () => {
+    expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["standard"] }))).toEqual(["standard"]);
     expect(modelSpeedTiers(model("gpt", { speedSupported: true, speedTiers: ["fast", "standard"] }))).toEqual(["standard", "fast"]);
+    expect(modelSpeedTiers(model("gpt", { speedSupported: true }))).toEqual(["standard"]);
     expect(modelSpeedTiers(model("other", { speedSupported: false }))).toEqual(["standard"]);
   });
 
@@ -85,6 +86,16 @@ describe("model rules model", () => {
     const supported = supportedReasoningLevels(current);
     expect(supported).toEqual(["high", "low"]);
     expect(normalizeReasoningSelection(supported, ["low", "stale", "HIGH"])).toEqual(["high", "low"]);
+  });
+
+  test("keeps very high selectable across catalog and saved-policy aliases", () => {
+    const current = model("reasoning", {
+      reasoningSupportedLevels: ["low", "very_high", "xhigh", "extra-high", "max"],
+    });
+    const supported = supportedReasoningLevels(current);
+    expect(supported).toEqual(["low", "xhigh", "max"]);
+    expect(normalizeReasoningSelection(supported, ["VERY_HIGH", "max"])).toEqual(["xhigh", "max"]);
+    expect(normalizeReasoningSelection(supported, ["extra_high"])).toEqual(["xhigh"]);
   });
 
   test("does not invent candidates when an automatic catalog has no levels", () => {

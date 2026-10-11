@@ -18,7 +18,7 @@ import { RoutingPolicyDialog } from "./RoutingPolicyDialog";
 type View = "members" | "models";
 export function PoolPage() {
   const { t } = useTranslation();
-  const { mode, runtime, activateCodexProfile, busy, perform, refresh, codexPoolOauthSelection } = useRelayState();
+  const { mode, runtime, activateCodexProfile, busy, perform, refresh, codexPoolOauthSelection, launchApplicationAfterConnect } = useRelayState();
   const [view, setView] = useState<View>("members");
   const [createSource, setCreateSource] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
@@ -40,15 +40,15 @@ export function PoolPage() {
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
     ? codexPoolOauthSelection
     : null;
-  const switchCodexToPool = (launchAfterConnect: boolean) => activateCodexProfile(
+  const switchCodexToPool = () => activateCodexProfile(
     "pool-switch",
     () => relayCommands.attachCodexGateway(selectedOauthAccountId, codexPoolOauthSelection === "none"),
-    launchAfterConnect,
+    launchApplicationAfterConnect,
   );
-  const connectOpenCode = async (launchAfterConnect: boolean) => {
-    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
-    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true });
-  };
+  const connectOpenCode = () => perform("opencode-connect", relayCommands.connectOpenCode, launchApplicationAfterConnect ? "feedback.launched" : "feedback.saved", {
+    backgroundRefresh: true,
+    ...(launchApplicationAfterConnect ? { afterWork: relayCommands.restartOpenCode } : {}),
+  });
   const running = Boolean(runtime?.gateway.running);
   const exportConfiguration = () => perform("configuration-preset-export", mode === "local" ? relayCommands.exportLocalConfigurationPreset : relayCommands.exportRemoteConfigurationPreset, undefined, { backgroundRefresh: true });
   const previewConfiguration = () => perform("configuration-preset-preview", async () => {
@@ -87,7 +87,7 @@ export function PoolPage() {
         variant="primary"
         icon={<Plug aria-hidden />}
         aria-label={t("pool.connect")}
-        busy={busy === "pool-switch"}
+        busy={busy === "pool-switch" || busy === "opencode-connect"}
         disabled={!running}
         title={!running ? t("pool.start") : undefined}
         onClick={() => setConnectDialog(true)}
@@ -130,8 +130,8 @@ export function PoolPage() {
     {connectDialog ? (
       <ApplicationPickerDialog
         onClose={() => setConnectDialog(false)}
-        onChatGPT={(launchAfterConnect) => void switchCodexToPool(launchAfterConnect)}
-        onOpenCode={(launchAfterConnect) => void connectOpenCode(launchAfterConnect)}
+        onChatGPT={() => void switchCodexToPool()}
+        onOpenCode={() => void connectOpenCode()}
       />
     ) : null}
     {createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}
@@ -203,7 +203,7 @@ function ConfigurationPresetDialog({ preview, mode, onClose }: { preview: Config
             </table>
           </div>
         ) : (
-          <EmptyState title={t("pool.configurationUnchanged")} description={t("pool.configurationUnchangedHint")} />
+          <EmptyState title={t("pool.configurationUnchanged")} />
         )}
       </div>
     </Dialog>

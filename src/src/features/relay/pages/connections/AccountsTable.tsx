@@ -23,13 +23,13 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
+import { accountPlanOption } from "../../accountPlans";
 import type { AccountSummary, AccountTransferProgress, CandidateRuntimeSnapshot, ProfileBinding } from "../../api/types";
 import {
   refreshAllAccountQuotas,
   type AccountQuotaRefreshReport,
 } from "../../accountQuotaRefresh";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
-import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
 import {
   ActionMenu,
   ActionMenuItem,
@@ -37,18 +37,18 @@ import {
   EmptyState,
   IconButton,
   OptionMenu,
-  accountPlanOption,
   useConfirm,
   AccountPlanBadge,
 } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
 import { providerCreditsSummary } from "../../providerCredits";
 import { routingOrderPositions, runtimeCandidateForMember } from "../../routingOrder";
-import { updatePoolMembership } from "../../poolMembership";
+import { canAccountJoinPool, updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults } from "./connectionHelpers";
 import { AccountErrorDialog } from "./AccountErrorDialog";
 import { AccountCard } from "./AccountCard";
+import { useConnectionAccountRemoval } from "./accountRemoval";
 import {
   accountCounts,
   accountPlanOptions,
@@ -89,7 +89,6 @@ export function AccountsTable({
   onExport: (accountIds: string[]) => void;
 }) {
   const { t, i18n } = useTranslation();
-  const confirmPoolAccounts = usePoolAccountWarning();
   const membershipPending = useRef(false);
   const {
     mode,
@@ -106,6 +105,7 @@ export function AccountsTable({
     setAccountValueVisible,
   } = useRelayState();
   const confirm = useConfirm();
+  const { canTrash, remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const [selected, setSelected] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
   const [planFilter, setPlanFilter] = useState("all");
@@ -216,14 +216,13 @@ export function AccountsTable({
     localStorage.setItem("relay.accountsGroupByPlan", String(!previousGroupByPlan));
     return !previousGroupByPlan;
   });
-  const updateSelectedParticipation = async (participate: boolean, bypassWarning = false) => {
+  const updateSelectedParticipation = async (participate: boolean) => {
     if (membershipPending.current) return;
     membershipPending.current = true;
     const accountsToUpdate = [...selectedAccounts];
     try {
-      const accepted = !participate || await confirmPoolAccounts(accountsToUpdate, bypassWarning);
       const accountIds = accountsToUpdate
-        .filter((account) => accepted || account.oauthClientKind === "excel_bps" || account.inPool)
+        .filter((account) => (!participate || canAccountJoinPool(account)) && account.inPool !== participate)
         .map((account) => account.id);
       if (!accountIds.length) return;
       const ok = await perform("pool-membership-bulk", () => updatePoolMembership(mode, { accountIds, sourceIds: [], inPool: participate }), "feedback.saved", { backgroundRefresh: true });
@@ -232,32 +231,16 @@ export function AccountsTable({
       membershipPending.current = false;
     }
   };
-  const deleteAccounts = async (accountIds: string[], operation: string) => {
-    const ok = await perform(operation, async () => {
-      if (mode === "local") {
-        if (accountIds.length === 1) {
-          const accountId = accountIds[0];
-          if (accountId) await relayCommands.deleteAccount(accountId);
-        }
-        else await relayCommands.deleteAccounts(accountIds);
-      } else {
-        for (const accountId of accountIds) await relayCommands.remoteAction({ type: "delete_account", id: accountId });
-      }
-    }, "feedback.deleted", { backgroundRefresh: true });
+  const deleteAccounts = async (accountIds: string[], operation: string, permanently: boolean) => {
+    const ok = await remove(accountIds, permanently, operation, Boolean(selectedOnServer));
     if (!ok) await refresh().catch(() => undefined);
     if (ok) setSelected((previousSelectedAccountIds) => previousSelectedAccountIds.filter((accountId) => !accountIds.includes(accountId)));
     return ok;
   };
-  const deleteSelected = async () => {
+  const deleteSelected = async (permanently = false) => {
     const accountIds = selectedAccounts.map((account) => account.id);
-    const message = mode === "remote"
-      ? t("accounts.deleteRemoteSelectedConfirm", { count: accountIds.length })
-      : selectedOnServer
-        ? t("accounts.deleteSelectedRecoveryConfirm", { count: accountIds.length })
-        : t("accounts.deleteSelectedConfirm", { count: accountIds.length });
-    if (accountIds.length && await confirm(message, { danger: true })) {
-      await deleteAccounts(accountIds, "delete-selected-accounts");
-    }
+    if (!accountIds.length) return;
+    await deleteAccounts(accountIds, "delete-selected-accounts", permanently);
   };
   const moveSelectedToRemote = async () => {
     if (!await confirm(t("accounts.moveToServerConfirm", { count: selectedCount }), {
@@ -379,12 +362,6 @@ export function AccountsTable({
                 icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />}
                 disabled={busy === "pool-membership-bulk"}
                 onClick={() => void updateSelectedParticipation(true)}
-                data-relay-context-action
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  void updateSelectedParticipation(true, true);
-                }}
               />
             ) : null}
             {canExcludeSelected ? (
@@ -419,10 +396,13 @@ export function AccountsTable({
             />
             <IconButton
               className="danger"
+              data-relay-context-action
               label={t("accounts.deleteSelected")}
               icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />}
-              disabled={busy === "delete-selected-accounts"}
-              onClick={deleteSelected}
+              disabled={Boolean(busy)}
+              title={t(canTrash ? "trash.deleteHint" : "trash.serverUpdateRequired")}
+              onClick={() => void deleteSelected()}
+              onContextMenu={(event) => openDeleteMenu(event, () => void deleteSelected(true))}
             />
             <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
           </> : <>
@@ -503,6 +483,7 @@ export function AccountsTable({
         onReauthenticate={onReauthenticate}
       />
     ) : <NoResults />}
+    {permanentDeleteMenu}
     {errorDetails ? <AccountErrorDialog account={errorDetails} onClose={() => setErrorDetails(null)} /> : null}
     </>
   );

@@ -1,0 +1,133 @@
+import { expect, test, type Page } from "../bun-playwright";
+import { installTauriMock } from "./tauri-mock";
+import { completedUsage, noOutputUsage, setUsageEventOverrides } from "./request-details-fixture";
+
+async function openRequest(page: Page, theme: "dark" | "light" = "dark", failure = true) {
+  await installTauriMock(page, {
+    mode: "local", locale: "ru", theme, populated: true, usageFailure: failure, usageCandidateKind: "source",
+    usageRequestedModel: "gpt-6.1-sol", usageResolvedModel: "gpt-6.1-sol",
+    usageAttemptOutcome: failure ? "retry_selection" : "completed",
+    usageUpstreamError: failure ? {
+      httpStatus: 503, code: "model_not_available", errorType: null, requestId: "req_provider_synthetic",
+      message: "Synthetic provider: the selected model is temporarily unavailable.",
+      redacted: false, truncated: false,
+    } : undefined,
+  });
+  await page.goto("/");
+  await setUsageEventOverrides(page, failure ? {
+    ...noOutputUsage, latencyMs: 237, httpStatus: 503, errorCategory: "upstream_model_unavailable",
+    requestedReasoningEffort: "max", effectiveReasoningEffort: "max",
+    errorOrigin: "provider",
+    toolUse: {
+      clientToolCount: 80, forwardedToolCount: 80, toolChoice: "auto",
+      toolCallCount: 0, textOutput: false, terminalOutput: "unknown",
+    },
+  } : completedUsage);
+  await page.getByRole("button", { name: "Использование", exact: true }).click();
+  await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
+  return page.getByRole("dialog", { name: "Сведения о запросе" });
+}
+
+for (const theme of ["dark", "light"] as const) {
+  for (const width of [390, 1160]) {
+    test(`failed request exposes the message and parameters in ${theme} ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const dialog = await openRequest(page, theme);
+      await expect(dialog.getByRole("heading", { name: "Модель временно недоступна" })).toBeVisible();
+      await expect(dialog.getByText("HTTP 503", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("237 мс", { exact: true })).toBeVisible();
+      await expect(dialog.getByRole("tab")).toHaveCount(0);
+      await expect(dialog.getByText("req_synthetic_local", { exact: true })).toBeHidden();
+      await expect(dialog.getByText("model_not_available", { exact: true })).toBeHidden();
+      await expect(dialog.getByText("Responses", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("HTTP", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Максимальное", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-technical-details .form-note")).toBeHidden();
+      await expect(dialog.locator(".request-execution")).toHaveCount(0);
+      const bounds = await dialog.boundingBox();
+      expect(bounds!.height).toBeLessThan(650);
+      await page.mouse.move(0, 0);
+      await expect(dialog.locator(".request-upstream-message pre")).toBeVisible();
+      await dialog.screenshot({ path: `output/playwright/request-report-error-${theme}-${width}.png` });
+      await dialog.getByRole("button", { name: "Копировать сообщение провайдера", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe("Provider: Synthetic provider: the selected model is temporarily unavailable.");
+      await dialog.locator(".request-technical-details > summary").click();
+      await expect(dialog.getByRole("region", { name: "Идентификаторы", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("region", { name: "Причина ошибки", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("region", { name: "Маршрут", exact: true })).toBeVisible();
+      await expect(dialog.getByText("req_provider_synthetic", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("model_not_available", { exact: true })).toBeVisible();
+      const toolDetails = dialog.getByRole("region", { name: "Инструменты", exact: true });
+      await expect(toolDetails).toContainText("Инструменты клиента80");
+      await expect(toolDetails).toContainText("Вызовы инструментов0");
+      await expect(toolDetails).toContainText("Итоговый выводНеизвестно");
+      await dialog.getByRole("button", { name: "Копировать ID запроса", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("req_synthetic_local");
+      expect(await dialog.locator(".relay-dialog-body, .request-details-list dd, .request-upstream-message")
+        .evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
+      await page.mouse.move(0, 0);
+      await dialog.screenshot({ path: `output/playwright/request-report-error-expanded-${theme}-${width}.png` });
+    });
+
+    test(`successful request shows tokens and keeps tools in technical details in ${theme} ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 1000 });
+      const dialog = await openRequest(page, theme, false);
+      await expect(dialog.locator(".request-details-identity")).toContainText("Успешно");
+      await expect(dialog.locator(".request-details-error")).toHaveCount(0);
+      await expect(dialog.locator(".request-execution")).toHaveCount(0);
+      await expect(dialog.getByText("640 мс", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-details-metrics dt")).toHaveText([
+        "Первый вывод", "Время ответа", "Скорость генерации", "Стоимость запроса",
+      ]);
+      await expect(dialog.getByText("Responses", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Обычные входные", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Прочитано из кэша", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Видимый вывод", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Рассуждения", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-token-details .request-section-badge")).toHaveText(/Всего токенов19\s340/);
+      await expect(dialog.locator(".request-tool-details")).toBeHidden();
+      await expect(dialog.getByText("req_synthetic_local", { exact: true })).toBeHidden();
+      expect(await dialog.locator(".relay-dialog-body, .request-details-parameters > div, .request-details-list dd")
+        .evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
+      await page.mouse.move(0, 0);
+      await dialog.screenshot({ path: `output/playwright/request-report-success-${theme}-${width}.png` });
+      await dialog.locator(".relay-dialog-body").hover();
+      await page.mouse.wheel(0, 1000);
+      await expect(dialog.locator(".request-technical-details > summary")).toBeInViewport({ ratio: 1 });
+      await dialog.locator(".request-technical-details > summary").click();
+      const toolDetails = dialog.locator(".request-technical-details .request-tool-details");
+      await expect(toolDetails).toBeVisible();
+      await expect(toolDetails).toContainText("Вызовы инструментов2");
+      expect(await toolDetails.locator("dd")
+        .evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
+      await dialog.screenshot({ path: `output/playwright/request-report-technical-${theme}-${width}.png` });
+      await dialog.locator(".request-technical-details > summary").click();
+      await expect(toolDetails).toBeHidden();
+    });
+  }
+}
+
+test("request disclosures are keyboard accessible and keep focus inside the dialog", async ({ page }) => {
+  const dialog = await openRequest(page);
+  const close = dialog.getByRole("button", { name: "Закрыть", exact: true });
+  const technicalSummary = dialog.locator(".request-technical-details > summary");
+  await close.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(technicalSummary).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog.locator(".request-technical-details")).toHaveAttribute("open");
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Копировать ID запроса", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Копировать ID запроса провайдера", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Копировать сообщение провайдера", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(technicalSummary).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" })).toBeFocused();
+});

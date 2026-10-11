@@ -350,7 +350,6 @@ export function SourcesList({ query, onEdit, onRefresh, onRefreshSelected }: {
       {errorDetails ? <ErrorDetailsDialog error={errorDetails} message={errorDetails.message} onClose={() => setErrorDetails(null)} /> : null}
       {launchSource ? <ApplicationPickerDialog
         title={t("sources.launchPickerTitle")}
-        showLaunchToggle={false}
         chatGPTDisabled={!sourceSupportsNativeResponses(launchSource)}
         onClose={() => setLaunchSourceId(null)}
         onChatGPT={() => {

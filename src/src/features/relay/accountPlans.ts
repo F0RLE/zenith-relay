@@ -1,4 +1,3 @@
-const subscriptionPlanPriority = ["enterprise", "business", "pro-500", "pro-200", "pro-100", "plus", "go", "edu", "free", "unknown"];
 const accountPlanOrder = ["plus", "pro-100", "pro-200", "pro-500", "business", "enterprise", "free", "go", "edu", "unknown"];
 const proTierLabels: Record<string, string> = {
   prolite: "Pro 100",
@@ -15,12 +14,6 @@ const proTierLabels: Record<string, string> = {
   pro500: "Pro 500",
   chatgptpromax: "Pro 500",
 };
-
-export function compareSubscriptionPlanPriority(left: { id: string; label: string }, right: { id: string; label: string }) {
-  const leftRank = subscriptionPlanPriority.indexOf(left.id);
-  const rightRank = subscriptionPlanPriority.indexOf(right.id);
-  return (leftRank < 0 ? subscriptionPlanPriority.length : leftRank) - (rightRank < 0 ? subscriptionPlanPriority.length : rightRank) || left.label.localeCompare(right.label);
-}
 
 export function formatAccountPlan(planType: string | null, unknown: string) {
   const normalizedPlanType = planType?.trim();

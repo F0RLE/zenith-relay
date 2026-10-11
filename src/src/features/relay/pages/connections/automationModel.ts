@@ -84,9 +84,10 @@ export function automationAccountSelectionValid(
 }
 
 export function resolveAutomationModel(availableModels: readonly string[], requestedModel: string) {
-  return availableModels.find((model) => modelIdKey(model) === modelIdKey(requestedModel))
-    ?? availableModels[0]
-    ?? "";
+  if (requestedModel.trim()) {
+    return availableModels.find((model) => modelIdKey(model) === modelIdKey(requestedModel)) ?? "";
+  }
+  return availableModels[0] ?? "";
 }
 
 export function automationFormValid(

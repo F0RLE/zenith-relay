@@ -108,7 +108,7 @@ test("connections stay outside the pool until the user adds selected members", a
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   await dialog.getByText("Business Workspace", { exact: true }).click();
   await dialog.getByRole("button", { name: "Add selected (1)" }).click();
-  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
 
   const rows = page.locator(".pool-member-card");
   await expect(rows).toHaveCount(1);

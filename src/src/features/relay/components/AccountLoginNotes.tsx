@@ -6,7 +6,7 @@ import { editedLoginNotes, rememberAccountLoginDraft, type AccountLoginDraft, ty
 import { secondsUntil, useRelativeTimeClock } from "../hooks/useRelativeTimeClock";
 import { useTransientFlag } from "../hooks/useTransientFlag";
 import { useRelayState } from "../state/RelayStateProvider";
-import { Button, copyText } from "./Ui";
+import { Button, SecretField, copyText } from "./Ui";
 
 type AccountLoginNotesProps = {
   accountId?: string;
@@ -176,16 +176,18 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
-      const totpPreview = await relayCommands.previewTotpCode(totpSecret);
-      if (cancelled) return;
-      setPreview(totpPreview);
-      const delay = totpPreview.expiresAtMs ? Math.max(250, totpPreview.expiresAtMs - Date.now() + 50) : 30_000;
-      previewTimer.current = window.setTimeout(() => void run(), delay);
+      try {
+        const totpPreview = await relayCommands.previewTotpCode(totpSecret);
+        if (cancelled) return;
+        setPreview(totpPreview);
+        const delay = totpPreview.expiresAtMs ? Math.max(250, totpPreview.expiresAtMs - Date.now() + 50) : 30_000;
+        previewTimer.current = window.setTimeout(() => void run(), delay);
+      } catch {
+        if (!cancelled) setPreview(null);
+      }
     };
-    if (!totpSecret.trim()) {
-      setPreview(null);
-      return;
-    }
+    setPreview(null);
+    if (!totpSecret.trim()) return;
     void run();
     return () => {
       cancelled = true;
@@ -203,7 +205,6 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
 
   return (
     <section className="account-login-notes" aria-label={t("accounts.loginDetails")}>
-      {loadFailed ? <p role="alert" className="form-note error-text">{t("accounts.loginSaveFailed")}</p> : null}
       <div className="account-login-fields">
         <label className="relay-field">
           <span>{t("accounts.loginEmail")}</span>
@@ -211,18 +212,26 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
         </label>
         <label className="relay-field">
           <span>{t("accounts.loginPhone")}</span>
-          <input value={phone} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("phone", event.target.value, setPhone)} onBlur={() => void save()} />
+          <input type="tel" value={phone} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("phone", event.target.value, setPhone)} onBlur={() => void save()} />
         </label>
-        <label className="relay-field">
-          <span>{t("accounts.loginPassword")}</span>
-          <input value={password} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("password", event.target.value, setPassword)} onBlur={() => void save()} />
-        </label>
-        <label className="relay-field">
-          <span>{t("accounts.loginTotpSecret")}</span>
-          <input value={totpSecret} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("totpSecret", event.target.value, setTotpSecret)} onBlur={() => void save()} />
-        </label>
+        <SecretField
+          key={`${accountId ?? loginId}:password`}
+          label={t("accounts.loginPassword")}
+          value={password}
+          disabled={!ready}
+          onChange={(value) => updateDraftField("password", value, setPassword)}
+          onBlur={() => void save()}
+        />
+        <SecretField
+          key={`${accountId ?? loginId}:totp`}
+          label={t("accounts.loginTotpSecret")}
+          value={totpSecret}
+          disabled={!ready}
+          onChange={(value) => updateDraftField("totpSecret", value, setTotpSecret)}
+          onBlur={() => void save()}
+        />
       </div>
-      <div className="account-login-code">
+      {totpSecret.trim() ? <div className="account-login-code">
         <span>{t("accounts.loginTotpCode")}</span>
         <strong>{preview?.code ?? "—"}</strong>
         {preview?.code ? <small>{t("accounts.loginCodeRemaining", { count: remaining })}</small> : null}
@@ -238,9 +247,12 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
             {codeCopied ? t("feedback.copied") : t("common.copy")}
           </Button>
         ) : null}
+      </div> : null}
+      <div className="account-login-feedback">
+        {loadFailed || saveFailed
+          ? <p role="alert" className="form-note error-text">{t(loadFailed ? "accounts.loginLoadFailed" : "accounts.loginSaveFailed")}</p>
+          : savedVisible ? <p role="status" className="form-note success-text">{t("accounts.loginSaved")}</p> : null}
       </div>
-      {savedVisible ? <p role="status" className="form-note success-text">{t("accounts.loginSaved")}</p> : null}
-      {saveFailed ? <p role="alert" className="form-note error-text">{t("accounts.loginSaveFailed")}</p> : null}
     </section>
   );
 }

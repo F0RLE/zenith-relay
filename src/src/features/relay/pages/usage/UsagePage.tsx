@@ -1,3 +1,4 @@
+import "../../../../styles/pages/usage.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CalendarDays, CheckCircle2, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, TrendingUp, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -17,7 +18,7 @@ import { CompactNumber } from "./usageReportParts";
 import { UsageMetric } from "./UsageMetric";
 import { UsagePagination } from "./UsagePagination";
 import { AccountUsageSummary } from "./AccountUsageSummary";
-import { totalsFromRows, usageRowsFromLocal, usageRowsFromRemote, type UsageRow } from "./usageData";
+import { logicalRequestRows, totalsFromRows, usageRowsFromLocal, usageRowsFromRemote, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
@@ -104,7 +105,7 @@ export function UsagePage() {
   useEffect(() => {
     setPage(1);
     setSelectedRequest(null);
-  }, [mode]);
+  }, [mode, runtime?.runtimeTarget.serverId]);
 
   const accountLabels = useMemo(() => new Map(runtime?.accounts.map((account) => [account.id, account.label]) ?? []), [runtime?.accounts]);
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
@@ -117,23 +118,41 @@ export function UsagePage() {
       unknownConnection: t("common.unknown"),
     };
     if (mode === "remote") {
-      return usageRowsFromRemote(remoteUsage, {
+      return logicalRequestRows(usageRowsFromRemote(remoteUsage, {
         ...labels,
         accountDisplayName: (candidateLabel) => accountDisplayName(null, candidateLabel),
-      });
+      }));
     }
-    return usageRowsFromLocal(localUsagePage?.events ?? [], {
+    return logicalRequestRows(usageRowsFromLocal(localUsagePage?.events ?? [], {
       ...labels,
       accountLabels,
       sourceLabels,
-    });
+    }));
   }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   useEffect(() => {
     if (!selectedRequest) return;
-    const currentRow = rows.find((row) => row.id === selectedRequest.id)
-      ?? (selectedRequest.requestId ? rows.find((row) => row.requestId === selectedRequest.requestId) : undefined);
-    if (currentRow !== selectedRequest) setSelectedRequest(currentRow ?? null);
+    const currentRow = rows.find((row) => selectedRequest.requestId
+      ? row.requestId === selectedRequest.requestId
+      : row.id === selectedRequest.id);
+    if (currentRow && currentRow !== selectedRequest) setSelectedRequest(currentRow);
   }, [rows, selectedRequest]);
+  const loadAttempts = useCallback(async (query: RemoteUsageQuery) => {
+    const labels = {
+      backgroundConnection: t("codex.backgroundConnection"),
+      unknownAccount: t("accounts.importUnknownAccount"),
+      removedAccount: t("usage.removedAccount"),
+      unknownConnection: t("common.unknown"),
+    };
+    if (mode === "remote") {
+      const result = await relayCommands.remoteUsage(query);
+      if (!result) throw new Error("Usage history is unavailable");
+      return { ...result, rows: usageRowsFromRemote(result.events, {
+        ...labels, accountDisplayName: (label) => accountDisplayName(null, label),
+      }) };
+    }
+    const result = await relayCommands.localUsagePage(query);
+    return { ...result, rows: usageRowsFromLocal(result.events, { ...labels, accountLabels, sourceLabels }) };
+  }, [mode, t, accountDisplayName, accountLabels, sourceLabels]);
   const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
   const totals = usagePage?.totals ?? totalsFromRows(rows);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
@@ -374,7 +393,8 @@ export function UsagePage() {
         onPageChange={changePage}
       />
     ) : null}
-    {selectedRequest ? <RequestDetails row={selectedRequest} local={mode === "local"} onClose={() => setSelectedRequest(null)} /> : null}
+    {selectedRequest ? <RequestDetails key={`${mode}:${runtime?.runtimeTarget.serverId ?? ""}:${selectedRequest.requestId ?? selectedRequest.id}`}
+      row={selectedRequest} local={mode === "local"} loadAttempts={loadAttempts} onClose={() => setSelectedRequest(null)} /> : null}
   </section>;
 }
 

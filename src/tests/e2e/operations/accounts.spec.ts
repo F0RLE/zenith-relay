@@ -101,17 +101,18 @@ test("ChatGPT recovery restores a selected manual snapshot", async ({ page }) =>
   expect(commands).toContain("restore_full_codex_profile_snapshot");
 });
 
-test("Overview connects OpenCode without launching it by default", async ({ page }) => {
+test("Overview connects and launches OpenCode from the launch action", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Launch application" }).click();
   const dialog = page.getByRole("dialog", { name: "Which application do you want to launch?" });
-  await expect(dialog.getByLabel("Launch application after connecting")).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
   await dialog.getByRole("button", { name: "OpenCode", exact: true }).click();
 
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "connect_opencode_to_local_gateway"))).toBe(true);
+  await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
   const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
-  expect(commands).not.toContain("restart_opencode_app");
+  expect(commands.filter((command) => ["connect_opencode_to_local_gateway", "restart_opencode_app"].includes(command)))
+    .toEqual(["connect_opencode_to_local_gateway", "restart_opencode_app"]);
 });
 
 test("confirmed local reset delegates protected restoration to Rust", async ({ page }) => {
@@ -327,9 +328,10 @@ test("frequent account actions use full-width zones and secondary actions stay i
   await expect(menu.getByRole("menuitem", { name: "Proxy: Common", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Export" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Notes", exact: true })).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveCount(5);
+  await expect(menu.getByRole("menuitem")).toHaveCount(6);
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
-  await expect(menu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Delete", exact: true })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Delete permanently", exact: true })).toBeVisible();
 });
 
 test("excluded connection exposes an add-to-pool action", async ({ page }) => {
@@ -609,7 +611,7 @@ test("plan filters and pool controls exclude a selected account without deleting
   await expect(page.getByRole("button", { name: "Add selected to pool", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove selected from pool", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Add selected to pool", exact: true }).click();
-  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
   await expect(card).toBeHidden();
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership").length)).toBe(2);
@@ -619,6 +621,36 @@ test("plan filters and pool controls exclude a selected account without deleting
     { input: { accountIds: ["account_synthetic_3"], sourceIds: [], inPool: true } },
   ]);
   expect(calls.some((call) => call.command === "delete_local_account")).toBe(false);
+});
+
+test("ordinary account joins the pool directly from Connections without a warning", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, poolMembers: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const card = page.locator(".account-card").first();
+  await card.getByRole("button", { name: "Add to pool", exact: true }).click();
+  await expect(card.getByRole("button", { name: "Remove from pool", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership"));
+  expect(calls.map((call) => call.args)).toEqual([
+    { input: { accountIds: ["account_synthetic"], sourceIds: [], inPool: true } },
+  ]);
+});
+
+test("Free BPS accounts have no pool addition action while paid BPS accounts do", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local", locale: "en", populated: true, accountCount: 3,
+    accountOAuthClientKind: "excel_bps", poolMembers: false,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const paid = page.locator(".account-card").filter({ hasText: "Personal Plus" });
+  const free = page.locator(".account-card").filter({ hasText: "Backup account" });
+  await expect(paid.getByRole("button", { name: "Add to pool", exact: true })).toBeVisible();
+  await expect(free.getByRole("button", { name: "Add to pool", exact: true })).toHaveCount(0);
+  await expect(free.getByRole("button", { name: "Remove from pool", exact: true })).toHaveCount(0);
 });
 
 test("bulk account actions stay compact and delete the selected records", async ({ page }) => {
@@ -635,10 +667,9 @@ test("bulk account actions stay compact and delete the selected records", async 
   await expect(actions.getByRole("button", { name: "Export selected (3)" })).toBeVisible();
 
   await actions.getByRole("button", { name: "Delete selected accounts" }).click();
-  await settleConfirmation(page);
   await expect(page.getByText("No accounts", { exact: true })).toBeVisible();
 
-  const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountIds?: string[] } }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "delete_local_accounts")?.args.accountIds);
+  const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountIds?: string[] } }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "trash_local_accounts")?.args.accountIds);
   expect([...(deleted ?? [])].sort()).toEqual(["account_synthetic", "account_synthetic_2", "account_synthetic_3"].sort());
 });
 
@@ -723,9 +754,8 @@ test("bulk deletion only removes accounts selected by the active filter", async 
   await chooseOption(page, page.locator(".account-filter-stack"), "Filter by plan", "free");
   await page.getByLabel("Select all accounts").check();
   await page.getByRole("button", { name: "Delete selected accounts" }).click();
-  await settleConfirmation(page);
 
-  const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountId?: string } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "delete_local_account").map((call) => call.args.accountId));
+  const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountIds?: string[] } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "trash_local_accounts").flatMap((call) => call.args.accountIds ?? []));
   expect(deleted).toEqual(["account_synthetic_3"]);
 });
 

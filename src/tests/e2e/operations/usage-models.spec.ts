@@ -91,7 +91,8 @@ test("usage request columns reorder, resize, and open details only from the requ
   await requestLink.click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toBeVisible();
-  await expect(details.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(details.getByRole("tab")).toHaveCount(0);
+  await expect(details.locator(".request-technical-details")).not.toHaveAttribute("open");
   await expect(details.getByText("Error origin", { exact: true })).toHaveCount(0);
   await expect(details.getByText("6.7 tok/s", { exact: true })).not.toHaveAttribute("data-tone");
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
@@ -151,12 +152,14 @@ test("usage details warn when forwarded tools yield a text-only response", async
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
+  await expect(dialog.getByText("Client tools", { exact: true })).toBeHidden();
+  await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeHidden();
+  await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeHidden();
+  await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog.getByText("Client tools", { exact: true })).toBeVisible();
-  await expect(dialog.locator(".request-details-list").getByText("3", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-tool-details").getByText("3", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Tools sent", { exact: true })).toHaveCount(0);
   await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeVisible();
   await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeVisible();
 });
 
@@ -167,7 +170,7 @@ test("usage details do not blame the upstream when tools were not forwarded", as
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
+  await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog.getByText(/Relay forwarded \d+ tool definitions/)).toHaveCount(0);
 });
 
@@ -204,10 +207,10 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toContainText("Generation speed6.7 tok/s");
-  await expect(details).toContainText("Total time428 ms");
+  await expect(details).toContainText("Response time428 ms");
   await expect(details.locator(".request-details-metrics > div")).toHaveCount(4);
   await expect(details).toContainText("Request cost≈$0.0001");
-  await details.getByRole("tab", { name: "Tokens", exact: true }).click();
+  await expect(details.getByText("Input tokens", { exact: true })).toBeVisible();
   await expect(details).toContainText("Input tokens20");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Cache reads12");
@@ -215,7 +218,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("Request cost≈$0.0001");
-  await details.getByRole("tab", { name: "Route", exact: true }).click();
+  await details.locator(".request-technical-details > summary").click();
   await expect(details).toContainText("Selection reasonGreatest quota remaining");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");
@@ -451,6 +454,32 @@ test("every native pool model exposes backend reasoning settings", async ({ page
   });
 });
 
+test("very high is visible in Russian and saves the canonical ChatGPT effort", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "ru",
+    populated: true,
+    serverModelOrder: [],
+    quotaAvailable: true,
+    modelReasoning: { "gpt-5.4": ["low", "medium", "high", "very_high", "xhigh"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
+  const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4"]');
+  await model.locator("[data-model-reasoning-edit]").click();
+  const dialog = page.getByRole("dialog", { name: "Режимы размышления" });
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Низкое", "Среднее", "Высокое", "Очень высокое"]);
+  const veryHigh = dialog.getByRole("checkbox", { name: "Очень высокое", exact: true });
+  await expect(veryHigh).toHaveAttribute("aria-checked", "true");
+  await veryHigh.click();
+  await expect(veryHigh).toHaveAttribute("aria-checked", "false");
+  await veryHigh.click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
+    input: { modelId: "gpt-5.4", allowedLevels: ["low", "medium", "high", "xhigh"] },
+  });
+});
+
 test("normalized catalog levels expose the complete Fable reasoning enum", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
@@ -468,7 +497,7 @@ test("normalized catalog levels expose the complete Fable reasoning enum", async
   const model = page.locator('.model-rules tbody tr[data-model-id="claude-fable-5-1"]');
   await model.getByRole("button", { name: "Set reasoning modes for claude-fable-5-1" }).click();
   const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
-  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Extra high", "Max"]);
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Very high", "Max"]);
   await dialog.getByRole("checkbox", { name: "High", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_reasoning")?.args)).toEqual({
     input: { modelId: "claude-fable-5-1", allowedLevels: ["low", "medium", "xhigh", "max"] },

@@ -32,10 +32,6 @@
   width: min(920px, 100%);
 }
 
-.relay-dialog.request-details-dialog {
-  width: min(720px, 100%);
-}
-
 .relay-dialog > header,
 .relay-dialog > footer {
   min-height: 64px;
@@ -147,27 +143,6 @@
 .relay-dialog .search-field > input:focus,
 .relay-dialog textarea:focus {
   background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-dialog-field-background));
-}
-
-.relay-dialog .secret-field {
-  position: relative;
-  display: block;
-}
-
-.relay-dialog .secret-field > input {
-  padding-right: 46px;
-}
-
-.relay-dialog .secret-field > .relay-icon-button {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
 }
 
 .relay-dialog .relay-dialog-body .relay-tabs {
@@ -296,28 +271,104 @@
   }
 }
 
+.relay-dialog.application-picker {
+  width: min(400px, 100%);
+}
+
+.application-picker .relay-dialog-body {
+  padding: 8px 16px 16px;
+  scrollbar-gutter: auto;
+}
+
+.application-picker-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.application-picker-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 140px;
+  padding: 20px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
+  color: var(--relay-text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.application-picker-option:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--relay-accent) 8%, var(--relay-subtle));
+}
+
+.application-picker-option:focus-visible {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: -2px;
+}
+
+.application-picker-logo {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.application-picker-logo.chatgpt {
+  filter: brightness(0);
+}
+
+:root[data-theme="dark"] .application-picker-logo.chatgpt {
+  filter: brightness(0) invert(1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .application-picker-logo.chatgpt {
+    filter: brightness(0) invert(1);
+  }
+}
+
+.application-picker-label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.application-picker-label strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.application-picker-label small {
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.application-picker-option:disabled {
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.application-picker-option:disabled .application-picker-logo,
+.application-picker-option:disabled strong {
+  opacity: 0.5;
+}
+
 .confirm-dialog-message {
   margin: 0;
   color: var(--relay-secondary);
   line-height: 1.55;
   white-space: pre-line;
-}
-
-.confirm-dialog-remember {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 18px;
-  color: var(--relay-secondary);
-  font-size: 13px;
-  line-height: 1.5;
-  cursor: pointer;
-}
-
-.confirm-dialog-remember input {
-  flex: 0 0 auto;
-  margin: 0;
-  accent-color: var(--relay-accent);
 }
 
 .update-dialog {
@@ -980,12 +1031,6 @@
   font-size: 14px;
 }
 
-.import-file-loading p {
-  margin: 4px 0 0;
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
 .import-progress {
   width: min(520px, 100%);
   min-height: 240px;
@@ -1083,35 +1128,6 @@
   50% {
     transform: translateY(-3px);
   }
-}
-
-.secret-field {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
-  border-radius: 6px;
-}
-
-.secret-field input {
-  min-width: 0;
-  border-radius: 6px 0 0 6px;
-}
-
-/* Edge/Chromium adds its own password reveal control. SecretField already
-   renders the accessible themed toggle, so showing both creates two reveal
-   buttons and makes the key field look like it accepts two actions. */
-.secret-field input::-ms-reveal,
-.secret-field input::-ms-clear {
-  display: none;
-}
-
-.secret-field button {
-  border-left: 0;
-  border-radius: 0 6px 6px 0;
-}
-
-.secret-field input:focus-visible,
-.secret-field button:focus-visible {
-  outline: 0;
 }
 
 .deployment-result {

@@ -259,7 +259,7 @@ test("open request details follow the terminal fallback result", async ({ page }
   const dialog = page.getByRole("dialog", { name: "Request details" });
   const error = dialog.locator(".request-details-error");
   await expect(dialog.getByText("Failed", { exact: true })).toBeVisible();
-  await expect(error.locator(".request-details-list > div").filter({ hasText: "HTTP status" }).locator("dd")).toHaveText("502");
+  await expect(error.locator(".request-outcome-heading > code")).toHaveText("HTTP 502");
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -472,7 +472,7 @@ test("remote bulk import previews multiple files and confirms selected rows", as
   await expect(existing).not.toBeChecked();
   await dialog.getByLabel("Add selected to pool after import").check();
   await dialog.getByRole("button", { name: "Import 2 account(s)" }).click();
-  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
   await expect(dialog).toBeHidden();
 
   const importCalls = await page.evaluate(() => {
@@ -630,8 +630,8 @@ test("remote capability omissions disable or hide unsupported operations", async
   await expect(page.getByRole("button", { name: "Connect ChatGPT", exact: true })).toBeDisabled();
   await expect(page.locator(".gateway-settings-panel")).toHaveCount(0);
   await expect(page.locator(".proxy-settings")).toHaveCount(0);
-  await page.getByRole("button", { name: "API", exact: true }).click();
-  await page.locator(".relay-page-actions .relay-action-menu summary").click();
+  await page.getByRole("tab", { name: "Server API", exact: true }).click();
+  await page.locator(".integration-section-actions .relay-action-menu summary").click();
   await expect(page.getByRole("menuitem", { name: "Restart API" })).toBeDisabled();
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();

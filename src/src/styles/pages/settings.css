@@ -143,8 +143,7 @@
   color: var(--relay-error);
 }
 
-.settings-profile-backup-toggle,
-.settings-debug-toggle {
+.settings-group-body .setting-toggle {
   min-height: 64px;
   padding: 14px 20px;
   border: 0;
@@ -153,42 +152,33 @@
   background: transparent;
 }
 
-.settings-profile-backup-toggle:hover,
-.settings-debug-toggle:hover {
+.settings-group-body .setting-toggle:hover {
   background: color-mix(in srgb, var(--relay-subtle) 72%, transparent);
 }
 
-.settings-profile-backup-toggle strong,
-.settings-debug-toggle strong {
+.settings-group-body .setting-toggle strong {
   color: var(--relay-text);
   font-size: 13px;
   font-weight: 650;
   line-height: 18px;
 }
 
-.settings-profile-backup-toggle small,
-.settings-debug-toggle small {
+.settings-group-body .setting-toggle small {
   font-size: 12px;
   line-height: 18px;
 }
 
-.settings-profile-backup-toggle:hover,
-.settings-debug-toggle:hover,
-.settings-profile-backup-toggle:has(input:checked),
-.settings-debug-toggle:has(input:checked),
-.settings-profile-backup-toggle:has(input:checked):hover,
-.settings-debug-toggle:has(input:checked):hover {
+.settings-group-body .setting-toggle:hover,
+.settings-group-body .setting-toggle:has(input:checked) {
   border-color: transparent;
   border-bottom-color: var(--relay-border);
 }
 
-.settings-profile-backup-toggle:has(input:checked),
-.settings-debug-toggle:has(input:checked) {
+.settings-group-body .setting-toggle:has(input:checked) {
   background: transparent;
 }
 
-.settings-profile-backup-toggle:has(input:checked):hover,
-.settings-debug-toggle:has(input:checked):hover {
+.settings-group-body .setting-toggle:has(input:checked):hover {
   background: color-mix(in srgb, var(--relay-subtle) 72%, transparent);
 }
 
@@ -198,8 +188,7 @@
 
 @media (max-width: 760px) {
   .settings-control-row,
-  .settings-profile-backup-toggle,
-  .settings-debug-toggle {
+  .settings-group-body .setting-toggle {
     align-items: flex-start;
     flex-wrap: wrap;
     gap: 10px 16px;

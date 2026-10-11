@@ -1,4 +1,4 @@
-import type { OperationalStatus } from "./common";
+import type { DefaultServiceTier, OperationalStatus } from "./common";
 import type { ApiEquivalentSummary, ApiModelPriceOverride } from "./pricing";
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini";
@@ -21,6 +21,7 @@ export type ModelEndpointCapability = {
   checkedAtMs: number;
   features: Partial<Record<ProtocolFeature, CapabilityStatus>>;
   reasoningEfforts: string[];
+  serviceTiers?: DefaultServiceTier[] | null;
 };
 export type SourceProtocolConfig = {
   revision: number;
@@ -29,13 +30,6 @@ export type SourceProtocolConfig = {
 };
 
 export type SourceProbeInput = { modelId: string; wireApi: SourceWireApi; expectedRevision: number };
-export type SourceProbeResult = {
-  capability: ModelEndpointCapability;
-  revision: number;
-  httpStatus: number | null;
-  errorCode: string | null;
-};
-
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";
 export type DocumentedCacheRetentionMinimum = "30m";

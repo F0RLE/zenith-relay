@@ -331,7 +331,7 @@ test("pool controls delegate an exhausted OAuth account to the backend", async (
   const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
   await dialog.getByText("Personal Plus", { exact: true }).click();
   await dialog.getByRole("button", { name: "Add selected (1)" }).click();
-  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   const start = page.getByRole("button", { name: "Start API", exact: true });
@@ -352,7 +352,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await connectPoolToChatGPT(page, true);
+  await connectPoolToChatGPT(page);
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
   const [feedbackBox, shellBox, helpBox] = await Promise.all([
@@ -401,7 +401,7 @@ test("pool connection launches Codex before waiting for a renderer snapshot", as
       return result;
     };
   });
-  await connectPoolToChatGPT(page, true);
+  await connectPoolToChatGPT(page);
   await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
   const attachIndex = calls.lastIndexOf("attach_codex_to_local_gateway");

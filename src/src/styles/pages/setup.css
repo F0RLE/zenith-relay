@@ -359,6 +359,10 @@
   gap: 10px;
 }
 
+.setup-sign-in-method {
+  margin-bottom: 12px;
+}
+
 .mode-options button,
 .client-options button,
 .setup-connect-options button {
@@ -1171,7 +1175,6 @@
 }
 
 .setup-ready-mark svg { width: 28px; height: 28px; }
-.setup-ready p { max-width: 500px; color: var(--relay-muted); }
 
 .setup-ready-summary {
   width: min(360px, 100%);
@@ -1215,8 +1218,7 @@
   gap: 4px;
 }
 
-.setup-oauth-pending,
-.setup-current-profile-status {
+.setup-oauth-pending {
   width: min(100%, 440px);
   display: flex;
   flex-direction: column;
@@ -1227,8 +1229,7 @@
   text-align: center;
 }
 
-.setup-oauth-pending-mark,
-.setup-current-profile-mark {
+.setup-oauth-pending-mark {
   width: 48px;
   height: 48px;
   display: grid;
@@ -1239,8 +1240,7 @@
   color: var(--relay-accent-hover);
 }
 
-.setup-oauth-pending-mark svg,
-.setup-current-profile-mark svg {
+.setup-oauth-pending-mark svg {
   width: 20px;
   height: 20px;
 }
@@ -1249,8 +1249,7 @@
   min-width: 0;
 }
 
-.setup-oauth-pending-copy strong,
-.setup-current-profile-copy strong {
+.setup-oauth-pending-copy strong {
   display: block;
   font-size: 15px;
   line-height: 1.35;
@@ -1270,8 +1269,7 @@
   text-align: center;
 }
 
-.setup-oauth-pending-actions,
-.setup-current-profile-actions {
+.setup-oauth-pending-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1311,48 +1309,6 @@
 .setup-oauth-reopen svg {
   width: 16px;
   height: 16px;
-}
-
-.setup-current-profile-status.failed .setup-current-profile-mark {
-  border-color: transparent;
-  background: var(--relay-error-soft);
-  color: var(--relay-error);
-}
-
-.setup-current-profile-status.complete {
-  width: 100%;
-  flex-direction: row;
-  gap: 10px;
-  margin: 0 0 16px;
-  padding: 0;
-  text-align: left;
-}
-
-.setup-current-profile-status.complete .setup-current-profile-mark {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
-}
-
-.setup-current-profile-status.complete .setup-current-profile-mark svg {
-  width: 16px;
-  height: 16px;
-}
-
-.setup-current-profile-copy {
-  min-width: 0;
-}
-
-.setup-current-profile-copy strong,
-.setup-current-profile-copy small {
-  display: block;
-}
-
-.setup-current-profile-copy small {
-  margin-top: 3px;
-  color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 1.35;
 }
 
 code,

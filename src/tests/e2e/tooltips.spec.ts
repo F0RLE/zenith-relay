@@ -134,7 +134,7 @@ test("a nested custom control wins over a delegated parent hint", async ({ page 
 test("main pages and model rules contain no browser tooltip attributes", async ({ page }) => {
   await openRules(page);
   await expect(page.locator("[title]")).toHaveCount(0);
-  for (const name of ["Overview", "Connections", "Pool", "Integrations", "API", "Usage", "Settings"]) {
+  for (const name of ["Overview", "Connections", "Pool", "Access", "Usage", "Settings"]) {
     await page.getByRole("button", { name, exact: true }).click();
     await expect(page.locator("[title]")).toHaveCount(0);
   }

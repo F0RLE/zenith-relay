@@ -80,43 +80,44 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
  * UI card is keyed only by the source id. */
 export function runtimeCandidateForMember(
   memberId: string,
-  kind: "api_source" | "oauth_account",
-  order: CandidateRuntimeSnapshot[],
-  protocol: "responses" | "all" = "all",
-  legacyWireApi?: "responses" | "chat_completions" | "messages" | "gemini",
+  memberKind: "api_source" | "oauth_account",
+  runtimeCandidates: CandidateRuntimeSnapshot[],
+  protocolFilter: "responses" | "all" = "all",
+  sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini",
 ): CandidateRuntimeSnapshot | undefined {
-  const candidates = order.filter((candidate) => candidate.kind === kind && (
-    kind === "oauth_account"
+  const memberCandidates = runtimeCandidates.filter((candidate) => candidate.kind === memberKind && (
+    memberKind === "oauth_account"
       ? candidate.candidateId === memberId
       : (candidate.candidateId === memberId || candidate.candidateId.startsWith(`${memberId}::`))
-        && (protocol === "all" || isResponsesCandidate(candidate.candidateId, legacyWireApi))
+        && (protocolFilter === "all" || isResponsesCandidate(candidate.candidateId, sourceWireApi))
   ));
-  if (!candidates.length) return undefined;
-  const firstCandidate = candidates[0];
-  if (candidates.length === 1 && firstCandidate?.candidateId === memberId) return firstCandidate;
+  if (!memberCandidates.length) return undefined;
+  const firstCandidate = memberCandidates[0];
+  if (memberCandidates.length === 1 && firstCandidate?.candidateId === memberId) return firstCandidate;
+  const memberActiveRequestCount = memberCandidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0);
   return {
     candidateId: memberId,
-    kind,
-    available: candidates.some((candidate) => candidate.available),
-    nextForNewRequest: candidates.some((candidate) => candidate.nextForNewRequest),
+    kind: memberKind,
+    available: memberCandidates.some((candidate) => candidate.available),
+    nextForNewRequest: memberCandidates.some((candidate) => candidate.nextForNewRequest),
     ...(firstCandidate?.activityRevision == null ? {} : { activityRevision: firstCandidate.activityRevision }),
     ...(firstCandidate?.runtimeId == null ? {} : { runtimeId: firstCandidate.runtimeId }),
-    inFlight: candidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0),
-    activeRequestCount: candidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0),
-    activeModels: activeModelCounts(candidates),
-    modelRetries: aggregateModelRetries(candidates),
-    lastUsedAtMs: candidates.reduce<number | null>((latest, candidate) =>
-      candidate.lastUsedAtMs != null && (latest == null || candidate.lastUsedAtMs > latest) ? candidate.lastUsedAtMs : latest, null),
-    nextRetryAtMs: candidates.reduce<number | null>((earliest, candidate) =>
-      candidate.nextRetryAtMs != null && (earliest == null || candidate.nextRetryAtMs < earliest) ? candidate.nextRetryAtMs : earliest, null),
-    halfOpen: candidates.some((candidate) => candidate.halfOpen),
-    dispatches: candidates.reduce((total, candidate) => total + candidate.dispatches, 0),
+    inFlight: memberActiveRequestCount,
+    activeRequestCount: memberActiveRequestCount,
+    activeModels: activeModelCounts(memberCandidates),
+    modelRetries: aggregateModelRetries(memberCandidates),
+    lastUsedAtMs: memberCandidates.reduce<number | null>((latestUsageAtMs, candidate) =>
+      candidate.lastUsedAtMs != null && (latestUsageAtMs == null || candidate.lastUsedAtMs > latestUsageAtMs) ? candidate.lastUsedAtMs : latestUsageAtMs, null),
+    nextRetryAtMs: memberCandidates.reduce<number | null>((earliestRetryAtMs, candidate) =>
+      candidate.nextRetryAtMs != null && (earliestRetryAtMs == null || candidate.nextRetryAtMs < earliestRetryAtMs) ? candidate.nextRetryAtMs : earliestRetryAtMs, null),
+    halfOpen: memberCandidates.some((candidate) => candidate.halfOpen),
+    dispatches: memberCandidates.reduce((total, candidate) => total + candidate.dispatches, 0),
   };
 }
 
-function isResponsesCandidate(candidateId: string, legacyWireApi?: "responses" | "chat_completions" | "messages" | "gemini") {
+function isResponsesCandidate(candidateId: string, sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini") {
   const separator = candidateId.indexOf("::");
-  if (separator < 0) return legacyWireApi == null || legacyWireApi === "responses";
+  if (separator < 0) return sourceWireApi == null || sourceWireApi === "responses";
   const suffix = candidateId.slice(separator + 2);
   return suffix === "responses" || suffix.startsWith("responses_");
 }

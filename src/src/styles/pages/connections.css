@@ -1,3 +1,37 @@
+.account-trash-view {
+  display: grid;
+  gap: 16px;
+}
+
+.account-trash-toolbar {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.account-trash-toolbar > .inline-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.account-trash-view .search-field {
+  min-width: 0;
+  flex: 1 1 140px;
+}
+
+.account-trash-view .account-identity small {
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+@container (max-width: 780px) {
+  .account-trash-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .account-command-bar {
   min-height: 34px;
   display: grid;
@@ -944,6 +978,10 @@
   border-top: 1px solid var(--relay-border);
 }
 
+.account-card-main + .account-card-footer {
+  border-top: 0;
+}
+
 .account-card-actions {
   width: 100%;
   min-width: 0;
@@ -1458,7 +1496,7 @@
 
 .account-login-notes {
   display: grid;
-  gap: 10px;
+  gap: 16px;
   padding: 12px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -1468,7 +1506,7 @@
 .account-login-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 12px;
+  gap: 14px 12px;
 }
 
 .account-login-fields .relay-field:nth-child(n + 3) {
@@ -1481,7 +1519,7 @@
   background: transparent;
 }
 
-.account-login-notes .relay-field input {
+.account-login-notes .secret-field > input {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
@@ -1519,20 +1557,18 @@
   padding-inline: 10px;
 }
 
-.relay-dialog.account-login-dialog > footer {
-  min-height: 0;
-  padding: 12px 16px;
-  background: color-mix(in srgb, var(--relay-subtle) 40%, var(--relay-surface));
+.account-login-feedback {
+  min-height: 18px;
+}
+
+.account-login-feedback > p {
+  margin: 0;
 }
 
 .relay-dialog.sign-in-dialog > footer {
   padding: 0 20px 20px;
   border: 0;
   background: transparent;
-}
-
-.account-login-dialog .relay-dialog-body {
-  padding: 16px;
 }
 
 .sign-in-dialog .relay-dialog-body {
@@ -1815,6 +1851,10 @@
   opacity: 0.38;
 }
 
+.app-context-menu button.danger {
+  color: var(--relay-error);
+}
+
 .app-context-menu button svg {
   width: 15px;
   height: 15px;
@@ -2055,3 +2095,20 @@
 }
 .source-probe-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
 .source-probe-result code { overflow-wrap: anywhere; color: var(--relay-muted); }
+.account-credential-diagnostics {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.account-credential-diagnostics small {
+  color: var(--relay-muted);
+}
+
+.account-credential-diagnostics[data-status="expired"],
+.account-credential-diagnostics[data-status="revoked"],
+.account-credential-diagnostics[data-status="auth_failed"] {
+  color: var(--relay-warning);
+}

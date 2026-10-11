@@ -6,9 +6,8 @@ import { AccountBadges, Button, Dialog, EmptyState, OptionMenu, accountErrorLabe
 import { accountPlanOption, compareAccountPlans } from "../../accountPlans";
 import { accountQuotaRefreshState, currentAccountErrorCode } from "../../accountStatus";
 import { compareStableText, toggle } from "../../poolHelpers";
-import { updatePoolMembership } from "../../poolMembership";
+import { canAccountJoinPool, updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
 import { accountPickerTone, compareMemberPickerHealth, MEMBER_PICKER_HEALTH_ORDER, memberPickerHealth, sourcePickerTone, type MemberPickerHealth } from "./memberPickerStatus";
 import type { AccountSummary, SourceSummary } from "../../api/types";
 import type { TFunction } from "i18next";
@@ -55,7 +54,6 @@ function sourcePickerStatus(source: SourceSummary, t: TFunction): { status: Surf
 export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
-  const confirmPoolAccounts = usePoolAccountWarning();
   const addPending = useRef(false);
   const canAddSource = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("sources"));
   const [accountIds, setAccountIds] = useState<string[]>([]);
@@ -65,7 +63,7 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   const [planFilter, setPlanFilter] = useState("all");
   const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const listRef = useRef<HTMLDivElement>(null);
-  const allAccounts = (runtime?.accounts ?? []).filter((account) => !account.inPool);
+  const allAccounts = (runtime?.accounts ?? []).filter((account) => canAccountJoinPool(account) && !account.inPool);
   const allSources = (runtime?.sources ?? []).filter((source) => !source.inPool);
   const planOptions = new Map<string, { id: string; label: string; count: number }>();
   for (const account of allAccounts) {
@@ -131,14 +129,13 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
   useEffect(() => {
     if (healthFilter !== "all" && !availableHealth.split("\n").includes(healthFilter)) setHealthFilter("all");
   }, [availableHealth, healthFilter]);
-  const add = async (bypassWarning = false) => {
+  const add = async () => {
     if (addPending.current) return;
     addPending.current = true;
     const accountsToAdd = allAccounts.filter((account) => selectedAccounts.includes(account.id));
     const sourcesToAdd = [...selectedSources];
     try {
-      const accepted = await confirmPoolAccounts(accountsToAdd, bypassWarning);
-      const accountsToInclude = accountsToAdd.filter((account) => accepted || account.oauthClientKind === "excel_bps").map((account) => account.id);
+      const accountsToInclude = accountsToAdd.map((account) => account.id);
       if (!accountsToInclude.length && !sourcesToAdd.length) return;
       const ok = await perform("pool-add-members", () => updatePoolMembership(mode, { accountIds: accountsToInclude, sourceIds: sourcesToAdd, inPool: true }), "feedback.saved", { backgroundRefresh: true });
       if (ok) onClose();
@@ -168,12 +165,6 @@ export function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void
       disabled={!selectedCount}
       aria-label={t("pool.addSelected", { count: selectedCount })}
       onClick={() => void add()}
-      data-relay-context-action
-      onContextMenu={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (selectedCount && !saving) void add(true);
-      }}
     >
       {t("pool.confirmAdd")}
     </Button>

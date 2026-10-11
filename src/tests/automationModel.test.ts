@@ -79,12 +79,12 @@ describe("automation model", () => {
     expect(availableAutomationModels(gateway, [first, second], "account_ids")).toEqual(["gpt-5.4"]);
   });
 
-  test("validates selector state and resolves a stale model to the first available one", () => {
+  test("validates selector state without replacing a saved unavailable model", () => {
     const pool = [account("one")];
     expect(automationAccountSelectionValid("all_eligible", pool, [], pool)).toBe(true);
     expect(automationAccountSelectionValid("account_ids", pool, ["one"], pool)).toBe(true);
     expect(automationAccountSelectionValid("account_ids", pool, ["missing"], [])).toBe(false);
-    expect(resolveAutomationModel(["gpt-5.4"], "removed")).toBe("gpt-5.4");
+    expect(resolveAutomationModel(["gpt-5.4"], "removed")).toBe("");
     expect(automationFormValid(" Name ", true, true, "gpt-5.4")).toBe(true);
     expect(automationFormValid("", true, false, "")).toBe(false);
     expect(automationFormValid("Countdown", true, automationType("quota_full").requiresModel, "")).toBe(false);

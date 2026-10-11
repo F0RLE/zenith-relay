@@ -354,7 +354,7 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
               disabled={directBlocked}
               icon={<WifiOff aria-hidden />}
               label={t("proxies.direct")}
-              hint={t(directBlocked ? "proxies.directBlockedHint" : "proxies.directHint")}
+              hint={directBlocked ? t("proxies.directBlockedHint") : undefined}
               onSelect={selectChoice}
             />
             <ProxyRouteOption
@@ -372,7 +372,6 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
               disabled={!availableProxies.length}
               icon={<Database aria-hidden />}
               label={t("proxies.chooseStored")}
-              hint={t("proxies.chooseStoredShortHint")}
               onSelect={(selectedChoice) => {
                 selectChoice(selectedChoice);
                 setProxyId((currentId) => currentId || availableProxies[0]?.id || "");
@@ -383,10 +382,9 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
               selected={choice === "custom"}
               icon={<Plus aria-hidden />}
               label={t("proxies.addCustom")}
-              hint={t("proxies.addCustomShortHint")}
               onSelect={selectChoice}
             />
-            {commonConfigured ? <ProxyRouteOption choice="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} hint={t("proxies.useCommonHint")} onSelect={selectChoice} /> : null}
+            {commonConfigured ? <ProxyRouteOption choice="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} onSelect={selectChoice} /> : null}
           </div>
           {choice === "stored" && availableProxies.length ? <div className="proxy-route-control">
             <OptionMenu className="field-option-menu" label={t("proxies.chooseStored")} value={proxyId || availableProxies[0]?.id || ""} onChange={setProxyId} options={availableProxies.map((proxyEntry) => ({ value: proxyEntry.id, label: proxyEntry.endpoint }))} />
@@ -434,7 +432,7 @@ function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummar
         disabled={directBlocked}
         icon={<WifiOff aria-hidden />}
         label={t("proxies.direct")}
-        hint={t(directBlocked ? "proxies.directBlockedHint" : "proxies.directHint")}
+        hint={directBlocked ? t("proxies.directBlockedHint") : undefined}
         onSelect={setChoice}
       />
       <ProxyRouteOption
@@ -442,10 +440,9 @@ function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummar
         selected={choice === "custom"}
         icon={<Plus aria-hidden />}
         label={t("proxies.addCustom")}
-        hint={t("proxies.addCustomShortHint")}
         onSelect={setChoice}
       />
-      {commonConfigured ? <ProxyRouteOption choice="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} hint={t("proxies.useCommonHint")} onSelect={setChoice} /> : null}
+      {commonConfigured ? <ProxyRouteOption choice="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} onSelect={setChoice} /> : null}
     </div>
     {choice === "custom" ? <div className="proxy-route-control">
       <SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} />
@@ -468,7 +465,7 @@ function ProxyRouteOption({
   disabled?: boolean;
   icon: ReactNode;
   label: string;
-  hint: string;
+  hint?: string | undefined;
   onSelect: (selectedChoice: AccountProxyChoice) => void;
 }) {
   return (
@@ -481,7 +478,7 @@ function ProxyRouteOption({
       onClick={() => onSelect(choice)}
     >
       {icon}
-      <span><strong>{label}</strong><small>{hint}</small></span>
+      <span><strong>{label}</strong>{hint ? <small>{hint}</small> : null}</span>
     </button>
   );
 }

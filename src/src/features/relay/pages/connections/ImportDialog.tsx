@@ -13,15 +13,12 @@ import {
 } from "../../state/relayPreferences";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { useProxyPool } from "./useProxyPool";
-import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
-import { updatePoolMembership } from "../../poolMembership";
+import { canAccountJoinPool } from "../../poolMembership";
 
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
 type ImportedSelection = {
   result: ConfirmAccountImportResponse;
   addedToPool: boolean;
-  poolAccountIds: string[];
-  poolSourceIds: string[];
 };
 
 function selectedImportItemIds(session?: ImportSession) {
@@ -48,7 +45,6 @@ export function ImportDialog({
   const { t } = useTranslation();
   const { mode: currentMode, runtime, perform, busy } = useRelayState();
   const relayMode = modeOverride ?? currentMode;
-  const confirmPoolAccounts = usePoolAccountWarning();
   const { pool: proxyPool } = useProxyPool(relayMode === "local");
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(initialSession ?? null);
@@ -68,7 +64,11 @@ export function ImportDialog({
   const pendingSelection = useRef<ImportedSelection | null>(null);
   const importedToPool = useRef(false);
   const closing = useRef(false);
-  const canImportToPool = relayMode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  const supportsImportToPool = relayMode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  const poolItemIds = new Set(session?.preview.rows
+    .filter((row) => selected.includes(row.itemId) && row.status !== "invalid" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+    .map((row) => row.itemId));
+  const canImportToPool = supportsImportToPool && poolItemIds.size > 0;
   const importOperationBusy = busy?.startsWith("import-") ?? false;
   const acceptSession = (updatedSession: ImportSession) => {
     setSession(updatedSession);
@@ -173,27 +173,13 @@ export function ImportDialog({
     onImported?.(importedToPool.current);
     if (mounted.current) onClose();
   };
-  const confirm = async (selectedIds = selected, bypassWarning = false) => {
+  const confirm = async (selectedIds = selected) => {
     if (!session || confirmInFlight.current || closing.current) return;
     confirmInFlight.current = true;
     const sessionId = session.sessionId;
     setCommandFailed(false);
     try {
       const finishSelection = async (selection: ImportedSelection) => {
-        if (selection.poolAccountIds.length || selection.poolSourceIds.length) {
-          const ok = await perform("import-pool-membership", () => updatePoolMembership(relayMode, {
-            accountIds: selection.poolAccountIds, sourceIds: selection.poolSourceIds, inPool: true,
-          }), undefined, { backgroundRefresh: true });
-          if (!mounted.current) return;
-          if (!ok) {
-            setProgress(null);
-            setCommandFailed(true);
-            return;
-          }
-          selection.addedToPool = true;
-          selection.poolAccountIds = [];
-          selection.poolSourceIds = [];
-        }
         if (relayMode === "local" && assignProxy) {
           const accountIds = selection.result.results.flatMap((item) => {
             const id = item.account?.account.id ?? item.accountId;
@@ -212,26 +198,19 @@ export function ImportDialog({
         pendingSelection.current = null;
         finishConfirmedImport(selection.result, selection.addedToPool);
       };
-      // The import session can already be complete when pool/proxy assignment
-      // fails. Retry those operations with the imported IDs, not credentials.
+      // Retry proxy assignment after a completed import using saved IDs.
       if (pendingSelection.current) {
         await finishSelection(pendingSelection.current);
         return;
       }
-      const poolRows = session.preview.rows.filter((row) => selectedIds.includes(row.itemId) && row.authMode !== "api_key" && row.status !== "invalid");
-      const includeAllInPool = addToPool && await confirmPoolAccounts(poolRows, bypassWarning);
-      if (!mounted.current) return;
-      const includeBasisOnly = addToPool && !includeAllInPool;
+      const eligibleItemIds = new Set(session.preview.rows
+        .filter((row) => selectedIds.includes(row.itemId) && row.status !== "invalid" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+        .map((row) => row.itemId));
+      const includeInPool = addToPool && supportsImportToPool && eligibleItemIds.size > 0;
       const acceptImportedSelection = async (result: ConfirmAccountImportResponse) => {
-        const basisItemIds = new Set(poolRows.filter((row) => row.oauthClientKind === "excel_bps").map((row) => row.itemId));
         const selection: ImportedSelection = {
           result,
-          addedToPool: includeAllInPool && result.results.some((item) => item.status === "succeeded"),
-          poolAccountIds: includeBasisOnly ? result.results.flatMap((item) => {
-            const id = item.account?.account.id ?? item.accountId;
-            return item.status === "succeeded" && id && basisItemIds.has(item.itemId) ? [id] : [];
-          }) : [],
-          poolSourceIds: includeBasisOnly ? result.results.flatMap((item) => item.status === "succeeded" && item.source ? [item.source.id] : []) : [],
+          addedToPool: includeInPool && result.results.some((item) => item.status === "succeeded" && eligibleItemIds.has(item.itemId)),
         };
         pendingSelection.current = selection;
         await finishSelection(selection);
@@ -243,7 +222,7 @@ export function ImportDialog({
         try {
           captured = await captureOperationResult(
             (work) => perform("import-confirm", work, undefined, { backgroundRefresh: true }),
-            () => relayCommands.confirmImport(sessionId, selectedIds, includeAllInPool),
+            () => relayCommands.confirmImport(sessionId, selectedIds, includeInPool),
           );
         } finally {
           finishAccountImportConfirmation();
@@ -261,7 +240,7 @@ export function ImportDialog({
         (work) => perform("import-confirm", work, "feedback.accountAdded", { backgroundRefresh: true }),
         async () => await relayCommands.remoteAction(
           { type: "confirm_account_batch_import" },
-          { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool: includeAllInPool },
+          { sessionId, selectedItemIds: selectedIds, probeMetadata: true, addToPool: includeInPool },
         ) as ConfirmAccountImportResponse,
       );
       if (!mounted.current) return;
@@ -340,11 +319,6 @@ export function ImportDialog({
       <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.cancel")}</Button>
       {fileLoading ? null : session ? (
         <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy} onClick={() => void confirm()}
-          data-relay-context-action onContextMenu={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!importOperationBusy && selected.length) void confirm(selected, true);
-          }}
         >{t("accounts.confirmImport", { count: selected.length })}</Button>
       ) : (
         <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim() || importOperationBusy} onClick={preview}>{t("accounts.preview")}</Button>
@@ -433,10 +407,7 @@ function ImportFileStatus() {
   return (
     <div className="import-file-loading" role="status" aria-live="polite">
       <span><Loader2 className="spin" aria-hidden /></span>
-      <div>
-        <strong>{t("accounts.readingImportFiles")}</strong>
-        <p>{t("accounts.readingImportFilesHint")}</p>
-      </div>
+      <strong>{t("accounts.readingImportFiles")}</strong>
     </div>
   );
 }
@@ -558,7 +529,7 @@ function ImportPreview({
                 <span className="import-account-identity">{row.identity}</span>
                 <AccountPlanBadge planType={row.plan ?? null} unknown={t("common.unknown")} />
               </span>
-              {row.error ? <small className="import-account-note error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small className="import-account-note">{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}
+              {row.error ? <small className="import-account-note error-text">{row.error.code === "basis_points_free_account_unsupported" ? t("accounts.errors.basisPointsFreeUnsupported") : t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small className="import-account-note">{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}
             </span>
           </label>
         </li>;
@@ -590,6 +561,7 @@ function collectImportFailures(response: ConfirmAccountImportResponse | null, se
 }
 
 function importFailureReason(code: string, t: TFunction) {
+  if (code === "basis_points_free_account_unsupported") return t("accounts.errors.basisPointsFreeUnsupported");
   if (code === "provider_account_id_missing") return t("accounts.importFailureReasons.providerAccountIdMissing");
   if (code === "provider_account_lookup_failed") return t("accounts.importFailureReasons.providerAccountLookupFailed");
   if (code === "access_token_rejected") return t("accounts.importFailureReasons.accessTokenRejected");

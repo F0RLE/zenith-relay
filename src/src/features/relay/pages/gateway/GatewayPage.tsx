@@ -1,12 +1,12 @@
 import { Play, RotateCw, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import { ActionMenu, ActionMenuItem, Button, PageHeader } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useSavedChoice } from "../../state/usePendingFlag";
 import { GatewayApiTab } from "./GatewayApiTab";
 
-export function GatewayPage() {
+export function GatewaySettings() {
   const { t } = useTranslation();
   const { mode, runtime, readyState, busy, perform } = useRelayState();
   const gatewayRunning = useSavedChoice(mode === "zenith" ? Boolean(readyState?.providerActive) : Boolean(runtime?.gateway.running));
@@ -55,8 +55,11 @@ export function GatewayPage() {
     </Button>
   </>;
 
-  return <section className="relay-page relay-workspace-page gateway-page">
-    <PageHeader title={t("nav.gateway")} actions={apiActions} />
+  return <div className="gateway-page">
+    <div className="integration-section-heading">
+      <h2>{t("integrations.apiTitle")}</h2>
+      <div className="integration-section-actions">{apiActions}</div>
+    </div>
     <GatewayApiTab running={running} endpoint={endpoint} />
-  </section>;
+  </div>;
 }

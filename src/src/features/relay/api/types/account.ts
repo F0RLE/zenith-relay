@@ -8,6 +8,12 @@ import type { RefreshStatus } from "./source";
 
 export type OAuthClientKind = "codex" | "excel_bps";
 
+export type TrashedAccountSummary = {
+  id: string;
+  label: string;
+  trashedAtMs: number;
+};
+
 export type AccountSummary = {
   id: string;
   label: string;
@@ -18,6 +24,12 @@ export type AccountSummary = {
   oauthClientKind?: OAuthClientKind;
   basisPointsAvailable?: boolean;
   basisPointsEnabled?: boolean;
+  credentialDiagnostics?: {
+    status: "pending" | "not_expired" | "expired" | "revoked" | "auth_failed" | "unknown";
+    expiresAtMs: number | null;
+    hasRefreshToken: boolean;
+    recovery: "none" | "refresh_next_request" | "sign_in" | "retry_later";
+  } | null;
   enabled: boolean;
   inPool: boolean;
   draining: boolean;
@@ -46,14 +58,6 @@ export type AccountSummary = {
   lastErrorCode: string | null;
   clientAuthStatus?: "login_required" | "available" | null;
   lastClientLoginRedirectAtMs?: number | null;
-};
-
-export type CredentialRefreshResult = {
-  accountId: string;
-  status: "refreshed" | "retryable_failure" | "requires_reauth";
-  code: string;
-  expiresAtMs?: number | null;
-  generation?: number | null;
 };
 
 export type RevealedAccountIdentity = {

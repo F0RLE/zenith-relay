@@ -1,20 +1,30 @@
 import { ChevronDown, RotateCcw } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { SourceSummary } from "../api/types";
-import { groupModels, memberModelCatalog, modelIdKey, orderModelIdsBySnapshot } from "../modelGroups";
+import { groupModels, memberModelCatalog, modelIdKey } from "../modelGroups";
 import {
   formatModelPricePlaceholder,
   parseEditableModelPrice,
 } from "../modelPricing";
 import { sourceModelsWithCacheWritePricing } from "../sourceProtocolBindings";
 import { useRelayState } from "../state/RelayStateProvider";
-import { IconButton, ToggleSwitch } from "./Ui";
+import { IconButton, OptionMenu, ToggleSwitch } from "./Ui";
 import {
   removeSourcePriceDraft,
   sourcePriceModels,
-  type SourcePriceDraft,
+  sourcePriceQuote,
+  sourcePriceOverride,
+  sourcePriceCacheWrites,
+  priceScheduleKey,
+  publishedPriceBands,
+  priceContextRanges,
+  selectedPriceRates,
+  type PriceBand,
+  type PriceSchedule,
+  type SourcePriceDraftField,
   type SourcePriceDrafts,
-  updateSourcePriceDraft,
+  updateSourcePriceScheduleDraft,
 } from "./sourcePriceEditorModel";
 
 type SourcePriceEditorProps = {
@@ -29,8 +39,9 @@ type SourcePriceEditorProps = {
 export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onToggleModel, presentation = "disclosure" }: SourcePriceEditorProps) {
   const { t } = useTranslation();
   const { runtime } = useRelayState();
+  const [selections, setSelections] = useState<Record<string, { band: PriceBand; tier: PriceSchedule }>>({});
   const compactRows = presentation === "member" || presentation === "tab";
-  const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? []);
+  const models = sourcePriceModels(source);
   const catalogModels = new Map(
     (runtime?.gateway.models ?? []).map((model) => [modelIdKey(model.id), model]),
   );
@@ -39,27 +50,21 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     metadata: (model) => catalog.get(modelIdKey(model)),
   });
   const detectedPrices = new Map(Object.entries(source.detectedModelPrices ?? {}).map(([model, price]) => [modelIdKey(model), price]));
-  const catalogPrices = catalogModels;
   const modelSelectionEnabled = Boolean(enabledModels && onToggleModel);
   const enabledModelIds = new Set((enabledModels ?? []).map((model) => modelIdKey(model)));
   const enabledCount = modelSelectionEnabled
     ? models.filter((model) => enabledModelIds.has(modelIdKey(model))).length
     : models.length;
-  const setField = (model: string, field: keyof SourcePriceDraft, value: string) => onChange(updateSourcePriceDraft(drafts, model, field, value));
   const reset = (model: string) => onChange(removeSourcePriceDraft(drafts, model));
   const title = t(modelSelectionEnabled ? "sources.modelsAndCost" : "sources.editorPricesTab");
-  const hint = t(modelSelectionEnabled ? "sources.modelsAndCostHint" : "sources.apiCostHint");
+  const hint = t("sources.apiCostHint");
   const manualOverrideCount = Object.keys(drafts).length;
   const count = modelSelectionEnabled
     ? `${t("common.enabled")}: ${enabledCount}/${models.length}`
-    : t(manualOverrideCount ? "sources.manualPrices" : "sources.apiPricesInUse", { count: manualOverrideCount });
+    : t(manualOverrideCount ? "sources.manualPrices" : "sources.automaticPrices", { count: manualOverrideCount });
   const cacheWritePrices = (model: string) => {
     const key = modelIdKey(model);
-    const inherited = detectedPrices.get(key) ?? catalogModels.get(key);
-    return {
-      fiveMinutes: inherited?.cacheWrite5mMicroUsdPerMillion,
-      oneHour: inherited?.cacheWrite1hMicroUsdPerMillion,
-    };
+    return sourcePriceCacheWrites(sourcePriceQuote(detectedPrices.get(key), catalogModels.get(key)), drafts[key]);
   };
   // A Messages route permits manual cache-write pricing. Explicit price data
   // stays visible even when the source's catalog uses another protocol.
@@ -67,10 +72,8 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     [
       ...sourceModelsWithCacheWritePricing(source),
       ...models.filter((model) => {
-        const key = modelIdKey(model);
         const prices = cacheWritePrices(model);
-        return prices.fiveMinutes != null || prices.oneHour != null
-          || Boolean(drafts[key]?.cacheWrite5m.trim() || drafts[key]?.cacheWrite1h.trim());
+        return prices.fiveMinutes || prices.oneHour;
       }),
     ].map((model) => modelIdKey(model)),
   );
@@ -79,10 +82,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
       <div className="source-price-groups">
         {groups.map((group) => {
         const anthropicWrites = group.provider === "anthropic" && group.models.some((model) => cacheWriteModels.has(modelIdKey(model)));
-        const openAiWrites = group.provider === "openai" && group.models.some((model) => {
-          const key = modelIdKey(model);
-          return cacheWritePrices(model).fiveMinutes != null || Boolean(drafts[key]?.cacheWrite5m.trim());
-        });
+        const openAiWrites = group.provider === "openai" && group.models.some((model) => cacheWritePrices(model).fiveMinutes);
         const cacheWriteKind = anthropicWrites ? "anthropic" : openAiWrites ? "openai" : "none";
         const groupEnabledCount = modelSelectionEnabled
           ? group.models.filter((model) => enabledModelIds.has(modelIdKey(model))).length
@@ -127,17 +127,37 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
             )}
             {group.models.map((model) => {
               const key = modelIdKey(model);
-              const draft = drafts[key];
-              const inherited = detectedPrices.get(key) ?? catalogPrices.get(key);
+              const savedDraft = drafts[key];
+              const catalogModel = catalogModels.get(key);
+              const quote = sourcePriceQuote(detectedPrices.get(key), catalogModel);
+              const bands = publishedPriceBands(quote, savedDraft);
+              const previous = selections[key] ?? { band: "base", tier: "standard" };
+              const selection = { ...previous, band: bands.includes(previous.band) ? previous.band : "base" as const };
+              const draft = selection.band === "base" && selection.tier === "standard"
+                ? savedDraft : savedDraft?.schedules?.[priceScheduleKey(selection.band, selection.tier)];
+              const rates = selectedPriceRates(quote, selection.band, selection.tier);
+              const setField = (_model: string, field: SourcePriceDraftField, text: string) =>
+                onChange(updateSourcePriceScheduleDraft(drafts, key, selection.band, selection.tier, field, text, sourcePriceOverride(quote)));
+              const select = (band: PriceBand, tier = selection.tier) =>
+                setSelections((previous) => ({ ...previous, [key]: { band, tier } }));
+              const contextOptions = priceContextRanges(bands).map(({ band, min, max }) => ({
+                value: band,
+                label: min == null ? t("sources.shortContextPrice", { limit: `${(max ?? 0) / 1000}k` })
+                  : max == null ? t("sources.longContextPrice", { limit: `${min / 1000}k` })
+                  : `> ${min / 1000}k · ≤ ${max / 1000}k`,
+                shortLabel: min == null ? `≤ ${(max ?? 0) / 1000}k`
+                  : max == null ? `> ${min / 1000}k` : `${min / 1000}–${max / 1000}k`,
+              }));
+              const requiredBase = selection.band === "base" && selection.tier === "standard";
               const showAnthropicWrites = cacheWriteKind === "anthropic" && cacheWriteModels.has(key);
-              const showOpenAiWrite = cacheWriteKind === "openai" && (cacheWritePrices(model).fiveMinutes != null || Boolean(draft?.cacheWrite5m.trim()));
-              const writePrices = cacheWritePrices(model);
+              const showOpenAiWrite = cacheWriteKind === "openai" && cacheWritePrices(model).fiveMinutes;
+              const writePrices = { fiveMinutes: rates.cacheWrite5m, oneHour: rates.cacheWrite1h };
               const enabled = !modelSelectionEnabled || enabledModelIds.has(key);
               return (
                 <div
                   className="source-price-row"
                   key={key}
-                  data-custom-price={draft ? "true" : "false"}
+                  data-custom-price={savedDraft ? "true" : "false"}
                   data-member-model-id={modelSelectionEnabled ? model : undefined}
                   data-enabled={modelSelectionEnabled ? String(enabled) : undefined}
                 >
@@ -151,29 +171,46 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                     />
                   ) : null}
                   <code data-relay-tooltip={model}>{model}</code>
+                  <div className="source-price-schedule">
+                    <div className="source-price-picker">
+                      <span>{t("sources.priceTier")}</span>
+                      <OptionMenu className="source-price-tier" label={t("sources.priceTierFor", { model })}
+                        value={selection.tier} align="start" fitContent
+                        options={[{ value: "standard", label: "Standard" }, { value: "flex", label: "Flex" }, { value: "priority", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }]}
+                        onChange={(value) => select(selection.band, value as PriceSchedule)} />
+                    </div>
+                    <div className="source-price-picker">
+                      <span>{t("sources.priceContext")}</span>
+                      {bands.length > 1 ? (
+                        <OptionMenu className="source-price-context" label={t("sources.priceContextFor", { model })}
+                          value={selection.band} align="start" fitContent options={contextOptions}
+                          onChange={(value) => select(value as PriceBand)} />
+                      ) : <small className="source-price-flat">{t("sources.flatContextPrice")}</small>}
+                    </div>
+                  </div>
                 </div>
                 <div className="source-price-fields">
                   <PriceInput
                     label={t("sources.inputPriceFor", { model })}
                     caption={compactRows ? t("sources.inputPrice") : undefined}
                     value={draft?.input ?? ""}
-                    placeholder={formatModelPricePlaceholder(inherited?.inputMicroUsdPerMillion)}
-                    invalid={draft != null && parseEditableModelPrice(draft.input) == null}
+                    placeholder={formatModelPricePlaceholder(rates.input)}
+                    invalid={draft != null && (requiredBase || draft.input.trim() !== "") && parseEditableModelPrice(draft.input) == null}
                     onChange={(priceText) => setField(key, "input", priceText)}
                   />
                   <PriceInput
                     label={t("sources.outputPriceFor", { model })}
                     caption={compactRows ? t("sources.outputPrice") : undefined}
                     value={draft?.output ?? ""}
-                    placeholder={formatModelPricePlaceholder(inherited?.outputMicroUsdPerMillion)}
-                    invalid={draft != null && parseEditableModelPrice(draft.output) == null}
+                    placeholder={formatModelPricePlaceholder(rates.output)}
+                    invalid={draft != null && (requiredBase || draft.output.trim() !== "") && parseEditableModelPrice(draft.output) == null}
                     onChange={(priceText) => setField(key, "output", priceText)}
                   />
                   <PriceInput
                     label={t("sources.cachedInputPriceFor", { model })}
                     caption={compactRows ? t("sources.cachedInputPrice") : undefined}
                     value={draft?.cached ?? ""}
-                    placeholder={formatModelPricePlaceholder(inherited?.cachedInputMicroUsdPerMillion)}
+                    placeholder={formatModelPricePlaceholder(rates.cacheRead)}
                     invalid={draft != null && draft.cached.trim() !== "" && parseEditableModelPrice(draft.cached) == null}
                     onChange={(priceText) => setField(key, "cached", priceText)}
                   />
@@ -208,7 +245,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
                     : cacheWriteKind === "openai" ? <span className="source-price-empty" aria-hidden />
                     : null}
                 </div>
-                {draft ? <IconButton label={t("sources.useDefaultPrice", { model })} icon={<RotateCcw aria-hidden />} onClick={() => reset(key)} /> : <span className="source-price-action" />}
+                {savedDraft ? <IconButton label={t("sources.useDefaultPrice", { model })} icon={<RotateCcw aria-hidden />} onClick={() => reset(key)} /> : <span className="source-price-action" />}
                 </div>
               );
             })}
@@ -229,6 +266,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
           <span>{count}</span>
         </header>
         {content}
+        <p className="form-note source-price-note">{t("sources.priceScheduleHint")}</p>
       </section>
     );
   }

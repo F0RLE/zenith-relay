@@ -1,6 +1,6 @@
 import type { RelayMode } from "../../api/types";
 
-export type ConnectionView = "sources" | "accounts" | "proxies" | "automations" | "remote";
+export type ConnectionView = "sources" | "accounts" | "proxies" | "automations" | "trash" | "remote";
 
 export function connectionViews(mode: RelayMode, features: readonly string[]): ConnectionView[] {
   if (mode === "zenith") return ["sources"];
@@ -12,6 +12,7 @@ export function connectionViews(mode: RelayMode, features: readonly string[]): C
     ...(supports("sources") ? ["sources" as const] : []),
     ...(mode === "local" ? ["proxies" as const] : []),
     ...(supports("wake_tasks") ? ["automations" as const] : []),
+    ...(supports("account_trash_v1") ? ["trash" as const] : []),
     ...(mode === "remote" ? ["remote" as const] : []),
   ];
 }

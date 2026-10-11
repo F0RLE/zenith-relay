@@ -9,6 +9,7 @@ import { copyText } from "./secret";
 
 export function Dialog({
   title,
+  subtitle,
   children,
   onClose,
   footer,
@@ -18,6 +19,7 @@ export function Dialog({
   layer = "default",
 }: {
   title: string;
+  subtitle?: ReactNode;
   children: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
@@ -49,13 +51,19 @@ export function Dialog({
         "input",
         "select",
         "textarea",
+        "summary",
         "[contenteditable=\"true\"]",
         "[tabindex]",
       ].join(","))).filter((element) => {
         if (element.matches("input[type=\"hidden\"]") || element.hasAttribute("disabled")) return false;
         if (element.tabIndex < 0 || element.hidden || element.closest("[aria-hidden=\"true\"]")) return false;
+        // Closed details can retain layout boxes. Only their first summary
+        // remains focusable, including when disclosures are nested.
+        for (let ancestor = element.parentElement; ancestor && ancestor !== dialog; ancestor = ancestor.parentElement) {
+          if (ancestor.matches("details:not([open])") && !ancestor.querySelector(":scope > summary")?.contains(element)) return false;
+        }
         const style = window.getComputedStyle(element);
-        return style.display !== "none" && style.visibility !== "hidden";
+        return element.getClientRects().length > 0 && style.display !== "none" && style.visibility !== "hidden";
       });
     };
     const isTopmost = () => {
@@ -126,7 +134,12 @@ export function Dialog({
         tabIndex={-1}
       >
         <header>
-          <h2 id={titleId}>{title}</h2>
+          {subtitle ? (
+            <div className="relay-dialog-heading">
+              <h2 id={titleId}>{title}</h2>
+              {subtitle}
+            </div>
+          ) : <h2 id={titleId}>{title}</h2>}
           {headerActions ? <div className="relay-dialog-header-actions">{headerActions}</div> : null}
           <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} />
         </header>

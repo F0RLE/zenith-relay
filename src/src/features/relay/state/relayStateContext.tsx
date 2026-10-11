@@ -47,6 +47,8 @@ export type RelayContextValue = {
   setTheme: (theme: "system" | "light" | "dark") => void;
   profileSwitchBackupPrompt: boolean;
   setProfileSwitchBackupPrompt: (enabled: boolean) => void;
+  launchApplicationAfterConnect: boolean;
+  setLaunchApplicationAfterConnect: (enabled: boolean) => void;
   codexPoolOauthSelection: string;
   setCodexPoolOauthSelection: (selection: string) => void;
   codexBackgroundTasksEnabled: boolean;

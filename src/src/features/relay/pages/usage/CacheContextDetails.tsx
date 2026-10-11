@@ -10,8 +10,7 @@ export function CacheContextDetails({ diagnostics }: { diagnostics: CacheContext
   const sections = (changes: CacheContextSection[]) => changes.length
     ? changes.map((section) => t(`usage.cacheContext.sections.${section}`)).join(", ")
     : t("usage.cacheContext.noChanges");
-  return <section className="request-details-section request-cache-context" aria-label={t("usage.cacheContext.title")}>
-    <h3>{t("usage.cacheContext.title")}</h3>
+  return <section className="request-cache-context" aria-label={t("usage.cacheContext.title")}>
     <p className="form-note">{t("usage.cacheContext.hint")}</p>
     <dl className="request-details-list">
       <div><dt>{t("usage.cacheContext.baseline")}</dt><dd>{t(`usage.cacheContext.baselines.${diagnostics.baseline}`)}</dd></div>

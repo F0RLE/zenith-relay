@@ -47,7 +47,8 @@ export function transientCandidateTone(
 }
 
 export function isCodexOauthAccountEligible(account: AccountSummary) {
-  return account.oauthClientKind !== "excel_bps" && account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
+  return account.oauthClientKind !== "excel_bps" && !account.remoteLocation && !account.draining
+    && canLaunchCodexAccount(account) && account.authState.state === "active";
 }
 
 export function requiresAccountReauthentication(account: Pick<AccountSummary, "authState" | "routingBlockReason">) {
@@ -112,6 +113,7 @@ export function currentAccountErrorCode(account: AccountSummary) {
 
 export function accountErrorTranslationKey(code: string) {
   const normalized = code.toLowerCase();
+  if (normalized === "basis_points_free_account_unsupported") return "accounts.errors.basisPointsFreeUnsupported";
   if (normalized === "remote_missing") return "accounts.errors.remoteMissing";
   if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return "accounts.errors.reusedRefreshToken";
   if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return "accounts.errors.expiredRefreshToken";

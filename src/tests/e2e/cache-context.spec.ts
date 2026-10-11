@@ -35,7 +35,17 @@ for (const locale of ["ru", "en"] as const) {
       await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
       await page.locator(".usage-request-table tbody tr button").first().click();
       const dialog = page.getByRole("dialog");
-      await dialog.getByRole("tab", { name: locale === "ru" ? "Контекст" : "Context", exact: true }).click();
+      const close = dialog.getByRole("button", { name: locale === "ru" ? "Закрыть" : "Close", exact: true });
+      const contextSummary = dialog.locator(".request-context-details > summary");
+      await expect(contextSummary).toBeAttached();
+      await close.focus();
+      await page.keyboard.press("Shift+Tab");
+      await expect(dialog.locator(".request-technical-details > summary")).toBeFocused();
+      await page.keyboard.press("Enter");
+      await close.focus();
+      await page.keyboard.press("Shift+Tab");
+      await expect(contextSummary).toBeFocused();
+      await page.keyboard.press("Enter");
       const section = dialog.getByRole("region", { name: locale === "ru" ? "Сравнение контекста" : "Context comparison" });
       await expect(section).toBeVisible();
       await expect(section).toContainText(locale === "ru" ? "Предыдущий завершённый запрос" : "Previous completed request");
@@ -64,7 +74,8 @@ for (const baseline of ["first_observation", "overlapping_requests", "unavailabl
     await page.goto("/");
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
-    await page.getByRole("tab", { name: "Context", exact: true }).click();
+    await page.locator(".request-technical-details > summary").click();
+    await page.locator(".request-context-details > summary").click();
     const section = page.getByRole("region", { name: "Context comparison" });
     await expect(section).toBeVisible();
     await expect(section.getByText("Client parameter changes", { exact: true })).toHaveCount(0);
@@ -78,7 +89,7 @@ test("Old usage rows without context diagnostics remain readable", async ({ page
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
-  await page.getByRole("tab", { name: "Tokens", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText("Total tokens", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Context comparison" })).toHaveCount(0);
   await expect(page.getByRole("dialog")).toContainText("Total tokens");
 });
@@ -88,6 +99,6 @@ test("Context diagnostics are hidden outside debug mode", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
-  await expect(page.getByRole("tab", { name: "Context", exact: true })).toHaveCount(0);
+  await expect(page.locator(".request-context-details")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Context comparison" })).toHaveCount(0);
 });

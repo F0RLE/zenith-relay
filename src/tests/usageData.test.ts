@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { createInstance } from "i18next";
 import {
   codexRequestOriginFromErrorCategory,
   normalizeObservedServiceTier,
+  logicalRequestRows,
   totalsFromRows,
   usageRowsFromLocal,
   usageRowsFromRemote,
@@ -14,7 +16,8 @@ import {
 } from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
-import { prefixErrorOrigin } from "../src/features/relay/pages/usage/usageReportFormat";
+import { compactRequestId, formatReasoningEffort, formatReasoningSummary, prefixErrorOrigin } from "../src/features/relay/pages/usage/usageReportFormat";
+import { ru } from "../src/i18n/locales/ru";
 
 const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
   id: "request",
@@ -58,6 +61,48 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("reasoning reports normalize historical aliases and show actual changes", async () => {
+    const i18n = createInstance();
+    await i18n.init({ lng: "ru", resources: { ru: { translation: ru } }, initImmediate: false });
+    const t = i18n.t.bind(i18n);
+    for (const effort of ["xhigh", "very_high", "extra-high", "Very high"]) {
+      expect(formatReasoningEffort(effort, t)).toBe("Очень высокое");
+    }
+    expect(formatReasoningSummary({
+      requestedReasoningEffort: "xhigh",
+      effectiveReasoningEffort: "xhigh",
+    }, t)).toBe("Очень высокое");
+    expect(formatReasoningSummary(JSON.parse('{"requestedReasoningEffort":"very_high","effectiveReasoningEffort":"xhigh"}'), t)).toBe("Очень высокое");
+    expect(formatReasoningSummary({
+      requestedReasoningEffort: "high",
+      effectiveReasoningEffort: "xhigh",
+    }, t)).toBe("Запрошено: Высокое, передано: Очень высокое");
+    expect(formatReasoningEffort("none", t)).toBe("Выключено");
+  });
+
+  test("reports keep one final result across connections and preserve separate client requests", () => {
+    const final = row({ id: 3, attempt: 3, connection: "Fallback", time: "2026-08-23T00:00:03Z" });
+    const other = row({ id: 4, requestId: "request-other", success: false, time: "2026-08-23T00:00:04Z" });
+    const requests = logicalRequestRows([
+      row({ id: 1, success: false, time: "2026-08-23T00:00:01Z" }),
+      final,
+      row({ id: 2, attempt: 2, success: false, time: "2026-08-23T00:00:09Z" }),
+      other,
+    ]);
+    expect(requests).toEqual([other, final]);
+    expect(totalsFromRows(requests).requests).toBe(2);
+    expect(totalsFromRows(requests).successfulRequests).toBe(1);
+    expect(logicalRequestRows([row({ id: 10, requestId: null }), row({ id: 11, requestId: null })])).toHaveLength(2);
+  });
+
+  test("short request labels preserve the differing suffix instead of repeating an identical prefix", () => {
+    const first = "relay-synthetic-common-prefix-11111111-1";
+    const second = "relay-synthetic-common-prefix-22222222-1";
+    expect(compactRequestId(first)).not.toBe(compactRequestId(second));
+    expect(compactRequestId(first)).toEndWith("11111111-1");
+    expect(compactRequestId("short-id")).toBe("short-id");
+  });
+
   test("usage error messages keep an English source prefix without duplication", () => {
     expect(prefixErrorOrigin("account", "Provider: upstream rejected request")).toBe(
       "Account: upstream rejected request",

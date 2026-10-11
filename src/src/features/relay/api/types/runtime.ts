@@ -10,12 +10,23 @@ import type {
 } from "./activity";
 import type { PoolRoutingSnapshot } from "./pool";
 
+export type RequestTimezonePolicy = {
+  enabled: boolean;
+  accountTimezones: Record<string, string>;
+};
+
+export type RequestTimezoneUpdate = {
+  policy: RequestTimezonePolicy;
+  expectedPolicy: RequestTimezonePolicy;
+};
+
 export type RuntimeSnapshot = {
   schemaVersion: number;
   configurationRevision?: string | null;
   runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
   gateway: {
     toolPolicy?: ToolPolicy;
+    requestTimezone?: RequestTimezonePolicy;
     basisPointsEnabled?: boolean;
     poolRouting?: PoolRoutingSnapshot;
     running: boolean;
@@ -35,6 +46,7 @@ export type RuntimeSnapshot = {
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     codexBackgroundTasksEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
+    chatgptContextPolicy?: ApplicationContextPolicy;
     chatgptRetryUntilAvailable?: boolean;
     blockDegradedRoutesEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
@@ -52,3 +64,14 @@ export type RuntimeSnapshot = {
   warnings: string[];
   pricing?: PricingMetadata;
 };
+
+export type ContextWindowPolicy =
+  | { mode: "client" | "short" | "extended" }
+  | { mode: "custom"; tokens: number };
+
+export type CompactionPolicy =
+  | { mode: "client" | "early" }
+  | { mode: "custom"; tokens: number };
+
+export type ApplicationContextPolicy = ContextWindowPolicy
+  | { mode: "configured"; context: ContextWindowPolicy; compaction: CompactionPolicy };

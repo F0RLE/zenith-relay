@@ -122,11 +122,10 @@ export function normalizeReasoningSelection(supported: readonly string[], select
 
 const MODEL_SPEED_ORDER = ["standard", "fast", "ultrafast"] as const satisfies readonly DefaultServiceTier[];
 
-/** Speed choices for one model. A configurable family always keeps all three modes. */
+/** Show only the speed modes supplied by the runtime. */
 export function modelSpeedTiers(model: Pick<ModelSummary, "speedSupported" | "speedTiers">): DefaultServiceTier[] {
   const declared = new Set(model.speedTiers ?? []);
   const ordered = MODEL_SPEED_ORDER.filter((tier) => declared.has(tier));
-  if (model.speedSupported && ordered.length <= 1) return [...MODEL_SPEED_ORDER];
   return ordered.length ? [...ordered] : ["standard"];
 }
 

@@ -1,13 +1,20 @@
 import type { TFunction } from "i18next";
-import type { ErrorOrigin, ReasoningEffort, ToolUseDiagnostics, UsageTotals } from "../../api/types";
+import type { ErrorOrigin, ToolUseDiagnostics, UsageTotals } from "../../api/types";
 import { formatNumber } from "../../numberFormatting";
+import { normalizeReasoningEffort } from "../../poolFormatting";
 import { observedTokensPerSecond } from "../../usageSpeed";
 import { cacheLifetime } from "./cacheLifetime";
 import { normalizeObservedServiceTier, totalsFromRows } from "./usageData";
 import type { CodexRequestOrigin, UsageRow } from "./usageData";
 
 export function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
+  if (ttft == null) return formatDurationMs(duration, locale, t);
   return `${formatDurationMs(ttft, locale, t)} / ${formatDurationMs(duration, locale, t)}`;
+}
+
+export function compactRequestId(requestId: string | null): string {
+  if (!requestId) return "—";
+  return requestId.length > 20 ? `${requestId.slice(0, 6)}…${requestId.slice(-10)}` : requestId;
 }
 
 export type AggregateRow = {
@@ -46,12 +53,12 @@ export function formatRequestOrigin(origin: Exclude<CodexRequestOrigin, null>, t
   return t("codex.taskTitle");
 }
 
-export function formatReasoningEffort(effort: ReasoningEffort | null, t: TFunction): string {
-  return effort ? t(`usage.reasoningEfforts.${effort}`) : "-";
+export function formatReasoningEffort(effort: string | null, t: TFunction): string {
+  return effort ? t(`usage.reasoningEfforts.${normalizeReasoningEffort(effort)}`) : "-";
 }
 
 export function formatReasoningSummary(row: Pick<UsageRow, "requestedReasoningEffort" | "effectiveReasoningEffort">, t: TFunction): string {
-  if (row.requestedReasoningEffort && row.effectiveReasoningEffort && row.requestedReasoningEffort !== row.effectiveReasoningEffort) {
+  if (row.requestedReasoningEffort && row.effectiveReasoningEffort && normalizeReasoningEffort(row.requestedReasoningEffort) !== normalizeReasoningEffort(row.effectiveReasoningEffort)) {
     return t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(row.requestedReasoningEffort, t), effective: formatReasoningEffort(row.effectiveReasoningEffort, t) });
   }
   return formatReasoningEffort(row.effectiveReasoningEffort ?? row.requestedReasoningEffort, t);

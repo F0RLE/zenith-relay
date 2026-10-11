@@ -2,23 +2,22 @@ import { useEffect, useState } from "react";
 import { LogIn, Plus, RefreshCw, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, OAuthClientKind, SourceSummary, WakeTask } from "../../api/types";
+import type { AccountSummary, SourceSummary, WakeTask } from "../../api/types";
 import { Button, IconButton, PageHeader, Tabs } from "../../components/Ui";
-import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
+import { useAccountSignIn } from "../../hooks/useAccountSignIn";
 import { useSourceRefresh } from "../../hooks/useSourceRefresh";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountProxyDialog, BulkProxyDialog, ProxyImportDialog, ProxyStorageView } from "./ProxyDialogs";
 import { connectionInitialView, connectionViews, reconcileRemoteConnectionView, type ConnectionView } from "./connectionViewState";
 import { AccountsTable } from "./AccountsTable";
+import { AccountTrashView } from "./AccountTrashView";
 import { SourceDialog } from "./SourceDialog";
 import { AccountExportDialog } from "./AccountExportDialog";
 import { AutomationDialog, AutomationsList } from "./AutomationsView";
-import { OAuthAccountSetupDialog, OAuthDialog } from "./OAuthDialogs";
 import { DeployDialog, RemoteDialog, RemoteView } from "./RemoteViews";
 import { SourcesList } from "./SourcesList";
 import { useProxyChecks } from "./useProxyChecks";
-import { rememberSignInProxyId } from "./signInProxyPreference";
-type DialogKind = "source" | "automation" | "remote" | "deploy" | "accountProxy" | "bulkProxies" | "proxyImport" | "oauthSetup" | "accountExport" | null;
+type DialogKind = "source" | "automation" | "remote" | "deploy" | "accountProxy" | "bulkProxies" | "proxyImport" | "accountExport" | null;
 const CONNECTIONS_VIEW_REQUEST = "relay.connections.requestedView";
 export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const { t } = useTranslation();
@@ -36,47 +35,10 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [proxyAccount, setProxyAccount] = useState<AccountSummary | null>(null);
   const [bulkProxyAccountIds, setBulkProxyAccountIds] = useState<string[]>([]);
   const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
-  const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
-  const [reauthenticatingAccountId, setReauthenticatingAccountId] = useState<string | null>(null);
-  const [signedInWithProxy, setSignedInWithProxy] = useState(false);
-  const [signInProxyId, setSignInProxyId] = useState<string | undefined>();
   const [proxyRevision, setProxyRevision] = useState(0);
   const proxyChecks = useProxyChecks(mode);
-  const oauth = useOAuthSignIn((oauthResult) => {
-    const isReauthentication = reauthenticatingAccountId === oauthResult.account.id;
-    setReauthenticatingAccountId(null);
-    if (isReauthentication) {
-      // Reauthentication updates an existing account in place. The setup
-      // dialog is only for a newly imported account; showing it here made a
-      // reauth look like a new pool member and invited an accidental toggle.
-      setDialog(null);
-      setOauthAccountId(null);
-      setSignedInWithProxy(false);
-      return;
-    }
-    setOauthAccountId(oauthResult.account.id);
-    setDialog("oauthSetup");
-  });
-  const startOAuth = () => {
-    setReauthenticatingAccountId(null);
-    setSignedInWithProxy(false);
-    setSignInProxyId(undefined);
-    void oauth.start(false);
-  };
-  const useSignInProxy = (proxyId: string) => {
-    rememberSignInProxyId(proxyId);
-    setSignedInWithProxy(true);
-    setSignInProxyId(proxyId);
-    void oauth.start(true, undefined, proxyId, oauth.flow?.clientKind ?? "codex");
-  };
-  const changeOAuthClient = (clientKind: OAuthClientKind) => {
-    void oauth.start(false, undefined, signInProxyId, clientKind);
-  };
-  const reauthenticateAccount = (account: AccountSummary) => {
-    setReauthenticatingAccountId(account.id);
-    setSignedInWithProxy(false);
-    void oauth.start(false, account.id);
-  };
+  const signIn = useAccountSignIn();
+  const startOAuth = () => signIn.start();
   const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
   const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
   const availableViews = connectionViews(mode, runtime?.capabilities.features ?? []);
@@ -94,8 +56,6 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     setProxyAccount(null);
     setBulkProxyAccountIds([]);
     setExportAccountIds([]);
-    setOauthAccountId(null);
-    setReauthenticatingAccountId(null);
   }, [mode]);
 
   useEffect(() => setQuery(""), [mode, view]);
@@ -114,6 +74,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     sources: t("connections.sources"),
     proxies: t("proxies.storage"),
     automations: t("connections.automations"),
+    trash: t("trash.title"),
     remote: t("connections.remoteServer"),
   };
   const tabs = availableViews.map((viewId) => ({ id: viewId, label: tabLabels[viewId] }));
@@ -166,7 +127,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       <PageHeader
         title={t("nav.connections")}
         navigation={<Tabs value={view} items={tabs} onChange={(nextView) => { if (nextView === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, nextView); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(nextView as ConnectionView); }} label={t("connections.views")} />}
-        actions={
+        actions={view === "trash" ? undefined :
           <>
             {view === "accounts" && mode === "local" ? (
               <Button variant="secondary" icon={<Upload aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>
@@ -211,25 +172,25 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           canExport={canExportAccounts}
           onImport={onImport}
           onSignIn={startOAuth}
-          onReauthenticate={reauthenticateAccount}
+          onReauthenticate={signIn.reauthenticate}
           onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }}
           onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }}
           onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }}
         />
       ) : null}
+      {view === "trash" ? <AccountTrashView /> : null}
       {view === "proxies" ? <ProxyStorageView revision={proxyRevision} diagnostics={proxyChecks} onImport={() => setDialog("proxyImport")} /> : null}
       {view === "automations" ? <AutomationsList onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
 
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
-      {oauth.flow ? <OAuthDialog flow={oauth.flow} starting={oauth.starting} onCancel={oauth.cancel} onUseProxy={oauth.flow.targetAccountId ? undefined : useSignInProxy} onUseClient={oauth.flow.targetAccountId ? undefined : changeOAuthClient} /> : null}
+      {signIn.dialogs}
       {dialog === "automation" ? <AutomationDialog task={editingAutomation} onClose={() => { setDialog(null); setEditingAutomation(null); }} /> : null}
       {dialog === "remote" ? <RemoteDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog accountIds={bulkProxyAccountIds} onClose={() => setDialog(null)} /> : null}
       {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((revision) => revision + 1)} onClose={() => setDialog(null)} /> : null}
-      {dialog === "oauthSetup" && oauthAccountId ? <OAuthAccountSetupDialog accountId={oauthAccountId} preserveProxy={signedInWithProxy} onClose={() => { setDialog(null); setOauthAccountId(null); setSignedInWithProxy(false); }} /> : null}
       {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}
     </section>

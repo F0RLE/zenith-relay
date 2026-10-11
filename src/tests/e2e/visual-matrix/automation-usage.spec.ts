@@ -27,7 +27,7 @@ test("unconfigured API empty state uses the available page center", async ({ pag
   await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
   await page.setViewportSize({ width: 1160, height: 760 });
   await page.goto("/");
-  await page.getByRole("button", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: "Доступ", exact: true }).click();
   await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
   await expectTopLevelEmptyCentered(page);
   await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });

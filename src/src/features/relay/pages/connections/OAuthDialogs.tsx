@@ -10,8 +10,7 @@ import { useTransientFlag } from "../../hooks/useTransientFlag";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { isHttpProxyEndpoint, rememberedSignInProxyId } from "./signInProxyPreference";
 import { useProxyPool } from "./useProxyPool";
-import { usePoolAccountWarning } from "../../hooks/usePoolAccountWarning";
-import { captureOperationResult } from "../../state/relayOperationModel";
+import { canAccountJoinPool } from "../../poolMembership";
 
 const HelpTopicDialog = lazy(async () => ({ default: (await import("../../help/HelpCenter")).HelpTopicDialog }));
 
@@ -199,33 +198,23 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
   const { t } = useTranslation();
   const { runtime, busy, perform } = useRelayState();
   const { pool } = useProxyPool();
-  const confirmPoolAccounts = usePoolAccountWarning();
   const applying = useRef(false);
   const [addToPool, setAddToPool] = useState(false);
   const [assignProxy, setAssignProxy] = useState(false);
   const account = runtime?.accounts.find((candidateAccount) => candidateAccount.id === accountId);
+  const canAddToPool = account != null && canAccountJoinPool(account) && !account.inPool;
   const hasAccountProxy = preserveProxy || account?.proxyMode === "account";
   const closeLocked = busy === "oauth-setup";
   const requestClose = () => {
     if (closeLocked || applying.current) return;
     onClose();
   };
-  const apply = async (bypassWarning = false) => {
+  const apply = async () => {
     if (applying.current) return;
     applying.current = true;
     const assignStoredProxy = assignProxy && !hasAccountProxy;
     try {
-      if (!addToPool && !assignStoredProxy) {
-        onClose();
-        return;
-      }
-      const captured = addToPool && !account ? await captureOperationResult(
-        (work) => perform("oauth-setup-state", work, undefined, { backgroundRefresh: true }),
-        () => relayCommands.localState(),
-      ) : null;
-      if (captured && !captured.ok) return;
-      const freshAccount = account ?? captured?.value?.accounts.find((candidate) => candidate.id === accountId);
-      const includeInPool = addToPool && await confirmPoolAccounts(freshAccount ? [freshAccount] : [{}], bypassWarning);
+      const includeInPool = addToPool && canAddToPool;
       if (!includeInPool && !assignStoredProxy) {
         onClose();
         return;
@@ -244,28 +233,19 @@ export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onCl
     onClose={requestClose}
     footer={<>
       <Button variant="secondary" disabled={closeLocked} onClick={requestClose}>{t("accounts.configureLater")}</Button>
-      <Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}
-        data-relay-context-action onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void apply(true);
-        }}
-      >{t("common.done")}</Button>
+      <Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}>{t("common.done")}</Button>
     </>}
   >
     <div className="relay-form oauth-account-setup">
       <div className="oauth-account-added">
         <Check aria-hidden />
-        <div>
-          <strong>{account?.identityHint ?? t("accounts.accountReady")}</strong>
-          <p>{t("accounts.accountAddedHint")}</p>
-        </div>
+        <strong>{account?.identityHint ?? t("accounts.accountReady")}</strong>
       </div>
       <div className="post-import-options">
-        <label>
+        {canAddToPool ? <label>
           <input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} />
-          <span><strong>{t("accounts.addAccountToPool")}</strong><small>{t("accounts.addToPoolHint")}</small></span>
-        </label>
+          <span><strong>{t("accounts.addAccountToPool")}</strong></span>
+        </label> : null}
         {hasAccountProxy ? null : <label>
           <input type="checkbox" checked={assignProxy} disabled={!pool || pool.total === 0} onChange={(event) => setAssignProxy(event.target.checked)} />
           <span>

@@ -44,9 +44,8 @@ export function groupModels<T>(
   const groups = new Map<string, ModelGroup<T>>();
   for (const model of models) {
     const metadata = options.metadata?.(model);
-    const provider = normalizeCatalogValue(
-      options.isNativeChatGpt?.(model) ? "openai" : metadata?.catalogProvider,
-    ) ?? OTHER_PROVIDER;
+    const provider = normalizeCatalogValue(metadata?.catalogProvider)
+      ?? (options.isNativeChatGpt?.(model) ? "openai" : OTHER_PROVIDER);
     const key = provider;
     let group = groups.get(key);
     if (!group) {

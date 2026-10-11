@@ -381,7 +381,7 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
     call.command === "open_api_key_page"
     && call.args.provider === "openrouter"
   )))).toBe(true);
-  const key = dialog.getByLabel("Upstream API key");
+  const key = dialog.getByRole("textbox", { name: "Upstream API key", exact: true });
   await key.focus();
   expect(await key.evaluate((input) => {
     const field = input.closest<HTMLElement>(".secret-field")!;
@@ -389,7 +389,7 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
   })).toEqual({ inputOutline: "none", fieldOutline: "none", fieldShadow: "none" });
 
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
-  await dialog.getByLabel("Upstream API key").fill("test-source-key");
+  await dialog.getByRole("textbox", { name: "Upstream API key", exact: true }).fill("test-source-key");
   await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("Zenith API", { exact: true })).toBeVisible();
@@ -417,7 +417,7 @@ test("provider presets leave automatic protocol discovery to the connector", asy
   await dialog.getByRole("radio", { name: /OpenAI/ }).click();
   await expect(dialog.locator(".source-route-simple-options")).toHaveCount(0);
 
-  await dialog.getByLabel("Upstream API key").fill("sk-synthetic-ready-key");
+  await dialog.getByRole("textbox", { name: "Upstream API key", exact: true }).fill("sk-synthetic-ready-key");
   await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("OpenAI", { exact: true })).toBeVisible();
@@ -453,7 +453,7 @@ test("source creation errors stay in one topmost dialog", async ({ page }) => {
   await page.getByRole("button", { name: "Add source", exact: true }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Add source" });
   await sourceDialog.getByRole("radio", { name: /OpenAI/ }).click();
-  await sourceDialog.getByLabel("Upstream API key").fill("sk-synthetic-invalid");
+  await sourceDialog.getByRole("textbox", { name: "Upstream API key", exact: true }).fill("sk-synthetic-invalid");
   await sourceDialog.getByRole("button", { name: "Add source", exact: true }).click();
 
   const errorDialog = page.getByRole("dialog", { name: "Error details" });
@@ -469,7 +469,7 @@ test("source creation errors stay in one topmost dialog", async ({ page }) => {
   await errorDialog.locator("footer").getByRole("button", { name: "Close", exact: true }).click();
   await expect(errorDialog).toBeHidden();
   await expect(sourceDialog).toBeVisible();
-  await expect(sourceDialog.getByLabel("Upstream API key")).toHaveValue("sk-synthetic-invalid");
+  await expect(sourceDialog.getByRole("textbox", { name: "Upstream API key", exact: true })).toHaveValue("sk-synthetic-invalid");
 });
 
 test("source editor preserves legacy routes while routing stays automatic", async ({ page }) => {

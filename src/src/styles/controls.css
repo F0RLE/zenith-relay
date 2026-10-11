@@ -222,6 +222,40 @@ textarea {
   width: 100%;
 }
 
+.secret-field {
+  min-width: 0;
+  display: grid;
+}
+
+.secret-field > input {
+  grid-area: 1 / 1;
+  min-width: 0;
+  width: 100%;
+  padding-inline-end: 46px;
+}
+
+.secret-field > :is(.relay-icon-button, .relay-disabled-tooltip-anchor) {
+  grid-area: 1 / 1;
+  align-self: center;
+  justify-self: end;
+  margin-inline-end: 5px;
+}
+
+.secret-field .relay-icon-button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+}
+
+/* WebView2 must not add a second reveal action beside the themed control. */
+.secret-field > input::-ms-reveal,
+.secret-field > input::-ms-clear {
+  display: none;
+}
+
 .relay-toggle-setting {
   display: flex;
   align-items: center;

@@ -59,10 +59,10 @@ export function OverviewPage() {
     setAnalyticsScopeSelection(selectedScope);
     localStorage.setItem("relay.overviewAnalyticsScope", selectedScope);
   }, []);
-  const connectOpenCode = async (launchAfterConnect: boolean) => {
-    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
-    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true });
-  };
+  const launchOpenCode = () => perform("opencode-launch", relayCommands.connectOpenCode, "feedback.launched", {
+    backgroundRefresh: true,
+    afterWork: relayCommands.restartOpenCode,
+  });
 
   useEffect(() => {
     if (!runtime) return;
@@ -169,7 +169,7 @@ export function OverviewPage() {
     </Button>
     <Button
       variant={running ? "primary" : "secondary"}
-      busy={busy === "chatgpt-launch" || busy === "opencode-connect" || busy === "opencode-launch"}
+      busy={busy === "chatgpt-launch" || busy === "opencode-launch"}
       icon={<Play aria-hidden />}
       disabled={!running}
       title={!running ? t("gateway.start") : undefined}
@@ -183,7 +183,7 @@ export function OverviewPage() {
     </Button>
   );
 
-  return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
+  return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={primary} />
     {!running && !runtime ? (
       <EmptyState
         title={t("overview.emptyTitle")}
@@ -212,10 +212,9 @@ export function OverviewPage() {
     {applicationDialog ? (
       <ApplicationPickerDialog
         title={t("overview.applicationPickerTitle")}
-        showLaunchToggle={false}
         onClose={() => setApplicationDialog(false)}
         onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true }); }}
-        onOpenCode={() => void connectOpenCode(false)}
+        onOpenCode={() => void launchOpenCode()}
       />
     ) : null}
   </section>;
@@ -253,7 +252,7 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
     </>
   );
 
-  return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
+  return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={actions} />
     {!selectedSource ? (
       <EmptyState
         title={t("sources.emptyTitle")}
@@ -274,10 +273,7 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
       <SourceStatsPanel source={selectedSource} {...(stats ? { state: stats } : {})} overview />
       <section className="direct-api-models">
         <header>
-          <div>
-            <h2>{t("overview.availableModels")}</h2>
-            <p>{t("overview.availableModelsHint")}</p>
-          </div>
+          <h2>{t("overview.availableModels")}</h2>
           <strong>{selectedSource.models.length}</strong>
         </header>
         <ul>{selectedSource.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul>

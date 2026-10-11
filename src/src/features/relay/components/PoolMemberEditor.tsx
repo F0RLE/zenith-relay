@@ -4,10 +4,11 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import { SourcePriceEditor } from "./SourcePriceEditor";
+import { AccountCredentialDiagnostics } from "./AccountCredentialDiagnostics";
 import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./sourcePriceEditorModel";
 import { Button, Dialog, OptionMenu, Tabs, ToggleSwitch } from "./Ui";
 import { toggle, type PoolMember } from "../poolHelpers";
-import { groupModels, memberModelCatalog, modelIdKey, orderModelIdsBySnapshot } from "../modelGroups";
+import { groupModels, memberModelCatalog, modelIdKey } from "../modelGroups";
 import { useRelayState } from "../state/RelayStateProvider";
 import {
   modelSelectionForMember,
@@ -34,8 +35,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
   const filteredModels = modelIds.filter((model) => modelIdKey(model).includes(search.trim().toLowerCase()));
   const catalog = memberModelCatalog(runtime?.gateway);
-  const orderedModels = orderModelIdsBySnapshot(filteredModels, runtime?.gateway.models ?? []);
-  const modelGroups = groupModels(orderedModels, {
+  const modelGroups = groupModels(filteredModels, {
     metadata: (model) => catalog.get(modelIdKey(model)),
     isNativeChatGpt: () => member.kind === "account",
   });
@@ -67,6 +67,12 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
     <Dialog
       className="member-policy-dialog"
       title={t("pool.editMember")}
+      subtitle={(
+        <div className="member-editor-identity">
+          <span data-relay-tooltip={memberName}>{memberName}</span>
+          <small>{t(`pool.types.${member.kind}`)}</small>
+        </div>
+      )}
       onClose={onClose}
       footer={(
         <>
@@ -84,10 +90,7 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
       )}
     >
       <div className="relay-form member-editor">
-        <div className="member-editor-identity">
-          <strong data-relay-tooltip={memberName}>{memberName}</strong>
-          <span>{t(`pool.types.${member.kind}`)}</span>
-        </div>
+        {member.kind === "account" ? <AccountCredentialDiagnostics account={member} /> : null}
         <Tabs value={tab} items={tabs} onChange={setTab} label={t("pool.editMember")} />
         <div role="tabpanel" aria-label={tabs.find((tabItem) => tabItem.id === tab)?.label}>
           {tab === "models" ? (

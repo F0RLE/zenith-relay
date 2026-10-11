@@ -77,9 +77,8 @@ test("old remote server does not advertise cross-protocol route recovery", async
 test("API degraded-route switch is on for ChatGPT accounts and saves immediately", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  await page.getByRole("button", { name: "Integrations", exact: true }).click();
+  await page.getByRole("button", { name: "Access", exact: true }).click();
   await page.getByRole("tab", { name: "Accounts", exact: true }).click();
-  await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
   const toggle = page.getByRole("checkbox", { name: "Reject model substitution", exact: true });
   await expect(toggle).toBeChecked();
   await expect(page.getByText("For ChatGPT accounts. Reject responses reporting a different model or an internal downgrade id such as degrade2.")).toBeVisible();
@@ -152,7 +151,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await importDialog.getByLabel("Add selected to pool after import").check();
   await expect(importDialog.getByLabel("Assign a stored proxy")).not.toBeChecked();
   await importDialog.getByRole("button", { name: "Import 2 account(s)" }).click();
-  await page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true }).getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
   await expect(importDialog).toBeHidden();
   const importCalls = await page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { selectedItemIds?: string[]; addToPool?: boolean; discoverModels?: boolean; probeQuota?: boolean } } }> }).__TAURI_TEST_INVOKES__;
@@ -209,7 +208,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
 
   await openGatewayApi(page);
   await expect(page.locator(".gateway-api-connection-panel")).toBeVisible();
-  await page.locator(".relay-page-actions .relay-action-menu summary").click();
+  await page.locator(".integration-section-actions .relay-action-menu summary").click();
   await page.getByRole("menuitem", { name: "Restart API" }).click();
   await page.getByRole("spinbutton", { name: "Port" }).fill("15001");
   await page.getByRole("spinbutton", { name: "Port" }).press("Enter");

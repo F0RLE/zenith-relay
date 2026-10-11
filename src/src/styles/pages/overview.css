@@ -131,21 +131,13 @@
   border-bottom: 1px solid var(--relay-border);
 }
 
-.direct-api-models > header h2,
-.direct-api-models p {
+.direct-api-models > header h2 {
   margin: 0;
 }
 
 .direct-api-models > header h2 {
   font-size: 15px;
   line-height: 20px;
-}
-
-.direct-api-models p {
-  margin-top: 2px;
-  color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 16px;
 }
 
 .direct-api-models > header > strong {

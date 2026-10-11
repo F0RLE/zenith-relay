@@ -6,62 +6,178 @@
   margin-top: 8px;
 }
 
-.integrations-toolbar {
+.integrations-page > .relay-workspace-header {
+  border-bottom: 1px solid var(--relay-border);
+  margin-bottom: 24px;
+}
+
+.integrations-page .relay-page-navigation .relay-tabs {
+  gap: 6px;
+}
+
+.integrations-page .relay-page-navigation .relay-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+}
+
+.integrations-page .relay-page-navigation svg {
+  width: 16px;
+  height: 16px;
+}
+
+.integration-section-heading {
   min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
+  gap: 16px;
 }
 
-.integrations-toolbar .relay-tabs {
+.integration-section-heading h2,
+.integration-detail-heading h3 {
   min-width: 0;
-  max-width: 100%;
-  height: auto;
+  margin: 0;
+  color: var(--relay-text);
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 600;
+}
+
+.integration-section-heading > .relay-button,
+.integration-section-actions {
+  flex-shrink: 0;
+}
+
+.integration-section-actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px;
+  gap: 8px;
+}
+
+.integration-workspace {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.integration-workspace.has-choices {
+  grid-template-columns: 172px minmax(0, 1fr);
+}
+
+.integration-picker {
+  min-width: 0;
+}
+
+.integration-picker .relay-tabs {
+  min-width: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   border: 0;
-  border-radius: 10px;
-  background: var(--relay-surface);
   overflow: visible;
 }
 
-.integrations-toolbar .relay-tabs button {
-  height: 34px;
-  padding: 0 16px;
+.integration-picker .relay-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: auto;
+  min-height: 42px;
+  padding: 10px 12px;
   border: 0;
   border-radius: 7px;
   color: var(--relay-muted);
+  text-align: left;
   font-size: 13px;
-  font-weight: 500;
 }
 
-.integrations-toolbar .relay-tabs button.active {
+.integration-picker .relay-tabs button.active {
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
-.integrations-toolbar .relay-tabs button:hover:not(.active) {
+.integration-picker .relay-tabs button:hover:not(.active) {
   background: var(--relay-subtle);
   color: var(--relay-text);
 }
 
-.integrations-toolbar .relay-tabs button:focus-visible {
-  border-radius: 7px;
-  background: var(--relay-subtle);
-  color: var(--relay-text);
-}
-
-.integrations-toolbar .relay-tabs button.active:focus-visible {
-  background: var(--relay-accent-soft);
+.integration-picker img {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
 }
 
 .integrations-settings {
+  container-type: inline-size;
   min-width: 0;
+}
+
+.integrations-page:has(.gateway-empty-tab-panel) {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.integrations-page:has(.gateway-empty-tab-panel) > .integrations-category,
+.integrations-page:has(.gateway-empty-tab-panel) .gateway-page {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.integration-detail-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 18px;
+}
+
+.integration-detail-icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--relay-surface);
+  color: var(--relay-accent-hover);
+}
+
+.integration-detail-icon img {
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
+}
+
+:root[data-theme="dark"] .integration-workspace img[src="/icons/chatgpt.svg"] {
+  filter: brightness(0) invert(1);
+}
+
+@container (max-width: 760px) {
+  .integration-workspace.has-choices {
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+
+@container (max-width: 560px) {
+  .integration-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .integration-workspace.has-choices {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .integrations-settings .gateway-workspace {
@@ -133,5 +249,73 @@
   .integration-chatgpt-settings .gateway-account-panel,
   .integration-chatgpt-settings .gateway-setting-row.codex-feature-control {
     padding: 16px;
+  }
+}
+.chatgpt-context-settings {
+  min-width: 0;
+}
+
+.chatgpt-context-controls {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 320px;
+}
+
+.chatgpt-context-mode .relay-option-trigger {
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chatgpt-context-budget {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 140px;
+  padding: 0 9px;
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
+.chatgpt-context-budget input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.chatgpt-context-budget span,
+.chatgpt-context-controls > small {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.chatgpt-context-budget:focus-within {
+  outline: 1px solid var(--relay-accent);
+}
+
+.chatgpt-context-budget:has(input[aria-invalid="true"]) {
+  outline: 1px solid var(--relay-danger);
+}
+
+.chatgpt-context-controls > small {
+  flex-basis: 100%;
+  text-align: right;
+}
+
+@container (max-width: 440px) {
+  .integration-chatgpt-settings .chatgpt-context-settings {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 140px);
+    gap: 12px;
   }
 }

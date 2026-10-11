@@ -4,6 +4,7 @@ import { accountPlanOption, compareAccountPlans } from "../../accountPlans";
 import { compareRoutingOrder } from "../../routingOrder";
 import { compareStableText } from "../../poolHelpers";
 import { matchesQuery } from "./connectionHelpers";
+import { canAccountJoinPool } from "../../poolMembership";
 
 export type ParticipationFilter = "all" | "included" | "excluded";
 export type AccountPlanOption = { id: string; label: string; count: number };
@@ -88,7 +89,7 @@ export function accountSelectionState(
     selectedSecretsUnavailable: selectedAccounts.some((account) => !account.secretAvailable),
     selectedOnServer,
     exportIds: selectedCount ? selectedAccountIds : allAccounts.map((account) => account.id),
-    canIncludeSelected: !selectedOnServer && selectedAccounts.some((account) => !accountParticipates(account)),
+    canIncludeSelected: !selectedOnServer && selectedAccounts.some((account) => canAccountJoinPool(account) && !accountParticipates(account)),
     canExcludeSelected: selectedAccounts.some(accountParticipates),
     allSelected: visibleAccounts.length > 0 && visibleAccounts.every((account) => selected.has(account.id)),
   };

@@ -54,13 +54,12 @@ for (const theme of ["light", "dark"] as const) {
 
       await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
       const dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
-      expect(await dialog.locator(".relay-tabs").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-      for (const tab of ["Обзор", "Токены", "Инструменты", "Маршрут"]) {
-        await dialog.getByRole("tab", { name: tab, exact: true }).click();
-        expect(await dialog.locator(".relay-dialog-body, .request-details-header, .request-details-metric, .request-details-list dd").evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
-      }
-      await dialog.getByRole("tab", { name: "Обзор", exact: true }).click();
+      await expect(dialog.getByRole("tab")).toHaveCount(0);
       await page.screenshot({ path: `output/playwright/usage-details-${theme}-${width}.png` });
+      for (const technicalExpanded of [false, true]) {
+        if (technicalExpanded) await dialog.locator(".request-technical-details > summary").click();
+        expect(await dialog.locator(".relay-dialog-body, .request-details-header, .request-details-metric, .request-details-parameters dd, .request-details-list dd").evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
+      }
       await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
       await expect(dialog).toHaveCount(0);
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatAccountValueMicroUsd, formatApiEquivalent, formatProviderMicroUsd } from "../src/features/relay/poolFormatting";
+import { formatAccountValueMicroUsd, formatApiEquivalent, formatProviderMicroUsd, normalizeReasoningEffort, sortReasoningEfforts } from "../src/features/relay/poolFormatting";
 
 describe("pool currency formatting", () => {
   test("formats account value with optional approximation marker", () => {
@@ -16,5 +16,15 @@ describe("pool currency formatting", () => {
 
   test("keeps API-equivalent source values compact enough for pool cards", () => {
     expect(formatApiEquivalent(3_682_678_150, "en-US")).toBe("≈$3,682.68");
+  });
+});
+
+describe("reasoning effort identities", () => {
+  test("deduplicates very-high aliases without changing other provider modes", () => {
+    expect(sortReasoningEfforts(["max", "extra-high", "high", "VERY_HIGH", "xhigh", "VeryHigh", "ExtraHigh", "low", "vendor-mode"])).toEqual([
+      "low", "high", "xhigh", "max", "vendor-mode",
+    ]);
+    expect(normalizeReasoningEffort(" X-HIGH ")).toBe("xhigh");
+    expect(normalizeReasoningEffort("Vendor-Mode")).toBe("vendor-mode");
   });
 });

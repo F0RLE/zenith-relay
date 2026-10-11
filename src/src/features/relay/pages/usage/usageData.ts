@@ -202,6 +202,20 @@ export function usageRowsFromRemote(events: readonly RemoteUsage[], labels: Remo
   });
 }
 
+/** Reports show the latest result of each Relay request, never its intermediate failures. */
+export function logicalRequestRows(rows: readonly UsageRow[]): UsageRow[] {
+  const requests = new Map<string, UsageRow>();
+  for (const row of rows) {
+    const key = row.requestId ? `request:${row.requestId}` : `record:${row.id}`;
+    const previous = requests.get(key);
+    if (!previous || row.attempt > previous.attempt
+      || (row.attempt === previous.attempt && Date.parse(row.time) > Date.parse(previous.time))) {
+      requests.set(key, row);
+    }
+  }
+  return [...requests.values()].sort((left, right) => Date.parse(right.time) - Date.parse(left.time));
+}
+
 export function totalsFromRows(rows: UsageRow[]): UsageTotals {
   return totalsFromUsageSamples(rows.map(usageTotalsSampleFromRow));
 }
