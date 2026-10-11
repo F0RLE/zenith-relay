@@ -57,6 +57,10 @@ pub(super) async fn set_local_model_price(
     let mut gateway = old_gateway.clone();
     let key = zenith_relay_core::model_id_key(&canonical);
     if let Some(price) = price {
+        let price = gateway
+            .model_price_overrides
+            .get(&key)
+            .map_or(price, |previous| previous.with_base_prices(price));
         gateway.model_price_overrides.insert(key, price);
     } else {
         gateway.model_price_overrides.remove(&key);
@@ -76,14 +80,19 @@ pub(super) async fn set_local_model_service_tier(
     let canonical = super::canonical_pool_model(&state, &input.model_id)?;
     let runtime = state.gateway.runtime().await;
     if input.service_tier != DefaultServiceTier::Standard
-        && !state
-            .model_metadata_catalog()
-            .service_tiers_for(&canonical)
-            .contains(&input.service_tier)
+        && !super::super::state::build_local_runtime_state(&state)
+            .await?
+            .gateway
+            .models
+            .iter()
+            .any(|model| {
+                model.id.eq_ignore_ascii_case(&canonical)
+                    && model.speed_tiers.contains(&input.service_tier)
+            })
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "requested service tier is not available under the Relay model-family policy",
+            "requested service tier is not supported by the model and configured routes",
         )
         .into());
     }

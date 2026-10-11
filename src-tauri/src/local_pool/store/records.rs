@@ -85,6 +85,7 @@ impl LocalPoolStore {
         automations: AutomationRecords,
         deleted_account_ids: &[String],
     ) -> Result<()> {
+        super::account_trash::validate_inventory(&accounts, &self.account_trash)?;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,

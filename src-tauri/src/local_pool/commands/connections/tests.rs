@@ -77,6 +77,7 @@ fn detected_prices_follow_the_source_upstream() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
         },
     );
     let base_url = source.base_url.clone();

@@ -171,6 +171,12 @@ pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(),
                 .accounts()
                 .iter()
                 .map(|account| account.account.id.clone())
+                .chain(
+                    store
+                        .account_trash()
+                        .iter()
+                        .map(|entry| entry.record.account.id.clone()),
+                )
                 .collect::<Vec<_>>(),
             store
                 .keys()

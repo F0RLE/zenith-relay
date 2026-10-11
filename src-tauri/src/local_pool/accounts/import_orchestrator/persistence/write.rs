@@ -36,6 +36,22 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     let previous_credentials = credential_store
         .load(&account_id)
         .map_err(credential_item_error)?;
+    if state
+        .store()
+        .map_err(|_| ImportItemError::recovery("account store is unavailable"))?
+        .account_trash()
+        .iter()
+        .any(|entry| {
+            entry.record.account.id == account_id
+                || entry.record.account.identity.identity_hash
+                    == account.account.identity.identity_hash
+        })
+    {
+        return Err(ImportItemError::new(
+            error_codes::ACCOUNT_CHANGED,
+            "account is in trash; restore it before importing",
+        ));
+    }
     if !StoredCodexCredentials::snapshots_match(previous_credentials.as_ref(), old_credential) {
         return Err(ImportItemError::new(
             error_codes::ACCOUNT_CHANGED,

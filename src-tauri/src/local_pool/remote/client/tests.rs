@@ -104,6 +104,7 @@ async fn usage_query_values_are_encoded_and_cannot_add_parameters() {
             page_size: 25,
             bucket_ms: Some(60_000),
             model_query: Some("gpt test&success=false".to_string()),
+            request_id: Some("req&success=false".into()),
             success: Some(true),
             ..UsageQuery::default()
         })
@@ -113,6 +114,8 @@ async fn usage_query_values_are_encoded_and_cannot_add_parameters() {
     assert!(uri.contains("modelQuery=gpt+test%26success%3Dfalse"));
     assert!(uri.contains("success=true"));
     assert!(uri.contains("bucketMs=60000"));
+    assert!(uri.contains("requestId=req%26success%3Dfalse"));
+    assert!(!uri.contains("requestId=req&success=false"));
     assert!(!uri.contains("modelQuery=gpt+test&success=false"));
 }
 

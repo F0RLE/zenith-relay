@@ -1,7 +1,5 @@
-use super::{
-    elapsed_ms, WakeExecutionErrorCode, WakeExecutionFailure, WakeExecutionMetrics,
-    MAX_RESPONSE_BYTES,
-};
+use super::{WakeExecutionErrorCode, WakeExecutionFailure, WakeExecutionMetrics};
+use axum::{body::Body, http::Response};
 use std::sync::Arc;
 use std::time::Instant;
 use zenith_relay_core::automations::WakeExecutionRequest;
@@ -9,6 +7,10 @@ use zenith_relay_core::error_codes;
 use zenith_relay_core::gateway::{execute_account_wake, AccountWakeRequest};
 use zenith_relay_core::GatewayRuntime;
 
+pub(super) const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// The runtime owns authentication, transport, scheduler leases and usage.
+/// This adapter keeps only bounded metrics from its sanitized response.
 pub async fn execute_with_runtime(
     runtime: Arc<GatewayRuntime>,
     local_key_id: &str,
@@ -25,12 +27,26 @@ pub async fn execute_with_runtime(
         },
     )
     .await;
+    metrics_from_response(wake_response, started).await
+}
+
+pub(super) async fn metrics_from_response(
+    wake_response: Response<Body>,
+    started: Instant,
+) -> Result<WakeExecutionMetrics, WakeExecutionFailure> {
     let status = wake_response.status();
     let category = wake_response
         .headers()
         .get("x-zenith-relay-error-category")
         .and_then(|header_value| header_value.to_str().ok())
         .map(str::to_string);
+    if !status.is_success() {
+        return Err(runtime_status_failure(
+            status,
+            category.as_deref(),
+            elapsed_ms(started),
+        ));
+    }
     let response_body = axum::body::to_bytes(wake_response.into_body(), MAX_RESPONSE_BYTES)
         .await
         .map_err(|_| {
@@ -41,13 +57,6 @@ pub async fn execute_with_runtime(
                 elapsed_ms(started),
             )
         })?;
-    if !status.is_success() {
-        return Err(runtime_status_failure(
-            status,
-            category.as_deref(),
-            elapsed_ms(started),
-        ));
-    }
     let response_json: serde_json::Value =
         serde_json::from_slice(&response_body).map_err(|_| {
             WakeExecutionFailure::runtime(
@@ -80,9 +89,24 @@ fn runtime_status_failure(
             | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE
             | error_codes::NO_ELIGIBLE_SOURCE,
         ) => (WakeExecutionErrorCode::Upstream, true),
-        Some(error_codes::MODEL_NOT_FOUND | error_codes::INVALID_REQUEST) => {
-            (WakeExecutionErrorCode::InvalidRequest, false)
-        }
+        Some(
+            error_codes::MODEL_NOT_FOUND
+            | error_codes::UPSTREAM_MODEL_NOT_FOUND
+            | error_codes::UPSTREAM_MODEL_UNSUPPORTED,
+        ) => (WakeExecutionErrorCode::ModelUnavailable, false),
+        Some(error_codes::INVALID_REQUEST) => (WakeExecutionErrorCode::InvalidRequest, false),
+        Some(
+            error_codes::REQUEST_TIMEOUT
+            | error_codes::UPSTREAM_REQUEST_TIMEOUT
+            | error_codes::UPSTREAM_GATEWAY_TIMEOUT
+            | error_codes::UPSTREAM_TRANSPORT_TIMEOUT,
+        ) => (WakeExecutionErrorCode::Timeout, true),
+        Some(
+            error_codes::UPSTREAM_TRANSPORT
+            | error_codes::UPSTREAM_TRANSPORT_CONNECT
+            | error_codes::UPSTREAM_TRANSPORT_REQUEST
+            | error_codes::UPSTREAM_TRANSPORT_BODY,
+        ) => (WakeExecutionErrorCode::Transport, true),
         _ => match status {
             reqwest::StatusCode::UNAUTHORIZED => (WakeExecutionErrorCode::Unauthorized, false),
             reqwest::StatusCode::FORBIDDEN => (WakeExecutionErrorCode::Forbidden, false),
@@ -93,6 +117,10 @@ fn runtime_status_failure(
         },
     };
     WakeExecutionFailure::runtime(code, retryable, Some(status.as_u16()), latency_ms)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn wake_usage(response_payload: &serde_json::Value) -> Option<&serde_json::Value> {

@@ -35,7 +35,8 @@ async fn read_account_models(
     let mut prepared = refresh::request_authorization(state, &scope.fence).await?;
     scope.validate(state)?;
     let http_scope = scope.http_scope(state);
-    let mut discovered_models = discover_account_models(&prepared, &http_scope).await;
+    let mut discovered_models =
+        discover_account_models(state, account_id, &prepared, &http_scope).await;
     respect_models_retry_after(state, scope, &discovered_models);
     scope.validate(state)?;
 
@@ -53,7 +54,8 @@ async fn read_account_models(
             Ok(recovered) => {
                 prepared = PreparedAccountAuthorization::from_tokens(recovered)?;
                 scope.validate(state)?;
-                discovered_models = discover_account_models(&prepared, &http_scope).await;
+                discovered_models =
+                    discover_account_models(state, account_id, &prepared, &http_scope).await;
                 respect_models_retry_after(state, scope, &discovered_models);
             }
             Err(_) if account_auth_is_access_only(state, account_id)? => {
@@ -79,7 +81,8 @@ async fn read_account_models(
                 Err(error) => return Err(error),
             };
         scope.validate(state)?;
-        discovered_models = discover_account_models(&prepared, &http_scope).await;
+        discovered_models =
+            discover_account_models(state, account_id, &prepared, &http_scope).await;
         respect_models_retry_after(state, scope, &discovered_models);
     }
 
@@ -116,11 +119,39 @@ fn respect_models_retry_after(
 }
 
 pub(in crate::local_pool::accounts) async fn discover_account_models(
+    state: &DesktopState,
+    account_id: &str,
     prepared: &PreparedAccountAuthorization,
     http_scope: &ManagementHttpScope,
 ) -> std::result::Result<Vec<String>, ModelDiscoveryFailure> {
+    let unavailable = || ModelDiscoveryFailure {
+        code: ModelDiscoveryFailureCode::Transport,
+        retryable: true,
+        http_status: None,
+        retry_after_ms: None,
+    };
+    let account = state
+        .store()
+        .map_err(|_| unavailable())?
+        .account(account_id)
+        .cloned()
+        .ok_or_else(unavailable)?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend)
+        .require(account_id)
+        .map_err(|_| unavailable())?;
+    super::super::super::records::validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )
+    .map_err(|_| ModelDiscoveryFailure {
+        code: ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+        retryable: false,
+        http_status: None,
+        retry_after_ms: None,
+    })?;
     let client = AccountModelsClient::new_with_proxy(prepared.proxy.as_ref())?
         .with_oauth_client_kind(prepared.oauth_client_kind)
+        .with_subscription_plan_type(account.account.subscription.plan_type.as_deref())
         .with_http_scope(http_scope.clone());
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
     client

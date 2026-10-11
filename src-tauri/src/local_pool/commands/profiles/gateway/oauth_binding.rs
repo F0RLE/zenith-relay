@@ -24,7 +24,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
         for account in store.accounts() {
             let explicitly_requested = requested_account_id == Some(account.account.id.as_str());
             if !account.account.enabled
-                || !account.account.in_pool
+                || account.remote_location.is_some()
                 || account.account.draining
                 || account.account.auth_state
                     != zenith_relay_core::accounts::AccountAuthState::Active
@@ -70,7 +70,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "selected OAuth account is not available to the local pool",
+            "selected account is not available to the ChatGPT application",
         ));
     }
 

@@ -1,18 +1,17 @@
 use super::super::{
     accounts::{
         quota_refresh::{
-            prepare_account_credentials, refresh_account_quota_once, AccountQuotaOutcome,
-            AccountQuotaRefreshResponse,
+            refresh_account_quota_once, AccountQuotaOutcome, AccountQuotaRefreshResponse,
         },
-        wake::{completion_from_execution, execute_with_runtime, CodexWakeClient},
+        wake::{completion_from_execution, execute_with_runtime},
     },
-    error::{ErrorCode, LocalPoolError, Result},
+    commands::{pool::SYSTEM_GATEWAY_KEY_ID, runtime_from_store},
+    error::Result,
     state::DesktopState,
 };
 use super::{WAKE_BATCH_SIZE, WORKER_ERROR_RETRY_MS};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
-use zenith_relay_core::error_codes;
 use zenith_relay_core::{
     automations::{
         verify_wake_countdown, WakeCompletion, WakeCompletionOutcome, WakePermit,
@@ -157,54 +156,45 @@ pub(super) async fn execute_wake_permit(
             "runtime_execution_started",
             &[("account", account_hash.clone())],
         );
-        execute_with_runtime(
-            runtime,
-            super::super::commands::pool::SYSTEM_GATEWAY_KEY_ID,
-            &permit.request,
-        )
-        .await
+        execute_with_runtime(runtime, SYSTEM_GATEWAY_KEY_ID, &permit.request).await
     } else {
-        // Startup can schedule the worker before the optional local listener
-        // has been created.  Preserve the existing direct probe only for that
-        // narrow window; once a runtime exists all wakes use the shared path.
+        // With no listener, use the same transport adapter. Keep setup serialized
+        // through this bounded request so a second scheduler cannot start midway.
+        let _mutation = state.setup_guard().await;
+        if !state.is_wake_permit_active(permit)? {
+            return Ok(None);
+        }
         crate::diagnostics::breadcrumb(
             "background-wake",
-            "runtime_unavailable_direct_fallback",
+            "listener_unavailable_runtime_execution",
             &[("account", account_hash.clone())],
         );
-        let prepared = match prepare_account_credentials(state, &permit.account_id).await {
-            Ok(prepared) => prepared,
+        let runtime = match state.gateway.runtime().await {
+            Some(runtime) => Ok(runtime),
+            None => runtime_from_store(state).await,
+        };
+        let runtime = match runtime {
+            Ok(runtime) => runtime,
             Err(error) => {
                 crate::diagnostics::record_error(
                     "background-wake",
-                    Some(credential_error_code(&error)),
+                    Some("runtime_create_failed"),
                     &error.message,
                     &[("account", account_hash.clone())],
                 );
-                return Ok(Some(failed_wake_completion(credential_error_code(&error))));
+                return Ok(Some(WakeCompletion {
+                    outcome: WakeCompletionOutcome::Failed,
+                    completed_at_ms: current_time_ms(),
+                    latency_ms: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    error_code: Some(
+                        zenith_relay_core::error_codes::WAKE_INVALID_CONFIGURATION.to_string(),
+                    ),
+                }));
             }
         };
-        let client = match CodexWakeClient::new_with_proxy(
-            prepared.tokens().access_token(),
-            prepared.provider_account_id(),
-            prepared.proxy(),
-        ) {
-            Ok(client) => client,
-            Err(failure) => {
-                crate::diagnostics::record_error(
-                    "background-wake",
-                    Some("client_create_failed"),
-                    &failure.to_string(),
-                    &[("account", account_hash.clone())],
-                );
-                return Ok(Some(completion_from_execution(
-                    &Err(failure),
-                    WakeVerificationOutcome::Unconfirmed,
-                    current_time_ms(),
-                )));
-            }
-        };
-        client.execute(&permit.request).await
+        execute_with_runtime(runtime, SYSTEM_GATEWAY_KEY_ID, &permit.request).await
     };
     if !state.is_wake_permit_active(permit)? {
         return Ok(None);
@@ -251,24 +241,6 @@ pub(super) fn verification_from_refresh(
             .quota
             .window(permit.verification.window_kind),
     )
-}
-
-fn failed_wake_completion(code: &'static str) -> WakeCompletion {
-    WakeCompletion {
-        outcome: WakeCompletionOutcome::Failed,
-        completed_at_ms: current_time_ms(),
-        latency_ms: None,
-        input_tokens: None,
-        output_tokens: None,
-        error_code: Some(code.to_string()),
-    }
-}
-
-fn credential_error_code(error: &LocalPoolError) -> &'static str {
-    match &error.code {
-        ErrorCode::NotFound => error_codes::WAKE_ACCOUNT_MISSING,
-        _ => error_codes::WAKE_CREDENTIALS_UNAVAILABLE,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

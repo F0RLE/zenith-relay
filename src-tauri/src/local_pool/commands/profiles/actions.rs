@@ -122,11 +122,15 @@ pub async fn launch_codex_source(
         )
         .into());
     }
+    let catalog = match catalog {
+        Some(catalog) => Some(super::catalog::context_catalog(&state, &catalog).await?),
+        None => None,
+    };
     let sync_history =
         history_provider_changed(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let attach_result = (|| {
+    let attach_result = with_chatgpt_context(&state, &profile_dir, || {
         let history_backup = if sync_history {
             synchronize_history_for_command(
                 &state,
@@ -147,7 +151,7 @@ pub async fn launch_codex_source(
         .map(|binding| ProfileActivation { binding })
         .map_err(Into::into);
         rollback_history_on_error(&state, history_backup.as_deref(), profile_attach_result)
-    })();
+    });
     let activation_result =
         restart_codex_after_failed_change(stopped, attach_result, launch_codex_with_profile);
     if activation_result.is_ok() {

@@ -91,6 +91,19 @@ pub(crate) async fn build_local_runtime_state(
         &inputs.gateway.model_display_order,
         &model_metadata,
     );
+    if let Some(runtime) = runtime.as_ref() {
+        runtime.set_chatgpt_context_policy(inputs.gateway.chatgpt_context_policy);
+        runtime.set_chatgpt_context_prices(
+            models
+                .iter()
+                .filter_map(|model| {
+                    model
+                        .token_price
+                        .map(|price| (zenith_relay_core::model_id_key(&model.id), price))
+                })
+                .collect(),
+        );
+    }
     zenith_relay_core::protocol::apply_member_model_display_order(
         &mut source_summaries,
         &mut account_summaries,
@@ -133,6 +146,7 @@ pub(crate) async fn build_local_runtime_state(
         },
         gateway: GatewaySummary {
             tool_policy: inputs.gateway.tool_policy.clone(),
+            request_timezone: inputs.gateway.request_timezone.clone(),
             basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 inputs.gateway.pool_routing.as_ref(),
@@ -162,6 +176,7 @@ pub(crate) async fn build_local_runtime_state(
             ),
             codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
             codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
+            chatgpt_context_policy: inputs.gateway.chatgpt_context_policy,
             chatgpt_retry_until_available: inputs.gateway.chatgpt_retry_until_available,
             block_degraded_routes_enabled: inputs.gateway.block_degraded_routes_enabled,
             routing_order,

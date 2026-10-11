@@ -194,10 +194,6 @@ impl PreparedAccountCredentials {
     pub(crate) fn provider_account_id(&self) -> &str {
         &self.provider_account_id
     }
-
-    pub(crate) fn proxy(&self) -> Option<&ProxyConfig> {
-        self.proxy.as_ref()
-    }
 }
 
 impl fmt::Debug for PreparedAccountCredentials {

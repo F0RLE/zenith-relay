@@ -100,7 +100,13 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
                 .map_err(|error| {
                     LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
                 })?
-                .is_some()
+                .is_some_and(|credential| {
+                    crate::local_pool::accounts::records::validate_account_plan(
+                        &credential,
+                        account.account.subscription.plan_type.as_deref(),
+                    )
+                    .is_ok()
+                })
         {
             return Ok(true);
         }

@@ -13,6 +13,7 @@ pub use ownership::{
 pub(crate) use participant::synthetic_responses_source;
 pub use participant::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord,
+    TrashedLocalAccount,
 };
 pub use snapshot::{LocalPoolSnapshot, RuntimeTarget};
 
@@ -66,5 +67,28 @@ mod tests {
         settings.chatgpt_interface_quota_reserve_basis_points =
             MAX_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS;
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn context_defaults_use_client_window_and_automatic_compaction() {
+        use zenith_relay_core::catalog::context_policy::{
+            ApplicationContextPolicy, CompactionPolicy, ContextWindowPolicy,
+        };
+        let expected = ApplicationContextPolicy::Configured {
+            context: ContextWindowPolicy::Client,
+            compaction: CompactionPolicy::Early,
+        };
+        let settings = GatewaySettings::default();
+        assert_eq!(settings.chatgpt_context_policy, expected);
+        let mut legacy = serde_json::to_value(settings).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("chatgptContextPolicy");
+        let restored: GatewaySettings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.chatgpt_context_policy, expected);
+        let mut invalid = restored;
+        invalid.chatgpt_context_policy = ApplicationContextPolicy::Custom { tokens: 1 };
+        assert!(invalid.validate().is_err());
     }
 }

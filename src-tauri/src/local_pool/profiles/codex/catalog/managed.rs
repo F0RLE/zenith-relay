@@ -206,6 +206,19 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
         collect_native_catalog_template(codex_home, user_catalog_path, current_managed_catalog)?;
     let template = template.unwrap_or_default();
     let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
+    let policy_document: Value =
+        serde_json::from_str(relay_catalog_json).map_err(LocalPoolError::invalid_state)?;
+    let context_policy: zenith_relay_core::catalog::context_policy::ApplicationContextPolicy =
+        policy_document
+            .get("relay_context_policy")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(LocalPoolError::invalid_state)?
+            .unwrap_or_default();
+    context_policy
+        .validate()
+        .map_err(LocalPoolError::invalid_state)?;
     // The managed provider is the Relay endpoint, so the catalog must contain
     // only models that its live pool exposes. Native/user catalog rows remain
     // untouched in their original profile and only supply a compatible template.
@@ -310,6 +323,25 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
         }
         if relay_managed {
             add_installed_codex_ultra(&mut catalog_entry, &model_id, bundled);
+        }
+        if let Some(limits) = policy_document
+            .get("relay_context_limits")
+            .and_then(|limits| limits.get(zenith_relay_core::model_id_key(&model_id)))
+        {
+            let price = limits
+                .get("price")
+                .filter(|price| !price.is_null())
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(LocalPoolError::invalid_state)?;
+            context_policy.apply(
+                &mut catalog_entry,
+                limits.get("context").and_then(Value::as_u64),
+                limits.get("input").and_then(Value::as_u64),
+                limits.get("output").and_then(Value::as_u64),
+                price,
+            );
         }
         if let Some(slug) = model_slug(&catalog_entry) {
             if seen.insert(slug.to_ascii_lowercase()) {

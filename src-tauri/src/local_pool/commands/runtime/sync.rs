@@ -106,9 +106,17 @@ fn sync_runtime_account_state_with_live_block(
     observed_at_ms: u64,
     preserve_live_block: bool,
 ) -> bool {
+    if !runtime.update_account_subscription_plan(
+        &account.account.id,
+        account.account.subscription.plan_type.as_deref(),
+    ) {
+        return false;
+    }
     let operational = runtime_account_operational_state(&account.account, observed_at_ms);
     let enabled =
-        account_candidate_enabled(account.account.enabled, operational.routing_block_reason);
+        account_candidate_enabled(account.account.enabled, operational.routing_block_reason)
+            && crate::local_pool::accounts::records::can_account_join_pool(account)
+                .unwrap_or(false);
     if preserve_live_block {
         runtime.sync_account_refresh_availability_with_quota(
             &account.account.id,

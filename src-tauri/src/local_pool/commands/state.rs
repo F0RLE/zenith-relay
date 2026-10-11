@@ -108,6 +108,7 @@ mod parity_tests {
             },
             gateway: GatewaySummary {
                 tool_policy: Default::default(),
+                request_timezone: Default::default(),
                 basis_points_enabled: false,
                 pool_routing: None,
                 running: false,
@@ -127,6 +128,7 @@ mod parity_tests {
                 chatgpt_interface_quota_reserve_basis_points: Some(100),
                 codex_background_tasks_enabled: true,
                 codex_websockets_enabled: true,
+                chatgpt_context_policy: Default::default(),
                 chatgpt_retry_until_available: false,
                 block_degraded_routes_enabled: true,
                 routing_order: Vec::new(),

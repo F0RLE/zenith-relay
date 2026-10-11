@@ -93,6 +93,20 @@ pub(super) fn local_account_summary(
             .is_some_and(AccountCredentialFacts::basis_points_available),
         basis_points_enabled: credentials
             .is_some_and(AccountCredentialFacts::basis_points_available),
+        credential_diagnostics: credentials
+            .is_some_and(|facts| {
+                facts.oauth_client_kind
+                    == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
+            })
+            .then(|| {
+                zenith_relay_core::protocol::CredentialDiagnostics::from_local(
+                    account_record.account.auth_state,
+                    secret_available,
+                    credentials.is_some_and(|facts| facts.has_refresh_token),
+                    credentials.and_then(|facts| facts.expires_at_ms),
+                    now_ms,
+                )
+            }),
         enabled: account_record.account.enabled,
         in_pool: account_record.account.in_pool,
         draining: account_record.account.draining,

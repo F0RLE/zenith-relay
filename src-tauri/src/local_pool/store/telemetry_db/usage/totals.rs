@@ -139,6 +139,7 @@ pub(in crate::local_pool::store::telemetry_db) fn is_unfiltered_all_time(
         && query.success.is_none()
         && query.error_category.is_none()
         && query.request_id_query.is_none()
+        && query.request_id.is_none()
 }
 
 pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
@@ -195,6 +196,10 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
     if let Some(request_id_query) = query.request_id_query.as_deref() {
         clauses.push("request_id LIKE ? ESCAPE '\\'");
         query_parameters.push(SqlValue::Text(sql_like_contains_pattern(request_id_query)));
+    }
+    if let Some(request_id) = query.request_id.as_deref() {
+        clauses.push("request_id = ?");
+        query_parameters.push(SqlValue::Text(request_id.to_string()));
     }
     let sql = if clauses.is_empty() {
         String::new()

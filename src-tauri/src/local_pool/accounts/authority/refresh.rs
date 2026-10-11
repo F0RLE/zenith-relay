@@ -128,7 +128,7 @@ where
                 error_codes::REFRESH_TOKEN_MISSING,
             )
         })?;
-        let refreshed = self
+        let refresh_result = self
             .client
             .refresh(
                 local_account_id,
@@ -137,7 +137,30 @@ where
                 now_ms,
                 stored_credentials.oauth_client_kind(),
             )
-            .await?;
+            .await;
+        let current = self.credentials.require(local_account_id).map_err(|_| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                error_codes::CREDENTIAL_LOAD_FAILED,
+            )
+        })?;
+        if !current.matches_snapshot(&stored_credentials) {
+            // A newer authorization wins even if the old grant failed. Never
+            // turn a concurrent login into a persisted reauthentication state.
+            if current.oauth_client_kind() == stored_credentials.oauth_client_kind()
+                && current.provider_account_id() == stored_credentials.provider_account_id()
+                && current.provider_user_id() == stored_credentials.provider_user_id()
+                && !current.is_agent_identity()
+                && current.is_access_usable(now_ms, self.refresh_skew_ms)
+            {
+                return current.to_token_refresh().map_err(|_| superseded());
+            }
+            return Err(superseded());
+        }
+        if revision.is_some_and(|revision| revision.guard().is_none()) {
+            return Err(superseded());
+        }
+        let refreshed = refresh_result?;
         let updated = stored_credentials
             .apply_refresh(refreshed, now_ms)
             .map_err(|_| {

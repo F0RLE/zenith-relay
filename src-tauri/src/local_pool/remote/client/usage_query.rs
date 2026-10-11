@@ -33,6 +33,7 @@ pub(super) fn usage_path(query: &UsageQuery) -> String {
         "requestIdQuery",
         query.request_id_query.as_deref(),
     );
+    append_text(&mut parameters, "requestId", query.request_id.as_deref());
     if let Some(include_events) = query.include_events {
         parameters.append_pair(
             "includeEvents",

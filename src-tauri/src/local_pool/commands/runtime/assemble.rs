@@ -57,7 +57,22 @@ pub(in crate::local_pool) async fn runtime_from_store(
     // still select only the protocol they actually use at the gateway edge.
     let (mut pool_source_ids, mut pool_account_ids) =
         pool::local_pool_member_ids(&source_records, &account_records)?;
-    pool_account_ids.retain(|account_id| !pending_move_ids.contains(account_id));
+    pool_account_ids.retain(|account_id| {
+        !pending_move_ids.contains(account_id)
+            && account_credentials
+                .get(account_id)
+                .and_then(Option::as_ref)
+                .is_some_and(|credential| {
+                    crate::local_pool::accounts::records::validate_account_plan(
+                        credential,
+                        account_records
+                            .iter()
+                            .find(|account| &account.account.id == account_id)
+                            .and_then(|account| account.account.subscription.plan_type.as_deref()),
+                    )
+                    .is_ok()
+                })
+    });
     let (sources, source_ids) = admit_runtime_sources(state, source_records, &source_api_keys);
     // Key scopes must reference only source executors admitted above. Keeping
     // a stale id for a malformed or credential-less source can make the core
@@ -120,6 +135,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     };
     let options = GatewayRuntimeOptions {
         tool_policy: settings.tool_policy,
+        request_timezone: settings.request_timezone,
         max_retry_candidates: usize::from(settings.max_retry_candidates),
         pool_routing: Some(pool_routing),
         hidden_models: settings.hidden_models,
@@ -158,6 +174,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
+    runtime.set_chatgpt_context_policy(settings.chatgpt_context_policy);
     runtime.set_route_recovery_enabled(settings.chatgpt_retry_until_available);
     runtime.set_block_degraded_routes_enabled(settings.block_degraded_routes_enabled);
     runtime
@@ -322,7 +339,11 @@ async fn admit_runtime_account(
             && account.remote_location.is_none()
             && !pending_move_ids.contains(&account_id),
         operational.routing_block_reason,
-    );
+    ) && crate::local_pool::accounts::records::validate_account_plan(
+        secret,
+        account.account.subscription.plan_type.as_deref(),
+    )
+    .is_ok();
     let refresh_proxy = secret
         .has_oauth()
         .then(|| (account_id.clone(), proxy.clone()));

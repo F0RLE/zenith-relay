@@ -21,6 +21,7 @@ type CommandResult<T> = std::result::Result<T, CommandError>;
 
 mod cleanup;
 mod prepare;
+pub(crate) mod trash;
 pub(in crate::local_pool::accounts) use prepare::ensure_accounts_exist;
 use prepare::{
     acquire_delete_credential_guards, delete_local_account_inner,

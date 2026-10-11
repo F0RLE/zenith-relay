@@ -120,6 +120,20 @@ impl DesktopState {
                 }
             });
         let mut store = LocalPoolStore::open(root.clone())?;
+        let mut accounts = store.accounts().to_vec();
+        let mut membership_changed = false;
+        for account in &mut accounts {
+            if account.account.in_pool
+                && super::accounts::records::can_account_join_pool(account)
+                    .is_ok_and(|eligible| !eligible)
+            {
+                account.account.in_pool = false;
+                membership_changed = true;
+            }
+        }
+        if membership_changed {
+            store.replace_accounts_and_keys(accounts, store.keys().to_vec())?;
+        }
         let telemetry = store.database();
         let pricing = Arc::new(
             PricingCatalogLoader::open(paths.pricing_catalog_file())

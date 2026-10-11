@@ -108,6 +108,13 @@ pub struct LocalAccountRecord {
     pub last_client_login_redirect_at_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashedLocalAccount {
+    pub record: LocalAccountRecord,
+    pub trashed_at_ms: u64,
+}
+
 impl LocalAccountRecord {
     /// Compares the operational record while ignoring Codex client-login
     /// observations. Those can change during a credential transaction and do

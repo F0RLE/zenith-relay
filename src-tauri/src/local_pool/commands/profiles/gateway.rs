@@ -87,48 +87,51 @@ pub async fn attach_codex_to_local_gateway(
     )?;
     let base_url = format!("http://127.0.0.1:{port}/v1");
     let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
+    let catalog = super::catalog::context_catalog(&state, &catalog).await?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let activation_result: Result<ProfileActivation, CommandError> = async {
         let bound_oauth =
             resolve_gateway_oauth_binding(&state, binding_request, &profile_dir).await?;
-        let history_backup = if sync_history {
-            synchronize_history_for_command(
-                &state,
-                &profile_dir,
-                CodexHistoryProvider::LocalGateway,
-            )?
-        } else {
-            None
-        };
-        let attached: Result<_, CommandError> = match bound_oauth.as_ref() {
-            Some((account_id, prepared)) => codex::attach_with_oauth_and_options(
-                &profile_dir,
-                &state.profile_backup_root(),
-                &key_id,
-                &base_url,
-                &secret,
-                codex::OAuthAttachOptions {
-                    catalog_json: &catalog,
-                    bound_oauth: codex::BoundOAuthProfile {
-                        account_id,
-                        tokens: prepared.tokens(),
-                        provider_account_id: prepared.provider_account_id(),
+        let binding = with_chatgpt_context(&state, &profile_dir, || {
+            let history_backup = if sync_history {
+                synchronize_history_for_command(
+                    &state,
+                    &profile_dir,
+                    CodexHistoryProvider::LocalGateway,
+                )?
+            } else {
+                None
+            };
+            let attached: Result<_, CommandError> = match bound_oauth.as_ref() {
+                Some((account_id, prepared)) => codex::attach_with_oauth_and_options(
+                    &profile_dir,
+                    &state.profile_backup_root(),
+                    &key_id,
+                    &base_url,
+                    &secret,
+                    codex::OAuthAttachOptions {
+                        catalog_json: &catalog,
+                        bound_oauth: codex::BoundOAuthProfile {
+                            account_id,
+                            tokens: prepared.tokens(),
+                            provider_account_id: prepared.provider_account_id(),
+                        },
+                        supports_websockets,
                     },
+                ),
+                None => codex::attach_with_catalog_and_websockets(
+                    &profile_dir,
+                    &state.profile_backup_root(),
+                    &key_id,
+                    &base_url,
+                    &secret,
+                    &catalog,
                     supports_websockets,
-                },
-            ),
-            None => codex::attach_with_catalog_and_websockets(
-                &profile_dir,
-                &state.profile_backup_root(),
-                &key_id,
-                &base_url,
-                &secret,
-                &catalog,
-                supports_websockets,
-            ),
-        }
-        .map_err(Into::into);
-        let binding = rollback_history_on_error(&state, history_backup.as_deref(), attached)?;
+                ),
+            }
+            .map_err(Into::into);
+            rollback_history_on_error(&state, history_backup.as_deref(), attached)
+        })?;
         set_runtime_pool_interface_reserve(
             &state,
             binding.bound_oauth_account_id.as_deref(),

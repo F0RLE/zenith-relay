@@ -205,6 +205,8 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
             catalog
         }
     };
+    let catalog = context_catalog(state, &catalog).await?;
+    let policy = state.store()?.gateway().chatgpt_context_policy;
     let previous_transport = supports_websockets
         .map(|enabled| {
             codex::set_local_gateway_websockets_with_previous(
@@ -216,9 +218,24 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
         })
         .transpose()?
         .flatten();
+    let context_change = match codex::sync_context_policy(&profile_dir, &backup_root, policy) {
+        Ok(change) => change,
+        Err(error) => {
+            if let Some(previous_transport_config) = previous_transport {
+                codex::set_local_gateway_websockets_with_previous(
+                    &profile_dir,
+                    &backup_root,
+                    previous_transport_config,
+                    Some(&binding.credential_id),
+                )?;
+            }
+            return Err(error);
+        }
+    };
     if let Err(error) =
         codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog, Some(&binding))
     {
+        let context_rollback = context_change.rollback();
         if let Some(previous_transport_config) = previous_transport {
             codex::set_local_gateway_websockets_with_previous(
                 &profile_dir,
@@ -227,9 +244,54 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
                 Some(&binding.credential_id),
             )?;
         }
-        return Err(error);
+        return Err(context_rollback.err().unwrap_or(error));
     }
     Ok(CodexCatalogRefreshStatus::Updated)
+}
+
+pub(super) async fn context_catalog(state: &DesktopState, catalog: &str) -> LocalResult<String> {
+    use serde_json::{json, Value};
+    let policy = state.store()?.gateway().chatgpt_context_policy;
+    policy.validate().map_err(LocalPoolError::invalid_state)?;
+    let mut document: Value =
+        serde_json::from_str(catalog).map_err(LocalPoolError::invalid_state)?;
+    let snapshot = super::super::state::build_local_runtime_state(state)
+        .await
+        .map_err(|error| LocalPoolError::new(error.code, error.message))?;
+    let metadata = state.model_metadata_catalog();
+    let pricing = state.pricing_catalog();
+    let mut limits = serde_json::Map::new();
+    if let Some(models) = document.get("models").and_then(Value::as_array) {
+        for row in models {
+            let Some(slug) = row.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let model = zenith_relay_core::decode_codex_model_alias(slug)
+                .unwrap_or_else(|| slug.to_owned());
+            let reference = metadata.resolve(&model);
+            let summary = snapshot
+                .gateway
+                .models
+                .iter()
+                .find(|summary| summary.id.eq_ignore_ascii_case(&model));
+            let quote = summary.and_then(|summary| summary.token_price).or_else(|| {
+                reference
+                    .and_then(|reference| pricing.official_token_price(&model, &reference.provider))
+            });
+            limits.insert(
+                zenith_relay_core::model_id_key(&model),
+                json!({
+                    "context": row.get("max_context_window").and_then(Value::as_u64),
+                    "input": reference.and_then(|row| row.capabilities.input_limit),
+                    "output": reference.and_then(|row| row.capabilities.output_limit),
+                    "price": quote,
+                }),
+            );
+        }
+    }
+    document["relay_context_policy"] = json!(policy);
+    document["relay_context_limits"] = Value::Object(limits);
+    serde_json::to_string(&document).map_err(LocalPoolError::invalid_state)
 }
 
 pub(super) fn direct_source_response_models(

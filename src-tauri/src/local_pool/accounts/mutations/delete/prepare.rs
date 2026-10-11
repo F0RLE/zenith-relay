@@ -120,6 +120,23 @@ pub(super) async fn prepare_delete_local_account(
     state: &DesktopState,
     credentials: &CredentialStore<NativeSecretBackend>,
 ) -> LocalResult<PreparedAccountDelete> {
+    prepare_account_removal(account_id, state, credentials, true).await
+}
+
+pub(super) async fn prepare_trash_local_account(
+    account_id: &str,
+    state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
+) -> LocalResult<PreparedAccountDelete> {
+    prepare_account_removal(account_id, state, credentials, false).await
+}
+
+async fn prepare_account_removal(
+    account_id: &str,
+    state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
+    delete_credentials: bool,
+) -> LocalResult<PreparedAccountDelete> {
     let old_accounts = state.store()?.accounts().to_vec();
     if !old_accounts
         .iter()
@@ -186,10 +203,14 @@ pub(super) async fn prepare_delete_local_account(
             .await;
         }
     };
-    if let Err(error) = credentials
-        .delete(account_id)
-        .map_err(credential_local_error)
-    {
+    let credential_result = if delete_credentials {
+        credentials
+            .delete(account_id)
+            .map_err(credential_local_error)
+    } else {
+        Ok(())
+    };
+    if let Err(error) = credential_result {
         return rollback_failed_delete_step(
             state,
             credentials,

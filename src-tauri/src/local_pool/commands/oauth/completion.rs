@@ -149,6 +149,7 @@ async fn prepare_oauth_completion(
         credentials = inherit_session_material(credentials, previous_credentials)?;
     }
     credentials = with_sign_in_proxy(credentials, sign_in_proxy_url.as_deref())?;
+    crate::local_pool::accounts::records::validate_account_plan(&credentials, None)?;
     let proxy = effective_proxy_config(&settings, &credentials)?;
     credentials = register_agent_identity_if_missing(
         credentials,
@@ -160,36 +161,13 @@ async fn prepare_oauth_completion(
     let previous_models = existing
         .map(|account| account.effective_models().to_vec())
         .unwrap_or_default();
-    let (models, model_issue) = discover_sign_in_models(
-        proxy.as_ref(),
-        &credentials,
-        &checkpoint.provider_account_id,
-        now_ms,
-        previous_models,
-    )
-    .await?;
-    crate::diagnostics::breadcrumb(
-        "oauth",
-        "initial_probes_complete",
-        &[
-            ("login", login_hash),
-            ("models_found", models.len().to_string()),
-            ("model_issue", model_issue.is_some().to_string()),
-        ],
-    );
     let mut account_record = new_account_record(
         &credentials,
         AccountAuthMode::OAuth,
-        models,
+        previous_models.clone(),
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
-    if model_issue.is_none()
-        && (!account_record.models.is_empty()
-            || credentials.oauth_client_kind() == OAuthClientKind::ExcelBps)
-    {
-        account_record.discovered_models = Some(account_record.models.clone());
-    }
     if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
         account_record.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -212,6 +190,36 @@ async fn prepare_oauth_completion(
         std::time::Duration::from_secs(settings.quota_request_timeout_seconds),
     )
     .await;
+    crate::local_pool::accounts::records::validate_account_plan(
+        &credentials,
+        account_record.account.subscription.plan_type.as_deref(),
+    )?;
+    let (models, model_issue) = discover_sign_in_models(
+        proxy.as_ref(),
+        &credentials,
+        &checkpoint.provider_account_id,
+        account_record.account.subscription.plan_type.as_deref(),
+        now_ms,
+        previous_models,
+    )
+    .await?;
+    crate::diagnostics::breadcrumb(
+        "oauth",
+        "initial_probes_complete",
+        &[
+            ("login", login_hash),
+            ("models_found", models.len().to_string()),
+            ("model_issue", model_issue.is_some().to_string()),
+        ],
+    );
+    if existing.is_none() {
+        account_record.models = models.clone();
+    }
+    if model_issue.is_none()
+        && (!models.is_empty() || credentials.oauth_client_kind() == OAuthClientKind::ExcelBps)
+    {
+        account_record.discovered_models = Some(models);
+    }
     if let Some(issue) = model_issue {
         apply_initial_model_issue(&mut account_record, issue);
     }
@@ -277,6 +285,7 @@ async fn discover_sign_in_models(
     proxy: Option<&ProxyConfig>,
     credentials: &StoredCodexCredentials,
     provider_account_id: &str,
+    plan_type: Option<&str>,
     now_ms: u64,
     previous_models: Vec<String>,
 ) -> LocalResult<(Vec<String>, Option<InitialModelIssue>)> {
@@ -284,6 +293,7 @@ async fn discover_sign_in_models(
     match AccountModelsClient::new_with_proxy(proxy) {
         Ok(client) => match client
             .with_oauth_client_kind(credentials.oauth_client_kind())
+            .with_subscription_plan_type(plan_type.or(credentials.plan_type()))
             .discover_authorized(
                 credentials
                     .authorization(now_ms)
@@ -433,6 +443,10 @@ async fn commit_oauth_completion(
     if let Some(previous_account_snapshot) = commit_previous_account.as_ref() {
         preserve_existing_settings(&mut account_record, previous_account_snapshot);
     }
+    crate::local_pool::accounts::records::validate_account_plan(
+        &committed_credentials,
+        account_record.account.subscription.plan_type.as_deref(),
+    )?;
     account_record.account.token_generation = committed_credentials.generation();
     account_record.account.token_updated_at_ms = Some(committed_credentials.issued_at_ms());
     let authority_tokens = committed_credentials

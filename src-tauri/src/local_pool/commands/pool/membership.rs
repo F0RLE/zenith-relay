@@ -49,6 +49,12 @@ pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
         .into());
     }
     if input.in_pool {
+        for account in old_accounts
+            .iter()
+            .filter(|account| account_ids.contains(&account.account.id))
+        {
+            crate::local_pool::accounts::records::require_pool_account(account)?;
+        }
         for source in old_sources
             .iter()
             .filter(|source| source_ids.contains(&source.id))

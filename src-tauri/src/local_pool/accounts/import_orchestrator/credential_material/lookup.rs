@@ -19,6 +19,16 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     proxy: Option<&ProxyConfig>,
     request_timeout_seconds: u64,
 ) -> ItemResult<ImportedCredentialMaterial> {
+    material
+        .oauth_client_kind
+        .validate_plan(
+            material.plan_type.as_deref(),
+            material.id_token.as_deref(),
+            Some(&material.access_token),
+        )
+        .map_err(|message| {
+            ImportItemError::new(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+        })?;
     if material.access_token.is_empty() {
         return Ok(material);
     }
@@ -35,7 +45,21 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     )
     .await
     {
-        Ok(account_id) => material.provider_account_id = Some(account_id),
+        Ok((account_id, plan)) => {
+            material
+                .oauth_client_kind
+                .validate_plan(plan.as_deref(), None, None)
+                .map_err(|message| {
+                    ImportItemError::new(
+                        error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
+                        message,
+                    )
+                })?;
+            material.provider_account_id = Some(account_id);
+            if plan.is_some() {
+                material.plan_type = plan;
+            }
+        }
         Err(error)
             if error.code != error_codes::ACCOUNT_IDENTITY_MISMATCH
                 && material
@@ -54,7 +78,9 @@ pub(in crate::local_pool::accounts) async fn lookup_import_account_id(
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
 ) -> ItemResult<String> {
-    lookup_import_account_id_with_hints(endpoint, access_token, &[], proxy, timeout).await
+    lookup_import_account_id_with_hints(endpoint, access_token, &[], proxy, timeout)
+        .await
+        .map(|(account_id, _)| account_id)
 }
 
 async fn lookup_import_account_id_with_hints(
@@ -63,7 +89,7 @@ async fn lookup_import_account_id_with_hints(
     claimed_account_ids: &[String],
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
-) -> ItemResult<String> {
+) -> ItemResult<(String, Option<String>)> {
     let authorization = crate::local_pool::accounts::credentials::bearer_authorization(
         access_token,
     )
@@ -145,19 +171,27 @@ async fn lookup_import_account_id_with_hints(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    resolve_account_check_account_id(&profile_payload, &claimed_account_ids).map_err(|error| {
-        let (code, message) = match error {
-            AccountCheckIdentityError::Missing => (
-                error_codes::PROVIDER_ACCOUNT_ID_MISSING,
-                "ChatGPT account lookup did not return an account id",
-            ),
-            AccountCheckIdentityError::Mismatch => (
-                error_codes::ACCOUNT_IDENTITY_MISMATCH,
-                "imported account identity does not match the authenticated account",
-            ),
-        };
-        ImportItemError::new(code, message)
-    })
+    let account_id = resolve_account_check_account_id(&profile_payload, &claimed_account_ids)
+        .map_err(|error| {
+            let (code, message) = match error {
+                AccountCheckIdentityError::Missing => (
+                    error_codes::PROVIDER_ACCOUNT_ID_MISSING,
+                    "ChatGPT account lookup did not return an account id",
+                ),
+                AccountCheckIdentityError::Mismatch => (
+                    error_codes::ACCOUNT_IDENTITY_MISMATCH,
+                    "imported account identity does not match the authenticated account",
+                ),
+            };
+            ImportItemError::new(code, message)
+        })?;
+    let plan = zenith_relay_core::providers::chatgpt::parse_account_check_subscription(
+        &profile_payload,
+        &account_id,
+    )
+    .ok()
+    .and_then(|metadata| metadata.plan_type);
+    Ok((account_id, plan))
 }
 
 pub(super) fn account_id_hints(

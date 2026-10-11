@@ -124,6 +124,12 @@ fn resolve_local_preset_references(
         let credential = credentials.require(&account.account.id).map_err(|error| {
             LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
         })?;
+        if rule.in_pool {
+            crate::local_pool::accounts::records::validate_account_plan(
+                &credential,
+                account.account.subscription.plan_type.as_deref(),
+            )?;
+        }
         let proxy_id = credential
             .proxy_url()
             .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok());

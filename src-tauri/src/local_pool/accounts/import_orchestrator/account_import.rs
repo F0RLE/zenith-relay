@@ -96,10 +96,26 @@ pub(super) async fn import_account_item(
         provider_account_id,
         identity_is_registered,
     } = reconciled;
+    records::validate_account_plan(&credentials, context.plan.as_deref())
+        .and_then(|_| {
+            records::validate_account_plan(
+                &credentials,
+                existing_account
+                    .as_ref()
+                    .and_then(|account| account.account.subscription.plan_type.as_deref()),
+            )
+        })
+        .map_err(|error| {
+            ImportItemError::new(
+                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
+                &error.message,
+            )
+        })?;
     let discovered_models = if discover_models && identity_is_registered {
         let client = AccountModelsClient::new_with_proxy(proxy.as_ref())
             .map_err(model_item_error)?
-            .with_oauth_client_kind(credentials.oauth_client_kind());
+            .with_oauth_client_kind(credentials.oauth_client_kind())
+            .with_subscription_plan_type(credentials.plan_type());
         let client_version =
             zenith_relay_core::providers::chatgpt::configured_codex_client_version();
         let models = client
@@ -194,6 +210,16 @@ pub(super) async fn import_account_item(
     } else {
         AccountQuotaOutcome::Skipped
     };
+    records::validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )
+    .map_err(|error| {
+        ImportItemError::new(
+            error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED,
+            &error.message,
+        )
+    })?;
     crate::diagnostics::breadcrumb(
         "account-import",
         "persist_ready",

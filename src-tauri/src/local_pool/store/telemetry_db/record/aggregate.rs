@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Default)]
-pub(super) struct UsageAggregate {
+pub(in crate::local_pool::store::telemetry_db) struct UsageAggregate {
     candidate_kind: String,
     candidate_id: String,
     model: String,
@@ -23,6 +23,22 @@ pub(super) struct UsageAggregate {
 }
 
 impl UsageAggregate {
+    pub(in crate::local_pool::store::telemetry_db) fn with_context_band(
+        mut self,
+        band: &str,
+    ) -> Self {
+        self.context_band = band.to_string();
+        self
+    }
+
+    pub(in crate::local_pool::store::telemetry_db) fn with_price_class(
+        mut self,
+        class: &str,
+    ) -> Self {
+        self.price_class = class.to_string();
+        self
+    }
+
     pub(super) fn from_event(event: &UsageEvent) -> Self {
         let cache_write_ttl = event
             .cache_write_ttl
@@ -53,7 +69,10 @@ impl UsageAggregate {
         )
     }
 
-    pub(super) fn from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Self> {
+    pub(in crate::local_pool::store::telemetry_db) fn from_row(
+        row: &rusqlite::Row<'_>,
+        offset: usize,
+    ) -> rusqlite::Result<Self> {
         let candidate_kind: String = row.get(offset)?;
         let candidate_id: String = row.get(offset + 1)?;
         let model_id: String = row.get(offset + 2)?;
@@ -97,21 +116,15 @@ impl UsageAggregate {
             candidate_kind: candidate_kind.to_string(),
             candidate_id: candidate_id.to_string(),
             model: model.to_string(),
-            price_class: match zenith_relay_core::usage::UsagePriceClass::from_observed(
+            price_class: zenith_relay_core::usage::UsagePriceClass::from_observed(
                 applied_service_tier,
-            ) {
-                zenith_relay_core::usage::UsagePriceClass::Flex => "flex",
-                zenith_relay_core::usage::UsagePriceClass::Priority => "priority",
-                zenith_relay_core::usage::UsagePriceClass::Standard => "standard",
-            }
+            )
+            .as_label()
             .to_string(),
-            context_band: match zenith_relay_core::usage::UsageContextBand::from_input_tokens(
+            context_band: zenith_relay_core::usage::UsageContextBand::from_input_tokens(
                 input_tokens,
-            ) {
-                zenith_relay_core::usage::UsageContextBand::Above272k => "above_272k",
-                zenith_relay_core::usage::UsageContextBand::Above200k => "above_200k",
-                zenith_relay_core::usage::UsageContextBand::Base => "base",
-            }
+            )
+            .as_label()
             .to_string(),
             input_tokens: input_tokens.map(sql_u64).unwrap_or_default(),
             input_samples: i64::from(input_tokens.is_some()),
@@ -135,7 +148,7 @@ impl UsageAggregate {
     }
 }
 
-pub(super) fn apply_aggregate_delta(
+pub(in crate::local_pool::store::telemetry_db) fn apply_aggregate_delta(
     transaction: &Transaction<'_>,
     aggregate: &UsageAggregate,
     multiplier: i64,

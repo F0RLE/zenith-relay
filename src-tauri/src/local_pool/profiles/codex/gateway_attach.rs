@@ -166,10 +166,14 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
     if account_backup_for_profile(codex_home, backup_root)?.is_some() {
-        account::restore_account_locked(codex_home, backup_root, &OsSecretBackend)?;
-        return Ok(());
+        let context_change =
+            context::sync_context_overrides_locked(codex_home, backup_root, false)?;
+        account::restore_account_locked(codex_home, backup_root, &OsSecretBackend)
+            .map(|_| ())
+            .map_err(|error| with_rollback(error, context_change.rollback_locked()))
+    } else {
+        local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
     }
-    local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
 }
 
 /// Updates the managed profile and returns the previous provider setting when

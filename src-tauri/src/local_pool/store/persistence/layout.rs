@@ -53,6 +53,7 @@ pub(super) fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
         gateway: read_legacy_json(&root.join("settings.json"))?,
         sources: read_legacy_json(&root.join("connections.json"))?,
         accounts: read_legacy_json(&root.join("accounts.json"))?,
+        account_trash: Vec::new(),
         keys: read_legacy_json(&root.join("pool-keys.json"))?,
         automations: read_legacy_json(&root.join("automations.json"))?,
         remote_target,

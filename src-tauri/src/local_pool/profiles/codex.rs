@@ -28,6 +28,10 @@ mod account;
 mod catalog;
 mod catalog_state;
 mod config;
+mod context;
+#[cfg(test)]
+pub(crate) use context::sync_context_overrides;
+pub(crate) use context::sync_context_policy;
 
 pub(super) use super::portable_path_value;
 mod local;

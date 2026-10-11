@@ -6,7 +6,7 @@ impl TelemetryDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io_error)?;
         }
-        let connection = Connection::open(path).map_err(db_error)?;
+        let mut connection = Connection::open(path).map_err(db_error)?;
         // This file is read by the usage UI while terminal requests append logs.
         // WAL avoids creating and deleting a rollback journal for every request;
         // FULL keeps the same crash durability for the shared local state.
@@ -123,6 +123,15 @@ impl TelemetryDb {
         }
         if version <= 30 {
             connection.execute_batch(MIGRATION_031).map_err(db_error)?;
+        }
+        if version <= 31 {
+            migrate_032(&mut connection)?;
+        }
+        if version <= 32 {
+            connection.execute_batch(MIGRATION_033).map_err(db_error)?;
+        }
+        if version <= 33 {
+            migrate_034(&mut connection)?;
         }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)

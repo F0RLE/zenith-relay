@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
+mod account_trash;
 mod refresh;
 mod rotation_upgrade;
 mod source_refresh;
@@ -34,11 +35,62 @@ fn temp_root() -> PathBuf {
 }
 
 #[test]
+fn automatic_compaction_upgrade_runs_once_and_preserves_custom_budgets() {
+    use zenith_relay_core::catalog::context_policy::{
+        ApplicationContextPolicy, CompactionPolicy, ContextWindowPolicy,
+    };
+    let root = temp_root();
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut gateway = store.gateway().clone();
+    gateway.chatgpt_context_defaults_version = 0;
+    gateway.chatgpt_context_policy = ApplicationContextPolicy::Configured {
+        context: ContextWindowPolicy::Custom { tokens: 500000 },
+        compaction: CompactionPolicy::Client,
+    };
+    store.replace_gateway(gateway).unwrap();
+    drop(store);
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(
+        store.gateway().chatgpt_context_policy,
+        ApplicationContextPolicy::Configured {
+            context: ContextWindowPolicy::Custom { tokens: 500000 },
+            compaction: CompactionPolicy::Early,
+        }
+    );
+    let mut gateway = store.gateway().clone();
+    gateway.chatgpt_context_policy = ApplicationContextPolicy::Configured {
+        context: ContextWindowPolicy::Extended,
+        compaction: CompactionPolicy::Client,
+    };
+    store.replace_gateway(gateway.clone()).unwrap();
+    drop(store);
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(
+        store.gateway().chatgpt_context_policy,
+        gateway.chatgpt_context_policy
+    );
+    gateway.chatgpt_context_defaults_version = 0;
+    gateway.chatgpt_context_policy = ApplicationContextPolicy::Configured {
+        context: ContextWindowPolicy::Short,
+        compaction: CompactionPolicy::Custom { tokens: 150000 },
+    };
+    store.replace_gateway(gateway.clone()).unwrap();
+    drop(store);
+    let store = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(
+        store.gateway().chatgpt_context_policy,
+        gateway.chatgpt_context_policy
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fresh_store_is_versioned_and_restart_safe() {
     let root = temp_root();
     let store = LocalPoolStore::open(root.clone()).unwrap();
     assert_eq!(store.gateway().port, 14998);
-    assert_eq!(store.database().state_count().unwrap(), 9);
+    assert_eq!(store.database().state_count().unwrap(), 10);
     assert!(root.join("data/database/relay.sqlite").exists());
     assert!(!root.join("data/metadata.json").exists());
     drop(store);
@@ -68,6 +120,7 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         },
     );
     store.replace_gateway(gateway).unwrap();
@@ -101,6 +154,7 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         })
     );
     drop(reopened);
@@ -341,6 +395,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
                     cache_write_5m_micro_usd_per_million: None,
                     cache_write_1h_micro_usd_per_million: None,
                     output_micro_usd_per_million: 2_000_000,
+                    ..Default::default()
                 },
             )]),
             last_used_at: None,
@@ -372,6 +427,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
         })
     );
     assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");

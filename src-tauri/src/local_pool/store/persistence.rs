@@ -2,13 +2,14 @@ use super::refresh::RefreshRevisions;
 use super::source_refresh::SourceRefreshRevisions;
 use super::{
     telemetry_db::TelemetryDb, LEGACY_STATE_FILES, MAX_LEGACY_JSON_BYTES, SQLITE_SIDECAR_SUFFIXES,
-    STATE_ACCOUNTS, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS, STATE_OWNERSHIP_OPERATION,
-    STATE_REFRESH_REVISIONS, STATE_REMOTE_TARGET, STATE_SOURCES, STATE_SOURCE_REVISIONS,
+    STATE_ACCOUNTS, STATE_ACCOUNT_TRASH, STATE_AUTOMATIONS, STATE_GATEWAY, STATE_KEYS,
+    STATE_OWNERSHIP_OPERATION, STATE_REFRESH_REVISIONS, STATE_REMOTE_TARGET, STATE_SOURCES,
+    STATE_SOURCE_REVISIONS,
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use crate::local_pool::models::{
     AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-    OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord,
+    OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord, TrashedLocalAccount,
 };
 use crate::storage_paths::StoragePaths;
 use serde::{de::DeserializeOwned, Serialize};
@@ -46,6 +47,7 @@ pub(super) struct PersistedState {
     pub(super) gateway: GatewaySettings,
     pub(super) sources: Vec<ProviderSourceRecord>,
     pub(super) accounts: Vec<LocalAccountRecord>,
+    pub(super) account_trash: Vec<TrashedLocalAccount>,
     pub(super) keys: Vec<LocalGatewayKeyRecord>,
     pub(super) automations: AutomationRecords,
     pub(super) remote_target: Option<RemoteTargetRecord>,
@@ -68,6 +70,8 @@ pub(super) fn load_or_initialize_state(
         gateway: load_state_from_entries(&state_entries, STATE_GATEWAY)?,
         sources: load_state_from_entries(&state_entries, STATE_SOURCES)?,
         accounts: load_state_from_entries(&state_entries, STATE_ACCOUNTS)?,
+        account_trash: load_optional_state_from_entries(&state_entries, STATE_ACCOUNT_TRASH)?
+            .unwrap_or_default(),
         keys: load_state_from_entries(&state_entries, STATE_KEYS)?,
         automations: load_state_from_entries(&state_entries, STATE_AUTOMATIONS)?,
         remote_target: load_optional_state_from_entries(&state_entries, STATE_REMOTE_TARGET)?,
@@ -88,6 +92,7 @@ pub(super) fn load_or_initialize_state(
 
 fn persist_state(database: &TelemetryDb, state: &PersistedState) -> Result<()> {
     database.replace_state_json(&[
+        (STATE_ACCOUNT_TRASH, serialize_state(&state.account_trash)?),
         (STATE_GATEWAY, serialize_state(&state.gateway)?),
         (STATE_SOURCES, serialize_state(&state.sources)?),
         (STATE_ACCOUNTS, serialize_state(&state.accounts)?),

@@ -1,3 +1,4 @@
+mod account_trash;
 mod persistence;
 mod records;
 mod refresh;
@@ -14,7 +15,8 @@ use crate::{
         error::{ErrorCode, LocalPoolError, Result},
         models::{
             AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-            OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord, MAX_LOCAL_ACCOUNTS,
+            OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord,
+            TrashedLocalAccount, MAX_LOCAL_ACCOUNTS,
         },
     },
     storage_paths::StoragePaths,
@@ -30,6 +32,7 @@ use zenith_relay_core::PoolRoutingPolicy;
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
 const STATE_ACCOUNTS: &str = "accounts";
+const STATE_ACCOUNT_TRASH: &str = "account_trash";
 const STATE_KEYS: &str = "keys";
 const STATE_AUTOMATIONS: &str = "automations";
 const STATE_REMOTE_TARGET: &str = "remote_target";
@@ -51,6 +54,7 @@ pub struct LocalPoolStore {
     gateway: GatewaySettings,
     sources: Vec<ProviderSourceRecord>,
     accounts: Vec<LocalAccountRecord>,
+    account_trash: Vec<TrashedLocalAccount>,
     keys: Vec<LocalGatewayKeyRecord>,
     automations: AutomationRecords,
     remote_target: Option<RemoteTargetRecord>,
@@ -71,6 +75,10 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        if gateway.upgrade_context_defaults() {
+            database
+                .replace_state_json(&[(STATE_GATEWAY, persistence::serialize_state(&gateway)?)])?;
+        }
         let mut sources = state.sources;
         for source in &mut sources {
             source.normalize();
@@ -79,6 +87,7 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let mut accounts = state.accounts;
+        account_trash::validate_inventory(&accounts, &state.account_trash)?;
         upgrade_saved_gateway(&database, &mut gateway, &sources, &accounts)?;
 
         let mut automations = state.automations;
@@ -158,6 +167,7 @@ impl LocalPoolStore {
             gateway,
             sources,
             accounts,
+            account_trash: state.account_trash,
             keys: state.keys,
             automations,
             remote_target: state.remote_target,

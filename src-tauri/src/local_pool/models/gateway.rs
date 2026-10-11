@@ -19,6 +19,8 @@ pub enum BindScope {
 pub struct GatewaySettings {
     #[serde(default)]
     pub tool_policy: zenith_relay_core::ToolPolicy,
+    #[serde(default)]
+    pub request_timezone: zenith_relay_core::RequestTimezonePolicy,
     /// Legacy preference, ignored. The OAuth client determines the transport.
     #[serde(default, skip_serializing, skip_deserializing)]
     pub basis_points_enabled: bool,
@@ -46,6 +48,11 @@ pub struct GatewaySettings {
     pub codex_background_tasks_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
+    #[serde(default = "default_chatgpt_context_policy")]
+    pub chatgpt_context_policy:
+        zenith_relay_core::catalog::context_policy::ApplicationContextPolicy,
+    #[serde(default)]
+    pub chatgpt_context_defaults_version: u8,
     /// Legacy persisted key for API text-route recovery, including non-ChatGPT
     /// clients. Retained so existing local settings survive upgrades.
     #[serde(default)]
@@ -76,6 +83,7 @@ impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
             tool_policy: Default::default(),
+            request_timezone: Default::default(),
             basis_points_enabled: false,
             enabled: false,
             bind_scope: BindScope::Localhost,
@@ -92,6 +100,8 @@ impl Default for GatewaySettings {
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             codex_background_tasks_enabled: true,
             codex_websockets_enabled: true,
+            chatgpt_context_policy: default_chatgpt_context_policy(),
+            chatgpt_context_defaults_version: 1,
             chatgpt_retry_until_available: false,
             block_degraded_routes_enabled: true,
             catalog_refresh_error: None,
@@ -106,6 +116,29 @@ impl Default for GatewaySettings {
 }
 
 impl GatewaySettings {
+    /// Upgrade the old application-default compaction once; later explicit choices survive.
+    pub(crate) fn upgrade_context_defaults(&mut self) -> bool {
+        use zenith_relay_core::catalog::context_policy::{
+            ApplicationContextPolicy, CompactionPolicy,
+        };
+        if self.chatgpt_context_defaults_version >= 1 {
+            return false;
+        }
+        self.chatgpt_context_policy = match self.chatgpt_context_policy {
+            ApplicationContextPolicy::Client => default_chatgpt_context_policy(),
+            ApplicationContextPolicy::Configured {
+                context,
+                compaction: CompactionPolicy::Client,
+            } => ApplicationContextPolicy::Configured {
+                context,
+                compaction: CompactionPolicy::Early,
+            },
+            policy => policy,
+        };
+        self.chatgpt_context_defaults_version = 1;
+        true
+    }
+
     pub fn pool_routing_for(
         &self,
         sources: &[ProviderSourceRecord],
@@ -137,6 +170,8 @@ impl GatewaySettings {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.request_timezone.validate()?;
+        self.chatgpt_context_policy.validate()?;
         if self.port < 1024 {
             return Err("gateway port must be between 1024 and 65535");
         }
@@ -176,6 +211,17 @@ impl GatewaySettings {
             return Err("model display order is invalid");
         }
         Ok(())
+    }
+}
+
+fn default_chatgpt_context_policy(
+) -> zenith_relay_core::catalog::context_policy::ApplicationContextPolicy {
+    use zenith_relay_core::catalog::context_policy::{
+        ApplicationContextPolicy, CompactionPolicy, ContextWindowPolicy,
+    };
+    ApplicationContextPolicy::Configured {
+        context: ContextWindowPolicy::Client,
+        compaction: CompactionPolicy::Early,
     }
 }
 

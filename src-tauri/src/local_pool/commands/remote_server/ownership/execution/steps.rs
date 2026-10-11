@@ -220,7 +220,7 @@ pub(in crate::local_pool::commands::remote_server::ownership) async fn activate_
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local account not found"))?;
     account.remote_location = None;
     account.account.enabled = true;
-    account.account.in_pool = true;
+    account.account.in_pool = crate::local_pool::accounts::records::can_account_join_pool(account)?;
     account.account.draining = false;
     if account.account.last_error_code.as_deref() == Some(REMOTE_MISSING_ERROR) {
         account.account.last_error_code = None;
@@ -234,12 +234,15 @@ pub(in crate::local_pool::commands::remote_server::ownership) fn local_return_is
     state: &DesktopState,
     local_account_id: &str,
 ) -> Result<bool, LocalPoolError> {
-    Ok(state
-        .store()?
-        .account(local_account_id)
-        .is_some_and(|account| {
-            account.remote_location.is_none() && account.account.enabled && account.account.in_pool
-        }))
+    let account = state.store()?.account(local_account_id).cloned();
+    let Some(account) = account else {
+        return Ok(false);
+    };
+    let expected_membership =
+        crate::local_pool::accounts::records::can_account_join_pool(&account)?;
+    Ok(account.remote_location.is_none()
+        && account.account.enabled
+        && account.account.in_pool == expected_membership)
 }
 
 pub(in crate::local_pool::commands::remote_server::ownership) fn move_remote_locations(

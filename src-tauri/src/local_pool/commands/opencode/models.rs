@@ -28,6 +28,9 @@ pub(super) fn capability_config(
         "tool_call": capabilities.tool_call == Some(true),
         "modalities": {"input": capabilities.input_modalities, "output": capabilities.output_modalities}
     });
+    if let Some(temperature) = capabilities.temperature {
+        capability_json["temperature"] = json!(temperature);
+    }
     if let (Some(context_limit), Some(output_limit)) =
         (capabilities.context_limit, capabilities.output_limit)
     {
@@ -51,7 +54,7 @@ pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
     models
         .iter()
         .map(|model| {
-            let capabilities =
+            let capabilities = model.catalog_capabilities.clone().unwrap_or_else(|| {
                 if model.catalog_input_modalities.is_empty() && model.catalog_provider.is_none() {
                     ModelCapabilities::unknown_model()
                 } else {
@@ -66,7 +69,8 @@ pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
                         output_limit: model.catalog_output_limit,
                         ..ModelCapabilities::default()
                     }
-                };
+                }
+            });
             let supported_levels = if model.reasoning_supported_levels.is_empty() {
                 &model.catalog_reasoning_effort_levels
             } else {

@@ -99,6 +99,7 @@ impl LocalPoolStore {
         keys: Vec<LocalGatewayKeyRecord>,
         operation: Option<OwnershipOperationRecord>,
     ) -> Result<()> {
+        super::super::account_trash::validate_inventory(&accounts, &self.account_trash)?;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
@@ -143,6 +144,14 @@ impl LocalPoolStore {
     }
 
     pub fn reset_local_records(&mut self) -> Result<()> {
+        let trashed_ids = self
+            .account_trash
+            .iter()
+            .map(|entry| entry.record.account.id.clone())
+            .collect::<Vec<_>>();
+        if !trashed_ids.is_empty() {
+            self.purge_trashed_accounts(&trashed_ids)?;
+        }
         self.replace_gateway(GatewaySettings::default())?;
         self.replace_all_records(
             Vec::new(),

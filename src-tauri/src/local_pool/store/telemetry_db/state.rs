@@ -97,6 +97,12 @@ impl TelemetryDb {
         for account_id in account_ids {
             transaction
                 .execute(
+                    "DELETE FROM request_attempts WHERE account_id = ?1",
+                    [account_id],
+                )
+                .map_err(db_error)?;
+            transaction
+                .execute(
                     "DELETE FROM request_logs WHERE account_id = ?1",
                     [account_id],
                 )

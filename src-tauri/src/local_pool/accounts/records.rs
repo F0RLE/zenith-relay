@@ -4,7 +4,7 @@ use super::credentials::{
 };
 use super::NativeSecretBackend;
 use crate::local_pool::{
-    error::{ErrorCode, LocalPoolError, Result},
+    error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result},
     models::LocalAccountRecord,
 };
 use sha2::{Digest, Sha256};
@@ -21,6 +21,48 @@ use zenith_relay_core::{
 pub const CODEX_SOURCE_ID: &str = "openai_codex";
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
+pub(in crate::local_pool) fn validate_account_plan(
+    credentials: &StoredCodexCredentials,
+    plan_type: Option<&str>,
+) -> Result<()> {
+    let kind = credentials.oauth_client_kind();
+    kind.validate_plan(
+        credentials.plan_type(),
+        credentials.id_token(),
+        Some(credentials.access_token()),
+    )
+    .and_then(|_| kind.validate_plan(plan_type, None, None))
+    .map_err(|message| {
+        LocalPoolError::new(ErrorCode::InvalidState, message).with_diagnostic(ErrorDiagnostics {
+            reason: Some(
+                zenith_relay_core::error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED.into(),
+            ),
+            ..Default::default()
+        })
+    })
+}
+
+pub(in crate::local_pool) fn require_pool_account(account: &LocalAccountRecord) -> Result<()> {
+    let credentials = CredentialStore::from_backend(NativeSecretBackend)
+        .require(&account.account.id)
+        .map_err(credential_error)?;
+    validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )
+}
+
+pub(in crate::local_pool) fn can_account_join_pool(account: &LocalAccountRecord) -> Result<bool> {
+    let credentials = CredentialStore::from_backend(NativeSecretBackend)
+        .require(&account.account.id)
+        .map_err(credential_error)?;
+    Ok(validate_account_plan(
+        &credentials,
+        account.account.subscription.plan_type.as_deref(),
+    )
+    .is_ok())
+}
+
 pub fn new_account_record(
     credentials: &StoredCodexCredentials,
     auth_mode: AccountAuthMode,
@@ -28,6 +70,7 @@ pub fn new_account_record(
     priority: i32,
     now_ms: u64,
 ) -> Result<LocalAccountRecord> {
+    validate_account_plan(credentials, None)?;
     let provider_account_id = credentials.provider_account_id().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -242,6 +285,10 @@ mod tests {
     };
 
     fn credentials() -> StoredCodexCredentials {
+        credentials_for_plan("plus")
+    }
+
+    fn credentials_for_plan(plan: &str) -> StoredCodexCredentials {
         StoredCodexCredentials::new(
             "account_local",
             "access-secret".into(),
@@ -254,10 +301,30 @@ mod tests {
             Some("provider-account".into()),
             None,
             None,
-            Some("plus".into()),
+            Some(plan.into()),
             false,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn free_plan_is_accepted_for_native_and_rejected_only_for_bps() {
+        use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+        let native = credentials_for_plan("chatgpt_free_tier");
+        let account =
+            new_account_record(&native, AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+        assert_eq!(
+            account.account.subscription.plan_type.as_deref(),
+            Some("free")
+        );
+        assert!(validate_account_plan(&native, Some("free")).is_ok());
+
+        let bps = native.with_oauth_client_kind(OAuthClientKind::ExcelBps);
+        assert!(new_account_record(&bps, AccountAuthMode::OAuth, Vec::new(), 0, 1).is_err());
+        assert!(validate_account_plan(&bps, Some("plus")).is_err());
+        let paid_bps = credentials().with_oauth_client_kind(OAuthClientKind::ExcelBps);
+        assert!(validate_account_plan(&paid_bps, Some("free")).is_err());
+        assert!(validate_account_plan(&paid_bps, Some("plus")).is_ok());
     }
 
     #[test]

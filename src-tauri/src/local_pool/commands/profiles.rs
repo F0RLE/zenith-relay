@@ -35,6 +35,7 @@ mod history;
 mod policy;
 mod process;
 
+pub(in crate::local_pool::commands) use catalog::refresh_active_codex_catalog;
 pub(in crate::local_pool) use catalog::CodexCatalogRefreshStatus;
 use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_direct_source};
 
@@ -66,6 +67,27 @@ use process::{
     restart_codex_after_failed_change, restart_codex_after_restore, stop_codex_and_sync_account,
     stop_codex_and_sync_account_at, stop_codex_for_profile_change,
 };
+
+fn with_chatgpt_context<T>(
+    state: &DesktopState,
+    profile_dir: &Path,
+    operation: impl FnOnce() -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    let change = codex::sync_context_policy(
+        profile_dir,
+        &state.profile_backup_root(),
+        state.store()?.gateway().chatgpt_context_policy,
+    )?;
+    operation().map_err(|mut error| {
+        if let Err(rollback) = change.rollback() {
+            error.message = format!(
+                "{}; automatic ChatGPT context rollback failed: {}",
+                error.message, rollback.message
+            );
+        }
+        error
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

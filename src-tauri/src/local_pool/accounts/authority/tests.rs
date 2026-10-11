@@ -504,6 +504,78 @@ fn fast_lock_config() -> ProcessLockConfig {
     }
 }
 
+#[tokio::test]
+async fn invalid_grant_after_new_authorization_reads_the_new_credentials() {
+    struct ReplacedGrant {
+        store: CredentialStore<MemorySecrets>,
+    }
+    impl CodexRefreshClient for ReplacedGrant {
+        fn refresh<'a>(
+            &'a self,
+            _local_account_id: &'a str,
+            _provider_account_id: Option<&'a str>,
+            _refresh_token: &'a str,
+            now_ms: u64,
+            _kind: super::super::oauth::OAuthClientKind,
+        ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let current = self.store.require("relay_account_1").unwrap();
+                let updated = current
+                    .apply_refresh(
+                        CredentialRefresh::new(
+                            "synthetic-login-access".into(),
+                            Some("synthetic-login-refresh".into()),
+                            None,
+                            Some(now_ms + 60_000),
+                        )
+                        .unwrap(),
+                        now_ms,
+                    )
+                    .unwrap();
+                self.store.save(&updated).unwrap();
+                Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::InvalidGrant,
+                    "invalid_grant",
+                ))
+            })
+        }
+    }
+    let root = temp_root("invalid-grant-new-login");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    let initial = expired_credentials();
+    store.save(&initial).unwrap();
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        Arc::new(ReplacedGrant {
+            store: store.clone(),
+        }),
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    let authority = TokenAuthority::new(1).unwrap();
+    authority
+        .register(
+            "relay_account_1",
+            initial.to_token_set().unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    let refreshed = authority
+        .prepare("relay_account_1", 10, 0, &adapter)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.tokens.access_token(), "synthetic-login-access");
+    assert_eq!(
+        store.require("relay_account_1").unwrap().refresh_token(),
+        Some("synthetic-login-refresh")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn temp_root(label: &str) -> PathBuf {
     let root =
         std::env::temp_dir().join(format!("zenith-relay-authority-{label}-{}", Uuid::new_v4()));

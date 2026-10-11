@@ -6,6 +6,16 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
     backup_root: &Path,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
+    let context_change = context::sync_context_overrides_locked(codex_home, backup_root, false)?;
+    restore_local_profile_locked(codex_home, backup_root, secrets)
+        .map_err(|error| with_rollback(error, context_change.rollback_locked()))
+}
+
+fn restore_local_profile_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
     let _ = local_backup(codex_home, backup_root)?;
     let backup_path = backup_path(backup_root);
     // Codex can refresh auth/config immediately after its process is stopped.

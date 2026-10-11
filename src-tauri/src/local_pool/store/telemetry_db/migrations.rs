@@ -1,13 +1,20 @@
+mod attempts;
+mod context_bands;
 mod early;
 mod late;
+mod service_tiers;
 
+pub(super) use attempts::MIGRATION_033;
+pub(super) use context_bands::migrate_032;
 pub(super) use early::*;
 pub(super) use late::*;
+pub(super) use service_tiers::migrate_034;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 31;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 34;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const ARCHIVE_USAGE_SQL: &str = r#"
+pub(super) const ARCHIVE_USAGE_SQL: &str = concat!(
+    r#"
 INSERT INTO usage_candidate_rollups(
     candidate_kind, candidate_id, model,
     price_class, context_band,
@@ -18,15 +25,11 @@ INSERT INTO usage_candidate_rollups(
 )
 SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
     COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
-    CASE lower(COALESCE(applied_service_tier, ''))
-        WHEN 'flex' THEN 'flex'
-        WHEN 'priority' THEN 'priority'
-        WHEN 'fast' THEN 'priority'
-        ELSE 'standard' END,
-    CASE
-        WHEN COALESCE(input_tokens, 0) > 272000 THEN 'above_272k'
-        WHEN COALESCE(input_tokens, 0) > 200000 THEN 'above_200k'
-        ELSE 'base' END,
+    "#,
+    zenith_relay_core::usage_price_class_sql!(),
+    ", ",
+    zenith_relay_core::usage_context_band_sql!(),
+    r#",
     COALESCE(SUM(input_tokens), 0), COUNT(input_tokens),
     COALESCE(SUM(cached_input_tokens), 0), COUNT(cached_input_tokens),
     COALESCE(SUM(cache_write_input_tokens), 0), COUNT(cache_write_input_tokens),
@@ -55,4 +58,5 @@ ON CONFLICT(candidate_kind, candidate_id, model, price_class, context_band) DO U
     total_tokens = total_tokens + excluded.total_tokens,
     total_samples = total_samples + excluded.total_samples;
 DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days');
-"#;
+"#
+);
