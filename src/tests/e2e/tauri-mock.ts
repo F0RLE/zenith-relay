@@ -1130,7 +1130,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_codex_oauth_status": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "callback_received" };
           case "submit_codex_oauth_callback":
           case "cancel_codex_oauth": return null;
-          case "complete_codex_oauth": return { account: { id: "account_synthetic" } };
+          case "complete_codex_oauth": {
+            if (!localRuntime.accounts.some((saved) => saved.id === account.id)) {
+              localRuntime.accounts.push({ ...structuredClone(accounts[0]), inPool: false });
+            }
+            return { account: { id: account.id } };
+          }
           case "start_local_gateway": localRuntime.gateway.running = true; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "stop_local_gateway": localRuntime.gateway.running = false; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "restart_local_gateway": refreshGatewayModels(localRuntime); return structuredClone(localRuntime);

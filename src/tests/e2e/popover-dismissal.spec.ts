@@ -129,7 +129,7 @@ test("mobile help contents and usage hint close outside", async ({ page }) => {
   const contentsToggle = page.locator(".help-contents-toggle");
   await contentsToggle.click();
   await expect(contentsToggle).toHaveAttribute("aria-expanded", "true");
-  await page.mouse.click(16, 720);
+  await page.locator(".titlebar strong").click();
   await expect(contentsToggle).toHaveAttribute("aria-expanded", "false");
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -138,6 +138,6 @@ test("mobile help contents and usage hint close outside", async ({ page }) => {
   const accountSummary = page.locator(".usage-account-value");
   await accountSummary.locator("summary").click();
   await expect(accountSummary.locator("details")).toHaveAttribute("open", "");
-  await page.mouse.click(16, 720);
+  await page.locator(".titlebar strong").click();
   await expect(accountSummary.locator("details")).not.toHaveAttribute("open", "");
 });

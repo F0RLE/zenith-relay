@@ -387,7 +387,7 @@ test("stored account proxy controls keep saved addresses hidden", async ({ page 
   const accountProxy = "account-user:account-pass@us-account.example:8081";
   accountDialog = page.getByRole("dialog", { name: "Account proxy" });
   await accountDialog.getByRole("radio", { name: /Add a new proxy/ }).click();
-  await accountDialog.getByLabel("HTTP(S) proxy").fill(accountProxy);
+  await accountDialog.getByLabel("HTTP(S) proxy", { exact: true }).fill(accountProxy);
   await accountDialog.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText(accountProxy)).toHaveCount(0);
   await accountCard.locator(".account-row-menu summary").click();
@@ -416,7 +416,7 @@ test("remote proxy controls use the capability-gated management actions", async 
   await page.getByRole("menuitem", { name: "Proxy: Common", exact: true }).click();
   const accountDialog = page.getByRole("dialog", { name: "Account proxy" });
   await accountDialog.getByRole("radio", { name: /Add a new proxy/ }).click();
-  await accountDialog.getByLabel("HTTP(S) proxy").fill("remote-account:secret@us-account.example:8081");
+  await accountDialog.getByLabel("HTTP(S) proxy", { exact: true }).fill("remote-account:secret@us-account.example:8081");
   await accountDialog.getByRole("button", { name: "Save" }).click();
   await page.locator(".account-bulk-menu summary").click();
   await page.getByRole("menuitem", { name: "Assign proxies" }).click();
@@ -438,7 +438,7 @@ test("remote trust and deployment secrets require explicit actions", async ({ pa
   await page.getByRole("tab", { name: "Remote Server" }).click();
   await page.getByRole("button", { name: "Connect existing server" }).click();
   await page.getByLabel("Server address").fill("http://127.0.0.1:14999");
-  await page.getByLabel("Management token").fill("synthetic-management-token-000000");
+  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
   await expect(page.getByRole("button", { name: "Test and connect" })).toBeDisabled();
   await page.getByLabel("Allow unencrypted HTTP").check();
   await page.getByLabel("Trust a new identity").check();
@@ -452,7 +452,7 @@ test("remote trust and deployment secrets require explicit actions", async ({ pa
   await page.getByRole("button", { name: "Deploy new server" }).click();
   await page.getByLabel("Public server URL").fill("https://relay.example.invalid");
   await page.getByRole("button", { name: "Generate bundle" }).click();
-  await expect(page.getByLabel("Management token")).toHaveAttribute("type", "password");
+  await expect(page.getByLabel("Management token", { exact: true })).toHaveAttribute("type", "password");
   await expect(page.getByLabel("Vault key")).toHaveAttribute("type", "password");
   await expect(page.getByText("These values are shown once.")).toBeVisible();
 });

@@ -180,7 +180,7 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByRole("radio", { name: /Custom API/ }).click();
     await sourceDialog.getByLabel("Name", { exact: true }).fill("Failover API");
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
-    await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
+    await sourceDialog.getByLabel("Upstream API key", { exact: true }).fill("synthetic-upstream-key");
     await sourceDialog.getByRole("button", { name: "Add source" }).click();
     await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
 

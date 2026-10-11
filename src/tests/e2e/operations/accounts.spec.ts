@@ -328,10 +328,13 @@ test("frequent account actions use full-width zones and secondary actions stay i
   await expect(menu.getByRole("menuitem", { name: "Proxy: Common", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Export" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Notes", exact: true })).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveCount(6);
+  await expect(menu.getByRole("menuitem")).toHaveCount(5);
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete", exact: true })).toBeVisible();
-  await expect(menu.getByRole("menuitem", { name: "Delete permanently", exact: true })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Delete permanently", exact: true })).toHaveCount(0);
+  await menu.getByRole("menuitem", { name: "Delete", exact: true }).click({ button: "right" });
+  await page.getByRole("menu", { name: "Context menu", exact: true }).getByRole("menuitem", { name: "Delete permanently", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Delete permanently", exact: true })).toBeVisible();
 });
 
 test("excluded connection exposes an add-to-pool action", async ({ page }) => {

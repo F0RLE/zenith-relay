@@ -10,7 +10,7 @@ test("source setup saves automatic routing without exposing adapter controls", a
   await dialog.getByRole("radio", { name: /Custom API/ }).click();
   await dialog.getByLabel("Name").fill("Automatic API");
   await dialog.getByLabel("API address").fill("https://api.example.test/v1");
-  await dialog.getByLabel("Upstream API key").fill("sk-automatic-test");
+  await dialog.getByLabel("Upstream API key", { exact: true }).fill("sk-automatic-test");
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   await expect(dialog.locator(".source-model-mode")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Add source", exact: true })).toBeEnabled();

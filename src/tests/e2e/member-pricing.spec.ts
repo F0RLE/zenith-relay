@@ -43,7 +43,7 @@ for (const mode of ["local", "remote"] as const) {
     const input = row.getByRole("textbox", { name: "Input token price for gpt-6-astra", exact: true });
     const output = row.getByRole("textbox", { name: "Output token price for gpt-6-astra", exact: true });
     await row.getByRole("button", { name: "gpt-6-astra price tier: Standard", exact: true }).click();
-    await expect(page.getByRole("option")).toHaveText(["Standard", "Flex", "Priority"]);
+    await expect(page.getByRole("option")).toHaveText(["Standard", "Flex", "Fast", "Ultrafast"]);
     await page.getByRole("option", { name: "Flex", exact: true }).click();
     await expect(input).toHaveAttribute("placeholder", "1");
     await row.getByRole("button", { name: "gpt-6-astra context range: Short · ≤ 272k", exact: true }).click();

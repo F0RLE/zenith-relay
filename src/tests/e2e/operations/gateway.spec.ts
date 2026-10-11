@@ -97,7 +97,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Accounts" })).toBeVisible();
-  await expect(page.getByRole("tab").allTextContents()).resolves.toEqual(["Accounts", "Sources", "Proxies", "Automations"]);
+  await expect(page.getByRole("tab").allTextContents()).resolves.toEqual(["Accounts", "Sources", "Proxies", "Automations", "Trash"]);
   await page.getByRole("tab", { name: "Sources" }).click();
   const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
   await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
@@ -119,7 +119,11 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect.poll(() => page.evaluate(() => {
     const call = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelPriceOverrides?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_local_source");
     return call?.args.input?.modelPriceOverrides?.["gpt-5.4"];
-  })).toEqual({ inputMicroUsdPerMillion: 1_250_000, outputMicroUsdPerMillion: 3_500_000 });
+  })).toEqual({
+    inputMicroUsdPerMillion: 1_250_000,
+    cachedInputMicroUsdPerMillion: 250_000,
+    outputMicroUsdPerMillion: 3_500_000,
+  });
   await page.getByRole("tab", { name: "Accounts" }).click();
   await page.getByRole("button", { name: "Sign in" }).first().click();
   const oauthDialog = page.getByRole("dialog", { name: "Sign in" });

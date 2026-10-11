@@ -27,7 +27,7 @@ test("proxy action cards disable unavailable choices without applying changes", 
   await custom.focus();
   await page.keyboard.press("Enter");
   await expect(custom).toBeChecked();
-  await expect(dialog.getByLabel("HTTP(S) proxy")).toBeVisible();
+  await expect(dialog.getByLabel("HTTP(S) proxy", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   expect((await commands(page)).some((call) => call.command === "set_local_account_proxy")).toBe(false);
 });

@@ -76,8 +76,8 @@ release entries are kept concise and link to the corresponding tag.
 - BPS cards and member settings show local credential expiry and recovery
   hints. Provider errors retain validated request IDs from response headers
   alongside the existing status, model, and error details.
-- The application picker places application logos above their names. Pool
-  connections launch ChatGPT or OpenCode by default; the switch is now in
+- The application picker uses vertical rows with application logos beside their
+  names. Pool connections launch ChatGPT or OpenCode by default; the switch is now in
   Settings, and existing opt-outs are preserved. Overview's OpenCode launch
   action now opens the application after configuring it.
 - English and Russian Help start with guided setup and distinguish direct

@@ -39,7 +39,7 @@ test("adding an unknown source to the pool completes without format selection", 
   await add.getByRole("radio", { name: /Custom API/ }).click();
   await add.getByLabel("Name", { exact: true }).fill("Manual API");
   await add.getByLabel("API address").fill("https://manual.example.test/v1");
-  await add.getByLabel("Upstream API key").fill("synthetic-key");
+  await add.getByLabel("Upstream API key", { exact: true }).fill("synthetic-key");
   await add.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add API source" })).toBeHidden();
   await expect(page.locator(".pool-member-card").filter({ hasText: "Manual API" })).toBeVisible();

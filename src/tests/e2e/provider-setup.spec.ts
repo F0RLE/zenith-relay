@@ -10,7 +10,7 @@ for (const failedStep of ["state", "membership"] as const) {
     await page.getByRole("dialog").getByRole("button", { name: "Add API source", exact: true }).click();
     const form = page.getByRole("dialog", { name: "Add API source", exact: true });
     await form.getByRole("radio", { name: "OpenAI", exact: true }).click();
-    await form.getByLabel("Upstream API key").fill("synthetic-retry-key");
+    await form.getByLabel("Upstream API key", { exact: true }).fill("synthetic-retry-key");
     await form.getByRole("button", { name: "Add source", exact: true }).click();
     const error = page.getByRole("dialog", { name: "Error details" });
     await expect(error).toBeVisible();
@@ -48,14 +48,14 @@ test("provider picker supports keyboard selection and preserves edits to the sel
   await expect(custom).toBeFocused();
   await expect(custom).toBeChecked();
 
-  await dialog.getByLabel("Upstream API key").fill("synthetic-provider-key");
+  await dialog.getByLabel("Upstream API key", { exact: true }).fill("synthetic-provider-key");
   await dialog.getByLabel("API address", { exact: true }).fill("https://api.example.invalid/v1");
   await expect(dialog.getByRole("button", { name: "Add source", exact: true })).toBeDisabled();
   await dialog.getByLabel("Name", { exact: true }).fill("Work API");
   await custom.click();
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Work API");
   await expect(dialog.getByLabel("API address", { exact: true })).toHaveValue("https://api.example.invalid/v1");
-  await expect(dialog.getByLabel("Upstream API key")).toHaveValue("synthetic-provider-key");
+  await expect(dialog.getByLabel("Upstream API key", { exact: true })).toHaveValue("synthetic-provider-key");
   await expect(dialog.getByRole("radio")).toHaveCount(12);
   await dialog.getByRole("button", { name: "Add source", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
@@ -77,7 +77,7 @@ for (const theme of ["light", "dark"] as const) {
       const dialog = page.getByRole("dialog", { name: "Добавить источник" });
       await page.screenshot({ path: `output/playwright/provider-picker-${theme}-${viewport.width}.png` });
       await dialog.getByRole("radio", { name: "Свой API", exact: true }).click();
-      await dialog.getByLabel("Ключ внешнего API").fill("synthetic-preview-key");
+      await dialog.getByLabel("Ключ внешнего API", { exact: true }).fill("synthetic-preview-key");
       await dialog.getByLabel("Адрес API", { exact: true }).fill("https://api.example.invalid/v1");
       await dialog.getByLabel("Название", { exact: true }).fill("Рабочий API");
       await expect(dialog.getByRole("button", { name: "Добавить источник", exact: true })).toBeEnabled();
