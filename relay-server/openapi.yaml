@@ -33,6 +33,43 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/AccountSummary" } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /accounts/trash:
+    get:
+      operationId: listAccountTrash
+      summary: List retained accounts in trash without exposing credentials
+      responses:
+        "200":
+          description: Accounts in trash
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/TrashedAccountSummary" } }
+  /accounts/{id}/trash:
+    post:
+      operationId: trashAccount
+      summary: Move an account out of active inventory, retaining its credentials and usage
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Account moved to trash and removed from routing and wake tasks }
+        "404": { description: Account not found }
+  /accounts/trash/{id}/restore:
+    post:
+      operationId: restoreTrashedAccount
+      summary: Restore an account disabled and outside the pool
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Account restored without restarting requests }
+        "404": { description: Trashed account not found }
+  /accounts/trash/{id}:
+    delete:
+      operationId: purgeTrashedAccount
+      summary: Permanently remove a trashed account and its credentials and retained usage
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Trashed account permanently deleted }
+        "404": { description: Trashed account not found }
   /accounts/export:
     post:
       operationId: exportAccounts
@@ -195,6 +232,45 @@ paths:
         "400": { description: Invalid policy. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: configuration_revision_stale; reload before saving. }
+  /gateway/request-timezone:
+    post:
+      operationId: setRequestTimezone
+      security: [{ managementToken: [] }]
+      description: >
+        Requires request_timezone_v1. Compare-and-set against expectedPolicy.
+        Applies to subsequent account Responses HTTP and WebSocket dispatches.
+        Disabled by default; disabled policies retain account choices.
+        Only existing user environment timezone tags and web-search location
+        timezone fields are rewritten. Dates and API-source requests are preserved.
+        Account identifiers belong to this host; this policy is not a portable preset.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy, expectedPolicy]
+              properties:
+                policy: { $ref: "#/components/schemas/RequestTimezonePolicy" }
+                expectedPolicy: { $ref: "#/components/schemas/RequestTimezonePolicy" }
+      responses:
+        "200": { description: Runtime snapshot with gateway.requestTimezone. }
+        "400": { description: Invalid account identifier or unknown IANA timezone. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: configuration_revision_stale; reload before saving. }
+  /gateway/request-timezone/catalog:
+    get:
+      operationId: getRequestTimezoneCatalog
+      security: [{ managementToken: [] }]
+      description: Backend IANA timezone catalog for request_timezone_v1.
+      responses:
+        "200":
+          description: Sorted valid timezone identifiers.
+          content:
+            application/json:
+              schema: { type: array, items: { type: string }, uniqueItems: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /models/order:
     post:
       security: [{ managementToken: [] }]
@@ -361,7 +437,10 @@ paths:
             Source/account cards include independent refreshState evidence for
             models and balance/quota; the account shape is AccountRefreshState.
             gateway.modelCatalog optionally maps member model IDs to advisory
-            catalogProvider and catalogFamily values, including excluded models.
+            catalogProvider and catalogFamily values, including excluded and
+            binding-only models. catalogProvider is the normalized display
+            group, preferring the canonical manufacturer, a unique primary
+            family owner, or an unambiguous leaf over the hosting namespace.
             This display metadata does not grant runtime eligibility.
           content:
             application/json:
@@ -376,6 +455,17 @@ paths:
         - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
         - { name: fromMs, in: query, schema: { type: integer, minimum: 0 } }
         - { name: toMs, in: query, schema: { type: integer, minimum: 0 } }
+        - name: requestId
+          in: query
+          schema: { type: string, maxLength: 256 }
+          description: >
+            Exact logical request ID. Events and pagination include its retained
+            attempt history; totals remain logical-request projections. Older
+            records may contain only the final attempt.
+        - name: requestIdQuery
+          in: query
+          schema: { type: string, maxLength: 256 }
+          description: Substring request ID filter for the ordinary report.
       responses:
         "200":
           description: >
@@ -387,6 +477,10 @@ paths:
             and a bounded redacted message; redacted and truncated
             flags describe omissions. Missing details in older records are not
             reconstructed. Successful events omit upstreamError.
+            routing.attemptOutcome, when present, records an executor decision
+            such as retry_selection, retry_repair, retry_authorization, completed,
+            returned_failure, execution_uncertain, or client_disconnected.
+            It is not inferred from status and does not grant retry permission.
             toolUse may include policyMode, policyOutcome, policyFallback,
             deferredToolSearch, clientSchemaBytes and
             forwardedSchemaBytes. A true deferredToolSearch means a native
@@ -559,6 +653,13 @@ components:
             properties:
               name: { type: string }
               values: { type: array, items: { type: string } }
+    TrashedAccountSummary:
+      type: object
+      required: [id, label, trashedAtMs]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        trashedAtMs: { type: integer, minimum: 0 }
     AccountSummary:
       type: object
       description: Redacted inventory and runtime projection; additional saved settings and aggregates may be present.
@@ -572,7 +673,7 @@ components:
         basisPointsAvailable: { type: boolean, description: Available only for an Excel / Basis Points OAuth connection. }
         basisPointsEnabled: { type: boolean, description: True only for an eligible Excel / Basis Points connection; ordinary ChatGPT connections remain native. }
         enabled: { type: boolean }
-        inPool: { type: boolean }
+        inPool: { type: boolean, description: Pool membership for native ChatGPT and eligible Excel / Basis Points connections. Known Free plans are supported on the native transport only. }
         draining: { type: boolean }
         operationalStatus: { type: string, enum: [rotation, quotaWait, unavailable, disabled] }
         authState: { $ref: "#/components/schemas/AccountAuthState" }
@@ -584,7 +685,23 @@ components:
         weight: { type: integer, minimum: 1 }
         refreshState: { $ref: "#/components/schemas/AccountRefreshState" }
         secretAvailable: { type: boolean }
+        credentialDiagnostics:
+          oneOf:
+            - { $ref: "#/components/schemas/CredentialDiagnostics" }
+            - { type: "null" }
         lastErrorCode: { type: [string, "null"] }
+    CredentialDiagnostics:
+      type: object
+      required: [status, expiresAtMs, hasRefreshToken, recovery]
+      description: >
+        Safe local BPS credential evidence. not_expired only checks the local
+        expiry and does not prove upstream authentication. Recovery does not
+        enable a disabled connection, change pool membership, or clear draining.
+      properties:
+        status: { type: string, enum: [pending, not_expired, expired, revoked, auth_failed, unknown] }
+        expiresAtMs: { type: [integer, "null"], minimum: 0 }
+        hasRefreshToken: { type: boolean }
+        recovery: { type: string, enum: [none, refresh_next_request, sign_in, retry_later] }
     AccountImportInput:
       type: object
       required: [label]
@@ -638,7 +755,7 @@ components:
       required: [sessionId]
       properties:
         sessionId: { type: string }
-        addToPool: { type: boolean, default: false, description: Add to pool; replacement keeps existing membership. }
+        addToPool: { type: boolean, default: false, description: Add a native ChatGPT or eligible Excel / Basis Points connection to the pool; replacement retains its membership. Known Free plans are rejected for BPS even when this option is false. }
         probeMetadata: { type: boolean, default: false }
     BatchImportIssue:
       type: object
@@ -725,6 +842,10 @@ components:
         checkedAtMs: { type: integer, minimum: 0 }
         features: { $ref: "#/components/schemas/ProtocolFeatures" }
         reasoningEfforts: { type: array, items: { type: string } }
+        serviceTiers:
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/ServiceTier" }
+          description: Optional route restriction; omitted or null uses reference modes, and an empty list allows Standard only.
     SourceProtocolConfig:
       type: object
       properties:
@@ -768,6 +889,13 @@ components:
         protocolConfig: { $ref: "#/components/schemas/SourceProtocolConfig" }
         protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
         resolvedProtocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" }, readOnly: true }
+        detectedModelPrices:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ApiModelPriceOverride" }
+          readOnly: true
+        modelPriceOverrides:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ApiModelPriceOverride" }
     RefreshStatus:
       type: string
       enum: [unknown, fresh, stale, unsupported]
@@ -797,6 +925,91 @@ components:
       properties:
         id: { type: string }
         protocolRoutes: { type: array, items: { $ref: "#/components/schemas/ModelProtocolRoute" }, readOnly: true }
+        catalogCapabilities: { $ref: "#/components/schemas/ModelCapabilities", readOnly: true }
+        tokenPrice:
+          oneOf:
+            - { $ref: "#/components/schemas/TokenPrice" }
+            - { type: "null" }
+          readOnly: true
+        speedTiers: { type: array, items: { $ref: "#/components/schemas/ServiceTier" }, readOnly: true }
+        speedTier: { $ref: "#/components/schemas/ServiceTier" }
+        speedSupported: { type: boolean, readOnly: true }
+        speedConfigurable: { type: boolean, readOnly: true }
+    ServiceTier:
+      type: string
+      enum: [standard, fast, ultrafast]
+    ModelCapabilities:
+      type: object
+      description: Normalized reference semantics; never grants model or route access.
+      properties:
+        reasoning: { type: [boolean, "null"] }
+        reasoningSource: { type: [string, "null"] }
+        reasoningMethod: { type: [string, "null"], enum: [effort, toggle, budget_tokens, adaptive, unknown, null] }
+        reasoningEffortLevels: { type: array, items: { type: string } }
+        defaultReasoningEffort: { type: [string, "null"] }
+        reasoningBudgetMinTokens: { type: [integer, "null"], minimum: 0 }
+        reasoningBudgetMaxTokens: { type: [integer, "null"], minimum: 0 }
+        reasoningBudgetDefaultTokens: { type: [integer, "null"], minimum: 0 }
+        reasoningModes: { type: array, items: { type: string, enum: [standard, pro] } }
+        toolCall: { type: [boolean, "null"] }
+        structuredOutput: { type: [boolean, "null"] }
+        attachment: { type: [boolean, "null"] }
+        openWeights: { type: [boolean, "null"] }
+        temperature: { type: [boolean, "null"] }
+        promptCaching: { type: [boolean, "null"] }
+        parallelToolCall: { type: [boolean, "null"] }
+        toolChoice: { type: [boolean, "null"] }
+        streaming: { type: [boolean, "null"] }
+        serviceTiers: { type: array, items: { $ref: "#/components/schemas/ServiceTier" } }
+        inputModalities: { type: array, items: { type: string } }
+        outputModalities: { type: array, items: { type: string } }
+        contextLimit: { type: [integer, "null"], minimum: 0 }
+        inputLimit: { type: [integer, "null"], minimum: 0 }
+        outputLimit: { type: [integer, "null"], minimum: 0 }
+    TokenRateSet:
+      type: object
+      description: Optional microUSD rates per million tokens. An absent component remains unknown; zero is an explicit free rate.
+      properties:
+        input: { type: integer, minimum: 0 }
+        cacheRead: { type: integer, minimum: 0 }
+        cacheWrite5m: { type: integer, minimum: 0 }
+        cacheWrite1h: { type: integer, minimum: 0 }
+        output: { type: integer, minimum: 0 }
+    LongContextRates:
+      type: object
+      properties:
+        standard: { $ref: "#/components/schemas/TokenRateSet" }
+        flex: { $ref: "#/components/schemas/TokenRateSet" }
+        priority: { $ref: "#/components/schemas/TokenRateSet", description: Fast schedule using the upstream priority name. }
+        ultrafast: { $ref: "#/components/schemas/TokenRateSet" }
+    TokenPriceSchedules:
+      type: object
+      description: Published tier and input-size schedules; prices never establish mode support or model access.
+      properties:
+        flex: { $ref: "#/components/schemas/TokenRateSet" }
+        priority: { $ref: "#/components/schemas/TokenRateSet" }
+        ultrafast: { $ref: "#/components/schemas/TokenRateSet" }
+        above100k: { $ref: "#/components/schemas/LongContextRates" }
+        above128k: { $ref: "#/components/schemas/LongContextRates" }
+        above200k: { $ref: "#/components/schemas/LongContextRates" }
+        above272k: { $ref: "#/components/schemas/LongContextRates" }
+        above512k: { $ref: "#/components/schemas/LongContextRates" }
+    TokenPrice:
+      allOf:
+        - { $ref: "#/components/schemas/TokenRateSet" }
+        - { $ref: "#/components/schemas/TokenPriceSchedules" }
+        - { type: object, required: [input, output] }
+    ApiModelPriceOverride:
+      allOf:
+        - { $ref: "#/components/schemas/TokenPriceSchedules" }
+        - type: object
+          required: [inputMicroUsdPerMillion, outputMicroUsdPerMillion]
+          properties:
+            inputMicroUsdPerMillion: { type: integer, minimum: 0 }
+            cachedInputMicroUsdPerMillion: { type: integer, minimum: 0 }
+            cacheWrite5mMicroUsdPerMillion: { type: integer, minimum: 0 }
+            cacheWrite1hMicroUsdPerMillion: { type: integer, minimum: 0 }
+            outputMicroUsdPerMillion: { type: integer, minimum: 0 }
     ConfigurationPreset:
       type: object
       additionalProperties: false
@@ -808,6 +1021,7 @@ components:
         pass_through policy resets it. Secrets and probe confirmations are not exported.
         Version-1 pool policies are converted automatically to version 2 after member-ID mapping.
         Missing pool policy preserves the destination policy. Import never grants additional permissions.
+        Request timezone bindings are host-specific and excluded; applying a preset preserves them.
       properties:
         format: { type: string, const: zenith-relay-configuration }
         schemaVersion: { type: integer, minimum: 2, maximum: 6 }
@@ -836,6 +1050,20 @@ components:
         size; it does not select or remove tools by name or infer relevance locally.
       properties:
         mode: { type: string, enum: [pass_through, automatic], default: pass_through }
+    RequestTimezonePolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        Fixed IANA timezone per account. The fallback for an unconfigured
+        account is America/New_York. This policy does not change the system timezone.
+      properties:
+        enabled: { type: boolean, default: false }
+        accountTimezones:
+          type: object
+          default: {}
+          maxProperties: 10000
+          propertyNames: { type: string, minLength: 1, maxLength: 256 }
+          additionalProperties: { type: string, description: Exact identifier from the backend IANA catalog. }
     PoolRoutingPolicy:
       type: object
       additionalProperties: false
@@ -878,7 +1106,7 @@ components:
         serverId: { type: string, minLength: 1 }
         protocolMin: { type: integer, minimum: 1 }
         protocolMax: { type: integer, minimum: 1 }
-        features: { type: array, items: { type: string }, uniqueItems: true, description: "source_protocols_v1 enables endpoint evidence and automatic computed routes; the legacy diagnostic generation operation remains available explicitly for compatibility. route_recovery_v1 indicates that the existing recovery setting applies to all four text API inputs, unlike the older chatgpt_retry_until_available feature alone. tool_policy_v1 enables tool catalog policy and schema-5 presets; rotation_v2 is the compatibility token for the current pool rotation policy, automatic startup conversion and schema-6 presets." }
+        features: { type: array, items: { type: string }, uniqueItems: true, description: "source_protocols_v1 enables endpoint evidence and automatic computed routes; the legacy diagnostic generation operation remains available explicitly for compatibility. route_recovery_v1 indicates that the existing recovery setting applies to all four text API inputs, unlike the older chatgpt_retry_until_available feature alone. tool_policy_v1 enables tool catalog policy and schema-5 presets; rotation_v2 is the compatibility token for the current pool rotation policy, automatic startup conversion and schema-6 presets. request_timezone_v1 enables persisted account IANA timezone bindings, the backend catalog, and compare-and-set updates without rebuilding the runtime; portable presets exclude these host-specific bindings." }
     SourceProviderStats:
       type: object
       required: [provider, balanceMicroUsd, spentMicroUsd, requests, totalTokens]

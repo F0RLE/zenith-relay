@@ -95,6 +95,16 @@ pub(super) async fn prepare_account_import(
     input: AccountImportInput,
     batch_session_id: Option<&str>,
 ) -> Result<AccountImportPreview, ManagementError> {
+    input
+        .oauth_client_kind
+        .validate_plan(
+            input.plan_type.as_deref(),
+            input.id_token.as_deref(),
+            Some(&input.access_token),
+        )
+        .map_err(|message| {
+            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+        })?;
     let token_client = OAuthClientKind::from_token_hints(
         input.id_token.as_deref(),
         Some(input.access_token.as_str()),
@@ -158,13 +168,23 @@ pub(super) async fn prepare_account_import(
         input.id_token.as_deref(),
         &input.access_token,
     )?;
-    let chatgpt_account_id = if has_agent_identity && input.access_token.is_empty() {
-        account_id_hints.first().cloned().ok_or_else(|| {
-            validation_error("ChatGPT account id is required for Agent Identity imports")
-        })?
+    let (chatgpt_account_id, checked_plan) = if has_agent_identity && input.access_token.is_empty()
+    {
+        (
+            account_id_hints.first().cloned().ok_or_else(|| {
+                validation_error("ChatGPT account id is required for Agent Identity imports")
+            })?,
+            None,
+        )
     } else {
         authenticate_import_account(state, &input.access_token, &account_id_hints).await?
     };
+    input
+        .oauth_client_kind
+        .validate_plan(checked_plan.as_deref(), None, None)
+        .map_err(|message| {
+            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+        })?;
     let label = redact_import_label(
         clean_label(&input.label, "account label")?,
         &[
@@ -175,9 +195,9 @@ pub(super) async fn prepare_account_import(
             Some(chatgpt_account_id.as_str()),
         ],
     );
-    let plan_type = input
-        .plan_type
+    let plan_type = checked_plan
         .as_deref()
+        .or(input.plan_type.as_deref())
         .filter(|plan_type_text| {
             !contains_sensitive(
                 plan_type_text,
@@ -229,6 +249,18 @@ pub(super) async fn prepare_account_import(
     let duplicate_account_id = duplicate_account
         .as_ref()
         .map(|account_record| account_record.id.clone());
+    input
+        .oauth_client_kind
+        .validate_plan(
+            duplicate_account
+                .as_ref()
+                .and_then(|account| account.subscription.plan_type.as_deref()),
+            None,
+            None,
+        )
+        .map_err(|message| {
+            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+        })?;
     let account_id = duplicate_account_id
         .clone()
         .unwrap_or_else(|| format!("account_{}", uuid::Uuid::new_v4().simple()));

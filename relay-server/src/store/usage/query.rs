@@ -63,6 +63,10 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
         clauses.push("request_id LIKE ? ESCAPE '\\'");
         query_parameters.push(SqlValue::Text(sql_like_contains_pattern(request_id_query)));
     }
+    if let Some(request_id) = query.request_id.as_deref() {
+        clauses.push("request_id = ?");
+        query_parameters.push(SqlValue::Text(request_id.to_string()));
+    }
     let sql = if clauses.is_empty() {
         String::new()
     } else {

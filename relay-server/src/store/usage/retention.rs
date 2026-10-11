@@ -176,6 +176,9 @@ impl Store {
             .execute("DELETE FROM usage_events", [])
             .map_err(db_error)?;
         transaction
+            .execute("DELETE FROM usage_attempts", [])
+            .map_err(db_error)?;
+        transaction
             .execute("DELETE FROM usage_key_rollups", [])
             .map_err(db_error)?;
         transaction

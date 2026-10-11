@@ -117,6 +117,7 @@ fn source_prices_revalue_raw_and_archived_usage_per_provider() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: output,
+        ..Default::default()
     };
     for (id, model_price) in [
         ("source_cheap", price(1_000_000, 2_000_000)),
@@ -276,6 +277,7 @@ fn usage_filters_paginate_escape_wildcards_and_clear() {
                         in_flight_before: 0,
                         dispatches_before: index - 1,
                         endpoint_kind: None,
+                        attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
                         cache_context: (index == 2).then(|| comparison.clone()),
                     }),
                     requested_model: Some(model.to_string()),

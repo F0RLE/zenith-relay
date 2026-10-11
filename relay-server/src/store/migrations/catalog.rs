@@ -204,6 +204,16 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "041_usage_transport",
         sql: include_str!("../../../migrations/041_usage_transport.sql"),
     },
+    Migration {
+        version: 42,
+        name: "042_request_attempts",
+        sql: include_str!("../../../migrations/042_request_attempts.sql"),
+    },
+    Migration {
+        version: 43,
+        name: "043_account_trash",
+        sql: include_str!("../../../migrations/043_account_trash.sql"),
+    },
 ];
 
 pub(super) struct Migration {

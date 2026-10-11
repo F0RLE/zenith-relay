@@ -18,6 +18,29 @@ use zenith_relay_core::{
 };
 
 impl Store {
+    pub fn request_timezone(&self) -> Result<zenith_relay_core::RequestTimezonePolicy, String> {
+        let policy: zenith_relay_core::RequestTimezonePolicy = self
+            .metadata("request_timezone")?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|_| "request timezone settings are invalid")?
+            .unwrap_or_default();
+        policy.validate().map_err(str::to_string)?;
+        Ok(policy)
+    }
+
+    pub fn set_request_timezone(
+        &self,
+        policy: &zenith_relay_core::RequestTimezonePolicy,
+    ) -> Result<(), String> {
+        policy.validate().map_err(str::to_string)?;
+        self.set_metadata(
+            "request_timezone",
+            &serde_json::to_string(policy)
+                .map_err(|_| "request timezone settings could not be serialized")?,
+        )
+    }
+
     pub fn common_proxy_configured(&self) -> Result<bool, String> {
         Ok(self
             .metadata("common_proxy_configured")?

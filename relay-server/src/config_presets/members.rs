@@ -145,12 +145,17 @@ pub(super) fn validate_references(
                     rule.id
                 ))
             })?;
-        serde_json::from_str::<AccountCredential>(&credential).map_err(|_| {
+        let credential = serde_json::from_str::<AccountCredential>(&credential).map_err(|_| {
             PresetError::Missing(format!(
                 "referenced account {} has an invalid credential",
                 rule.id
             ))
         })?;
+        if rule.in_pool {
+            credential
+                .validate_plan(account_record.subscription.plan_type.as_deref())
+                .map_err(PresetError::Invalid)?;
+        }
     }
     for proxy_id in settings
         .accounts

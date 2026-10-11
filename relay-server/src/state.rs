@@ -21,7 +21,7 @@ use zenith_relay_core::{
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 41;
+pub const SERVER_SCHEMA_VERSION: u32 = 43;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -81,7 +81,7 @@ impl AppState {
             ModelMetadataCatalogLoader::open(config.data_dir.join("models-dev.json"))
                 .map_err(|error| error.to_string())?,
         );
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             config,
             store,
             vault,
@@ -106,7 +106,35 @@ impl AppState {
             pricing,
             model_metadata,
             runtime: RwLock::new(None),
-        }))
+        });
+        let mut removed_members = Vec::new();
+        for account in state.store.accounts()? {
+            if account.in_pool
+                && state
+                    .account_pool_eligible(&account)
+                    .is_ok_and(|eligible| !eligible)
+            {
+                removed_members.push((account.id, false));
+            }
+        }
+        if !removed_members.is_empty() {
+            state.store.replace_pool_membership(&[], &removed_members)?;
+        }
+        Ok(state)
+    }
+
+    pub(crate) fn account_pool_eligible(
+        &self,
+        account: &ServerAccountRecord,
+    ) -> Result<bool, String> {
+        let Some(secret) = self.vault.load(&account.secret_ref)? else {
+            return Ok(false);
+        };
+        let credential: AccountCredential = serde_json::from_str(&secret)
+            .map_err(|_| "stored account credential is invalid".to_string())?;
+        Ok(credential
+            .validate_plan(account.subscription.plan_type.as_deref())
+            .is_ok())
     }
 
     pub(crate) fn pricing_loader(&self) -> Arc<PricingCatalogLoader> {

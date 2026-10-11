@@ -18,6 +18,15 @@ pub(super) fn persist_usage_batch(
 
     let mut account_events = BTreeMap::<String, Vec<&QueuedUsage>>::new();
     for queued in batch {
+        if queued
+            .event
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome)
+            == Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+        {
+            continue;
+        }
         if let Some(account_id) = queued.event.account_id.as_ref() {
             account_events
                 .entry(account_id.clone())
@@ -149,7 +158,7 @@ fn apply_queued_account_usage(
             account.cooldowns.clear();
             account.consecutive_failures = 0;
         }
-        if event.success {
+        if event.is_natural_account_use() {
             natural_use_at_ms = Some(queued.observed_at_ms);
         }
     }

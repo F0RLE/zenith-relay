@@ -42,11 +42,11 @@ async fn preset_versions_preserve_omitted_tool_policy_and_allow_explicit_reset()
 
     for version in 2..=6 {
         preset["schemaVersion"] = json!(version);
-        apply_tool_policy_preset(&client, &server, &preset).await;
+        apply_preset(&client, &server, &preset).await;
         assert_eq!(server.state.snapshot().unwrap().gateway.tool_policy, policy);
     }
     preset["settings"]["routing"]["toolPolicy"] = Value::Null;
-    apply_tool_policy_preset(&client, &server, &preset).await;
+    apply_preset(&client, &server, &preset).await;
     assert_eq!(server.state.snapshot().unwrap().gateway.tool_policy, policy);
 
     for version in [0, 1, 7, u16::MAX] {
@@ -64,7 +64,7 @@ async fn preset_versions_preserve_omitted_tool_policy_and_allow_explicit_reset()
 
     preset["schemaVersion"] = json!(5);
     preset["settings"]["routing"]["toolPolicy"] = json!({"mode": "pass_through"});
-    apply_tool_policy_preset(&client, &server, &preset).await;
+    apply_preset(&client, &server, &preset).await;
     assert_eq!(
         server.state.snapshot().unwrap().gateway.tool_policy,
         ToolPolicy::default()
@@ -76,11 +76,7 @@ async fn preset_versions_preserve_omitted_tool_policy_and_allow_explicit_reset()
     server.task.abort();
 }
 
-async fn apply_tool_policy_preset(
-    client: &reqwest::Client,
-    server: &RunningServer,
-    preset: &Value,
-) {
+pub(super) async fn apply_preset(client: &reqwest::Client, server: &RunningServer, preset: &Value) {
     let preview: Value = client
         .post(format!("{}/configuration/preset/preview", server.origin))
         .bearer_auth("synthetic-management-token-value")

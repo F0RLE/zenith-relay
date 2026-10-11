@@ -84,6 +84,7 @@ fn snapshot_preserves_persisted_model_policy_and_missing_secret_warning() {
                 cache_write_5m_micro_usd_per_million: Some(1_500),
                 cache_write_1h_micro_usd_per_million: Some(2_000),
                 output_micro_usd_per_million: 3_000,
+                ..Default::default()
             },
         )]))
         .unwrap();
@@ -564,6 +565,7 @@ fn free_accounts_route_like_other_pool_accounts() {
             oauth_client_kind: Default::default(),
             secret_available: true,
             basis_points_available: true,
+            credential_diagnostics: None,
             proxy_mode: ProxyMode::Direct,
             proxy_available: true,
             api_equivalent: ApiEquivalentSummary::default(),

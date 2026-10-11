@@ -42,6 +42,10 @@ pub(super) fn apply_account_policies_if_running(
             }
             continue;
         }
+        runtime.update_account_subscription_plan(
+            &account.id,
+            account.subscription.plan_type.as_deref(),
+        );
         if !runtime.update_account_policy(&account.id, policy) {
             return Ok(false);
         }
@@ -71,7 +75,12 @@ fn account_runtime_policy(
         zenith_relay_core::QUOTA_STALE_AFTER_MS,
     ));
     Ok(RuntimeCandidatePolicy {
-        enabled: account_candidate_enabled(account.enabled, operational.routing_block_reason),
+        enabled: account_candidate_enabled(account.enabled, operational.routing_block_reason)
+            && credential.as_ref().is_some_and(|credential| {
+                credential
+                    .validate_plan(account.subscription.plan_type.as_deref())
+                    .is_ok()
+            }),
         draining: account.draining,
         priority: account.priority,
         weight: account.weight,

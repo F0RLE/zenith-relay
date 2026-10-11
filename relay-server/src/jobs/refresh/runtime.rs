@@ -46,7 +46,14 @@ pub(super) async fn synchronize(
         now,
         QUOTA_STALE_AFTER_MS,
     ));
-    let enabled = account_candidate_enabled(account.enabled, operational.routing_block_reason);
+    let enabled = account_candidate_enabled(account.enabled, operational.routing_block_reason)
+        && credential.as_ref().is_some_and(|credential| {
+            credential
+                .validate_plan(account.subscription.plan_type.as_deref())
+                .is_ok()
+        });
+    runtime
+        .update_account_subscription_plan(&account.id, account.subscription.plan_type.as_deref());
     let synced = if !health_changed {
         runtime.sync_account_refresh_availability_with_quota(
             &account.id,

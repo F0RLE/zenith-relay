@@ -184,15 +184,23 @@ impl Store {
             .map_err(db_error)?;
         let json = transaction
             .query_row(
-                "SELECT data_json FROM accounts WHERE id = ?1",
+                "SELECT data_json FROM accounts WHERE id = ?1
+                 UNION ALL SELECT data_json FROM account_trash WHERE id = ?1",
                 [account_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(db_error)?;
         if json.is_some() {
+            transaction.execute(
+                "DELETE FROM usage_attempts WHERE candidate_kind = 'account' AND candidate_hint = ?1",
+                [&candidate_hint],
+            ).map_err(db_error)?;
             transaction
                 .execute("DELETE FROM accounts WHERE id = ?1", [account_id])
+                .map_err(db_error)?;
+            transaction
+                .execute("DELETE FROM account_trash WHERE id = ?1", [account_id])
                 .map_err(db_error)?;
             transaction
                 .execute(

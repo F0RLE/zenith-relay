@@ -149,6 +149,15 @@ async fn discover_account_models(
         })?;
     let (mut credential, mut authorization) = (prepared.credential, prepared.header);
     *rejected_tokens = prepared.oauth_tokens;
+    credential
+        .validate_plan(account.subscription.plan_type.as_deref())
+        .map_err(|_| {
+            (
+                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED.to_string(),
+                false,
+                None,
+            )
+        })?;
     let proxy = account_proxy_config(state, account, &credential).map_err(|_| {
         (
             error_codes::MODELS_PROXY_UNAVAILABLE.to_string(),
@@ -163,6 +172,7 @@ async fn discover_account_models(
     )
     .map_err(|_| (error_codes::MODELS_CLIENT_INIT.to_string(), false, None))?
     .with_oauth_client_kind(credential.oauth_client_kind)
+    .with_subscription_plan_type(account.subscription.plan_type.as_deref())
     .with_http_scope(super::refresh::account_http_scope(state, fence));
     let client_version = configured_codex_client_version();
     let mut model_read_result = models_client

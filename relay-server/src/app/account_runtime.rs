@@ -210,6 +210,7 @@ pub(super) struct AccountSummaryInputs {
     pub(super) oauth_client_kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
     pub(super) secret_available: bool,
     pub(super) basis_points_available: bool,
+    pub(super) credential_diagnostics: Option<zenith_relay_core::protocol::CredentialDiagnostics>,
     pub(super) proxy_mode: ProxyMode,
     pub(super) proxy_available: bool,
     pub(super) api_equivalent: ApiEquivalentSummary,
@@ -225,6 +226,7 @@ pub(super) fn account_summary(
         oauth_client_kind,
         secret_available,
         basis_points_available,
+        credential_diagnostics,
         proxy_mode,
         proxy_available,
         api_equivalent,
@@ -246,6 +248,7 @@ pub(super) fn account_summary(
         provider_family: account_record.provider_family.clone(),
         oauth_client_kind,
         basis_points_available,
+        credential_diagnostics,
         basis_points_enabled: basis_points_available
             && oauth_client_kind
                 == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,

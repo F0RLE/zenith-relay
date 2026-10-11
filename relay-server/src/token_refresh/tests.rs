@@ -100,6 +100,14 @@ async fn old_persistence_cannot_write_a_replaced_login_or_auth_state() {
     // Runtime rebuilds may hold configuration_lock while waiting for the
     // token authority slot. Persistence must use only the credential lock.
     let configuration = state.configuration_lock.lock().await;
+    state
+        .store
+        .update_account(&record.id, |account| {
+            account.enabled = false;
+            account.draining = true;
+            Ok(())
+        })
+        .unwrap();
     tokio::time::timeout(
         Duration::from_secs(2),
         ServerTokenPersistence::for_account(state.clone(), &record)
@@ -109,6 +117,14 @@ async fn old_persistence_cannot_write_a_replaced_login_or_auth_state() {
     .expect("token persistence must not wait for configuration_lock")
     .unwrap();
     drop(configuration);
+    ServerTokenPersistence::for_account(state.clone(), &record)
+        .persist_auth_state(&record.id, AccountAuthState::Active)
+        .await
+        .unwrap();
+    let paused = state.store.account(&record.id).unwrap().unwrap();
+    assert!(!paused.enabled);
+    assert!(!paused.in_pool);
+    assert!(paused.draining);
 
     // Even when the account and secret reference remain the same, a late
     // task registration belongs to the old Agent Identity, not a new one

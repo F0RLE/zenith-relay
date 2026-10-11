@@ -64,6 +64,21 @@ pub(super) fn account_summaries(
                         .unwrap_or_default(),
                     secret_available,
                     basis_points_available,
+                    credential_diagnostics: credential
+                        .as_ref()
+                        .filter(|credential| {
+                            credential.oauth_client_kind
+                                == zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps
+                        })
+                        .map(|credential| {
+                            zenith_relay_core::protocol::CredentialDiagnostics::from_local(
+                                account_record.auth_state,
+                                secret_available,
+                                credential.refresh_token.is_some(),
+                                credential.expires_at_ms,
+                                crate::state::now_ms(),
+                            )
+                        }),
                     proxy_mode,
                     proxy_available,
                     api_equivalent: inputs

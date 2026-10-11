@@ -83,6 +83,7 @@ fn normalize_usage_query(query: &mut UsageQuery) -> Result<(), ManagementError> 
         &mut query.source_or_account_query,
         &mut query.error_category,
         &mut query.request_id_query,
+        &mut query.request_id,
     ] {
         if let Some(text) = query_field {
             *text = text.trim().to_string();

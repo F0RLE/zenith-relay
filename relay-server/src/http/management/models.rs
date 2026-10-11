@@ -102,6 +102,9 @@ pub async fn set_model_price(
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
     let mut overrides = previous_overrides.clone();
     if let Some(price) = price {
+        let price = overrides
+            .get(&canonical)
+            .map_or(price, |previous| previous.with_base_prices(price));
         overrides.insert(canonical, price);
     } else {
         overrides.remove(&canonical);
@@ -130,7 +133,7 @@ pub async fn set_model_service_tier(
     {
         return Err(ManagementError::validation(
             error_codes::MODEL_SERVICE_TIER_UNSUPPORTED,
-            "requested service tier is not available under the Relay model-family policy",
+            "requested service tier is not supported by the model and configured routes",
         ));
     }
     let previous_overrides = state

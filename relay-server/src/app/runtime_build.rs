@@ -101,6 +101,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
         },
         GatewayRuntimeOptions {
             tool_policy: routing_policy.tool_policy.unwrap_or_default(),
+            request_timezone: state.store.request_timezone()?,
             max_retry_candidates: usize::from(routing_policy.max_retry_candidates),
             pool_routing: Some(pool_routing),
             hidden_models,
@@ -288,7 +289,13 @@ fn retain_active_pool_members(
     source_ids.retain(|source_id| active_source_ids.contains(source_id.as_str()));
     let active_account_ids = accounts
         .iter()
-        .filter(|account| account.enabled && !account.draining)
+        .filter(|account| {
+            account
+                .oauth_client_kind
+                .supports_pool(account.subscription_plan_type.as_deref())
+                && account.enabled
+                && !account.draining
+        })
         .map(|account| account.id.as_str())
         .collect::<HashSet<_>>();
     account_ids.retain(|account_id| active_account_ids.contains(account_id.as_str()));

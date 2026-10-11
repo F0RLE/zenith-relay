@@ -622,7 +622,14 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .json()
         .await
         .unwrap();
-    assert_eq!(compact["type"], "compaction");
+    // ChatGPT's native compact endpoint returns a Responses object; Relay
+    // validates the encrypted checkpoint and preserves that native shape.
+    assert_eq!(compact["object"], "response");
+    assert_eq!(compact["output"][0]["type"], "compaction");
+    assert_eq!(
+        compact["output"][0]["encrypted_content"],
+        "synthetic-encrypted-checkpoint"
+    );
 
     let search: Value = client
         .post(format!("{}/v1/alpha/search", first.origin))

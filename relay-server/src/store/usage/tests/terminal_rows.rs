@@ -143,6 +143,33 @@ fn usage_keeps_one_terminal_row_per_request() {
     assert_eq!(failed.error_origin, Some(ErrorOrigin::Provider));
     assert_eq!(failed.requested_reasoning_effort, None);
     assert_eq!(failed.effective_reasoning_effort, None);
+    let history_query = UsageQuery {
+        request_id: Some("req_fallback".into()),
+        page_size: 1,
+        ..UsageQuery::default()
+    };
+    let history = store.usage_page(&history_query).unwrap();
+    assert_eq!(history.total, 2);
+    assert_eq!(history.total_pages, 2);
+    assert!(history.events[0].success);
+    assert!(history.events[0].id < 0);
+    let first = store
+        .usage_page(&UsageQuery {
+            page: 2,
+            ..history_query.clone()
+        })
+        .unwrap();
+    assert_eq!(first.events[0].attempt, 1);
+    assert!(!first.events[0].success);
+    assert_ne!(
+        first.events[0].candidate_hint,
+        history.events[0].candidate_hint
+    );
+    event.request_id = "req_fallback_extra".into();
+    store.record_usage(&event, 5_000).unwrap();
+    assert_eq!(store.usage_page(&history_query).unwrap().total, 2);
+    store.clear_usage().unwrap();
+    assert_eq!(store.usage_page(&history_query).unwrap().total, 0);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
@@ -247,8 +274,28 @@ fn deleting_account_removes_telemetry_and_rejects_late_usage() {
         })
         .unwrap();
 
+    // Deleting a member must also remove its earlier attempt when the final
+    // row belongs to a source that remains in the pool.
+    let history_query = UsageQuery {
+        request_id: Some("rerouted-before-delete".into()),
+        ..UsageQuery::default()
+    };
+    let mut rerouted = event.clone();
+    rerouted.request_id = "rerouted-before-delete".into();
+    rerouted.success = false;
+    store.record_usage(&rerouted, 11).unwrap();
+    rerouted.attempt = 2;
+    rerouted.account_id = None;
+    rerouted.candidate_id = Some("preserved-source".into());
+    rerouted.source_id = "preserved-source".into();
+    rerouted.success = true;
+    store.record_usage(&rerouted, 12).unwrap();
+    assert_eq!(store.usage_page(&history_query).unwrap().total, 2);
     assert!(store.delete_account(account_id).unwrap().is_some());
-    assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 0);
+    assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
+    let history = store.usage_page(&history_query).unwrap();
+    assert_eq!(history.total, 1);
+    assert_eq!(history.events[0].attempt, 2);
     assert!(!store
         .api_equivalents()
         .unwrap()
@@ -257,7 +304,22 @@ fn deleting_account_removes_telemetry_and_rejects_late_usage() {
 
     event.request_id = "request-after-delete".into();
     store.record_usage(&event, 20).unwrap();
-    assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 0);
+    assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
+    assert_eq!(
+        store
+            .usage_page(&UsageQuery {
+                request_id: Some("request-after-delete".into()),
+                ..UsageQuery::default()
+            })
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(
+        store.prune_usage_history_with_limits(30, 100, 0).unwrap(),
+        1
+    );
+    assert_eq!(store.usage_page(&history_query).unwrap().total, 0);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

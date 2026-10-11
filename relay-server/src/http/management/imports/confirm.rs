@@ -114,6 +114,31 @@ pub(super) async fn confirm_one_account_import(
     pending_credential
         .validate_oauth_client()
         .map_err(validation_error)?;
+    pending_credential
+        .validate_plan(preview.plan_type.as_deref())
+        .map_err(|message| {
+            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+        })?;
+    for trashed_account in state.store.trashed_accounts().map_err(store_error)? {
+        let Some(retained_secret) = state
+            .vault
+            .load(&trashed_account.secret_ref)
+            .map_err(vault_error)?
+        else {
+            continue;
+        };
+        let retained_credential: AccountCredential = serde_json::from_str(&retained_secret)
+            .map_err(|_| validation_error("trashed account credential is invalid"))?;
+        if retained_credential.matches_connection(
+            pending_credential.oauth_client_kind,
+            &pending_credential.chatgpt_account_id,
+            pending_credential.principal_user_id().as_deref(),
+        ) {
+            return Err(validation_error(
+                "account is in trash; restore it before importing",
+            ));
+        }
+    }
     let mut existing_account = None;
     for account_record in state.store.accounts().map_err(store_error)? {
         let Some(existing_secret) = state
@@ -190,6 +215,11 @@ pub(super) async fn confirm_one_account_import(
     if subscription.active_until_ms.is_none() {
         subscription.updated_at_ms = None;
     }
+    pending_credential
+        .validate_plan(subscription.plan_type.as_deref())
+        .map_err(|message| {
+            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
+        })?;
     let mut account_record = ServerAccountRecord {
         id: preview.account_id.clone(),
         label: existing_account

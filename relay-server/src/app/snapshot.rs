@@ -162,6 +162,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         },
         gateway: GatewaySummary {
             tool_policy: routing_policy.tool_policy.unwrap_or_default(),
+            request_timezone: state.store.request_timezone()?,
             basis_points_enabled: false,
             pool_routing: Some(zenith_relay_core::protocol::pool_routing_summary(
                 routing_policy.pool_routing.as_ref(),
@@ -192,6 +193,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             chatgpt_interface_quota_reserve_basis_points: None,
             codex_background_tasks_enabled,
             codex_websockets_enabled,
+            chatgpt_context_policy: Default::default(),
             chatgpt_retry_until_available,
             block_degraded_routes_enabled,
             routing_order,

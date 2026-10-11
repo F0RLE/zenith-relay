@@ -9,6 +9,7 @@ mod models;
 mod pricing;
 mod proxies;
 mod quota;
+mod request_timezone;
 mod routing;
 mod sources;
 mod tool_policy;
@@ -56,6 +57,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .merge(usage::routes())
         .merge(gateway::routes())
         .merge(tool_policy::routes())
+        .merge(request_timezone::routes())
         .merge(automations::routes())
 }
 
@@ -142,6 +144,34 @@ fn account_summary(
         .find(|account_summary| account_summary.id == account_record.id)
         .ok_or_else(|| {
             ManagementError::internal(error_codes::SNAPSHOT_MISSING, "account snapshot missing")
+        })
+}
+
+fn require_pool_account(
+    state: &AppState,
+    account: &ServerAccountRecord,
+) -> Result<(), ManagementError> {
+    let secret = state
+        .vault
+        .load(&account.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::validation(
+                error_codes::ACCOUNT_SECRET_MISSING,
+                "account credentials are missing",
+            )
+        })?;
+    let credential: crate::state::AccountCredential =
+        serde_json::from_str(&secret).map_err(|_| {
+            ManagementError::validation(
+                error_codes::ACCOUNT_SECRET_INVALID,
+                "account credentials are invalid",
+            )
+        })?;
+    credential
+        .validate_plan(account.subscription.plan_type.as_deref())
+        .map_err(|message| {
+            ManagementError::validation(error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED, message)
         })
 }
 

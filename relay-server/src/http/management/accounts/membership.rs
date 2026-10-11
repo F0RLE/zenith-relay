@@ -62,6 +62,12 @@ pub(super) async fn set_pool_membership(
         })
         .collect::<Result<Vec<_>, _>>()?;
     if input.in_pool {
+        for account in accounts
+            .iter()
+            .filter(|account| account_ids.contains(&account.id))
+        {
+            super::super::require_pool_account(&state, account)?;
+        }
         for source_id in &source_ids {
             let source_record = sources
                 .iter()

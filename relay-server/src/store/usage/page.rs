@@ -77,7 +77,22 @@ impl Store {
             Vec::new()
         };
         let buckets = usage_buckets(&connection, &where_sql, &query_parameters, query, resolver)?;
-        let total = totals.requests;
+        let event_table = if query.request_id.is_some() {
+            "usage_attempts"
+        } else {
+            "usage_events"
+        };
+        let total = if query.request_id.is_some() {
+            connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {event_table}{where_sql}"),
+                    params_from_iter(query_parameters.iter()),
+                    |row| row.get::<_, i64>(0).map(|count| count.max(0) as u64),
+                )
+                .map_err(db_error)?
+        } else {
+            totals.requests
+        };
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let mut events = if query.includes_events() {
             let sql = format!(
@@ -88,7 +103,7 @@ impl Store {
                  created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, \
                  error_origin, requested_reasoning_effort, effective_reasoning_effort, \
                  cache_write_ttl, attempt, upstream_error_json \
-                 FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+                 FROM {event_table}{where_sql} ORDER BY rowid DESC LIMIT ? OFFSET ?"
             );
             let mut statement = connection.prepare(&sql).map_err(db_error)?;
             let mut event_parameters = query_parameters;

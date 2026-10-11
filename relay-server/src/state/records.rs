@@ -174,6 +174,16 @@ pub struct AccountCredential {
 }
 
 impl AccountCredential {
+    pub fn validate_plan(&self, plan_type: Option<&str>) -> Result<(), String> {
+        self.oauth_client_kind
+            .validate_plan(
+                plan_type,
+                self.id_token.as_deref(),
+                Some(&self.access_token),
+            )
+            .map_err(str::to_owned)
+    }
+
     pub fn matches_connection(
         &self,
         kind: OAuthClientKind,

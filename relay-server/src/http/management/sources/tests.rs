@@ -231,6 +231,7 @@ fn failed_refresh_clears_the_source_catalog() {
                 cache_write_5m_micro_usd_per_million: None,
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 1,
+                ..Default::default()
             },
         )]),
         last_error_code: None,

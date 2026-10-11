@@ -56,7 +56,9 @@ pub(super) fn runtime_account(
         enabled: account_candidate_enabled(
             account_record.enabled,
             operational.routing_block_reason,
-        ),
+        ) && credential
+            .validate_plan(account_record.subscription.plan_type.as_deref())
+            .is_ok(),
         draining: account_record.draining,
         priority: account_record.priority,
         weight: account_record.weight,

@@ -83,7 +83,7 @@ pub(super) async fn authenticate_import_account(
     state: &AppState,
     access_token: &str,
     claimed_account_ids: &[String],
-) -> Result<String, ManagementError> {
+) -> Result<(String, Option<String>), ManagementError> {
     let authorization = zenith_relay_core::providers::chatgpt::bearer_authorization(access_token)
         .map_err(|_| {
         ManagementError::validation(
@@ -171,7 +171,13 @@ pub(super) async fn authenticate_import_account(
                 "imported account identity does not match the authenticated account",
             ),
         })?;
-    clean_identifier(&account_id, "account id")
+    let plan = zenith_relay_core::providers::chatgpt::parse_account_check_subscription(
+        &account_check_payload,
+        &account_id,
+    )
+    .ok()
+    .and_then(|metadata| metadata.plan_type);
+    Ok((clean_identifier(&account_id, "account id")?, plan))
 }
 
 pub(super) fn safe_plan_type(plan_text: String) -> Option<String> {

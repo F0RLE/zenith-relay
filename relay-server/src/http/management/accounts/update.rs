@@ -47,6 +47,9 @@ pub(super) async fn update_account(
         account_record.enabled = enabled;
     }
     if let Some(in_pool) = input.in_pool {
+        if in_pool {
+            super::super::require_pool_account(&state, &account_record)?;
+        }
         account_record.in_pool = in_pool;
     }
     if let Some(draining) = input.draining {

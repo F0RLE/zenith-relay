@@ -31,6 +31,8 @@ use zenith_relay_server::{
     store::{Store, Vault},
 };
 
+#[path = "support/request_timezone.rs"]
+mod request_timezone;
 #[path = "support/tool_policy.rs"]
 mod tool_policy;
 
@@ -350,6 +352,7 @@ async fn source_lifecycle_response(
     Json(json!({
         "id":"response-source-lifecycle",
         "object":"response",
+        "status":"completed",
         "model":"gpt-source-lifecycle",
         "output":[],
         "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
@@ -414,7 +417,7 @@ async fn spawn_account_proxy(
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "text/event-stream")
                 .body(Body::from(format!(
-                    "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"object\":\"response\",\"model\":\"gpt-proxy-test\",\"output\":[],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
+                    "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-proxy-test\",\"output\":[],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
                 )))
                 .unwrap()
         }
@@ -464,10 +467,29 @@ async fn upstream_response(request: Request) -> Response {
         .and_then(|value| value.get("stream").and_then(Value::as_bool))
         .unwrap_or(false);
     if stream {
+        let terminal = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "response-test",
+                "object": "response",
+                "status": "completed",
+                "model": "gpt-test",
+                "output": [{
+                    "id": "message-test",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type":"output_text","text":"OK","annotations":[]}]
+                }],
+                "usage": {"input_tokens":1,"output_tokens":1,"total_tokens":2}
+            }
+        });
         return Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/event-stream")
-            .body(Body::from("data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+            .body(Body::from(format!(
+                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}}\n\ndata: {terminal}\n\n"
+            )))
             .unwrap();
     }
     (
@@ -507,6 +529,7 @@ async fn load_upstream_response(
         Json(json!({
             "id":"concurrent-response",
             "object":"response",
+            "status":"completed",
             "model":"gpt-test",
             "output":[],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
@@ -537,7 +560,7 @@ async fn account_response(request: Request) -> Response {
     assert!(body["input"].is_array());
     let terminal = json!({
         "type": "response.completed",
-        "response": {"id": "account-response-test", "object": "response",
+        "response": {"id": "account-response-test", "object": "response", "status": "completed",
             "model": body["model"], "output": [],
             "usage": {"input_tokens":1,"input_tokens_details":{"cached_tokens":1},"output_tokens":1,"total_tokens":2}}
     });
@@ -555,7 +578,17 @@ async fn account_compact(request: Request) -> Response {
     let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert!(body.get("stream").is_none());
-    Json(json!({"type":"compaction","items":[]})).into_response()
+    Json(json!({
+        "id": "account-compaction-test",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "id": "compaction-test",
+            "type": "compaction",
+            "encrypted_content": "synthetic-encrypted-checkpoint"
+        }]
+    }))
+    .into_response()
 }
 
 async fn account_search(request: Request) -> Response {

@@ -426,6 +426,9 @@ fn import_warning_code_name(warning_code: ImportWarningCode) -> &'static str {
 fn import_issue_code_name(issue_code: ImportIssueCode) -> &'static str {
     match issue_code {
         ImportIssueCode::AmbiguousCredentials => error_codes::AMBIGUOUS_CREDENTIALS,
+        ImportIssueCode::BasisPointsFreeAccountUnsupported => {
+            error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED
+        }
         ImportIssueCode::DuplicateItem => error_codes::DUPLICATE_ITEM,
         ImportIssueCode::InvalidCredentials => error_codes::INVALID_CREDENTIALS,
         ImportIssueCode::MalformedJson => error_codes::MALFORMED_JSON,
