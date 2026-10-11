@@ -39,6 +39,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/relay-core -> target
       - uses: taiki-e/install-action@cargo-audit
       - name: Prepare RustSec advisory database
         run: |
@@ -92,6 +96,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - name: Run Windows Rust tests
         # The test keyring is process-global, so its system key must not be mutated concurrently.
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
@@ -127,6 +133,8 @@ jobs:
           bun-version: 1.4.2
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - run: bun install --frozen-lockfile
         working-directory: src
       - name: Install Linux Tauri dependencies

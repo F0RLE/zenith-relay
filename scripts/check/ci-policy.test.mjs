@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,26 @@ function workflow(name) {
 function needs(job) {
   return Array.isArray(job.needs) ? job.needs : [job.needs];
 }
+
+test("Rust caches use the nested Cargo workspaces and their own target directories", () => {
+  const cases = [
+    ["build.yml", "check", ["src-tauri", "crates/relay-core"]],
+    ["build.yml", "check-windows", ["src-tauri"]],
+    ["build.yml", "build", ["src-tauri"]],
+    ["relay-server.yml", "check", ["relay-server"]],
+  ];
+  for (const [file, jobName, directories] of cases) {
+    const job = workflow(file).jobs[jobName];
+    const cache = job.steps.find((step) => step.uses?.startsWith("Swatinem/rust-cache@"));
+    const entries = cache?.with?.workspaces?.trim().split(/\r?\n/).map((entry) => entry.trim());
+    expect(entries, `${file}: ${jobName}`).toEqual(
+      directories.map((directory) => `${directory} -> target`),
+    );
+    for (const directory of directories) {
+      expect(existsSync(new URL(`../../${directory}/Cargo.toml`, import.meta.url))).toBe(true);
+    }
+  }
+});
 
 describe("desktop CI", () => {
   const build = workflow("build.yml");

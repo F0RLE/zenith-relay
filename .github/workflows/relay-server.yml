@@ -38,6 +38,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: relay-server -> target
       - uses: taiki-e/install-action@cargo-audit
       - name: Prepare RustSec advisory database
         run: |
