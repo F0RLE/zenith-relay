@@ -93,16 +93,6 @@ pub(crate) async fn build_local_runtime_state(
     );
     if let Some(runtime) = runtime.as_ref() {
         runtime.set_chatgpt_context_policy(inputs.gateway.chatgpt_context_policy);
-        runtime.set_chatgpt_context_prices(
-            models
-                .iter()
-                .filter_map(|model| {
-                    model
-                        .token_price
-                        .map(|price| (zenith_relay_core::model_id_key(&model.id), price))
-                })
-                .collect(),
-        );
     }
     zenith_relay_core::protocol::apply_member_model_display_order(
         &mut source_summaries,

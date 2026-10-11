@@ -328,19 +328,11 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
             .get("relay_context_limits")
             .and_then(|limits| limits.get(zenith_relay_core::model_id_key(&model_id)))
         {
-            let price = limits
-                .get("price")
-                .filter(|price| !price.is_null())
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(LocalPoolError::invalid_state)?;
             context_policy.apply(
                 &mut catalog_entry,
                 limits.get("context").and_then(Value::as_u64),
                 limits.get("input").and_then(Value::as_u64),
                 limits.get("output").and_then(Value::as_u64),
-                price,
             );
         }
         if let Some(slug) = model_slug(&catalog_entry) {

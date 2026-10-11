@@ -13,10 +13,6 @@ impl GatewayRuntime {
         *crate::poison::mutex(&self.chatgpt_context_policy) = policy;
     }
 
-    pub fn set_chatgpt_context_prices(&self, prices: BTreeMap<String, crate::pricing::TokenPrice>) {
-        *crate::poison::mutex(&self.chatgpt_context_prices) = prices;
-    }
-
     pub(crate) fn apply_chatgpt_context_policy(
         &self,
         entry: &mut Value,
@@ -25,9 +21,6 @@ impl GatewayRuntime {
     ) {
         let policy = *crate::poison::mutex(&self.chatgpt_context_policy);
         let capabilities = self.model_capabilities(model);
-        let quote = crate::poison::mutex(&self.chatgpt_context_prices)
-            .get(&crate::model_id_key(model))
-            .copied();
         policy.apply(
             entry,
             if native {
@@ -37,7 +30,6 @@ impl GatewayRuntime {
             },
             capabilities.input_limit,
             capabilities.output_limit,
-            quote,
         );
     }
 

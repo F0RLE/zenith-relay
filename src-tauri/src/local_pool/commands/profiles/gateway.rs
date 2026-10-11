@@ -87,7 +87,7 @@ pub async fn attach_codex_to_local_gateway(
     )?;
     let base_url = format!("http://127.0.0.1:{port}/v1");
     let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
-    let catalog = super::catalog::context_catalog(&state, &catalog).await?;
+    let catalog = super::catalog::context_catalog(&state, &catalog)?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let activation_result: Result<ProfileActivation, CommandError> = async {
         let bound_oauth =

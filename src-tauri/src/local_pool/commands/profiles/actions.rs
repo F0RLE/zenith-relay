@@ -123,7 +123,7 @@ pub async fn launch_codex_source(
         .into());
     }
     let catalog = match catalog {
-        Some(catalog) => Some(super::catalog::context_catalog(&state, &catalog).await?),
+        Some(catalog) => Some(super::catalog::context_catalog(&state, &catalog)?),
         None => None,
     };
     let sync_history =

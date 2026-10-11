@@ -134,7 +134,6 @@ pub struct GatewayRuntime {
     model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
     model_display_order: Mutex<Vec<String>>,
     chatgpt_context_policy: Mutex<crate::catalog::context_policy::ApplicationContextPolicy>,
-    chatgpt_context_prices: Mutex<BTreeMap<String, crate::pricing::TokenPrice>>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,

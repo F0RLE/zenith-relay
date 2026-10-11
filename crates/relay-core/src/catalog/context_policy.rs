@@ -1,4 +1,3 @@
-use crate::pricing::TokenPrice;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -93,7 +92,6 @@ impl ApplicationContextPolicy {
         context_limit: Option<u64>,
         input_limit: Option<u64>,
         output_limit: Option<u64>,
-        _price: Option<TokenPrice>,
     ) {
         if !self.manages_window() && !self.manages_compaction() {
             return;
@@ -182,13 +180,12 @@ impl ApplicationContextPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::{LongContextRates, TokenRateSet};
 
     #[test]
     fn client_policy_preserves_all_native_fields() {
         let mut entry = json!({"context_window": 272000, "auto_compact_token_limit": 240000});
         let original = entry.clone();
-        ApplicationContextPolicy::Client.apply(&mut entry, Some(1050000), None, None, None);
+        ApplicationContextPolicy::Client.apply(&mut entry, Some(1050000), None, None);
         assert_eq!(entry, original);
     }
 
@@ -200,7 +197,6 @@ mod tests {
             Some(200000),
             Some(100000),
             Some(32000),
-            None,
         );
         assert_eq!(entry["context_window"], 128000);
         assert_eq!(entry["max_context_window"], 128000);
@@ -210,45 +206,27 @@ mod tests {
     #[test]
     fn extended_window_reserves_a_large_output_against_the_hard_ceiling() {
         let mut entry = json!({"context_window": 272000, "max_context_window": 1050000});
-        ApplicationContextPolicy::Extended.apply(&mut entry, None, None, Some(128000), None);
+        ApplicationContextPolicy::Extended.apply(&mut entry, None, None, Some(128000));
         assert_eq!(entry["context_window"], 1000000);
         assert_eq!(entry["auto_compact_token_limit"], 875900);
         assert!(entry["auto_compact_token_limit"].as_u64().unwrap() + 128000 < 1050000);
         let mut smaller = json!({"context_window": 272000, "max_context_window": 872000});
-        ApplicationContextPolicy::Extended.apply(&mut smaller, None, None, None, None);
+        ApplicationContextPolicy::Extended.apply(&mut smaller, None, None, None);
         assert_eq!(smaller["context_window"], 872000);
     }
 
     #[test]
-    fn numeric_presets_ignore_price_boundaries_and_unknown_capacity_stays_unknown() {
-        let price = TokenPrice {
-            input: 1,
-            output: 2,
-            cache_read: None,
-            cache_write_5m: None,
-            cache_write_1h: None,
-            flex: TokenRateSet::EMPTY,
-            priority: TokenRateSet::EMPTY,
-            above_200k: LongContextRates {
-                standard: TokenRateSet {
-                    input: Some(2),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            above_272k: LongContextRates::EMPTY,
-            ..Default::default()
-        };
+    fn numeric_presets_respect_capacity_and_unknown_capacity_stays_unknown() {
         let mut entry = json!({"context_window": 272000, "max_context_window": 1000000});
-        ApplicationContextPolicy::Short.apply(&mut entry, None, None, Some(32000), Some(price));
+        ApplicationContextPolicy::Short.apply(&mut entry, None, None, Some(32000));
         assert_eq!(entry["context_window"], 272000);
         assert!(entry["auto_compact_token_limit"].as_u64().unwrap() < 272000);
-        ApplicationContextPolicy::Short.apply(&mut entry, Some(128000), None, None, None);
+        ApplicationContextPolicy::Short.apply(&mut entry, Some(128000), None, None);
         assert_eq!(entry["context_window"], 128000);
-        ApplicationContextPolicy::Extended.apply(&mut entry, Some(128000), None, None, None);
+        ApplicationContextPolicy::Extended.apply(&mut entry, Some(128000), None, None);
         assert_eq!(entry["context_window"], 128000);
         let mut unknown = json!({"slug": "unknown"});
-        ApplicationContextPolicy::Extended.apply(&mut unknown, None, None, None, Some(price));
+        ApplicationContextPolicy::Extended.apply(&mut unknown, None, None, None);
         assert!(unknown.get("context_window").is_none());
     }
 
@@ -259,7 +237,7 @@ mod tests {
             context: ContextWindowPolicy::Client,
             compaction: CompactionPolicy::Custom { tokens: 150000 },
         }
-        .apply(&mut entry, None, None, Some(32000), None);
+        .apply(&mut entry, None, None, Some(32000));
         assert_eq!(entry["context_window"], 272000);
         assert_eq!(entry["max_context_window"], 1050000);
         assert_eq!(entry["auto_compact_token_limit"], 150000);
@@ -274,13 +252,13 @@ mod tests {
             context: ContextWindowPolicy::Client,
             compaction: CompactionPolicy::Client,
         }
-        .apply(&mut entry, None, None, None, None);
+        .apply(&mut entry, None, None, None);
         assert_eq!(entry, original);
         ApplicationContextPolicy::Configured {
             context: ContextWindowPolicy::Custom { tokens: 128000 },
             compaction: CompactionPolicy::Custom { tokens: 1000000 },
         }
-        .apply(&mut entry, None, None, Some(32000), None);
+        .apply(&mut entry, None, None, Some(32000));
         assert_eq!(entry["context_window"], 128000);
         assert_eq!(entry["auto_compact_token_limit"], 91200);
         assert!(ApplicationContextPolicy::Configured {
