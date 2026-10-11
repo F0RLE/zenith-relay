@@ -63,24 +63,24 @@ for (const args of diffs) {
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   let currentPath = "";
   try {
-    for await (const line of lines) {
+    lines.on("line", (line) => {
       const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
       if (header) {
         currentPath = header[2];
-        continue;
+        return;
       }
       if (!line.startsWith("+") || line.startsWith("+++") || testPath.test(currentPath)) {
-        continue;
+        return;
       }
       if (line.includes("fixture") && /\.(unwrap|expect)\s*\(/i.test(line)) {
-        continue;
+        return;
       }
       for (const rule of rules) {
         if (rule.pattern.test(line) && violations.length < 40) {
           violations.push(`[${rule.name}] ${currentPath}: ${line}`);
         }
       }
-    }
+    });
     const result = await finished;
     if (result.error || result.code !== 0) {
       const detail = result.error?.message ?? stderr.trim();

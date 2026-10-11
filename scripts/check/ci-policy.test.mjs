@@ -60,6 +60,18 @@ describe("server CI", () => {
     expect(JSON.stringify(server.jobs.smoke)).not.toContain("docker/login-action");
     expect(JSON.stringify(server.jobs.publish.steps)).not.toContain("edge-");
   });
+
+  test("only manual runs retain the smoke-tested image without publishing it", () => {
+    const exportImage = server.jobs.smoke.steps.find((step) => step.name === "Export checked server image");
+    const upload = server.jobs.smoke.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
+    expect(exportImage.if).toBe("github.event_name == 'workflow_dispatch'");
+    expect(exportImage.run).toContain('docker save "zenith-relay-server:$GITHUB_SHA"');
+    expect(exportImage.run).toContain("sha256sum");
+    expect(upload.if).toBe(exportImage.if);
+    expect(upload.with["if-no-files-found"]).toBe("error");
+    expect(server.jobs.smoke.steps.indexOf(exportImage))
+      .toBeGreaterThan(server.jobs.smoke.steps.findIndex((step) => step.name === "Smoke-test server container"));
+  });
 });
 
 describe("agent guardrails", () => {
@@ -102,5 +114,5 @@ describe("agent guardrails", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

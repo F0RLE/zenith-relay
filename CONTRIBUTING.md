@@ -363,6 +363,12 @@ installers or publish artifacts. Pushing a <code>v*</code> tag builds the deskto
 installers and, after those checks pass, publishes the GitHub Release, updater
 manifest, and server image. A manual workflow run can build and smoke-test the
 same artifacts, but it does not publish, even when started from a tag.
+The manual Build run retains desktop installers as Actions artifacts. A manual
+Relay Server run retains the checked `linux/amd64` image as a `.tar.gz` archive,
+with `SHA256SUMS` and `REVISION`. Verify the checksum, then load the archive with
+`docker load --input zenith-relay-server-linux-amd64.tar.gz`; the loaded tag is
+`zenith-relay-server:<commit SHA>`. These artifacts do not update a GitHub Release,
+the updater, or GHCR.
 
 ### macOS distribution
 

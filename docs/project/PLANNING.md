@@ -505,7 +505,7 @@ does not establish distributed scheduling.
 
 ## Usage and prices
 
-Desktop schema 33 and server schema 42 retain a separate attempt history.
+Desktop migration 33 and server migration 42 add a separate attempt history.
 The ordinary report and its rollups still store one final row per logical
 request. An exact `requestId` usage query returns retained attempts across
 members, including pre-output compatibility repairs and HTTP authorization
