@@ -5,9 +5,10 @@ not claim that a feature exists. Implemented behavior is documented in
 [PLANNING.md](PLANNING.md); contributor and release checks are in
 [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-Relay is a local-first, user-owned pool. The shipped subscription connector is
-ChatGPT. Other providers can be used as generic API sources when their API
-contract is known; a subscription connector needs its own authentication,
+Relay is a local-first, user-owned pool. The shipped account connector has
+separate native ChatGPT and Excel / Basis Points sign-ins, both available to
+the pool. Native sign-in also supports direct launch. Other providers can be used as generic API sources when
+their API contract is known; a subscription connector needs its own authentication,
 refresh, entitlement, quota, usage, and recovery work.
 
 ## Product direction
@@ -52,17 +53,24 @@ accounts and real installed clients.
   Add Kimi Code subscription and MiniMax M Plan quota readers only after
   verifying their cloud endpoint, credential scope, units, and reset semantics.
   A local Kimi CLI usage endpoint is not a cloud quota contract.
-- Exercise ChatGPT and generic API sources through add, refresh, disable,
-  remove, restore, model refresh, failed-write rollback, and configuration
-  recovery.
+- Exercise native ChatGPT connections, Excel / Basis Points pool connections,
+  and generic API sources through add, refresh, disable, remove, restore,
+  model refresh, failed-write rollback, and configuration recovery.
 - Verify Responses, Chat Completions, Anthropic Messages, and Gemini requests
   for every advertised source, including JSON, streaming, tools, reasoning,
   cache usage, safe pre-output retry, and a fresh turn after restart.
+- Cover completed, incomplete, refusal, malformed terminal, interrupted stream,
+  and late-usage outcomes separately. Check health, affinity, retry, and
+  continuation state as well as the client-visible result.
+- Verify parallel tools, fragmented arguments, optional Gemini call IDs, and
+  signed reasoning on the next turn. Exercise both retained local state and
+  missing state after restart. Unsupported meaningful extensions must fail
+  conversion explicitly while native routes preserve them.
 - Verify compressed requests, compaction, retained-context continuation, OAuth
   refresh, credential replacement, routing-cookie expiry, and client recovery.
 - Keep the complete source inventory separate from endpoint support. A model
   returned by a source must not disappear only because a route is unavailable.
-- Use two permitted accounts to check rotation, proxy, quota refresh,
+- Use two permitted BPS connections to check rotation, proxy, quota refresh,
   cooldown/recovery, member removal, and redacted usage.
 
 ### Excel / Basis Points acceptance
@@ -75,9 +83,21 @@ accounts and real installed clients.
   import, export, server transfer, and concurrent credential replacement.
 - Check actual model entitlements, reasoning, tools, image input, usage,
   streaming, and continuation on the Excel route.
-- Confirm ordinary ChatGPT connections remain native after old settings are
-  imported or the runtime is rebuilt. Excel refusals must never authorize an
-  unsafe replay or change another connection's transport.
+- Verify generation 401 recovery on the next request with a retained Excel
+  refresh token, simultaneous refresh and delayed 401, a new login during
+  `invalid_grant`, and operator disable/draining preserved throughout recovery.
+  Check that model permission refusals pause only the canonical model for
+  30 minutes and that aliases share the pause without replaying generation.
+- Exercise optional request timezone binding through native HTTP, WebSocket,
+  Excel, compaction, remote persistence, and restart with installed clients.
+  Check existing environment and web-search timezone fields while dates,
+  ordinary text, and API-source requests remain intact. These observations
+  do not establish response quality.
+- Verify mixed pools of native ChatGPT, paid Excel / Basis Points, and API
+  sources after import, restart, and server transfer. Native Free accounts
+  remain eligible; Free BPS imports, discovery, and generation stay blocked,
+  including after a live plan downgrade. Excel refusals
+  must never authorize an unsafe replay or change another connection's transport.
 - Compare quality under controlled conditions. A separate Excel OAuth client
   does not establish that account degradation has been eliminated.
 

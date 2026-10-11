@@ -80,7 +80,8 @@ headers, prompts, response bodies, or provider session material.
 - Never use a management token as a `/v1` profile credential, and never expose
   either credential in a snapshot, log, export, or example.
 - Preserve the distinction between quota monitoring and routing eligibility.
-  Do not reinstate a Free-account routing policy or a hard-coded quota window.
+  Native Free accounts can join the pool. Reject known Free plans only for
+  Excel / Basis Points imports and requests; do not hard-code quota windows.
 - Retry another candidate only after a proven pre-execution rejection or
   not-sent result, and before any response bytes reach the client. Preserve
   response ownership; saved history proves portability, not execution safety.
@@ -89,8 +90,23 @@ headers, prompts, response bodies, or provider session material.
 - Update a profile through the existing inspect, snapshot, attach, verify, and
   restore flow. Never overwrite a newer user login.
 
-Read [AGENTS.md](AGENTS.md), [PLANNING.md](docs/project/PLANNING.md), and
-[ROADMAP.md](docs/project/ROADMAP.md) before changing a cross-cutting behavior.
+Apply [AGENTS.md](AGENTS.md). Consult [PLANNING.md](docs/project/PLANNING.md)
+for affected contracts and [ROADMAP.md](docs/project/ROADMAP.md) when changing
+planned scope or acceptance gates; routine edits do not need both documents.
+
+## API and protocol references
+
+Use [New API](https://github.com/QuantumNous/new-api) as the implementation
+reference for API integrations and protocol adapters: request and response
+formats, tool calls, streaming events, cache fields, usage, and errors. Start
+with its API documentation, `relay/` provider adapters, and `relaykit/`
+conversions. Record the referenced commit and file paths in the pull request.
+
+Check the referenced behavior against the provider's official API contract and
+Relay's contracts. Resolve differences explicitly; New API does not establish
+a source's model access, capabilities, prices, or quota. Adapt only the relevant
+behavior to Relay and preserve source attribution and license terms for any
+reused code.
 
 ## Development setup
 
@@ -221,6 +237,13 @@ Run the narrowest relevant checks while iterating. Before a commit that changes
 the frontend, desktop host, shared runtime, or server, run the corresponding
 commands below.
 
+Changes only to contributor documentation need content/link and diff checks.
+For behavior changes, reuse existing coverage or add regression cases that
+exercise the affected contract when tests are in scope. Avoid tests that
+merely repeat implementation, renamed identifiers, or document wording.
+After relevant checks pass, expand or repeat them only for new changes,
+failures, or an unresolved concern.
+
 These two checks are the same ones CI runs. They need Bun, not PowerShell.
 Use the branch targeted by the pull request as the base reference:
 
@@ -318,8 +341,8 @@ behavior.
 1. Inspect the active branch and working tree. Preserve unrelated local work.
 2. Change the owning layer and update its callers only when its contract
    changes.
-3. Add or update the smallest regression test that would fail without the
-   behavior.
+3. For behavior changes, use coverage that would detect a regression. Add or
+   update a focused case when existing coverage leaves a meaningful gap.
 4. Run the relevant checks and regenerate screenshots if their UI changed.
 5. Review the diff for secret leakage, stale Help wording, and generated-file
    noise.

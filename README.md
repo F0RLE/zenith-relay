@@ -17,18 +17,18 @@
 
 ## What it does
 
-- Combines ChatGPT accounts and compatible API sources in a local pool.
-- Selects a member by model, protocol, availability, quota, load, and the
-  selected rotation mode.
-- Preserves a provider-native route when the request can use it and converts
-  only supported protocol shapes.
-- Provides a local API for Responses, Chat Completions, Anthropic Messages, and
-  Gemini requests.
-- Can manage a user-operated Relay Server. Hosted multi-user accounts, billing,
-  and customer wallets are not part of Relay.
+- Combines native ChatGPT accounts, Excel / Basis Points connections, and compatible API sources in a local pool.
+- Connects installed ChatGPT and OpenCode applications, or another client through
+  a compatible API. Relay does not install those applications.
+- Selects an available pool member for each request and shows its status,
+  quota, and request history.
+- Supports direct use of one account or API source without pool rotation.
+- Can manage a Relay Server on your own machine for a pool that keeps running
+  when the desktop is closed.
 
-Relay is a separate personal-pool product. It must not contain Zenith production
-credentials, customer data, or production routing and billing logic.
+Bring your own account or provider API key. Conversations stay in your chosen
+client; Relay manages connections and routing. Usage costs are estimates, not
+a Relay subscription or bill.
 
 ## Download
 
@@ -52,16 +52,28 @@ Download a package for your platform from
 
 ## Quick start
 
-1. Open **Connections** and add a ChatGPT account or API source.
-2. In **Pool**, add the connections and allow the required models.
-3. Start **API**, then use **Pool → Connect** for ChatGPT or OpenCode. Other
-   clients use the displayed address and request key.
-4. Check **Overview** for state, **Usage** for request history, and **Recovery**
-   for Relay-managed client settings.
+1. Select **Computer**.
+2. In **Connections → Accounts → Sign in**, choose **ChatGPT** or
+   **Excel / Basis Points**, or add an API source under **Connections → Sources**.
+3. In **Pool → Members**, add the saved connections. Check **Model Rules**
+   for the model you want to use.
+4. Start the API under **Access → Local API**, then use **Pool → Connect**
+   for ChatGPT or OpenCode. Other clients use the API address and request key
+   from **Access**.
+5. Send a request from the client and find it in **Usage → Requests**.
+
+Ordinary **ChatGPT** accounts can join the pool and use native Responses.
+They also support direct **Launch in ChatGPT**. The separate
+**Excel / Basis Points** sign-in is marked **BPS** and requires a non-Free
+account. Free BPS imports and requests are rejected; native Free accounts
+can join the pool. The guide covers [direct use](docs/help/en/README.md#work-without-the-pool),
+[manual API setup](docs/help/en/README.md#local-api), and
+[connecting your server](docs/help/en/README.md#your-server).
 
 The full user guide is available in the application and in
 [English](docs/help/en/README.md) and [Russian](docs/help/ru/README.md).
-Quick Setup can be opened again from **Help**.
+Quick Setup guides the first launch and can be opened again from **Help**.
+Use **Recovery** to restore saved client settings.
 
 ## Screenshots
 
