@@ -361,7 +361,7 @@ fn managed_gpt_catalog_refresh_keeps_native_ids_without_copying_cached_capabilit
         assert_eq!(model["display_name"], label);
         assert_eq!(model["comp_hash"], CODEX_RELAY_CATALOG_HASH);
         assert_eq!(model["supported_reasoning_levels"], json!([]));
-        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert_eq!(model["supports_parallel_tool_calls"], false);
         assert!(model.get("context_window").is_none());
         assert!(model.get("default_reasoning_level").is_none());
         assert!(!catalog::is_native_catalog_entry(model));
@@ -1055,10 +1055,7 @@ fn direct_source_catalog_publishes_known_limits_without_client_context_policy() 
     assert!(value["models"][0]
         .get("effective_context_window_percent")
         .is_none());
-    assert_eq!(
-        value["models"][1]["input_modalities"],
-        json!(["text", "image"])
-    );
+    assert_eq!(value["models"][1]["input_modalities"], json!(["text"]));
     assert_eq!(value["models"][1]["supported_reasoning_levels"], json!([]));
     assert!(value["models"][1].get("context_window").is_none());
     assert!(value["models"][1].get("auto_compact_token_limit").is_none());

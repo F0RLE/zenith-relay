@@ -5,6 +5,21 @@ fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
     let root = test_root("usage-retention");
     let path = root.join("relay.sqlite");
     let store = Store::open(path.clone()).unwrap();
+    let catalog = zenith_relay_core::pricing::PricingCatalog::from_litellm_json(
+        r#"{"retention-model":{
+            "input_cost_per_token":0.0000025,"output_cost_per_token":0.000015,
+            "input_cost_per_token_priority":0.0000025,
+            "output_cost_per_token_priority":0.000015,
+            "cache_read_input_token_cost_priority":0.00000025
+        }}"#,
+    )
+    .unwrap();
+    let pricing = zenith_relay_core::pricing::PricingContext::default();
+    let equivalents = |store: &Store| {
+        store
+            .api_equivalents_with_pricing(&catalog, &pricing)
+            .unwrap()
+    };
     let mut event = UsageEvent {
         request_id: "req_old".into(),
         attempt: 1,
@@ -15,8 +30,8 @@ fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
         account_token_generation: None,
         client_context_id: None,
         routing: None,
-        requested_model: Some("gpt-5.4".into()),
-        resolved_model: Some("gpt-5.4".into()),
+        requested_model: Some("retention-model".into()),
+        resolved_model: Some("retention-model".into()),
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
@@ -44,7 +59,9 @@ fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
         quota_snapshot: None,
     };
     store.record_usage(&event, DAY_MS).unwrap();
-    let initial_usage = store.usage_page(&UsageQuery::default()).unwrap();
+    let initial_usage = store
+        .usage_page_with_pricing(&UsageQuery::default(), &catalog, &pricing)
+        .unwrap();
     assert_eq!(initial_usage.totals.generation_output_tokens, 0);
     assert_eq!(initial_usage.totals.generation_samples, 0);
     event.request_id = "req_current".into();
@@ -62,18 +79,12 @@ fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
     );
     assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
     let candidate_hint = hex::encode(Sha256::digest(b"source_alpha"))[..12].to_string();
-    assert_eq!(
-        store.api_equivalents().unwrap()[&candidate_hint].micro_usd,
-        3_100_025
-    );
+    assert_eq!(equivalents(&store)[&candidate_hint].micro_usd, 3_100_025);
 
     event.request_id = "req_newest".into();
     store.record_usage(&event, 102 * DAY_MS).unwrap();
     assert_eq!(store.prune_usage_history_with_limits(0, 1, 0).unwrap(), 1);
-    assert_eq!(
-        store.api_equivalents().unwrap()[&candidate_hint].micro_usd,
-        3_100_050
-    );
+    assert_eq!(equivalents(&store)[&candidate_hint].micro_usd, 3_100_050);
     let archived_daily_requests = store
         .lock()
         .unwrap()
@@ -90,19 +101,13 @@ fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
     event.input_tokens = Some(9_000_000);
     store.record_usage(&event, 101 * DAY_MS).unwrap();
     assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
-    assert_eq!(
-        store.api_equivalents().unwrap()[&candidate_hint].micro_usd,
-        3_100_050
-    );
+    assert_eq!(equivalents(&store)[&candidate_hint].micro_usd, 3_100_050);
     drop(store);
 
     let reopened = Store::open(path).unwrap();
-    assert_eq!(
-        reopened.api_equivalents().unwrap()[&candidate_hint].micro_usd,
-        3_100_050
-    );
+    assert_eq!(equivalents(&reopened)[&candidate_hint].micro_usd, 3_100_050);
     assert_eq!(reopened.clear_usage().unwrap(), 1);
-    assert!(reopened.api_equivalents().unwrap().is_empty());
+    assert!(equivalents(&reopened).is_empty());
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }

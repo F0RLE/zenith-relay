@@ -131,17 +131,21 @@ fn keeps_prepared_catalog_order_and_excludes_disabled_models() {
 
 #[test]
 fn configures_opencode_for_responses_tool_calls() {
-    let provider = managed_provider(
-        "http://127.0.0.1:14998/v1",
-        "test-secret",
-        &[model("gpt-5.6-sol", true)],
-    );
+    let metadata = super::ModelMetadataCatalog::from_models_dev_json(
+        r#"{"test/tool-model":{"attachment":true,"tool_call":true,
+        "modalities":{"input":["text","image"],"output":["text"]}}}"#,
+    )
+    .unwrap();
+    let mut models = vec![model("tool-model", true)];
+    zenith_relay_core::protocol::apply_model_metadata(&mut models, &metadata);
+    let provider = managed_provider("http://127.0.0.1:14998/v1", "test-secret", &models);
 
     assert_eq!(provider["npm"], PROVIDER_NPM);
     assert_eq!(provider["options"]["baseURL"], "http://127.0.0.1:14998/v1");
-    assert_eq!(provider["models"]["gpt-5.6-sol"]["attachment"], true);
+    assert_eq!(provider["models"]["tool-model"]["attachment"], true);
+    assert_eq!(provider["models"]["tool-model"]["tool_call"], true);
     assert_eq!(
-        provider["models"]["gpt-5.6-sol"]["modalities"]["input"],
+        provider["models"]["tool-model"]["modalities"]["input"],
         json!(["text", "image"])
     );
 }
@@ -166,12 +170,10 @@ fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
     assert_eq!(pooled["text-only"]["modalities"]["input"], json!(["text"]));
     assert_eq!(pooled["text-only"]["tool_call"], true);
     assert_eq!(pooled["text-only"]["limit"]["context"], 32000);
-    assert_eq!(
-        pooled["unknown"]["modalities"]["input"],
-        json!(["text", "image"])
-    );
+    assert_eq!(pooled["unknown"]["modalities"]["input"], json!(["text"]));
+    assert_eq!(pooled["unknown"]["attachment"], false);
     assert_eq!(pooled["unknown"]["reasoning"], false);
-    assert_eq!(pooled["unknown"]["tool_call"], true);
+    assert_eq!(pooled["unknown"]["tool_call"], false);
     assert!(pooled["unknown"].get("limit").is_none());
     models[0].reasoning_configurable = true;
     models[0].reasoning_allowed_levels = vec!["high".into(), "max".into()];
