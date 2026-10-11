@@ -1,34 +1,36 @@
 use super::{AuthenticatedKey, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
 use crate::{CandidateKind, Error, Result, WireApi};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
+        let models = self.visible_models(key, &[WireApi::Responses], crate::unix_time_ms());
         let scope = key.scope_snapshot();
         let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
-        let mut models = BTreeSet::new();
-        for account in self.chatgpt_accounts.values() {
-            let Some(candidate) = scheduler.candidate(&account.id) else {
-                continue;
-            };
-            let inventory = crate::poison::read(&account.model_inventory);
-            for model in &inventory.configured_models {
-                if !self.degraded_route_blocked(model)
-                    && key.model_rules.allows(model)
-                    && self.model_enabled(model)
-                    && basis_points_models.model_available(&account.id, model)
-                    && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
-                {
-                    models.insert(match key.model_prefix.as_deref() {
-                        Some(prefix) => format!("{prefix}/{model}"),
-                        None => model.clone(),
-                    });
-                }
-            }
-        }
-        models.into_iter().collect()
+        // Filter the shared ordered catalog instead of rebuilding it from
+        // account/model BTreeMaps, which would replace upstream order with
+        // alphabetical order. Keep the account-only inventory boundary.
+        models
+            .into_iter()
+            .filter(|display_id| {
+                let Some(model) = self.resolve_model(key, display_id) else {
+                    return false;
+                };
+                self.chatgpt_accounts.values().any(|account| {
+                    let inventory = crate::poison::read(&account.model_inventory);
+                    inventory
+                        .configured_models
+                        .iter()
+                        .any(|configured| configured.eq_ignore_ascii_case(&model))
+                        && basis_points_models.model_available(&account.id, &model)
+                        && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                            candidate.is_catalog_visible(&model, &[WireApi::Responses], &scope)
+                        })
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn codex_model_chatgpt_account_ids_for_resolved(
@@ -185,9 +187,10 @@ impl GatewayRuntime {
     ) -> Vec<String> {
         let mut levels = Vec::new();
         for route in self.configured_executor_routes(key, model, &[client], false) {
-            let fallback = self
+            let capabilities = self
                 .model_capabilities(&route.source_model)
-                .reasoning_effort_levels_for_route(route.route_capability.as_ref());
+                .for_route(route.route_capability.as_ref());
+            let fallback = &capabilities.reasoning_effort_levels;
             levels.extend(
                 fallback
                     .iter()
@@ -196,9 +199,11 @@ impl GatewayRuntime {
                             &route.candidate_id,
                             &route.source_model,
                             level,
-                        ) && route
-                            .adapter
-                            .supports_reasoning_effort(route.reasoning_mode, level)
+                        ) && route.adapter.supports_reasoning_effort_for_model(
+                            route.reasoning_mode,
+                            level,
+                            &capabilities,
+                        )
                     })
                     .cloned(),
             );

@@ -40,7 +40,22 @@ pub(super) fn event_terminal(event_payload: &Value) -> EventTerminal {
         }
         _ => None,
     };
-    let error_category = upstream_event_failure_category(event_type, event_payload);
+    let completion =
+        crate::protocol::completion::ResponseCompletion::from_responses_event(event_payload);
+    let completion_error = match completion {
+        Some(crate::protocol::completion::ResponseCompletion::Invalid) => {
+            Some(error_codes::STREAM_INVALID)
+        }
+        Some(crate::protocol::completion::ResponseCompletion::Incomplete) => {
+            Some(error_codes::RESPONSE_INCOMPLETE)
+        }
+        _ => None,
+    };
+    if completion == Some(crate::protocol::completion::ResponseCompletion::Incomplete) {
+        outcome = Some(EventTerminalOutcome::Incomplete);
+    }
+    let error_category =
+        upstream_event_failure_category(event_type, event_payload).or(completion_error);
     if let Some(category) = error_category {
         let explicitly_incomplete = outcome == Some(EventTerminalOutcome::Incomplete)
             || matches!(event_type, Some("response.completed" | "response.done"))

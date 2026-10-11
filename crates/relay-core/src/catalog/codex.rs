@@ -50,7 +50,7 @@ pub fn publish_routed_codex_context(
     }
 }
 
-/// Replace source-provided tier fields with the shared Relay model policy.
+/// Publish only modes supported by the reference and the configured transport.
 pub(crate) fn set_codex_service_tiers(model: &mut Value, supported: &[DefaultServiceTier]) {
     let Some(model_fields) = model.as_object_mut() else {
         return;

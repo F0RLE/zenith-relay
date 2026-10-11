@@ -239,7 +239,7 @@ async fn websocket_http_fallback_waits_through_silence_and_keeps_one_attempt() {
     assert_held(&gateway, &events);
     sender
         .send(Bytes::from_static(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ))
         .unwrap();
     assert_eq!(

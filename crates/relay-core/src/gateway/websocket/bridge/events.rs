@@ -305,7 +305,10 @@ fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> Event
             in_flight.event.ttft_ms = Some(in_flight.started.elapsed().as_millis() as u64);
         }
         if let Some(usage) = super::super::super::response::find_usage(event_payload) {
-            apply_usage(&mut in_flight.event, usage);
+            crate::protocol::merge_usage(&mut in_flight.usage_snapshot, usage);
+            if let Some(snapshot) = in_flight.usage_snapshot.as_ref() {
+                apply_usage(&mut in_flight.event, snapshot);
+            }
         }
         if let Some(response_id) = super::super::super::response::response_id(event_payload) {
             in_flight.response_id = Some(response_id.to_string());

@@ -7,6 +7,7 @@ mod responses_usage;
 mod terminal;
 mod tools;
 
+mod citations;
 mod reasoning;
 
 fn input(protocol: WireApi) -> Value {

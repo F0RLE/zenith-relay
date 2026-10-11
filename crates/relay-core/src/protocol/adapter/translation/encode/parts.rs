@@ -116,42 +116,22 @@ pub(super) fn thinking(
     generation: &mut Map<String, Value>,
     reasoning: &Reasoning,
     protocol: WireApi,
+    mode: MessagesReasoningMode,
+    explicit_max_tokens: bool,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<()> {
-    match (protocol, reasoning) {
-        (WireApi::Responses, Reasoning::Effort(effort)) => {
-            request_fields.insert("reasoning".into(), json!({"effort":effort}));
-        }
-        (WireApi::ChatCompletions, Reasoning::Effort(effort)) => {
-            request_fields.insert("reasoning_effort".into(), effort.clone().into());
-        }
-        (WireApi::Gemini, Reasoning::Effort(effort))
-            if matches!(effort.as_str(), "minimal" | "low" | "medium" | "high") =>
-        {
-            generation.insert("thinkingConfig".into(), json!({"thinkingLevel":effort}));
-        }
-        (WireApi::Gemini, Reasoning::Budget(budget)) => {
-            generation.insert("thinkingConfig".into(), json!({"thinkingBudget":budget}));
-        }
-        (WireApi::Messages, Reasoning::Budget(budget)) if *budget >= 1024 => {
-            request_fields.insert(
-                "thinking".into(),
-                json!({"type":"enabled","budget_tokens":budget}),
-            );
-        }
-        (WireApi::Messages, Reasoning::Effort(effort)) if effort == "none" => {
-            request_fields.insert("thinking".into(), json!({"type":"disabled"}));
-        }
-        (WireApi::Messages, Reasoning::Effort(effort))
-            if matches!(effort.as_str(), "low" | "medium" | "high" | "max") =>
-        {
-            request_fields.insert("thinking".into(), json!({"type":"adaptive"}));
-            request_fields
-                .entry("output_config")
-                .or_insert_with(|| json!({}))["effort"] = effort.clone().into();
-        }
-        _ => return Err(AdapterError::reasoning_unsupported()),
+    let fields = if protocol == WireApi::Gemini {
+        generation
+    } else {
+        request_fields
+    };
+    let policy = super::super::super::contracts::ReasoningPolicy::new(protocol, mode, capabilities);
+    match reasoning {
+        Reasoning::Effort(effort) => policy.apply_effort(fields, effort, explicit_max_tokens),
+        Reasoning::Budget(budget) => policy.apply_budget(fields, *budget, explicit_max_tokens),
+        Reasoning::DynamicBudget => policy.apply_dynamic_budget(fields),
+        Reasoning::Adaptive => Err(AdapterError::reasoning_unsupported()),
     }
-    Ok(())
 }
 
 pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResult<Vec<Value>> {
@@ -190,7 +170,7 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                 },
             ) => {
                 flush_responses_content(&mut encoded_items, &mut content, role);
-                encoded_items.push(json!({"type":"function_call_output","call_id":id,"output":tool_output(output, *is_error)}));
+                encoded_items.push(json!({"type":"function_call_output","call_id":id,"output":tool_output(output, *is_error, protocol)?}));
             }
             (
                 WireApi::ChatCompletions,
@@ -214,7 +194,7 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
                 if !content.is_empty() || !calls.is_empty() {
                     return Err(AdapterError::parameter_unsupported());
                 }
-                encoded_items.push(json!({"role":"tool","tool_call_id":id,"content":tool_output(output, *is_error)}));
+                encoded_items.push(json!({"role":"tool","tool_call_id":id,"content":tool_output(output, *is_error, protocol)?}));
             }
             _ => content.push(content_block(block, protocol, message.role)?),
         }
@@ -234,12 +214,43 @@ pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResu
     Ok(encoded_items)
 }
 
-pub(super) fn tool_output(content: &str, is_error: bool) -> String {
-    if is_error {
-        json!({"error":content}).to_string()
-    } else {
-        content.into()
+fn tool_output(content: &[Block], is_error: bool, protocol: WireApi) -> AdapterResult<Value> {
+    if let Some(text) = tool_output_text(content) {
+        return Ok(Value::String(if is_error {
+            json!({"error":text}).to_string()
+        } else {
+            text
+        }));
     }
+    if protocol == WireApi::ChatCompletions {
+        return Err(AdapterError::parameter_unsupported_for("input.output"));
+    }
+    let mut parts = Vec::new();
+    if is_error {
+        parts.push(content_block(
+            &Block::Text("Tool execution failed.".into()),
+            protocol,
+            Role::User,
+        )?);
+    }
+    parts.extend(
+        content
+            .iter()
+            .map(|block| content_block(block, protocol, Role::User))
+            .collect::<AdapterResult<Vec<_>>>()?,
+    );
+    Ok(Value::Array(parts))
+}
+
+fn tool_output_text(content: &[Block]) -> Option<String> {
+    let mut text = String::new();
+    for block in content {
+        let Block::Text(part) = block else {
+            return None;
+        };
+        text.push_str(part);
+    }
+    Some(text)
 }
 
 pub(super) fn flush_responses_content(
@@ -254,7 +265,10 @@ pub(super) fn flush_responses_content(
 
 pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> AdapterResult<Value> {
     Ok(match block {
-        Block::Text(text) => match protocol {
+        Block::Refusal(text) if protocol == WireApi::Responses => {
+            json!({"type":"refusal","refusal":text})
+        }
+        Block::Text(text) | Block::Refusal(text) => match protocol {
             WireApi::Responses => {
                 json!({"type":if role == Role::Assistant { "output_text" } else { "input_text" },"text":text})
             }
@@ -321,29 +335,59 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             is_error,
         } => match protocol {
             WireApi::Messages => {
+                let content = content
+                    .iter()
+                    .map(|block| content_block(block, protocol, Role::User))
+                    .collect::<AdapterResult<Vec<_>>>()?;
                 json!({"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error})
             }
             WireApi::Gemini => {
-                let tool_response = serde_json::from_str::<Value>(content)
-                    .ok()
-                    .filter(Value::is_object)
-                    .unwrap_or_else(|| {
-                        if *is_error {
-                            json!({"error":content})
+                let text = content
+                    .iter()
+                    .filter_map(|block| {
+                        if let Block::Text(text) = block {
+                            Some(text.as_str())
                         } else {
-                            json!({"result":content})
+                            None
                         }
-                    });
-                json!({"functionResponse":{"id":id,"name":name,"response":tool_response}})
+                    })
+                    .collect::<String>();
+                let parsed = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .filter(Value::is_object);
+                let response = if *is_error {
+                    match parsed {
+                        Some(value) if value.get("error").is_some() => value,
+                        Some(value) => json!({"error":value}),
+                        None => json!({"error":text}),
+                    }
+                } else {
+                    parsed.unwrap_or_else(|| json!({"result":text}))
+                };
+                let mut result = json!({"id":id,"name":name,"response":response});
+                let mut media = Vec::new();
+                for block in content
+                    .iter()
+                    .filter(|block| !matches!(block, Block::Text(_)))
+                {
+                    let part = content_block(block, protocol, Role::User)?;
+                    if !matches!(
+                        part.pointer("/inlineData/mimeType").and_then(Value::as_str),
+                        Some("image/png" | "image/jpeg" | "image/webp")
+                    ) {
+                        return Err(AdapterError::parameter_unsupported_for("input.output"));
+                    }
+                    media.push(part);
+                }
+                if !media.is_empty() {
+                    result["parts"] = Value::Array(media);
+                }
+                json!({"functionResponse":result})
             }
             _ => return Err(AdapterError::unsupported_binding()),
         },
-        Block::Reasoning(text) if protocol == WireApi::Messages => {
-            json!({"type":"thinking","thinking":text})
-        }
-        Block::Reasoning(text) if protocol == WireApi::Gemini => {
-            json!({"text":text,"thought":true})
-        }
+        // Provider-owned thinking can only be replayed through native_turns,
+        // with its real signature and source/model owner intact.
         Block::Reasoning(_) => return Err(AdapterError::reasoning_unsupported()),
     })
 }

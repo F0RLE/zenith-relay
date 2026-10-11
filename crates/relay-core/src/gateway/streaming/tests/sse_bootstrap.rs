@@ -57,10 +57,10 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
 }
 
 #[tokio::test]
-async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output() {
+async fn bootstrap_rejects_empty_incomplete_without_authorizing_replay() {
     let event = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
-        "data: {\"type\":\"response.incomplete\",\"response\":{\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"output\":[],\"usage\":{\"output_tokens\":0}}}\n\n"
     );
     let (upstream, server) = response_from_sse_event(event.into()).await;
     let failure = bootstrap_stream(upstream, None)
@@ -69,8 +69,12 @@ async fn bootstrap_retries_empty_zero_token_incomplete_without_committing_output
         .expect("empty incomplete stream must not commit client output");
     server.await.unwrap();
 
-    assert_eq!(failure.failure.category, "stream_incomplete");
+    assert_eq!(failure.failure.category, "response_incomplete");
     assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        failure.execution.certainty,
+        crate::scheduler::rotation::ExecutionCertainty::Unknown
+    );
 }
 
 #[tokio::test]
@@ -114,8 +118,16 @@ async fn large_valid_bootstrap_event_is_not_rejected_at_the_old_limit() {
 
 #[tokio::test]
 async fn heartbeat_never_splits_an_unfinished_sse_frame() {
-    let frame = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\r\n\r\n";
-    for native_gemini in [false, true] {
+    for (native_gemini, frame) in [
+        (
+            false,
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\r\n\r\n".as_slice(),
+        ),
+        (
+            true,
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"synthetic\"}]}}]}\r\n\r\n".as_slice(),
+        ),
+    ] {
         for split in 1..frame.len() {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
             let input = stream::unfold(receiver, |mut receiver| async move {
@@ -182,7 +194,7 @@ async fn quiet_stream_keeps_sending_heartbeats_until_provider_completion() {
     }
 
     let completed = Bytes::from_static(
-        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"slow-response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"synthetic\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
     );
     sender.send(Ok(completed.clone())).unwrap();
     assert_eq!(stream.next().await.unwrap().unwrap(), completed);

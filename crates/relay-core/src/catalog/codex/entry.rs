@@ -86,9 +86,8 @@ pub fn routed_codex_catalog_entry(
     catalog_entry.insert("supports_search_tool".into(), Value::Bool(false));
     catalog_entry.insert("web_search_tool_type".into(), Value::String("text".into()));
     catalog_entry.insert("supports_image_detail_original".into(), Value::Bool(false));
-    // Unknown models support text/image input; models.dev replaces this
-    // fallback for known exact model identities at the publication boundary.
-    catalog_entry.insert("input_modalities".into(), json!(["text", "image"]));
+    // Optional input types require model evidence at the publication boundary.
+    catalog_entry.insert("input_modalities".into(), json!(["text"]));
     catalog_entry.insert("experimental_supported_tools".into(), json!([]));
     catalog_entry.insert(
         "apply_patch_tool_type".into(),
@@ -295,7 +294,7 @@ pub fn normalize_upstream_codex_catalog_entry(
     let mut catalog_value = Value::Object(catalog_entry);
     set_codex_service_tiers(
         &mut catalog_value,
-        super::super::model_service_tiers(model, None),
+        &super::super::model_service_tiers(model, &[]),
     );
     codex_catalog_entry_is_compatible(&catalog_value).then_some(catalog_value)
 }

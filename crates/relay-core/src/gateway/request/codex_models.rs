@@ -206,6 +206,7 @@ async fn fetch_codex_account_manifest(
                     turn_scope: None,
                     budget: None,
                     lease: None,
+                    usage_event: None,
                 },
             )
             .await

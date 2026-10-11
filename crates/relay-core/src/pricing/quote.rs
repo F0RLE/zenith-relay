@@ -34,7 +34,7 @@ impl TokenRateSet {
             && self.output.is_none()
     }
 
-    fn skip_serializing(rate_set: &Self) -> bool {
+    pub fn is_empty_ref(rate_set: &Self) -> bool {
         rate_set.is_empty()
     }
 
@@ -68,12 +68,14 @@ impl TokenRateSet {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LongContextRates {
-    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
     pub standard: TokenRateSet,
-    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
     pub flex: TokenRateSet,
-    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
     pub priority: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub ultrafast: TokenRateSet,
 }
 
 impl LongContextRates {
@@ -81,18 +83,25 @@ impl LongContextRates {
         standard: TokenRateSet::EMPTY,
         flex: TokenRateSet::EMPTY,
         priority: TokenRateSet::EMPTY,
+        ultrafast: TokenRateSet::EMPTY,
     };
 
     pub const fn is_empty(self) -> bool {
-        self.standard.is_empty() && self.flex.is_empty() && self.priority.is_empty()
+        self.standard.is_empty()
+            && self.flex.is_empty()
+            && self.priority.is_empty()
+            && self.ultrafast.is_empty()
     }
 
-    fn skip_serializing(context_rates: &Self) -> bool {
+    pub fn is_empty_ref(context_rates: &Self) -> bool {
         context_rates.is_empty()
     }
 
     pub const fn is_valid(self) -> bool {
-        self.standard.is_valid() && self.flex.is_valid() && self.priority.is_valid()
+        self.standard.is_valid()
+            && self.flex.is_valid()
+            && self.priority.is_valid()
+            && self.ultrafast.is_valid()
     }
 
     const fn clear_cache_writes(self) -> Self {
@@ -100,11 +109,12 @@ impl LongContextRates {
             standard: self.standard.clear_cache_writes(),
             flex: self.flex.clear_cache_writes(),
             priority: self.priority.clear_cache_writes(),
+            ultrafast: self.ultrafast.clear_cache_writes(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenPrice {
     pub input: u64,
@@ -115,20 +125,40 @@ pub struct TokenPrice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<u64>,
     pub output: u64,
-    /// Published Flex components. An empty set means this catalog has no Flex
-    /// price; callers must not reuse the standard components for that tier.
-    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    /// Published Flex components. Within a published schedule missing
+    /// components stay unknown.
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
     pub flex: TokenRateSet,
-    /// Published Priority components. `fast` uses this set. Ultrafast does not.
-    #[serde(default, skip_serializing_if = "TokenRateSet::skip_serializing")]
+    /// Published Fast components, using the upstream `priority` name.
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
     pub priority: TokenRateSet,
-    #[serde(default, skip_serializing_if = "LongContextRates::skip_serializing")]
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub ultrafast: TokenRateSet,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_100k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_128k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
     pub above_200k: LongContextRates,
-    #[serde(default, skip_serializing_if = "LongContextRates::skip_serializing")]
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
     pub above_272k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_512k: LongContextRates,
 }
 
 impl TokenPrice {
+    /// Price thresholds, in ascending order. They are independent of a model's
+    /// maximum context window and are applied to each request's input tokens.
+    pub const fn context_rates(self) -> [(u64, LongContextRates); 5] {
+        [
+            (100_000, self.above_100k),
+            (128_000, self.above_128k),
+            (200_000, self.above_200k),
+            (272_000, self.above_272k),
+            (512_000, self.above_512k),
+        ]
+    }
+
     pub const fn is_valid(self) -> bool {
         self.input <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
             && self.output <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
@@ -137,8 +167,12 @@ impl TokenPrice {
             && option_is_valid(self.cache_write_1h)
             && self.flex.is_valid()
             && self.priority.is_valid()
+            && self.ultrafast.is_valid()
+            && self.above_100k.is_valid()
+            && self.above_128k.is_valid()
             && self.above_200k.is_valid()
             && self.above_272k.is_valid()
+            && self.above_512k.is_valid()
     }
 
     pub const fn clear_cache_writes(self) -> Self {
@@ -147,8 +181,12 @@ impl TokenPrice {
             cache_write_1h: None,
             flex: self.flex.clear_cache_writes(),
             priority: self.priority.clear_cache_writes(),
+            ultrafast: self.ultrafast.clear_cache_writes(),
+            above_100k: self.above_100k.clear_cache_writes(),
+            above_128k: self.above_128k.clear_cache_writes(),
             above_200k: self.above_200k.clear_cache_writes(),
             above_272k: self.above_272k.clear_cache_writes(),
+            above_512k: self.above_512k.clear_cache_writes(),
             ..self
         }
     }

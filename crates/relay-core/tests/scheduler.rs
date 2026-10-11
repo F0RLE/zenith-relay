@@ -153,6 +153,7 @@ async fn spawn_gateway(
             model_metadata_catalog: None,
             max_retry_candidates,
             tool_policy: Default::default(),
+            request_timezone: Default::default(),
             pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
@@ -214,7 +215,42 @@ async fn upstream(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let parsed_body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let parsed_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let model = parsed_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(MODEL);
+    let default_response = match uri.path() {
+        "/v1/chat/completions" => json!({
+            "id": "default-response",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "synthetic reply"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        }),
+        "/v1/messages" => json!({
+            "id": "default-response",
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": "synthetic reply"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }),
+        _ => json!({
+            "id": "default-response",
+            "object": "response",
+            "model": model,
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }),
+    };
     state.requests.lock().unwrap().push(ObservedRequest {
         path: uri.path().to_string(),
         authorization: headers
@@ -263,7 +299,12 @@ async fn upstream(
         .lock()
         .unwrap()
         .pop_front()
-        .unwrap_or_else(|| response_reply("default-response", "default"));
+        .unwrap_or(Reply::Json {
+            status: StatusCode::OK,
+            body: default_response,
+            cache_control: "default",
+            retry_after: None,
+        });
     match reply {
         Reply::Json {
             status,

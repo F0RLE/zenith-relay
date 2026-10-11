@@ -15,6 +15,12 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
             false,
         ),
         (
+            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+            "basis_points_free_account_unsupported",
+            false,
+            false,
+        ),
+        (
             ModelDiscoveryFailureCode::Forbidden,
             "models_forbidden",
             false,
@@ -92,6 +98,41 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
         assert_eq!(code.management_code(), management_code);
         assert_eq!(code.is_authentication_failure(), authentication_failure);
         assert_eq!(code.blocks_account(), blocks_account);
+    }
+}
+
+#[tokio::test]
+async fn bps_free_discovery_rejects_metadata_and_token_claims_before_http() {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let token = format!(
+        "e30.{}.synthetic",
+        URL_SAFE_NO_PAD.encode(
+            json!({
+                "https://api.openai.com/auth": {"chatgpt_plan_type":"chatgpt_free_tier"}
+            })
+            .to_string()
+        )
+    );
+    for (plan, access) in [
+        (Some("Free plan"), "synthetic-access"),
+        (Some("plus"), token.as_str()),
+    ] {
+        let client = AccountModelsClient::with_endpoint(
+            Url::parse("http://127.0.0.1:1/basispoints/api/responses/access").unwrap(),
+        )
+        .unwrap()
+        .with_oauth_client_kind(super::super::OAuthClientKind::ExcelBps)
+        .with_subscription_plan_type(plan);
+        let error = client
+            .discover(access, "synthetic-account", "ignored")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported
+        );
+        assert!(!error.retryable);
+        assert_eq!(error.http_status, None);
     }
 }
 

@@ -4,12 +4,23 @@ use crate::{
     pricing::{
         PriceEvidence, PriceSource, PricingCatalog, PricingContext, PricingMetadata,
         PricingSourceSummary, ResolvedPrice, TokenPrice, TokenRateSet,
-        MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
     },
 };
 use std::collections::BTreeMap;
 
 impl ApiModelPriceOverride {
+    /// Replace the legacy base fields without losing separately configured schedules.
+    pub fn with_base_prices(self, base: Self) -> Self {
+        Self {
+            input_micro_usd_per_million: base.input_micro_usd_per_million,
+            cached_input_micro_usd_per_million: base.cached_input_micro_usd_per_million,
+            cache_write_5m_micro_usd_per_million: base.cache_write_5m_micro_usd_per_million,
+            cache_write_1h_micro_usd_per_million: base.cache_write_1h_micro_usd_per_million,
+            output_micro_usd_per_million: base.output_micro_usd_per_million,
+            ..self
+        }
+    }
+
     pub fn from_optional_fields(
         input_price: Option<u64>,
         cache_read_price: Option<u64>,
@@ -37,6 +48,7 @@ impl ApiModelPriceOverride {
                     cache_write_5m_micro_usd_per_million: short_cache_write_price,
                     cache_write_1h_micro_usd_per_million: long_cache_write_price,
                     output_micro_usd_per_million: output_price,
+                    ..Default::default()
                 };
                 price
                     .is_valid()
@@ -49,17 +61,7 @@ impl ApiModelPriceOverride {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.input_micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
-            && self
-                .cached_input_micro_usd_per_million
-                .is_none_or(|price_value| price_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-            && self
-                .cache_write_5m_micro_usd_per_million
-                .is_none_or(|price_value| price_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-            && self
-                .cache_write_1h_micro_usd_per_million
-                .is_none_or(|price_value| price_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-            && self.output_micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+        TokenPrice::from(*self).is_valid()
     }
 }
 
@@ -73,10 +75,14 @@ impl From<ApiModelPriceOverride> for TokenPrice {
             cache_write_5m: price.cache_write_5m_micro_usd_per_million,
             cache_write_1h: price.cache_write_1h_micro_usd_per_million,
             output: price.output_micro_usd_per_million,
-            flex: TokenRateSet::EMPTY,
-            priority: TokenRateSet::EMPTY,
-            above_200k: Default::default(),
-            above_272k: Default::default(),
+            flex: price.flex,
+            priority: price.priority,
+            ultrafast: price.ultrafast,
+            above_100k: price.above_100k,
+            above_128k: price.above_128k,
+            above_200k: price.above_200k,
+            above_272k: price.above_272k,
+            above_512k: price.above_512k,
         }
     }
 }
@@ -89,6 +95,14 @@ impl From<TokenPrice> for ApiModelPriceOverride {
             cache_write_5m_micro_usd_per_million: price.cache_write_5m,
             cache_write_1h_micro_usd_per_million: price.cache_write_1h,
             output_micro_usd_per_million: price.output,
+            flex: price.flex,
+            priority: price.priority,
+            ultrafast: price.ultrafast,
+            above_100k: price.above_100k,
+            above_128k: price.above_128k,
+            above_200k: price.above_200k,
+            above_272k: price.above_272k,
+            above_512k: price.above_512k,
         }
     }
 }
@@ -407,23 +421,14 @@ fn token_cost(tokens: u64, micro_usd_per_million: u64) -> u64 {
 
 /// Picks the published schedule for one tier and prompt band.
 ///
-/// Flex and Priority are used only when that schedule publishes at least one
-/// component. A tier the catalog does not publish uses the standard schedule,
-/// including the standard long-context band. Inside a published tier, a missing
-/// component stays unpriced: it is not replaced by the standard component and
-/// it is not zero. Long-context components replace only the fields that tier
-/// publishes; the highest exceeded threshold wins. Ultrafast stays standard.
+/// Missing tier prices stay unpriced. Long-context fields overlay that tier's
+/// base fields; the highest published threshold exceeded by the request wins.
 fn rates_for(
     quote: TokenPrice,
     class: super::UsagePriceClass,
     band: super::UsageContextBand,
 ) -> Option<TokenRateSet> {
-    use super::{UsageContextBand, UsagePriceClass};
-    let class = match class {
-        UsagePriceClass::Flex if quote.flex.is_empty() => UsagePriceClass::Standard,
-        UsagePriceClass::Priority if quote.priority.is_empty() => UsagePriceClass::Standard,
-        class => class,
-    };
+    use super::UsagePriceClass;
     let mut rates = match class {
         UsagePriceClass::Standard => TokenRateSet {
             input: Some(quote.input),
@@ -434,19 +439,26 @@ fn rates_for(
         },
         UsagePriceClass::Flex => quote.flex,
         UsagePriceClass::Priority => quote.priority,
+        UsagePriceClass::Ultrafast => quote.ultrafast,
     };
-    let above = match (band, class) {
-        (UsageContextBand::Base, _) => None,
-        (UsageContextBand::Above272k, class) => first_published([
-            band_rates(quote.above_272k, class),
-            band_rates(quote.above_200k, class),
-        ]),
-        (UsageContextBand::Above200k, class) => band_rates(quote.above_200k, class),
-    };
+    let above = context_rates(quote, band, class);
     if let Some(above) = above {
         rates = rates.overlay(above);
     }
-    Some(rates)
+    (!rates.is_empty()).then_some(rates)
+}
+
+fn context_rates(
+    quote: TokenPrice,
+    band: super::UsageContextBand,
+    class: super::UsagePriceClass,
+) -> Option<TokenRateSet> {
+    quote
+        .context_rates()
+        .into_iter()
+        .rev()
+        .filter(|(threshold, _)| *threshold <= band.threshold())
+        .find_map(|(_, rates)| band_rates(rates, class))
 }
 
 fn band_rates(
@@ -458,10 +470,7 @@ fn band_rates(
         UsagePriceClass::Standard => rates.standard,
         UsagePriceClass::Flex => rates.flex,
         UsagePriceClass::Priority => rates.priority,
+        UsagePriceClass::Ultrafast => rates.ultrafast,
     };
     (!rates.is_empty()).then_some(rates)
-}
-
-fn first_published(rates: [Option<TokenRateSet>; 2]) -> Option<TokenRateSet> {
-    rates.into_iter().flatten().next()
 }

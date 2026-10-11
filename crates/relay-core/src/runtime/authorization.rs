@@ -10,6 +10,7 @@ pub(crate) struct AuthorizationDispatch<'a> {
     pub(crate) turn_scope: Option<&'a super::CodexTurnStateScope<'a>>,
     pub(crate) budget: Option<&'a crate::scheduler::rotation::SharedRequestBudget>,
     pub(crate) lease: Option<&'a super::CandidateLease>,
+    pub(crate) usage_event: Option<(&'a crate::UsageEvent, std::time::Instant)>,
 }
 
 mod dispatch;
@@ -55,6 +56,7 @@ mod tests {
             identity: None,
             token_generation: None,
             token_revision: None,
+            account_plan_supported: true,
             agent_task_id: agent.task_id().map(str::to_string),
             agent_credential_fingerprint: Some(agent_credential_fingerprint(agent)),
             agent_identity_revision: Some(0),

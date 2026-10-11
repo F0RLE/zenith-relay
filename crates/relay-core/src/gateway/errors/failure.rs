@@ -79,13 +79,28 @@ impl AttemptFailure {
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
             AuthorizedRequestError::NotReplayable => Self::upstream_response_body_failure(),
             AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
-            AuthorizedRequestError::ModelAccess(failure) => Self {
-                execution: ExecutionObservation::not_sent(),
-                status: StatusCode::BAD_GATEWAY,
-                category: failure.code.management_code(),
-                message: "Basis Points model access could not be verified",
-                cooldown_hint: Default::default(),
-            },
+            AuthorizedRequestError::ModelAccess(failure) => {
+                let rate_limited = failure.code
+                    == crate::providers::chatgpt::ModelDiscoveryFailureCode::RateLimited;
+                Self {
+                    execution: ExecutionObservation::not_sent(),
+                    status: if rate_limited {
+                        StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    category: failure.code.management_code(),
+                    message: if rate_limited {
+                        "Basis Points access check is rate limited; retry after the cooldown"
+                    } else {
+                        "Basis Points model access could not be verified"
+                    },
+                    cooldown_hint: RateLimitBodyHint {
+                        retry_after_ms: failure.retry_after_ms,
+                        global: rate_limited,
+                    },
+                }
+            }
             AuthorizedRequestError::ModelUnavailable => Self {
                 execution: ExecutionObservation::not_sent(),
                 status: StatusCode::NOT_ACCEPTABLE,

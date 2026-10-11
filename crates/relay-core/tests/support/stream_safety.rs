@@ -2,7 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn automatic_adapter_candidate_shares_the_execution_budget() {
-    let (chat_server, chat_state) = spawn_upstream("chat-key", Vec::new()).await;
+    let (chat_server, chat_state) =
+        spawn_upstream("chat-key", vec![overload_reply("retry-budget", None)]).await;
     let (responses_server, responses_state) = spawn_upstream(
         "responses-key",
         vec![response_reply("responses-wins", "winner")],
@@ -36,7 +37,7 @@ async fn automatic_adapter_candidate_shares_the_execution_budget() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let chat_requests = chat_state.requests.lock().unwrap();
     assert_eq!(chat_requests.len(), 1);
     assert_eq!(chat_requests[0].path, "/v1/chat/completions");
@@ -118,7 +119,7 @@ async fn streaming_usage_limit_keeps_the_provider_reset_before_fallback() {
         vec![Reply::Stream {
             chunks: vec![
                 StreamChunk::Data("data: {\"type\":\"response.created\"}\n\n"),
-                StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_winner\",\"status\":\"completed\"}}\n\n"),
+                StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_winner\",\"status\":\"completed\",\"output\":[]}}\n\n"),
             ],
             cache_control: "winner",
         }],
@@ -170,7 +171,7 @@ async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_acco
     let (source_b, _) = spawn_upstream(
         "b-key",
         vec![Reply::Stream {
-            chunks: vec![StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_winner\",\"status\":\"completed\"}}\n\n")],
+            chunks: vec![StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_winner\",\"status\":\"completed\",\"output\":[]}}\n\n")],
             cache_control: "winner",
         }],
     )

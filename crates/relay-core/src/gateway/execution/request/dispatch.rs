@@ -149,6 +149,21 @@ pub(super) async fn dispatch_request_attempt(
                 upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header);
         }
     }
+    let authorization_event = usage_event(
+        UsageAttempt {
+            request_id,
+            attempt: *attempt,
+            local_key_id: &key.id,
+            route: &route,
+            reasoning_effort: Some(reasoning_effort),
+            requested_model,
+            tool_use: tool_use.clone(),
+        },
+        false,
+        401,
+        None,
+        started.elapsed().as_millis() as u64,
+    );
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
@@ -165,6 +180,7 @@ pub(super) async fn dispatch_request_attempt(
                 turn_scope: turn_scope.as_ref(),
                 budget: Some(budget),
                 lease: Some(lease),
+                usage_event: Some((&authorization_event, started)),
             },
         )
         .await;
@@ -199,6 +215,13 @@ pub(super) async fn dispatch_request_attempt(
             // replayable error. A local exhausted budget is not a source
             // failure either.
             if uncertain || exhausted {
+                if let Some(routing) = event.routing.as_mut() {
+                    routing.attempt_outcome = Some(if uncertain {
+                        crate::AttemptOutcome::ExecutionUncertain
+                    } else {
+                        crate::AttemptOutcome::ReturnedFailure
+                    });
+                }
                 if uncertain {
                     lease.settle_rotation_unknown(now_ms());
                 }
@@ -213,6 +236,9 @@ pub(super) async fn dispatch_request_attempt(
             let failure_state =
                 settle_route_failure(runtime, lease, &route, &failure, &HeaderMap::new());
             apply_failure_state(&mut event, failure_state);
+            if let Some(routing) = event.routing.as_mut() {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+            }
             emit_usage(runtime, event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;

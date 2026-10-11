@@ -1,7 +1,7 @@
 use super::super::prelude::*;
 use super::super::recovery::{
-    adapter_error_response, recover_stale_tool_history, replay_native_tool_continuation,
-    try_repair_legacy_responses_call_ids, LegacyCallIdRepair,
+    adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
+    replay_native_tool_continuation, try_repair_legacy_responses_call_ids, LegacyCallIdRepair,
 };
 use super::FailureStep;
 
@@ -9,7 +9,6 @@ pub(super) enum AfterRepair<'a> {
     Step(FailureStep),
     Proceed(super::CollectedRejection<'a>, AttemptFailure),
 }
-
 pub(super) fn repair_collected_rejection(
     super::CollectedRejection {
         status,
@@ -60,22 +59,37 @@ pub(super) fn repair_collected_rejection(
         encrypted_context: encrypted_context_attempted,
         ..
     } = repairs;
-    if try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
-        request,
-        client_wire_api,
-        adapter_is_passthrough,
-        upstream_rejected_tool_links: status.is_client_error()
-            && responses_tool_call_links_rejected(&bytes),
-        repair_attempted: legacy_call_id_repair_attempted,
-        tried,
-        candidate_id: &route.candidate_id,
-        has_unpaired_tool_output,
-        requires_affinity_owner,
-    }) {
+    // Classify even early identifier repairs, which previously had no usage row.
+    populate_tokens(event, &bytes);
+    let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+    super::super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
+    *last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
+    event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_response(
+        Some(status.as_u16()),
+        &bytes,
+        response_headers,
+    ));
+    event.error_category = Some(failure.category.to_string());
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
+            request,
+            client_wire_api,
+            adapter_is_passthrough,
+            upstream_rejected_tool_links: status.is_client_error()
+                && responses_tool_call_links_rejected(&bytes),
+            repair_attempted: legacy_call_id_repair_attempted,
+            tried,
+            candidate_id: &route.candidate_id,
+            has_unpaired_tool_output,
+            requires_affinity_owner,
+        })
+    {
         lease.settle_rotation_repair(now_ms());
+        emit_repair(runtime, event);
         return AfterRepair::Step(FailureStep::Continue);
     }
-    if client_wire_api == WireApi::Responses
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && client_wire_api == WireApi::Responses
         && adapter_is_passthrough
         && repair_responses_item_prefixes(
             request,
@@ -92,16 +106,11 @@ pub(super) fn repair_collected_rejection(
         )
     {
         lease.settle_rotation_repair(now_ms());
+        emit_repair(runtime, event);
         return AfterRepair::Step(FailureStep::Continue);
     }
-    let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
-    super::super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
-    *last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
-    let upstream_error =
-        crate::usage::UpstreamErrorDetails::from_response_body(Some(status.as_u16()), &bytes);
-    event.upstream_error = Some(upstream_error.clone());
-    event.error_category = Some(failure.category.to_string());
-    if client_wire_api == WireApi::Responses
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && client_wire_api == WireApi::Responses
         && adapter_is_passthrough
         && has_previous_response_id
         && !*native_replay_attempted
@@ -126,7 +135,7 @@ pub(super) fn repair_collected_rejection(
                 );
                 tried.remove(&route.candidate_id);
                 lease.allow_rotation_repair();
-                emit_usage(runtime, event.clone());
+                emit_repair(runtime, event);
                 *last_failure = Some(failure);
                 *last_failure_origin = selected_error_origin;
                 lease.settle_rotation_repair(now_ms());
@@ -134,11 +143,14 @@ pub(super) fn repair_collected_rejection(
             }
             Ok(false) => {}
             Err(error) => {
-                return AfterRepair::Step(FailureStep::Respond(adapter_error_response(error)))
+                emit_usage(runtime, mark_adapter_failure(event.clone(), &error));
+                lease.settle_rotation_terminal(now_ms());
+                return AfterRepair::Step(FailureStep::Respond(adapter_error_response(error)));
             }
         }
     }
-    if client_wire_api == WireApi::Responses
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && client_wire_api == WireApi::Responses
         && has_previous_response_id
         && responses_tool_call_is_missing_output(&bytes)
         && recover_stale_tool_history(
@@ -157,13 +169,14 @@ pub(super) fn repair_collected_rejection(
         );
         tried.remove(&route.candidate_id);
         lease.allow_rotation_repair();
-        emit_usage(runtime, event.clone());
+        emit_repair(runtime, event);
         *last_failure = Some(failure);
         *last_failure_origin = selected_error_origin;
         lease.settle_rotation_repair(now_ms());
         return AfterRepair::Step(FailureStep::Continue);
     }
-    if client_wire_api == WireApi::Responses
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && client_wire_api == WireApi::Responses
         && allow_previous_response_reset
         && !*model_switch_reset_attempted
         && reset_materialized_continuation(
@@ -185,7 +198,7 @@ pub(super) fn repair_collected_rejection(
             resolved_model,
         )
     {
-        emit_usage(runtime, event.clone());
+        emit_repair(runtime, event);
         *last_failure = Some(failure);
         *last_failure_origin = selected_error_origin;
         lease.settle_rotation_repair(now_ms());
@@ -213,7 +226,7 @@ pub(super) fn repair_collected_rejection(
             request_id,
             &route.candidate_id,
         );
-        emit_usage(runtime, event.clone());
+        emit_repair(runtime, event);
         *last_failure = Some(failure);
         *last_failure_origin = selected_error_origin;
         lease.settle_rotation_repair(now_ms());

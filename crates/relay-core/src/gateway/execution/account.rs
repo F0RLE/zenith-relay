@@ -84,7 +84,12 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         allow_automatic_responses_lite,
         request_origin,
     } = context;
-    let service_tier_policy = ServiceTierPolicy::pool_owned(&request);
+    let mut service_tier_policy = ServiceTierPolicy::pool_owned(&request);
+    service_tier_policy.capture_pool_default(
+        &runtime,
+        &resolved_model,
+        &runtime.account_service_tiers(&key, &resolved_model),
+    );
     let request_id = request_id();
     if let Some(origin) = request_origin {
         runtime.mark_request_origin(&request_id, origin);
@@ -400,6 +405,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             }
         }
         let response = complete_account_response(AccountSuccessInput {
+            endpoint,
             status,
             bytes,
             response_headers: &response_headers,

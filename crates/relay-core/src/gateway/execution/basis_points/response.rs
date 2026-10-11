@@ -9,9 +9,54 @@ pub(super) fn invalid_tool_output(parameter: &'static str) -> AdapterError {
     AdapterError::upstream_response_invalid().with_parameter(parameter)
 }
 
+fn parse_direct_tool_call(code: &str) -> Option<Map<String, Value>> {
+    // Some upstream responses contain a direct client-tool call instead of
+    // the documented nested transport object. Parse only its strict
+    // `name(JSON value)` shape; never evaluate the surrounding text.
+    fn strip_keyword<'a>(code: &'a str, keyword: &str) -> Option<&'a str> {
+        let rest = code.strip_prefix(keyword)?;
+        rest.chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace())
+            .then(|| rest.trim_start())
+    }
+
+    let mut code = code.trim();
+    if let Some(rest) = strip_keyword(code, "return") {
+        code = rest;
+        if let Some(rest) = strip_keyword(code, "await") {
+            code = rest;
+        }
+    } else if let Some(rest) = strip_keyword(code, "await") {
+        code = rest;
+    }
+
+    let open_parenthesis = code.find('(')?;
+    let tool = code[..open_parenthesis].trim();
+    if tool.is_empty()
+        || is_transport_tool(tool)
+        || !tool.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+        })
+    {
+        return None;
+    }
+
+    let call_tail = code[open_parenthesis + 1..].trim_end();
+    let arguments_text = call_tail.strip_suffix(')')?.trim();
+    if arguments_text.is_empty() {
+        return None;
+    }
+    let arguments = serde_json::from_str::<Value>(arguments_text).ok()?;
+    Some(Map::from_iter([
+        ("tool".to_string(), Value::String(tool.to_string())),
+        ("args".to_string(), arguments),
+    ]))
+}
+
 pub(super) fn parse_transport_envelope(
     tool_call_item: &Map<String, Value>,
-) -> Result<Map<String, Value>, AdapterError> {
+) -> Result<(Map<String, Value>, bool), AdapterError> {
     let tool_name = tool_call_item
         .get("name")
         .and_then(Value::as_str)
@@ -42,17 +87,32 @@ pub(super) fn parse_transport_envelope(
         let code = code
             .as_str()
             .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
-        return Ok(Map::from_iter([
-            ("tool".to_string(), Value::String(tool.to_string())),
-            ("args".to_string(), Value::String(code.to_string())),
-        ]));
+        return Ok((
+            Map::from_iter([
+                ("tool".to_string(), Value::String(tool.to_string())),
+                ("args".to_string(), Value::String(code.to_string())),
+            ]),
+            false,
+        ));
     }
 
     // Accept the legacy nested envelope for already materialized history, but
     // never generate it for new calls.
-    let mut inner = parse_json_object(Some(code))
+    let (mut inner, direct_call) = match parse_json_object(Some(code))
         .and_then(|nested_code_value| nested_code_value.as_object().cloned())
-        .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+    {
+        Some(inner) => (inner, false),
+        None => {
+            let code = code
+                .as_str()
+                .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+            (
+                parse_direct_tool_call(code)
+                    .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?,
+                true,
+            )
+        }
+    };
     for _ in 0..2 {
         let inner_name = inner.get("name").and_then(Value::as_str);
         if !inner_name.is_some_and(is_transport_tool) {
@@ -65,7 +125,7 @@ pub(super) fn parse_transport_envelope(
             .and_then(|nested_code_value| nested_code_value.as_object().cloned())
             .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
     }
-    Ok(inner)
+    Ok((inner, direct_call))
 }
 
 /// Convert a completed Basis Points response back to the client Responses
@@ -102,7 +162,7 @@ pub(in crate::gateway::execution) fn translate_response(
         if !matches!(kind, "function_call" | "custom_tool_call") {
             continue;
         }
-        let inner = parse_transport_envelope(output_object)?;
+        let (inner, direct_call) = parse_transport_envelope(output_object)?;
         let tool_name = inner
             .get("tool")
             .or_else(|| inner.get("name"))
@@ -157,7 +217,9 @@ pub(in crate::gateway::execution) fn translate_response(
         } else {
             let function_arguments = tool_arguments
                 .and_then(|argument_value| {
-                    if argument_value.is_object() {
+                    if direct_call {
+                        argument_value.is_object().then(|| argument_value.clone())
+                    } else if argument_value.is_object() {
                         Some(argument_value.clone())
                     } else {
                         parse_json_object(Some(argument_value))

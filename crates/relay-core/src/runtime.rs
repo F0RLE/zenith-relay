@@ -108,6 +108,7 @@ static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GatewayRuntime {
     tool_policy: RwLock<crate::ToolPolicy>,
+    request_timezone: RwLock<crate::RequestTimezonePolicy>,
     clients: RuntimeHttpClients,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
@@ -132,6 +133,8 @@ pub struct GatewayRuntime {
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
     model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
     model_display_order: Mutex<Vec<String>>,
+    chatgpt_context_policy: Mutex<crate::catalog::context_policy::ApplicationContextPolicy>,
+    chatgpt_context_prices: Mutex<BTreeMap<String, crate::pricing::TokenPrice>>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
@@ -194,6 +197,7 @@ impl AuthenticatedKey {
 
 struct ChatGptAccountExecutor {
     oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
+    subscription_plan_type: RwLock<Option<String>>,
     id: String,
     source_id: String,
     chatgpt_account_id: String,
@@ -271,6 +275,7 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
     pub(crate) token_revision: Option<TokenDispatchRevision>,
+    pub(crate) account_plan_supported: bool,
     pub(crate) agent_task_id: Option<String>,
     pub(crate) agent_credential_fingerprint: Option<[u8; 32]>,
     pub(crate) agent_identity_revision: Option<u64>,

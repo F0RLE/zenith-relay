@@ -208,6 +208,9 @@ pub struct UsageQuery {
     pub success: Option<bool>,
     pub error_category: Option<String>,
     pub request_id_query: Option<String>,
+    /// Exact logical request identity, independent of report filters.
+    #[serde(default)]
+    pub request_id: Option<String>,
     /// Include request event rows in the response. `None` preserves the
     /// legacy behavior for API clients that do not send the projection hint.
     #[serde(default)]

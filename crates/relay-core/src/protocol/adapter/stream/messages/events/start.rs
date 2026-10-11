@@ -22,6 +22,14 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
+        if super::super::super::super::messages::validate_response_block(
+            &block_start_event["content_block"],
+        )
+        .is_err()
+        {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
         if self.response_id.is_none()
             || self.assistant_blocks.contains_key(&index)
             || self.closed_blocks.contains(&index)
@@ -39,6 +47,10 @@ impl MessagesStreamBridge {
     }
 
     fn start_text_block(&mut self, index: usize, block: &Map<String, Value>) {
+        if block.get("text").is_some_and(|text| !text.is_string()) {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
         let initial_text = block
             .get("text")
             .and_then(Value::as_str)
@@ -101,8 +113,15 @@ impl MessagesStreamBridge {
         let tool_kind = target.kind;
         let client_name = target.name;
         let client_namespace = target.namespace;
+        let tool_already_started = self
+            .assistant_blocks
+            .values()
+            .any(|block| matches!(block, StreamBlock::Tool { .. }));
         if self.assistant_blocks.values().any(|existing| {
             matches!(existing, StreamBlock::Tool { id: existing_id, .. } if existing_id == call_id)
+        }) || self.request.as_ref().is_some_and(|request| {
+            request.bridge_state.tool_call_targets.contains_key(call_id)
+                || (tool_already_started && !request.bridge_state.allows_parallel_tool_calls())
         }) {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -189,6 +208,16 @@ impl MessagesStreamBridge {
     }
 
     fn start_thinking_block(&mut self, index: usize, block: &Map<String, Value>) {
+        if block
+            .get("thinking")
+            .is_some_and(|thinking| !thinking.is_string())
+            || block
+                .get("signature")
+                .is_some_and(|signature| !signature.is_string())
+        {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
         let thinking = block
             .get("thinking")
             .and_then(Value::as_str)
@@ -209,7 +238,11 @@ impl MessagesStreamBridge {
     }
 
     fn start_redacted_thinking_block(&mut self, index: usize, block: &Map<String, Value>) {
-        let Some(redacted_data) = block.get("data").and_then(Value::as_str) else {
+        let Some(redacted_data) = block
+            .get("data")
+            .and_then(Value::as_str)
+            .filter(|data| !data.trim().is_empty())
+        else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };

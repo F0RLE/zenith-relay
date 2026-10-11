@@ -94,14 +94,18 @@ pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body:
         // Buffered BPS failures can still contain usage in complete SSE frames.
         // Observe those frames without treating a truncated response as success.
         let mut offset = 0;
+        let mut usage_snapshot = None;
         while let Some(end) = crate::protocol::sse::event_end(&response_body[offset..]) {
             let data = crate::protocol::sse::event_data(&response_body[offset..offset + end]);
             if let Ok(payload) = serde_json::from_slice::<Value>(&data) {
                 if let Some(usage) = find_usage(&payload) {
-                    apply_usage(event, usage);
+                    crate::protocol::merge_usage(&mut usage_snapshot, usage);
                 }
             }
             offset += end;
+        }
+        if let Some(snapshot) = usage_snapshot {
+            apply_usage(event, &snapshot);
         }
         return;
     };
@@ -125,6 +129,13 @@ pub(in crate::gateway) fn response_service_tier(
     .rev()
     .find_map(|response_object| response_object.get("service_tier").and_then(Value::as_str))
     .and_then(normalize_observed_service_tier)
+}
+
+pub(in crate::gateway) fn emit_repair(runtime: &GatewayRuntime, event: &mut UsageEvent) {
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+    }
+    emit_usage(runtime, event.clone());
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
@@ -152,6 +163,12 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
 }
 
 pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) {
+    let mut event = event;
+    if let Some(routing) = event.routing.as_mut() {
+        if event.success {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
+        }
+    }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
 }
 
@@ -168,10 +185,12 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .and_then(Value::as_u64);
     let input_tokens =
         if anthropic_cache_read_tokens.is_some() || anthropic_cache_write_tokens.is_some() {
-            reported_input_tokens.map(|input_token_count| {
+            reported_input_tokens.and_then(|input_token_count| {
                 input_token_count
-                    .saturating_add(anthropic_cache_read_tokens.unwrap_or_default())
-                    .saturating_add(anthropic_cache_write_tokens.unwrap_or_default())
+                    .checked_add(anthropic_cache_read_tokens.unwrap_or_default())
+                    .and_then(|input| {
+                        input.checked_add(anthropic_cache_write_tokens.unwrap_or_default())
+                    })
             })
         } else {
             reported_input_tokens
@@ -182,8 +201,8 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| gemini_usage_metadata.get("candidatesTokenCount"))
         .and_then(Value::as_u64);
     if gemini_usage_metadata.get("candidatesTokenCount").is_some() {
-        output_tokens = output_tokens.map(|output_token_count| {
-            output_token_count.saturating_add(
+        output_tokens = output_tokens.and_then(|output_token_count| {
+            output_token_count.checked_add(
                 gemini_usage_metadata
                     .get("thoughtsTokenCount")
                     .and_then(Value::as_u64)
@@ -191,8 +210,8 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
             )
         });
     }
-    if let Some(input_tokens) = input_tokens {
-        event.input_tokens = Some(input_tokens);
+    if reported_input_tokens.is_some() {
+        event.input_tokens = input_tokens;
     }
     let cached_input_tokens = usage
         .get("input_tokens_details")
@@ -205,8 +224,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("cached_tokens"))
         .or_else(|| usage.get("cache_read_input_tokens"))
         .or_else(|| gemini_usage_metadata.get("cachedContentTokenCount"))
-        .and_then(Value::as_u64)
-        .map(|cached| cached.min(input_tokens.unwrap_or(event.input_tokens.unwrap_or(cached))));
+        .and_then(Value::as_u64);
     if let Some(cached_input_tokens) = cached_input_tokens {
         event.cached_input_tokens = Some(cached_input_tokens);
     }
@@ -220,14 +238,7 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| usage.get("cache_write_tokens"))
         .or_else(|| usage.get("cache_creation_input_tokens"))
-        .and_then(Value::as_u64)
-        .map(|written| {
-            written.min(
-                input_tokens
-                    .unwrap_or(written)
-                    .saturating_sub(event.cached_input_tokens.unwrap_or_default()),
-            )
-        });
+        .and_then(Value::as_u64);
     if let Some(cache_write_input_tokens) = cache_write_input_tokens {
         event.cache_write_input_tokens = Some(cache_write_input_tokens);
     }
@@ -246,33 +257,25 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
                 .and_then(|details| details.get("reasoning_tokens"))
         })
         .or_else(|| gemini_usage_metadata.get("thoughtsTokenCount"))
-        .and_then(Value::as_u64)
-        .map(|reasoning| {
-            reasoning.min(output_tokens.unwrap_or(event.output_tokens.unwrap_or(reasoning)))
-        });
+        .and_then(Value::as_u64);
     if let Some(reasoning_tokens) = reasoning_tokens {
         event.reasoning_tokens = Some(reasoning_tokens);
     }
-    if let Some(output_tokens) = output_tokens {
-        event.output_tokens = Some(output_tokens);
+    if usage.get("output_tokens").is_some()
+        || usage.get("completion_tokens").is_some()
+        || gemini_usage_metadata.get("candidatesTokenCount").is_some()
+    {
+        event.output_tokens = output_tokens;
     }
     let reported_total = usage
         .get("total_tokens")
         .or_else(|| gemini_usage_metadata.get("totalTokenCount"))
         .and_then(Value::as_u64);
-    let frame_total = input_tokens
-        .zip(output_tokens)
-        .map(|(input, output)| input.saturating_add(output));
-    if let Some(total_tokens) = reported_total.or(frame_total).or(event.total_tokens) {
-        event.total_tokens = Some(
-            total_tokens.max(
-                event
-                    .input_tokens
-                    .unwrap_or_default()
-                    .saturating_add(event.output_tokens.unwrap_or_default()),
-            ),
-        );
-    }
+    let derived_total = event
+        .input_tokens
+        .zip(event.output_tokens)
+        .and_then(|(input, output)| input.checked_add(output));
+    event.total_tokens = reported_total.or(derived_total);
 }
 
 pub(in crate::gateway) fn find_usage(response_payload: &Value) -> Option<&Value> {

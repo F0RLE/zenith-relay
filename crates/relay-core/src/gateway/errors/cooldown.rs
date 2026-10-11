@@ -85,6 +85,15 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         return None;
     }
     let status = canonical_upstream_status(status, category);
+    if status == StatusCode::UNAUTHORIZED
+        && category == error_codes::UPSTREAM_UNAUTHORIZED
+        && runtime.is_basis_points_account(candidate_id)
+    {
+        // The rejected bearer is expired by the token authority. A later
+        // request must be able to acquire a replacement, without a global
+        // authentication pause delaying that recovery.
+        return None;
+    }
     let now = crate::unix_time_ms_at(now_system);
     let header_retry_after_ms = retry_after_ms(headers, now_system);
     let explicit = header_retry_after_ms.is_some()
@@ -94,8 +103,13 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
     if reason == CooldownReason::Transient {
         return None;
     }
+    let basis_points_rate_limit =
+        status == StatusCode::TOO_MANY_REQUESTS && runtime.is_basis_points_account(candidate_id);
+    let basis_points_model_permission = status == StatusCode::FORBIDDEN
+        && category == error_codes::UPSTREAM_MODEL_UNAVAILABLE
+        && runtime.is_basis_points_account(candidate_id);
     let scope = if status == StatusCode::TOO_MANY_REQUESTS {
-        rate_limit_scope(category, hint.global, model)
+        rate_limit_scope(category, hint.global || basis_points_rate_limit, model)
     } else if category.starts_with("upstream_model_")
         || matches!(
             category,
@@ -120,11 +134,18 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         ) {
         MAX_RATE_LIMIT_COOLDOWN_MS
     } else if status == StatusCode::TOO_MANY_REQUESTS {
-        1_000
+        if basis_points_rate_limit {
+            crate::providers::chatgpt::BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS
+        } else {
+            1_000
+        }
     } else {
         TRANSIENT_COOLDOWN_MS
     };
-    let duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    let mut duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    if basis_points_model_permission {
+        duration_ms = duration_ms.max(30 * 60 * 1_000);
+    }
     let retry_at_ms = now.saturating_add(source_cooldown_ms(
         duration_ms,
         runtime.source_recovery_delay_ms(candidate_id),

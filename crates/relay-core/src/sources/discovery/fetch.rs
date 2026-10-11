@@ -258,6 +258,10 @@ pub(super) fn merge_route_model_price(
     if left.input_micro_usd_per_million != right.input_micro_usd_per_million
         || left.cached_input_micro_usd_per_million != right.cached_input_micro_usd_per_million
         || left.output_micro_usd_per_million != right.output_micro_usd_per_million
+        || (!left.flex.is_empty() && !right.flex.is_empty() && left.flex != right.flex)
+        || (!left.priority.is_empty()
+            && !right.priority.is_empty()
+            && left.priority != right.priority)
     {
         return None;
     }
@@ -277,13 +281,35 @@ pub(super) fn merge_route_model_price(
         (Some(price), _) | (_, Some(price)) => Some(price),
         (None, None) => None,
     };
-    Some(ApiModelPriceOverride {
-        input_micro_usd_per_million: left.input_micro_usd_per_million,
-        cached_input_micro_usd_per_million: left.cached_input_micro_usd_per_million,
+    let mut merged = ApiModelPriceOverride {
         cache_write_5m_micro_usd_per_million: short_cache_write_price,
         cache_write_1h_micro_usd_per_million: long_cache_write_price,
-        output_micro_usd_per_million: left.output_micro_usd_per_million,
-    })
+        flex: if left.flex.is_empty() {
+            right.flex
+        } else {
+            left.flex
+        },
+        priority: if left.priority.is_empty() {
+            right.priority
+        } else {
+            left.priority
+        },
+        ..left
+    };
+    for (target, incoming) in [
+        (&mut merged.above_100k, right.above_100k),
+        (&mut merged.above_128k, right.above_128k),
+        (&mut merged.above_200k, right.above_200k),
+        (&mut merged.above_272k, right.above_272k),
+        (&mut merged.above_512k, right.above_512k),
+    ] {
+        if target.is_empty() {
+            *target = incoming;
+        } else if !incoming.is_empty() && *target != incoming {
+            return None;
+        }
+    }
+    Some(merged)
 }
 
 fn root_v1_fallback_allowed(connector: &SourceConnector, binding: &SourceProtocolBinding) -> bool {

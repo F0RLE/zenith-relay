@@ -38,7 +38,7 @@ fn buffered_json_and_account_stream_keep_original_failure_details() {
 }
 
 #[test]
-fn non_stream_usage_normalizes_cached_reasoning_and_total_tokens() {
+fn non_stream_usage_preserves_reported_cache_reasoning_and_total_tokens() {
     let mut event = test_usage_event();
     populate_tokens(
         &mut event,
@@ -46,10 +46,10 @@ fn non_stream_usage_normalizes_cached_reasoning_and_total_tokens() {
     );
 
     assert_eq!(event.input_tokens, Some(16));
-    assert_eq!(event.cached_input_tokens, Some(16));
-    assert_eq!(event.reasoning_tokens, Some(5));
+    assert_eq!(event.cached_input_tokens, Some(30));
+    assert_eq!(event.reasoning_tokens, Some(30));
     assert_eq!(event.output_tokens, Some(5));
-    assert_eq!(event.total_tokens, Some(21));
+    assert_eq!(event.total_tokens, Some(10));
     assert_eq!(event.applied_service_tier, Some("priority".to_string()));
 }
 
@@ -69,6 +69,71 @@ fn truncated_stream_keeps_usage_from_complete_frames_without_marking_success() {
     assert_eq!(event.reasoning_tokens, Some(1));
     assert_eq!(event.total_tokens, Some(20));
     assert!(!event.success);
+}
+
+#[test]
+fn partial_usage_updates_replace_stale_totals_and_keep_known_counters() {
+    use serde_json::json;
+
+    for (first, second, unknown, expected_input, expected_output) in [
+        (
+            json!({"usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}),
+            json!({"usage":{"output_tokens":2}}),
+            json!({"usage":{"input_tokens":null,"output_tokens":null,"total_tokens":null}}),
+            3,
+            2,
+        ),
+        (
+            json!({"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}),
+            json!({"usage":{"completion_tokens":2}}),
+            json!({"usage":{"prompt_tokens":null,"completion_tokens":null,"total_tokens":null}}),
+            3,
+            2,
+        ),
+        (
+            json!({"message":{"usage":{"input_tokens":3,"output_tokens":0,
+                "cache_read_input_tokens":5,"cache_creation_input_tokens":2,"total_tokens":10}}}),
+            json!({"usage":{"output_tokens":2}}),
+            json!({"usage":{"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,
+                "cache_creation_input_tokens":null,"total_tokens":null}}),
+            10,
+            2,
+        ),
+        (
+            json!({"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":0,
+                "thoughtsTokenCount":1,"totalTokenCount":4}}),
+            json!({"usageMetadata":{"candidatesTokenCount":2}}),
+            json!({"usageMetadata":{"promptTokenCount":null,"candidatesTokenCount":null,
+                "thoughtsTokenCount":null,"totalTokenCount":null}}),
+            3,
+            3,
+        ),
+    ] {
+        let frames = format!("data: {first}\n\ndata: {second}\n\ndata: {unknown}\n\n");
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, frames.as_bytes());
+        assert_eq!(event.input_tokens, Some(expected_input), "{first}");
+        assert_eq!(event.output_tokens, Some(expected_output), "{first}");
+        assert_eq!(
+            event.total_tokens,
+            Some(expected_input + expected_output),
+            "{first}"
+        );
+    }
+}
+
+#[test]
+fn usage_overflow_does_not_reuse_an_older_total() {
+    let mut event = test_usage_event();
+    let frames = format!(
+        "data: {{\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}\n\n\
+         data: {{\"usage\":{{\"input_tokens\":{}}}}}\n\n",
+        u64::MAX
+    );
+    populate_tokens(&mut event, frames.as_bytes());
+    assert_eq!(event.input_tokens, Some(u64::MAX));
+    assert_eq!(event.output_tokens, Some(1));
+    assert_eq!(event.total_tokens, None);
 }
 
 #[test]
@@ -229,8 +294,8 @@ fn buffered_success_with_a_degraded_model_stays_retryable_only_while_blocking() 
 #[test]
 fn buffered_model_mismatch_is_rejected_but_generated_output_is_not_replayed() {
     for body in [
-        br#"{"model":"gpt-5.6-luna","output":[{"type":"message","content":[{"type":"output_text","text":"synthetic"}]}]}"#.as_slice(),
-        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-luna\",\"output\":[]}}\n\n".as_slice(),
+        br#"{"model":"gpt-5.6-luna","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"synthetic"}]}]}"#.as_slice(),
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-luna\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"synthetic\"}]}]}}\n\n".as_slice(),
     ] {
         let failure = completed_upstream_response(body, true, Some("gpt-6-astra")).unwrap_err();
         assert_eq!(failure.failure.category, "upstream_route_degraded");
@@ -250,7 +315,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
             assert!(socket.read(&mut request).await.unwrap() > 0);
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
             let frame = concat!(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"gpt-6-astra\",\"status\":\"completed\",\"output\":[]}}\n\n",
             "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"ignored_tail\"}}}\n\n",
         );
             socket

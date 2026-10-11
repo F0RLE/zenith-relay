@@ -10,19 +10,10 @@ where
     S: AsRef<str>,
 {
     crate::canonicalize_reasoning_levels(levels.into_iter().filter_map(|level| {
-        let normalized_level = level.as_ref().trim().to_ascii_lowercase();
+        let normalized_level = crate::catalog::canonical_reasoning_level(level.as_ref());
         matches!(
             normalized_level.as_str(),
-            "none"
-                | "minimal"
-                | "low"
-                | "medium"
-                | "high"
-                | "xhigh"
-                | "very_high"
-                | "extra_high"
-                | "max"
-                | "ultra"
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
         )
         .then_some(normalized_level)
     }))

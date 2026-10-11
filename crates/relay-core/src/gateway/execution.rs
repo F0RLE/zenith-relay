@@ -27,6 +27,7 @@ use crate::protocol::{
 use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
 use crate::ErrorOrigin;
+use crate::WireApi;
 use axum::body::Body;
 use axum::http::{HeaderValue, Response, StatusCode};
 use serde_json::Value;
@@ -513,6 +514,13 @@ pub(super) fn bind_responses_turn(
     capture_replay: bool,
 ) {
     if let Ok(response) = serde_json::from_slice::<Value>(response_body) {
+        if crate::protocol::completion::ResponseCompletion::for_protocol(
+            WireApi::Responses,
+            &response,
+        ) != crate::protocol::completion::ResponseCompletion::Completed
+        {
+            return;
+        }
         if capture_replay {
             runtime.capture_native_responses_replay(
                 local_key_id,
@@ -526,10 +534,10 @@ pub(super) fn bind_responses_turn(
         for call_id in response_tool_call_ids(&response) {
             runtime.bind_tool_call_affinity(local_key_id, &call_id, candidate_id, now_ms());
         }
+        runtime.bind_response_affinity(
+            response_id_from_bytes(response_body).as_deref(),
+            candidate_id,
+            now_ms(),
+        );
     }
-    runtime.bind_response_affinity(
-        response_id_from_bytes(response_body).as_deref(),
-        candidate_id,
-        now_ms(),
-    );
 }

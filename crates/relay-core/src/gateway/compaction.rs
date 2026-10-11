@@ -207,6 +207,7 @@ pub(super) async fn execute(
                 turn_scope: scope,
                 budget: Some(budget),
                 lease: Some(lease),
+                usage_event: None,
             },
         )
         .await
@@ -337,7 +338,7 @@ mod tests {
         let frames = vec![
             json!({"type":"response.output_item.done", "output_index":1, "item":compaction}),
             json!({"type":"response.output_item.done", "output_index":0, "item":message}),
-            json!({"type":"response.completed", "response":{"id":"synthetic-compact", "usage":{"input_tokens":12}}}),
+            json!({"type":"response.completed", "response":{"id":"synthetic-compact", "status":"completed", "output":[], "usage":{"input_tokens":12}}}),
         ];
         let sse = |frames: &[Value]| {
             frames

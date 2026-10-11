@@ -8,12 +8,18 @@ use super::*;
 use std::collections::BTreeMap;
 
 pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<Request> {
-    let decoded_request = match protocol {
+    let mut decoded_request = match protocol {
         WireApi::Responses => responses::decode(request_body)?,
         WireApi::ChatCompletions => chat::decode(request_body)?,
         WireApi::Messages => messages::decode(request_body)?,
         WireApi::Gemini => gemini::decode(request_body)?,
     };
+    if let Some(Reasoning::Effort(effort)) = &mut decoded_request.reasoning {
+        *effort = crate::catalog::canonical_reasoning_level(effort);
+        if effort.is_empty() {
+            return Err(AdapterError::invalid_request().with_parameter("reasoning"));
+        }
+    }
     if decoded_request
         .messages
         .iter()
@@ -25,6 +31,11 @@ pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<
         if !decoded_request.tools.iter().any(|tool| tool.name == *name) {
             return Err(AdapterError::unsupported_tool());
         }
+    }
+    if matches!(decoded_request.tool_choice, Some(ToolChoice::Required))
+        && decoded_request.tools.is_empty()
+    {
+        return Err(AdapterError::unsupported_tool());
     }
     Ok(decoded_request)
 }
@@ -72,6 +83,9 @@ pub(super) fn resolve_tool_history(messages: &mut [Message]) -> AdapterResult<()
                         })
                         .ok_or_else(AdapterError::invalid_request)?;
                     let (call_id, call_name) = pending.remove(index);
+                    if !name.is_empty() && *name != call_name {
+                        return Err(AdapterError::invalid_request());
+                    }
                     *id = call_id;
                     *name = call_name;
                 }
@@ -84,24 +98,46 @@ pub(super) fn resolve_tool_history(messages: &mut [Message]) -> AdapterResult<()
 
 fn validate_tool_history(messages: &[Message]) -> AdapterResult<()> {
     let mut pending = BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
     for message in messages {
+        if message.role == Role::Assistant && !pending.is_empty() {
+            return Err(AdapterError::invalid_request());
+        }
         for block in &message.blocks {
             match block {
-                Block::ToolCall { id, name, .. } => {
-                    if pending.insert(id, name).is_some() {
+                Block::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => {
+                    if message.role != Role::Assistant
+                        || !seen.insert(id)
+                        || serde_json::from_str::<Value>(arguments)
+                            .ok()
+                            .is_none_or(|value| !value.is_object())
+                        || pending.insert(id, name).is_some()
+                    {
                         return Err(AdapterError::invalid_request());
                     }
                 }
-                Block::ToolResult { id, name, .. }
-                    if pending
-                        .remove(id)
-                        .is_none_or(|call_name| !name.is_empty() && call_name != name) =>
-                {
-                    return Err(AdapterError::invalid_request());
+                Block::ToolResult { id, name, .. } => {
+                    if message.role != Role::User
+                        || pending
+                            .remove(id)
+                            .is_none_or(|call_name| !name.is_empty() && call_name != name)
+                    {
+                        return Err(AdapterError::invalid_request());
+                    }
+                }
+                _ if message.role != Role::Assistant && !pending.is_empty() => {
+                    return Err(AdapterError::invalid_request())
                 }
                 _ => {}
             }
         }
+    }
+    if !pending.is_empty() {
+        return Err(AdapterError::invalid_request());
     }
     Ok(())
 }

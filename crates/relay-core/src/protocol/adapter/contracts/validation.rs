@@ -265,7 +265,7 @@ fn validate_responses_transport_controls(request: &Value) -> AdapterResult<()> {
     Ok(())
 }
 
-fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
+pub(super) fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
     let tool_object = tool
         .as_object()
         .ok_or_else(AdapterError::unsupported_tool)?;

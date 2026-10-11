@@ -17,6 +17,7 @@ const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
 pub(in crate::gateway) struct ServiceTierPolicy {
     owner: ServiceTierOwner,
     client_tier: Option<Value>,
+    pool_default: DefaultServiceTier,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +34,7 @@ impl ServiceTierPolicy {
                 .as_object()
                 .and_then(|request_fields| request_fields.get("service_tier"))
                 .cloned(),
+            pool_default: DefaultServiceTier::Standard,
         }
     }
 
@@ -43,13 +45,28 @@ impl ServiceTierPolicy {
         }
     }
 
-    pub(in crate::gateway) fn select_for_model(
-        &self,
+    /// Capture the preference once after model resolution. The key's configured
+    /// transports may narrow the reference modes; health and retries do not
+    /// change the captured selection.
+    pub(in crate::gateway) fn capture_pool_default(
+        &mut self,
         runtime: &GatewayRuntime,
         model: &str,
-    ) -> DefaultServiceTier {
+        supported: &[DefaultServiceTier],
+    ) {
+        if self.owner == ServiceTierOwner::Pool && self.client_tier.is_none() {
+            let preferred = runtime.model_effective_service_tier(model);
+            self.pool_default = if supported.contains(&preferred) {
+                preferred
+            } else {
+                DefaultServiceTier::Standard
+            };
+        }
+    }
+
+    pub(in crate::gateway) fn selected_tier(&self) -> DefaultServiceTier {
         self.client_tier.as_ref().map_or_else(
-            || runtime.model_effective_service_tier(model),
+            || self.pool_default,
             |tier| DefaultServiceTier::from_storage_value(tier.as_str().unwrap_or_default()),
         )
     }
@@ -110,15 +127,12 @@ impl ServiceTierPolicy {
 }
 
 pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServiceTier {
-    match request.get("service_tier").and_then(Value::as_str) {
-        Some(tier) if tier.eq_ignore_ascii_case("ultrafast") => DefaultServiceTier::Ultrafast,
-        Some(tier)
-            if tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast") =>
-        {
-            DefaultServiceTier::Fast
-        }
-        _ => DefaultServiceTier::Standard,
-    }
+    DefaultServiceTier::from_storage_value(
+        request
+            .get("service_tier")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 /// Apply the pool's speed setting after the request owner has removed any tier

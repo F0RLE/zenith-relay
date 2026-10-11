@@ -21,6 +21,11 @@ pub(super) fn parse_entry(
     let token = parse_token_price(pricing_record)?;
     let image = parse_image_price(pricing_record)?;
     let request_micro_usd = optional_micro_request(pricing_record)?;
+    // A request/image tariff with placeholder zero token fields is not a free
+    // text model. Explicit zero components on token-priced models remain valid.
+    let token = token.filter(|quote| {
+        quote.input != 0 || quote.output != 0 || (image.is_none() && request_micro_usd.is_none())
+    });
     if token.is_none() && image.is_none() && request_micro_usd.is_none() {
         return Ok(None);
     }
@@ -63,8 +68,12 @@ fn parse_token_price(
         output,
         flex: rate_set(pricing_record, "_flex")?,
         priority: rate_set(pricing_record, "_priority")?,
+        ultrafast: rate_set(pricing_record, "_ultrafast")?,
+        above_100k: long_context_rates(pricing_record, "100k")?,
+        above_128k: long_context_rates(pricing_record, "128k")?,
         above_200k: long_context_rates(pricing_record, "200k")?,
         above_272k: long_context_rates(pricing_record, "272k")?,
+        above_512k: long_context_rates(pricing_record, "512k")?,
     }))
 }
 
@@ -76,6 +85,7 @@ fn long_context_rates(
         standard: long_context_set(pricing_record, threshold, "")?,
         flex: long_context_set(pricing_record, threshold, "_flex")?,
         priority: long_context_set(pricing_record, threshold, "_priority")?,
+        ultrafast: long_context_set(pricing_record, threshold, "_ultrafast")?,
     })
 }
 
@@ -266,6 +276,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_each_published_context_threshold_and_cache_schedule() {
+        for threshold in ["100k", "128k", "200k", "272k", "512k"] {
+            let mut record = json!({
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 2e-6,
+                "max_input_tokens": 1_000_000
+            });
+            for suffix in ["", "_flex", "_priority"] {
+                record[format!("input_cost_per_token_above_{threshold}_tokens{suffix}")] =
+                    json!(3e-6);
+                record[format!("cache_read_input_token_cost_above_{threshold}_tokens{suffix}")] =
+                    json!(0);
+                record[format!(
+                    "cache_creation_input_token_cost_above_1hr_above_{threshold}_tokens{suffix}"
+                )] = json!(5e-6);
+            }
+            let token = parse_entry("synthetic-model", &record)
+                .unwrap()
+                .unwrap()
+                .token
+                .unwrap();
+            let published: Vec<_> = token
+                .context_rates()
+                .into_iter()
+                .filter(|(_, rates)| !rates.is_empty())
+                .collect();
+            assert_eq!(published.len(), 1);
+            assert_eq!(format!("{}k", published[0].0 / 1000), threshold);
+            for rates in [
+                published[0].1.standard,
+                published[0].1.flex,
+                published[0].1.priority,
+            ] {
+                assert_eq!(rates.input, Some(3_000_000));
+                assert_eq!(rates.output, None);
+                assert_eq!(rates.cache_read, Some(0));
+                assert_eq!(rates.cache_write_1h, Some(5_000_000));
+            }
+            let cleared = token.clear_cache_writes();
+            for (_, rates) in cleared.context_rates() {
+                for rate in [rates.standard, rates.flex, rates.priority] {
+                    assert_eq!(rate.cache_write_5m, None);
+                    assert_eq!(rate.cache_write_1h, None);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn keeps_image_and_request_prices_out_of_token_price() {
         let image_pricing_entry = parse_entry(
             "gemini-image",
@@ -292,5 +351,24 @@ mod tests {
                 .unwrap();
         assert!(request_pricing_entry.token.is_none());
         assert_eq!(request_pricing_entry.request_micro_usd, Some(5_000));
+        for price in [
+            json!({ "input_cost_per_token": 0, "output_cost_per_token": 0, "cost_per_request": 0.005 }),
+            json!({ "input_cost_per_token": 0, "output_cost_per_token": 0, "output_cost_per_image": 0.04 }),
+        ] {
+            assert!(parse_entry("request-or-image", &price)
+                .unwrap()
+                .unwrap()
+                .token
+                .is_none());
+        }
+        let free = parse_entry(
+            "free-token-model",
+            &json!({
+                "input_cost_per_token": 0, "output_cost_per_token": 0
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(free.token.unwrap().input, 0);
     }
 }

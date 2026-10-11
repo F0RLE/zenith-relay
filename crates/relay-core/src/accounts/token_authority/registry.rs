@@ -212,8 +212,35 @@ impl TokenAuthority {
         now_ms: u64,
         persistence: &dyn TokenPersistenceAdapter,
     ) -> Result<bool, TokenAuthorityError> {
-        self.invalidate_access_with_fence(account_id, failed_generation, None, now_ms, persistence)
-            .await
+        self.invalidate_access_with_fence(
+            account_id,
+            failed_generation,
+            None,
+            None,
+            now_ms,
+            persistence,
+        )
+        .await
+    }
+
+    /// A delayed refusal may reuse a persisted generation from another login.
+    /// Bind invalidation to the exact in-memory credential incarnation.
+    pub async fn invalidate_access_revision_and_persist(
+        &self,
+        account_id: &str,
+        rejected_revision: &TokenDispatchRevision,
+        now_ms: u64,
+        persistence: &dyn TokenPersistenceAdapter,
+    ) -> Result<bool, TokenAuthorityError> {
+        self.invalidate_access_with_fence(
+            account_id,
+            None,
+            None,
+            Some(rejected_revision),
+            now_ms,
+            persistence,
+        )
+        .await
     }
 
     /// A remote 401 belongs to the exact bearer that was sent. Generation
@@ -229,6 +256,7 @@ impl TokenAuthority {
             account_id,
             None,
             Some(rejected_tokens),
+            None,
             now_ms,
             persistence,
         )
@@ -240,6 +268,7 @@ impl TokenAuthority {
         account_id: &str,
         failed_generation: Option<u64>,
         rejected_tokens: Option<&TokenSet>,
+        rejected_revision: Option<&TokenDispatchRevision>,
         now_ms: u64,
         persistence: &dyn TokenPersistenceAdapter,
     ) -> Result<bool, TokenAuthorityError> {
@@ -250,6 +279,7 @@ impl TokenAuthority {
         let mut slot = slot_handle.lock().await;
         if failed_generation.is_some_and(|generation| slot.tokens.generation != generation)
             || rejected_tokens.is_some_and(|tokens| slot.tokens != *tokens)
+            || rejected_revision.is_some_and(|revision| *revision != slot_handle.snapshot())
         {
             return Ok(false);
         }

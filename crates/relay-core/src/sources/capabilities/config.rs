@@ -20,7 +20,9 @@ impl SourceProtocolConfig {
             }
             if capability.status == CapabilityStatus::Unknown
                 && (capability.origin != CapabilityOrigin::Catalog
-                    || (capability.features.is_empty() && capability.reasoning_efforts.is_empty()))
+                    || (capability.features.is_empty()
+                        && capability.reasoning_efforts.is_empty()
+                        && capability.service_tiers.is_none()))
             {
                 continue;
             }
@@ -62,6 +64,7 @@ impl SourceProtocolConfig {
                             CapabilityStatus::Declared,
                         )]),
                         reasoning_efforts: vec![],
+                        service_tiers: None,
                     })
                     .or_else(|| observations.first().map(|capability| (*capability).clone()));
                 if let Some(effective_capability) = merged.as_mut() {
@@ -79,6 +82,9 @@ impl SourceProtocolConfig {
                         if !observation.reasoning_efforts.is_empty() {
                             effective_capability.reasoning_efforts =
                                 observation.reasoning_efforts.clone();
+                        }
+                        if observation.service_tiers.is_some() {
+                            effective_capability.service_tiers = observation.service_tiers.clone();
                         }
                     }
                 }
@@ -183,16 +189,11 @@ impl SourceProtocolConfig {
         self.resolve_with_catalog(base_url, models, legacy_bindings, fallback_protocol, None)
     }
 
-    /// Resolve every catalog model. A model sends the protocol native to its
-    /// group (OpenAI Responses, Anthropic Messages, Google Gemini, otherwise
-    /// Chat Completions) whatever host or reseller serves it, because a
-    /// reseller may accept another endpoint yet drop cache billing and usage.
-    /// The group comes from the validated reference catalog. An endpoint the
-    /// source owner pinned, or a protocol the source catalog marks
-    /// unsupported, takes precedence over the group. Models the reference
-    /// catalog cannot resolve keep the endpoint and capability selection.
-    /// Legacy generation probes are diagnostic only. Prices never
-    /// participate.
+    /// Resolve one upstream protocol per model before projecting client APIs.
+    /// An owner-pinned endpoint wins, followed by exact model declarations,
+    /// the reference group's native protocol, and the service host. Explicit
+    /// exclusions apply at every step. Prices and generation probes never
+    /// establish routing support.
     pub fn resolve_with_catalog(
         &self,
         base_url: &str,
@@ -262,25 +263,12 @@ impl SourceProtocolConfig {
             // Pick one physical upstream contract for the model before
             // projecting any client-facing contract. A model must not reach
             // Responses for one harness and Messages/Gemini for another just
-            // because the client wire API changed. The source profile or
-            // explicit endpoint hint wins when the catalog does not reject
-            // it; otherwise the strongest per-model route evidence wins.
+            // because the client wire API changed.
             let Some(selected_protocol) = select_upstream_protocol(
                 UpstreamProtocolHints {
                     pinned: pinned_protocol,
                     group_native: reference_catalog
-                        .and_then(|catalog| catalog.native_protocol_for(model))
-                        .filter(|protocol| {
-                            // Chat Completions is only ever the catch-all assumed
-                            // for models outside the first-party groups. Declared
-                            // source evidence for another protocol outranks a
-                            // guess; first-party natives are never second-guessed.
-                            *protocol != WireApi::ChatCompletions
-                                || available_capabilities.is_empty()
-                                || available_capabilities.iter().any(|capability| {
-                                    capability.upstream_wire_api == WireApi::ChatCompletions
-                                })
-                        }),
+                        .and_then(|catalog| catalog.native_protocol_for(model)),
                     host: host_protocol,
                 },
                 available_capabilities,
@@ -335,24 +323,34 @@ fn select_upstream_protocol(
 ) -> Option<WireApi> {
     let is_unsupported =
         |protocol: &WireApi| unsupported_protocols.is_some_and(|set| set.contains(protocol));
-    if let Some(protocol) = [hints.pinned, hints.group_native, hints.host]
-        .into_iter()
-        .flatten()
-        .find(|protocol| !is_unsupported(protocol))
-    {
+    if let Some(protocol) = hints.pinned.filter(|protocol| !is_unsupported(protocol)) {
         return Some(protocol);
     }
     available_capabilities
         .iter()
+        .filter(|capability| {
+            matches!(
+                capability.origin,
+                CapabilityOrigin::Catalog | CapabilityOrigin::Manual
+            )
+        })
         .filter(|capability| !is_unsupported(&capability.upstream_wire_api))
         .max_by_key(|capability| {
             (
                 capability.status == CapabilityStatus::Confirmed,
                 capability.checked_at_ms,
+                Some(capability.upstream_wire_api) == hints.group_native,
+                Some(capability.upstream_wire_api) == hints.host,
                 std::cmp::Reverse(capability.upstream_wire_api),
             )
         })
         .map(|capability| capability.upstream_wire_api)
+        .or_else(|| {
+            [hints.group_native, hints.host]
+                .into_iter()
+                .flatten()
+                .find(|protocol| !is_unsupported(protocol))
+        })
         .or_else(|| {
             legacy_protocols
                 .iter()

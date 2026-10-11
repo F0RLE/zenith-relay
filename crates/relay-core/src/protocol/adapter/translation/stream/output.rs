@@ -28,14 +28,30 @@ impl TranslationStream {
         }
     }
 
-    pub(super) fn emit_changes(&mut self) -> AdapterResult<()> {
+    pub(super) fn emit_changes(&mut self, upstream_finished: bool) -> AdapterResult<()> {
         self.start();
         if self.emitted.len() > self.decoded_response.blocks.len() {
             return Err(AdapterError::upstream_stream_invalid());
         }
         for block_index in 0..self.decoded_response.blocks.len() {
             let block = self.decoded_response.blocks[block_index].clone();
+            // Gemini patches JSON objects rather than appending JSON text.
+            // Emit each assembled call once its upstream response is terminal.
+            if self.translation_request.upstream == WireApi::Gemini
+                && matches!(block, Block::ToolCall { .. })
+                && !upstream_finished
+            {
+                break;
+            }
             let previous_block = self.emitted.get(block_index).cloned();
+            if self.translation_request.client == WireApi::Messages
+                && block_index < self.finished_message_blocks
+            {
+                if previous_block.as_ref() != Some(&block) {
+                    return Err(AdapterError::upstream_stream_invalid());
+                }
+                continue;
+            }
             if previous_block.is_none() {
                 if let Block::ToolCall {
                     id,
@@ -46,19 +62,29 @@ impl TranslationStream {
                     if id.is_empty() || name.is_empty() || arguments.is_empty() {
                         break;
                     }
+                    self.translation_request.validate_tool_call(id, name)?;
+                    if self.decoded_response.blocks[..block_index].iter().any(|block| {
+                        matches!(block, Block::ToolCall { id: previous_id, .. } if previous_id == id)
+                    }) || (!self.translation_request.parallel_tools && self.tool_index(block_index) > 0) {
+                        return Err(AdapterError::upstream_stream_invalid());
+                    }
                 }
                 self.block_start(block_index, &block)?;
             }
             match (&block, &previous_block) {
                 (Block::Text(text), Some(Block::Text(previous_text)))
-                | (Block::Reasoning(text), Some(Block::Reasoning(previous_text))) => {
-                    self.text_delta(
-                        block_index,
-                        text.strip_prefix(previous_text)
-                            .ok_or_else(AdapterError::upstream_stream_invalid)?,
-                        matches!(block, Block::Reasoning(_)),
-                    )?;
+                | (Block::Reasoning(text), Some(Block::Reasoning(previous_text)))
+                | (Block::Refusal(text), Some(Block::Refusal(previous_text))) => {
+                    let delta = text
+                        .strip_prefix(previous_text)
+                        .ok_or_else(AdapterError::upstream_stream_invalid)?;
+                    if matches!(block, Block::Refusal(_)) {
+                        self.refusal_delta(block_index, delta)?;
+                    } else {
+                        self.text_delta(block_index, delta, matches!(block, Block::Reasoning(_)))?;
+                    }
                 }
+                (Block::Refusal(text), None) => self.refusal_delta(block_index, text)?,
                 (Block::Text(text), None) | (Block::Reasoning(text), None) => {
                     self.text_delta(block_index, text, matches!(block, Block::Reasoning(_)))?
                 }
@@ -91,6 +117,18 @@ impl TranslationStream {
             } else {
                 self.emitted[block_index] = block;
             }
+            if self.translation_request.client == WireApi::Messages {
+                // Messages streams one block at a time. Buffer later blocks while
+                // the upstream can still add deltas to the active block.
+                if !upstream_finished && !self.closed.contains(&block_index) {
+                    break;
+                }
+                self.event(
+                    "content_block_stop",
+                    json!({"type":"content_block_stop","index":block_index}),
+                );
+                self.finished_message_blocks += 1;
+            }
         }
         Ok(())
     }
@@ -99,7 +137,7 @@ impl TranslationStream {
         match self.translation_request.client {
             WireApi::Responses => {
                 let output_item = match block {
-                    Block::Text(_) => {
+                    Block::Text(_) | Block::Refusal(_) => {
                         json!({"type":"message","id":format!("msg_{}_{output_index}",self.decoded_response.id),"role":"assistant","status":"in_progress","content":[]})
                     }
                     Block::ToolCall { id, name, .. } => {
@@ -129,7 +167,9 @@ impl TranslationStream {
                     "response.output_item.added",
                     json!({"type":"response.output_item.added","output_index":output_index,"item":output_item}),
                 );
-                if matches!(block, Block::Text(_)) {
+                if matches!(block, Block::Refusal(_)) {
+                    self.event("response.content_part.added", json!({"type":"response.content_part.added","output_index":output_index,"item_id":format!("msg_{}_{output_index}",self.decoded_response.id),"content_index":0,"part":{"type":"refusal","refusal":""}}));
+                } else if matches!(block, Block::Text(_)) {
                     self.event("response.content_part.added", json!({"type":"response.content_part.added","output_index":output_index,"item_id":format!("msg_{}_{output_index}",self.decoded_response.id),"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}));
                 } else if matches!(block, Block::Reasoning(_)) {
                     self.event("response.reasoning_summary_part.added", json!({"type":"response.reasoning_summary_part.added","output_index":output_index,"item_id":format!("rs_{}_{output_index}",self.decoded_response.id),"summary_index":0,"part":{"type":"summary_text","text":""}}));
@@ -137,8 +177,8 @@ impl TranslationStream {
             }
             WireApi::Messages => {
                 let content = match block {
-                    Block::Text(_) => json!({"type":"text","text":""}),
-                    Block::Reasoning(_) => json!({"type":"thinking","thinking":""}),
+                    Block::Text(_) | Block::Refusal(_) => json!({"type":"text","text":""}),
+                    Block::Reasoning(_) => return Err(AdapterError::upstream_stream_invalid()),
                     Block::ToolCall { id, name, .. } => {
                         json!({"type":"tool_use","id":id,"name":name,"input":{}})
                     }
@@ -152,7 +192,12 @@ impl TranslationStream {
             WireApi::ChatCompletions => {
                 if let Block::ToolCall { id, name, .. } = block {
                     self.chat_chunk(json!({"tool_calls":[{"index":self.tool_index(output_index),"id":id,"type":"function","function":{"name":name,"arguments":""}}]}), None);
-                } else if !matches!(block, Block::Text(_) | Block::Reasoning(_)) {
+                } else if matches!(block, Block::Refusal(_)) {
+                    self.chat_chunk(json!({"refusal":""}), None);
+                } else if !matches!(
+                    block,
+                    Block::Text(_) | Block::Reasoning(_) | Block::Refusal(_)
+                ) {
                     return Err(AdapterError::upstream_stream_invalid());
                 }
             }
@@ -166,6 +211,18 @@ impl TranslationStream {
             .iter()
             .filter(|block| matches!(block, Block::ToolCall { .. }))
             .count()
+    }
+
+    fn refusal_delta(&mut self, output_index: usize, text: &str) -> AdapterResult<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        match self.translation_request.client {
+            WireApi::Responses => self.event("response.refusal.delta", json!({"type":"response.refusal.delta","output_index":output_index,"item_id":format!("msg_{}_{output_index}",self.decoded_response.id),"content_index":0,"delta":text})),
+            WireApi::ChatCompletions => self.chat_chunk(json!({"refusal":text}), None),
+            _ => self.text_delta(output_index, text, false)?,
+        }
+        Ok(())
     }
 
     fn text_delta(
@@ -231,11 +288,26 @@ impl TranslationStream {
                     match output_item.get("type").and_then(Value::as_str) {
                         Some("message") => {
                             let content_part = &output_item["content"][0];
-                            self.event("response.output_text.done", json!({"type":"response.output_text.done","output_index":output_index,"item_id":output_item["id"],"content_index":0,"text":content_part["text"]}));
+                            if content_part.get("type").and_then(Value::as_str) == Some("refusal") {
+                                self.event("response.refusal.done", json!({"type":"response.refusal.done","output_index":output_index,"item_id":output_item["id"],"content_index":0,"refusal":content_part["refusal"]}));
+                            } else {
+                                for (annotation_index, annotation) in content_part["annotations"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .enumerate()
+                                {
+                                    self.event("response.output_text.annotation.added", json!({"type":"response.output_text.annotation.added","output_index":output_index,"item_id":output_item["id"],"content_index":0,"annotation_index":annotation_index,"annotation":annotation}));
+                                }
+                                self.event("response.output_text.done", json!({"type":"response.output_text.done","output_index":output_index,"item_id":output_item["id"],"content_index":0,"text":content_part["text"]}));
+                            }
                             self.event("response.content_part.done", json!({"type":"response.content_part.done","output_index":output_index,"item_id":output_item["id"],"content_index":0,"part":content_part}));
                         }
                         Some("function_call") => self.event("response.function_call_arguments.done", json!({"type":"response.function_call_arguments.done","output_index":output_index,"item_id":output_item["id"],"arguments":output_item["arguments"]})),
-                        Some("custom_tool_call") => self.event("response.custom_tool_call_input.done", json!({"type":"response.custom_tool_call_input.done","output_index":output_index,"item_id":output_item["id"],"input":output_item["input"]})),
+                        Some("custom_tool_call") => {
+                            self.event("response.custom_tool_call_input.delta", json!({"type":"response.custom_tool_call_input.delta","output_index":output_index,"item_id":output_item["id"],"delta":output_item["input"]}));
+                            self.event("response.custom_tool_call_input.done", json!({"type":"response.custom_tool_call_input.done","output_index":output_index,"item_id":output_item["id"],"input":output_item["input"]}));
+                        }
                         Some("reasoning") => {
                             self.event("response.reasoning_summary_text.done", json!({"type":"response.reasoning_summary_text.done","output_index":output_index,"item_id":output_item["id"],"summary_index":0,"text":output_item["summary"][0]["text"]}));
                             self.event("response.reasoning_summary_part.done", json!({"type":"response.reasoning_summary_part.done","output_index":output_index,"item_id":output_item["id"],"summary_index":0,"part":output_item["summary"][0]}));
@@ -258,16 +330,14 @@ impl TranslationStream {
                 );
             }
             WireApi::Messages => {
-                for block_index in 0..self.decoded_response.blocks.len() {
-                    self.event(
-                        "content_block_stop",
-                        json!({"type":"content_block_stop","index":block_index}),
-                    );
-                }
                 self.event("message_delta", json!({"type":"message_delta","delta":{"stop_reason":response::finish_value(WireApi::Messages,self.decoded_response.finish),"stop_sequence":null},"usage":response::usage_value(WireApi::Messages,&self.decoded_response.usage)}));
                 self.event("message_stop", json!({"type":"message_stop"}));
             }
             WireApi::ChatCompletions => {
+                let annotations = citations::chat_annotations(&self.decoded_response)?;
+                if !annotations.is_empty() {
+                    self.chat_chunk(json!({"annotations":annotations}), None);
+                }
                 self.chat_chunk(
                     json!({}),
                     Some(response::finish_value(

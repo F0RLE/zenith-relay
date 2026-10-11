@@ -490,7 +490,8 @@ fn reasoning_effort_never_claims_support_from_a_disabled_bridge() {
     assert!(native.supports_reasoning_effort("provider-defined"));
     assert!(!disabled_bridge.supports_reasoning_effort("high"));
     assert!(adaptive_bridge.supports_reasoning_effort("high"));
-    assert!(!adaptive_bridge.supports_reasoning_effort("very_high"));
+    assert!(adaptive_bridge.supports_reasoning_effort("very_high"));
+    assert!(!adaptive_bridge.supports_reasoning_effort("provider-defined"));
 }
 
 #[test]

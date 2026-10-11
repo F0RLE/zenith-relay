@@ -14,6 +14,7 @@ pub(super) struct SelectionGap<'a> {
     pub(super) key: &'a AuthenticatedKey,
     pub(super) client_request: &'a mut ClientRequest,
     pub(super) tried: &'a mut HashSet<String>,
+    pub(super) incompatible: &'a HashSet<String>,
     pub(super) last_failure: &'a Option<GatewayFailure>,
     pub(super) http_fallback_origin: &'a Option<ErrorOrigin>,
     pub(super) allow_previous_response_reset: bool,
@@ -159,7 +160,7 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
                 resolved_model: &client_request.resolved_model,
                 protocols: WEBSOCKET_PROTOCOLS,
                 operation: crate::scheduler::rotation::RotationOperation::Text,
-                exclusions: &HashSet::new(),
+                exclusions: gap.incompatible,
             },
             &mut *tried,
             client_request.response_affinity_key.as_deref(),
@@ -173,6 +174,7 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
         && wait_for_candidate_availability
     {
         tried.clear();
+        tried.extend(gap.incompatible.iter().cloned());
         if !runtime
             .wait_for_recovery_event(
                 key,

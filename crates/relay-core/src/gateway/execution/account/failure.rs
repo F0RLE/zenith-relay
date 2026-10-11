@@ -9,7 +9,9 @@ use super::super::super::errors::{
     settle_route_failure, AttemptFailure, PreservedUpstreamError,
 };
 use super::super::super::now_ms;
-use super::super::super::response::{emit_usage, proxy_error_response, usage_event, UsageAttempt};
+use super::super::super::response::{
+    emit_repair, emit_usage, populate_tokens, proxy_error_response, usage_event, UsageAttempt,
+};
 use super::super::super::turn_state::relay_account_response_header;
 use super::super::request::recover_stale_tool_history;
 use super::super::AttemptRepairs;
@@ -77,10 +79,10 @@ struct ClassifiedAccountFailure {
 pub(super) fn handle_account_status_failure(
     mut account_failure_input: AccountStatusFailureInput<'_>,
 ) -> AccountStatusFailure {
-    if let Some(step) = repair_account_body(&mut account_failure_input) {
+    let mut classified = classify_account_failure(&mut account_failure_input);
+    if let Some(step) = repair_account_body(&mut account_failure_input, &mut classified) {
         return step;
     }
-    let mut classified = classify_account_failure(&mut account_failure_input);
     if let Some(step) =
         repair_classified_account_failure(&mut account_failure_input, &mut classified)
     {
@@ -91,7 +93,13 @@ pub(super) fn handle_account_status_failure(
 
 fn repair_account_body(
     account_failure_input: &mut AccountStatusFailureInput<'_>,
+    classified: &mut ClassifiedAccountFailure,
 ) -> Option<AccountStatusFailure> {
+    if classified.failure.execution.certainty
+        != crate::scheduler::rotation::ExecutionCertainty::NotSent
+    {
+        return None;
+    }
     {
         let request_body = &mut *account_failure_input.request;
         let tried = &mut *account_failure_input.tried;
@@ -115,6 +123,7 @@ fn repair_account_body(
             // attempt as not sent so the repaired request can use the same
             // account without a cooldown or an unknown cancellation.
             account_failure_input.lease.settle_rotation_repair(now_ms());
+            record_account_repair(account_failure_input, classified);
             return Some(AccountStatusFailure::Continue);
         }
     }
@@ -135,6 +144,7 @@ fn repair_account_body(
         account_failure_input.lease,
     ) {
         account_failure_input.lease.settle_rotation_repair(now_ms());
+        record_account_repair(account_failure_input, classified);
         return Some(AccountStatusFailure::Continue);
     }
     None
@@ -161,9 +171,10 @@ fn classify_account_failure(
     }
     *account_failure_input.last_preserved_upstream_error =
         preserved_upstream_error(&failure, &account_failure_input.bytes);
-    let upstream_error = crate::usage::UpstreamErrorDetails::from_response_body(
+    let upstream_error = crate::usage::UpstreamErrorDetails::from_response(
         Some(account_failure_input.status.as_u16()),
         &account_failure_input.bytes,
+        account_failure_input.response_headers,
     );
     let mut event = usage_event(
         UsageAttempt {
@@ -180,6 +191,7 @@ fn classify_account_failure(
         Some(failure.category.to_string()),
         account_failure_input.started.elapsed().as_millis() as u64,
     );
+    populate_tokens(&mut event, &account_failure_input.bytes);
     event.upstream_error = Some(upstream_error.clone());
     ClassifiedAccountFailure {
         cache_write_rejected: prompt_cache_write_rejected(&account_failure_input.bytes),
@@ -218,11 +230,8 @@ fn repair_classified_account_failure(
                 account_failure_input.request_id,
                 candidate_id,
             );
-            emit_usage(account_failure_input.runtime, classified.event.clone());
-            *account_failure_input.last_failure = Some(classified.failure);
-            *account_failure_input.last_failure_origin =
-                account_failure_input.selected_error_origin;
             account_failure_input.lease.settle_rotation_repair(now_ms());
+            record_account_repair(account_failure_input, classified);
             return Some(AccountStatusFailure::Continue);
         }
     }
@@ -245,9 +254,7 @@ fn repair_classified_account_failure(
             .tried
             .remove(&account_failure_input.route.candidate_id);
         account_failure_input.lease.settle_rotation_repair(now_ms());
-        emit_usage(account_failure_input.runtime, classified.event.clone());
-        *account_failure_input.last_failure = Some(classified.failure);
-        *account_failure_input.last_failure_origin = account_failure_input.selected_error_origin;
+        record_account_repair(account_failure_input, classified);
         return Some(AccountStatusFailure::Continue);
     }
     if !account_failure_input.repairs.model_switch_reset
@@ -270,10 +277,8 @@ fn repair_classified_account_failure(
             account_failure_input.resolved_model,
         )
     {
-        emit_usage(account_failure_input.runtime, classified.event.clone());
-        *account_failure_input.last_failure = Some(classified.failure);
-        *account_failure_input.last_failure_origin = account_failure_input.selected_error_origin;
         account_failure_input.lease.settle_rotation_repair(now_ms());
+        record_account_repair(account_failure_input, classified);
         return Some(AccountStatusFailure::Continue);
     }
     None
@@ -317,7 +322,6 @@ fn settle_account_failure(
     );
     if affinity_miss {
         event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
-        emit_usage(runtime, event);
         if reset_materialized_continuation_for_owner_retry(
             &mut repairs.model_switch_reset,
             response_affinity_key,
@@ -329,10 +333,12 @@ fn settle_account_failure(
         ) {
             tried.remove(&route.candidate_id);
             lease.settle_rotation_repair(now_ms());
+            emit_repair(runtime, &mut event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;
             return AccountStatusFailure::Continue;
         }
+        emit_usage(runtime, event);
         settle_route_failure(runtime, lease, route, &failure, response_headers);
         return AccountStatusFailure::Respond(api_error(
             StatusCode::CONFLICT,
@@ -371,6 +377,15 @@ fn settle_account_failure(
         relay_account_response_header(client_headers, response_headers, &mut error_response);
     }
     AccountStatusFailure::Respond(error_response)
+}
+
+fn record_account_repair(
+    account_failure_input: &mut AccountStatusFailureInput<'_>,
+    classified: &mut ClassifiedAccountFailure,
+) {
+    emit_repair(account_failure_input.runtime, &mut classified.event);
+    *account_failure_input.last_failure = Some(classified.failure);
+    *account_failure_input.last_failure_origin = account_failure_input.selected_error_origin;
 }
 
 fn repair_legacy_call_ids(request: &mut Value) -> bool {

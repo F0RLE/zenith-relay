@@ -94,14 +94,22 @@ pub(in crate::gateway) async fn collect_upstream_response(
                         &bytes[..inspected],
                         account_stream,
                         expected_model,
-                    );
+                    )
+                    .map_err(|mut failure| {
+                        failure.partial_body = bytes[..inspected].to_vec();
+                        failure
+                    });
                 }
             }
             let Some(chunk) = remaining.next().await else {
                 break;
             };
-            let chunk =
-                chunk.map_err(|error| Box::new(AttemptFailure::transport(&error).into()))?;
+            let chunk = chunk.map_err(|error| {
+                Box::new(StreamBootstrapFailure {
+                    partial_body: bytes.clone(),
+                    ..AttemptFailure::transport(&error).into()
+                })
+            })?;
             bytes.extend_from_slice(&chunk);
         }
         bytes
@@ -110,7 +118,10 @@ pub(in crate::gateway) async fn collect_upstream_response(
             .await
             .map_err(|_| Box::new(AttemptFailure::stream(error_codes::UPSTREAM_BODY).into()))?
     };
-    completed_upstream_response(&bytes, account_stream, expected_model)
+    completed_upstream_response(&bytes, account_stream, expected_model).map_err(|mut failure| {
+        failure.partial_body = bytes;
+        failure
+    })
 }
 
 pub(in crate::gateway) fn completed_upstream_response(
@@ -119,42 +130,16 @@ pub(in crate::gateway) fn completed_upstream_response(
     expected_model: Option<&str>,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     if let Ok(upstream_json) = serde_json::from_slice::<Value>(bytes) {
-        let response_payload = upstream_json.get("response").unwrap_or(&upstream_json);
-        if response_payload
-            .get("error")
-            .is_some_and(|error| !error.is_null())
-            || upstream_json.get("type").and_then(Value::as_str) == Some("error")
-            || matches!(
-                response_payload.get("status").and_then(Value::as_str),
-                Some("failed" | "cancelled" | "canceled")
-            )
+        validate_upstream_response(&upstream_json, expected_model)?;
+        // Buffered account traffic uses Responses. Generic API traffic is
+        // validated against its selected protocol by the request executor.
+        if account_stream
+            && crate::protocol::completion::ResponseCompletion::for_protocol(
+                crate::WireApi::Responses,
+                &upstream_json,
+            ) == crate::protocol::completion::ResponseCompletion::Invalid
         {
-            let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(bytes));
-            return Err(Box::new(StreamBootstrapFailure {
-                execution: if super::super::streaming::has_semantic_output(&upstream_json, None) {
-                    crate::scheduler::rotation::ExecutionObservation::accepted()
-                } else {
-                    failure.execution
-                },
-                upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(
-                    None,
-                    &upstream_json,
-                )),
-                preserved: super::super::errors::preserved_upstream_error_value(
-                    &failure,
-                    &upstream_json,
-                ),
-                ..failure.into()
-            }));
-        }
-        if expected_model.is_some_and(|expected| {
-            super::super::streaming::served_model_is_rejected(&upstream_json, expected)
-        }) {
-            let mut failure = super::super::streaming::degraded_route_stream_failure();
-            if super::super::streaming::has_semantic_output(&upstream_json, None) {
-                failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
-            }
-            return Err(Box::new(failure));
+            return Err(invalid_buffered_response());
         }
         return Ok(bytes.to_vec());
     }
@@ -221,6 +206,13 @@ pub(in crate::gateway) fn completed_upstream_response(
                     {
                         response["output"] = Value::Array(output_items);
                     }
+                    if crate::protocol::completion::ResponseCompletion::for_protocol(
+                        crate::WireApi::Responses,
+                        &response,
+                    ) == crate::protocol::completion::ResponseCompletion::Invalid
+                    {
+                        return Err(invalid_buffered_response());
+                    }
                     return serde_json::to_vec(&response).map_err(|_| {
                         Box::new(AttemptFailure::stream(error_codes::STREAM_INVALID).into())
                     });
@@ -234,4 +226,60 @@ pub(in crate::gateway) fn completed_upstream_response(
     Err(Box::new(
         AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into(),
     ))
+}
+
+/// Check error and served-model evidence for account endpoints with their own schema.
+pub(in crate::gateway) fn validate_upstream_response(
+    upstream_json: &Value,
+    expected_model: Option<&str>,
+) -> Result<(), Box<StreamBootstrapFailure>> {
+    if !upstream_json.is_object() {
+        return Err(invalid_buffered_response());
+    }
+    let response_payload = upstream_json.get("response").unwrap_or(upstream_json);
+    let bytes = serde_json::to_vec(upstream_json).map_err(|_| invalid_buffered_response())?;
+    if response_payload
+        .get("error")
+        .is_some_and(|error| !error.is_null())
+        || upstream_json.get("type").and_then(Value::as_str) == Some("error")
+        || matches!(
+            response_payload.get("status").and_then(Value::as_str),
+            Some("failed" | "cancelled" | "canceled")
+        )
+    {
+        let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(&bytes));
+        return Err(Box::new(StreamBootstrapFailure {
+            execution: if super::super::streaming::has_semantic_output(upstream_json, None) {
+                crate::scheduler::rotation::ExecutionObservation::accepted()
+            } else {
+                failure.execution
+            },
+            upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(
+                None,
+                upstream_json,
+            )),
+            preserved: super::super::errors::preserved_upstream_error_value(
+                &failure,
+                upstream_json,
+            ),
+            ..failure.into()
+        }));
+    }
+    if expected_model.is_some_and(|expected| {
+        super::super::streaming::served_model_is_rejected(upstream_json, expected)
+    }) {
+        let mut failure = super::super::streaming::degraded_route_stream_failure();
+        if super::super::streaming::has_semantic_output(upstream_json, None) {
+            failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
+        }
+        return Err(Box::new(failure));
+    }
+    Ok(())
+}
+
+fn invalid_buffered_response() -> Box<StreamBootstrapFailure> {
+    let mut failure: StreamBootstrapFailure =
+        AttemptFailure::stream(error_codes::STREAM_INVALID).into();
+    failure.execution = crate::scheduler::rotation::ExecutionObservation::unknown();
+    Box::new(failure)
 }

@@ -77,19 +77,25 @@ pub(super) fn retryable_recovery_wait(
         )
 }
 
-/// Basis Points must return an upstream `403` as-is. A policy or entitlement
-/// rejection is not evidence that another OAuth account can safely replay the
-/// generation, and switching accounts would hide the provider's decision.
+/// Basis Points returns credential and permission refusals without replaying
+/// the generation. Token recovery happens before a subsequent client request.
 pub(super) fn route_forbids_fallback(
     route: &ExecutorRoute,
     status: StatusCode,
     category: &str,
 ) -> bool {
     route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints
-        && (status == StatusCode::FORBIDDEN || category == error_codes::UPSTREAM_MODEL_UNAVAILABLE)
+        && (matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+            || category == error_codes::UPSTREAM_MODEL_UNAVAILABLE)
 }
 
 pub(crate) fn basis_points_transport_rejected(status: u16, category: Option<&str>) -> bool {
+    if status == 401 && category == Some(error_codes::UPSTREAM_UNAUTHORIZED) {
+        // The token authority expires only the rejected bearer and preserves
+        // its refresh token. Generation telemetry must not turn this into a
+        // hard reauthentication state that prevents next-request recovery.
+        return true;
+    }
     // An explicit credential or account failure applies to the connection,
     // even when Basis Points returns it as an access or rate-limit refusal.
     if matches!(

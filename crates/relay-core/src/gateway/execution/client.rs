@@ -28,6 +28,7 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) request_id: String,
     pub(in crate::gateway) budget: SharedRequestBudget,
     pub(in crate::gateway) transport: UsageTransport,
+    pub(in crate::gateway) service_tier_policy: ServiceTierPolicy,
 }
 
 /// Internal compact-to-Responses dispatch is not an ordinary conversation turn.
@@ -95,11 +96,17 @@ async fn execute_client_request_inner(
         .cloned()
         .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request_json));
     let managed_codex_client = is_managed_codex_client(&headers);
-    let service_tier_policy = if managed_codex_client {
-        ServiceTierPolicy::pool_owned(&request_json)
-    } else {
-        ServiceTierPolicy::client_owned(&request_json)
-    };
+    let captured_tier_policy = parts
+        .extensions
+        .get::<RoutedRequestIdentity>()
+        .map(|identity| identity.service_tier_policy.clone());
+    let mut service_tier_policy = captured_tier_policy.clone().unwrap_or_else(|| {
+        if managed_codex_client {
+            ServiceTierPolicy::pool_owned(&request_json)
+        } else {
+            ServiceTierPolicy::client_owned(&request_json)
+        }
+    });
     if client_wire_api == WireApi::ChatCompletions
         && !chat_request_is_text_or_image_only(&request_json)
     {
@@ -208,16 +215,18 @@ async fn execute_client_request_inner(
             now_ms(),
         )
         .or_else(|| {
-            runtime
-                .route_recovery_enabled()
-                .then(|| {
-                    runtime.resolve_configured_model(
-                        &key,
-                        &requested_model,
-                        candidate_protocols(client_wire_api),
-                    )
-                })
-                .flatten()
+            let resolved = runtime.resolve_configured_model(
+                &key,
+                &requested_model,
+                candidate_protocols(client_wire_api),
+            )?;
+            (runtime.route_recovery_enabled()
+                || runtime.basis_points_access_failed_for_model(
+                    &key,
+                    &resolved,
+                    candidate_protocols(client_wire_api),
+                ))
+            .then_some(resolved)
         });
     let Some(resolved_model) = resolved_model else {
         return api_error(
@@ -226,6 +235,13 @@ async fn execute_client_request_inner(
             error_codes::MODEL_NOT_FOUND,
         );
     };
+    if captured_tier_policy.is_none() {
+        service_tier_policy.capture_pool_default(
+            &runtime,
+            &resolved_model,
+            &runtime.client_service_tiers(&key, &resolved_model, client_wire_api),
+        );
+    }
     let responses_lite = (client_wire_api == WireApi::Responses)
         .then(|| headers.get(CODEX_RESPONSES_LITE_HEADER).cloned())
         .flatten();

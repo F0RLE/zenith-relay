@@ -32,6 +32,7 @@ fn resolves_provider_exact_then_canonical_then_manual() {
         priority: TokenRateSet::EMPTY,
         above_200k: LongContextRates::EMPTY,
         above_272k: LongContextRates::EMPTY,
+        ..Default::default()
     };
     let exact = catalog.resolve_source(
         "gpt-test",
@@ -187,6 +188,7 @@ fn explicit_provider_is_required_for_provider_specific_exact_prices() {
         priority: TokenRateSet::EMPTY,
         above_200k: LongContextRates::EMPTY,
         above_272k: LongContextRates::EMPTY,
+        ..Default::default()
     };
 
     let exact = catalog.resolve_source("openrouter/gpt-test", Some("openrouter"), None, None, None);
@@ -320,6 +322,7 @@ fn provider_price_replaces_the_official_model_family_price() {
         priority: TokenRateSet::EMPTY,
         above_200k: LongContextRates::EMPTY,
         above_272k: LongContextRates::EMPTY,
+        ..Default::default()
     };
     let resolved = catalog.resolve_source("grok-4.7", None, None, Some(provider), None);
     assert_eq!(resolved.source, PriceSource::Provider);
@@ -351,6 +354,7 @@ fn unknown_model_keeps_an_explicit_family_and_then_manual_price() {
         priority: TokenRateSet::EMPTY,
         above_200k: LongContextRates::EMPTY,
         above_272k: LongContextRates::EMPTY,
+        ..Default::default()
     };
     let declared =
         catalog.resolve_source("private-model", None, Some("openai"), None, Some(manual));
@@ -384,6 +388,7 @@ fn pricing_context_normalizes_source_ids_but_keeps_account_policy_isolated() {
         priority: TokenRateSet::EMPTY,
         above_200k: LongContextRates::EMPTY,
         above_272k: LongContextRates::EMPTY,
+        ..Default::default()
     };
     let context = PricingContext {
         account_provider_families: BTreeMap::from([("acct".into(), "openrouter".into())]),
@@ -437,6 +442,7 @@ fn cache_creation_price_requires_a_messages_model_route() {
         priority: TokenRateSet::EMPTY,
         above_200k: LongContextRates::EMPTY,
         above_272k: LongContextRates::EMPTY,
+        ..Default::default()
     };
     let context = PricingContext {
         source_metadata: BTreeMap::from([

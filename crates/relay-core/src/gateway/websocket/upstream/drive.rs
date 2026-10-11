@@ -63,8 +63,8 @@ pub(super) async fn drive_selected_candidate(
         return Ok(DrivenConnect::Continue(request));
     };
     route.client_transport = crate::UsageTransport::Websocket;
-    request.apply_service_tier_for_route(runtime, &route);
-    route.service_tier = request.service_tier(runtime, &route);
+    request.apply_service_tier();
+    route.service_tier = request.service_tier();
     route.half_open_probe = selected.half_open_probe;
     route.routing = Some(selected.diagnostics);
     route.client_context_id = client_context_fingerprint(client_headers);

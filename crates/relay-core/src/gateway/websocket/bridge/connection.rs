@@ -157,6 +157,7 @@ pub(super) fn install_in_flight(
         request: request.clone(),
         route,
         event,
+        usage_snapshot: None,
         started,
         response_id: None,
         prompt_affinity_key: request.prompt_affinity_key,

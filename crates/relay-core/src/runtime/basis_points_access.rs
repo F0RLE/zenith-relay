@@ -4,7 +4,7 @@ use crate::accounts::TokenDispatchRevision;
 use crate::providers::chatgpt::{
     basis_points_access_url, basis_points_headers, parse_basis_points_model_access,
     BasisPointsModelAccess, ModelDiscoveryFailure, ModelDiscoveryFailureCode, OAuthClientKind,
-    MAX_BASIS_POINTS_ACCESS_BYTES,
+    BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS, MAX_BASIS_POINTS_ACCESS_BYTES,
 };
 use futures_util::{stream, StreamExt};
 use serde_json::Value;
@@ -52,7 +52,7 @@ fn failure(code: ModelDiscoveryFailureCode, retryable: bool) -> ModelDiscoveryFa
 }
 
 impl GatewayRuntime {
-    pub(crate) fn is_basis_points_account(&self, candidate_id: &str) -> bool {
+    pub fn is_basis_points_account(&self, candidate_id: &str) -> bool {
         self.chatgpt_accounts
             .get(candidate_id)
             .is_some_and(|account| account.oauth_client_kind == OAuthClientKind::ExcelBps)
@@ -87,9 +87,46 @@ impl GatewayRuntime {
         let account = self.chatgpt_accounts.get(candidate_id)?;
         // Release the cache lock before acquiring the credential guard.
         // Publication holds the credential guard before editing this cache.
-        let cached = crate::poison::read(&account.basis_points_access).clone()?;
-        let current = cached.expires_at > Instant::now() && cached.revision.guard().is_some();
-        current.then_some(cached)
+        let mut cached = crate::poison::read(&account.basis_points_access).clone()?;
+        let remaining = cached.expires_at.checked_duration_since(Instant::now())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        drop(cached.revision.guard()?);
+        if let Err(error) = &mut cached.result {
+            if error.code == ModelDiscoveryFailureCode::RateLimited
+                || error.retry_after_ms.is_some()
+            {
+                // Reusing a failed read must not restart its original Retry-After.
+                error.retry_after_ms = Some(remaining.as_millis().min(u128::from(u64::MAX)) as u64);
+            }
+        }
+        Some(cached)
+    }
+
+    /// A failed access check hides executable permissions, not the reason the
+    /// configured route is unavailable. Let execution report that failure even
+    /// when automatic route recovery is disabled.
+    pub(crate) fn basis_points_access_failed_for_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        protocols: &[crate::WireApi],
+    ) -> bool {
+        let scope = key.scope_snapshot();
+        let candidate_ids = self
+            .lock_scheduler()
+            .candidates()
+            .filter(|candidate| {
+                self.is_basis_points_account(&candidate.id)
+                    && candidate.is_configured(model, protocols, &scope)
+            })
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        candidate_ids.iter().any(|candidate_id| {
+            self.cached_basis_points_access(candidate_id)
+                .is_some_and(|cached| cached.result.is_err())
+        })
     }
 
     pub(crate) fn basis_points_reasoning_available(
@@ -114,6 +151,8 @@ impl GatewayRuntime {
         &self,
         candidate_id: &str,
     ) -> Result<PreparedAuthorization, super::AuthorizedRequestError> {
+        self.validate_basis_points_plan(candidate_id, None)
+            .map_err(super::AuthorizedRequestError::ModelAccess)?;
         let mut prepared = self
             .prepare_authorization(candidate_id, super::runtime_now_ms())
             .await
@@ -129,7 +168,7 @@ impl GatewayRuntime {
             prepared = self
                 .refresh_authorization_after_unauthorized(
                     candidate_id,
-                    prepared.token_generation,
+                    &prepared,
                     super::runtime_now_ms(),
                 )
                 .await
@@ -172,6 +211,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         prepared: &PreparedAuthorization,
     ) -> Result<BasisPointsModelAccess, ModelDiscoveryFailure> {
+        self.validate_basis_points_plan(candidate_id, Some(prepared))?;
         let account = self
             .chatgpt_accounts
             .get(candidate_id)
@@ -200,19 +240,104 @@ impl GatewayRuntime {
             }
             // Coalesce concurrent failed reads too, respecting Retry-After.
             // A failure never publishes stale permissions or erases inventory.
-            Err(error) => Duration::from_millis(error.retry_after_ms.unwrap_or(1_000).max(1_000)),
+            Err(error) => Duration::from_millis(
+                error
+                    .retry_after_ms
+                    .unwrap_or(if error.code == ModelDiscoveryFailureCode::RateLimited {
+                        BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS
+                    } else {
+                        1_000
+                    })
+                    .max(1_000),
+            ),
         };
+        let expires_at = Instant::now()
+            .checked_add(cache_ttl)
+            .unwrap_or_else(|| Instant::now() + ACCESS_TTL);
         *crate::poison::write(&account.basis_points_access) = Some(CachedBasisPointsAccess {
             result: result.clone(),
             revision: revision.clone(),
-            expires_at: Instant::now()
-                .checked_add(cache_ttl)
-                .unwrap_or_else(|| Instant::now() + ACCESS_TTL),
+            expires_at,
         });
-        if result.is_ok() {
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.code == ModelDiscoveryFailureCode::RateLimited)
+        {
+            // Access throttling blocks this BPS connection's entire endpoint,
+            // without changing quota or the separately stored native login.
+            self.lock_scheduler().set_cooldown_with_reason(
+                candidate_id,
+                "*",
+                crate::unix_time_ms().saturating_add(cache_ttl.as_millis() as u64),
+                crate::scheduler::CooldownReason::RateLimit,
+            );
+            self.candidate_availability.notify_waiters();
+        } else if result.is_ok() {
             self.clear_candidate_capability_blocks(candidate_id);
         }
         result
+    }
+
+    /// Update entitlement metadata without replacing the scheduler or active leases.
+    pub fn update_account_subscription_plan(
+        &self,
+        account_id: &str,
+        plan_type: Option<&str>,
+    ) -> bool {
+        let Some(account) = self.chatgpt_accounts.get(account_id) else {
+            return false;
+        };
+        let mut current = crate::poison::write(&account.subscription_plan_type);
+        if current.as_deref() == plan_type {
+            return true;
+        }
+        let _fence = self.fence_candidate_dispatch(account_id);
+        *current = plan_type.map(str::to_owned);
+        *crate::poison::write(&account.basis_points_access) = None;
+        if !account.oauth_client_kind.supports_pool(plan_type) {
+            let mut scheduler = self.lock_scheduler();
+            if let Some(candidate) = scheduler.candidate(account_id).cloned() {
+                scheduler.update_candidate_availability(
+                    account_id,
+                    false,
+                    candidate.health,
+                    candidate.quota,
+                );
+            }
+        }
+        self.candidate_availability.notify_waiters();
+        true
+    }
+
+    pub(in crate::runtime) fn validate_basis_points_plan(
+        &self,
+        candidate_id: &str,
+        prepared: Option<&PreparedAuthorization>,
+    ) -> Result<(), ModelDiscoveryFailure> {
+        let account = self
+            .chatgpt_accounts
+            .get(candidate_id)
+            .ok_or_else(|| failure(ModelDiscoveryFailureCode::InvalidAccountId, false))?;
+        if prepared.is_some_and(|prepared| !prepared.account_plan_supported) {
+            return Err(failure(
+                ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+                false,
+            ));
+        }
+        let plan = crate::poison::read(&account.subscription_plan_type);
+        let access_token = prepared
+            .and_then(|prepared| prepared.authorization.to_str().ok())
+            .and_then(|header| header.strip_prefix("Bearer "));
+        account
+            .oauth_client_kind
+            .validate_plan(plan.as_deref(), None, access_token)
+            .map_err(|_| {
+                failure(
+                    ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+                    false,
+                )
+            })
     }
 
     async fn fetch_basis_points_access(
@@ -262,14 +387,15 @@ impl GatewayRuntime {
                 _ if status.is_server_error() => ModelDiscoveryFailureCode::Upstream,
                 _ => ModelDiscoveryFailureCode::HttpStatus,
             };
+            let header_delay =
+                crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
+            // Keep bounded error bodies only long enough to extract a retry
+            // deadline; malformed bodies must not replace the proven status.
             return Err(ModelDiscoveryFailure {
                 code,
                 retryable: status.as_u16() == 429 || status.is_server_error(),
                 http_status: Some(status.as_u16()),
-                retry_after_ms: crate::transport::retry_after_ms(
-                    response.headers(),
-                    std::time::SystemTime::now(),
-                ),
+                retry_after_ms: header_delay,
             });
         }
         let bytes = crate::transport::collect_limited(response, MAX_BASIS_POINTS_ACCESS_BYTES)

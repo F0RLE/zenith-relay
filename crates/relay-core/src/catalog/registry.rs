@@ -83,6 +83,12 @@ impl ModelRegistry {
             let Some(candidate) = scheduler.candidate(&registered.id) else {
                 continue;
             };
+            // A member outside this key's scope cannot establish the order of
+            // models later supplied by an accessible member. Keep the full
+            // source sequence below so protocol splitting does not reorder it.
+            if !candidate.is_discovery_visible(scope) {
+                continue;
+            }
             for model in &registered.models {
                 // Route grouping must not change the source catalog order.
                 let normalized = super::model_id_key(model);

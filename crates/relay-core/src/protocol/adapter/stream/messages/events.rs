@@ -6,8 +6,8 @@ use super::super::super::messages::{
     set_message_output_id, validate_messages_tool_calls,
 };
 use super::super::frame::{
-    failed_responses_event, is_ignorable_metadata_event, merge_usage, parse_sse_data,
-    push_sse_frame, sse_event_has_data, tool_arguments_value,
+    failed_responses_event, merge_usage, parse_sse_data, push_sse_frame, sse_event_has_data,
+    tool_arguments_value,
 };
 use super::{MessagesStreamBridge, StreamBlock, TextOutput};
 use serde_json::{json, Map, Value};
@@ -24,21 +24,28 @@ impl MessagesStreamBridge {
             }
             return;
         };
+        if let Some(usage) = event_payload
+            .pointer("/message/usage")
+            .or_else(|| event_payload.get("usage"))
+        {
+            merge_usage(&mut self.usage, usage);
+        }
         let Some(kind) = event_payload.get("type").and_then(Value::as_str) else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
+        if kind == "error" {
+            self.upstream_error = Some(event_payload);
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
+        if self.completion.observe(&event_payload).is_err() {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
         match kind {
             "message_start" => self.handle_message_start(&event_payload),
             "content_block_start" => self.handle_block_start(&event_payload),
-            "content_block_delta"
-                if event_payload
-                    .get("delta")
-                    .and_then(|delta| delta.get("type"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|delta| {
-                        matches!(delta, "citations_delta" | "document" | "compaction_delta")
-                    }) => {}
             "content_block_delta" => self.handle_block_delta(&event_payload),
             "content_block_stop" => self.handle_block_stop(&event_payload),
             "message_delta" => {
@@ -56,22 +63,20 @@ impl MessagesStreamBridge {
                         self.fail(AdapterError::upstream_stream_invalid());
                         return;
                     }
+                    if self.stop_reason.is_some() {
+                        self.fail(AdapterError::upstream_stream_invalid());
+                        return;
+                    }
                     self.stop_reason = Some(reason.to_owned());
-                }
-                if let Some(usage) = event_payload.get("usage") {
-                    merge_usage(&mut self.usage, usage);
+                    self.refusal_explanation = event_payload
+                        .pointer("/delta/stop_details/explanation")
+                        .or_else(|| event_payload.pointer("/stop_details/explanation"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                 }
             }
             "message_stop" => self.complete(),
-            // Anthropic may emit keep-alives and metadata deltas which do not
-            // change the client-visible Responses output. They must not turn
-            // an otherwise valid stream into a synthetic adapter failure.
             "ping" => {}
-            "error" => {
-                self.upstream_error = Some(event_payload.clone());
-                self.fail(AdapterError::upstream_stream_invalid());
-            }
-            kind if is_ignorable_metadata_event(kind) => {}
             _ => self.fail(AdapterError::upstream_stream_invalid()),
         }
     }
@@ -101,9 +106,6 @@ impl MessagesStreamBridge {
         let response_id = bridged_response_id_scoped(response_scope, upstream_id);
         self.upstream_id = Some(upstream_id.to_string());
         self.response_id = Some(response_id.clone());
-        if let Some(usage) = message.get("usage") {
-            merge_usage(&mut self.usage, usage);
-        }
         self.frame(
             "response.created",
             json!({
@@ -172,7 +174,7 @@ impl MessagesStreamBridge {
                 "item_id": item_id,
                 "output_index": output_index,
                 "content_index": content_index,
-                "part": {"type": "output_text", "text": ""},
+                "part": {"type": "output_text", "text": "", "annotations": []},
             }),
         );
         (!self.terminal).then_some((item_id, output_index, content_index))
@@ -297,17 +299,6 @@ impl MessagesStreamBridge {
     }
 
     fn complete(&mut self) {
-        if self.response_id.is_none()
-            || (self.assistant_blocks.is_empty()
-                && !matches!(self.stop_reason.as_deref(), Some("refusal" | "max_tokens")))
-            || self.closed_blocks.len() != self.assistant_blocks.len()
-        {
-            self.fail(AdapterError::upstream_stream_invalid());
-            return;
-        }
-        if !self.finish_active_text_output() {
-            return;
-        }
         let (status, incomplete_reason) =
             match super::super::super::messages::messages_response_terminal(
                 self.stop_reason.as_deref(),
@@ -318,6 +309,18 @@ impl MessagesStreamBridge {
                     return;
                 }
             };
+        if self.response_id.is_none()
+            || (self.assistant_blocks.is_empty()
+                && status == "completed"
+                && self.stop_reason.as_deref() != Some("refusal"))
+            || self.closed_blocks.len() != self.assistant_blocks.len()
+        {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
+        if !self.finish_active_text_output() {
+            return;
+        }
         let Some(request) = self.request.take() else {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
@@ -338,7 +341,7 @@ impl MessagesStreamBridge {
         let (mut output, _) = match responses_output_from_messages_content(
             &content,
             &request.bridge_state,
-            status == "incomplete",
+            status == "incomplete" || self.stop_reason.as_deref() == Some("refusal"),
         ) {
             Ok(output_parts) => output_parts,
             Err(error) => {
@@ -354,7 +357,17 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         }
+        let refused = self.stop_reason.as_deref() == Some("refusal");
+        if refused {
+            output.push(super::super::super::messages::refusal_message(
+                self.refusal_explanation.as_deref().unwrap_or(""),
+            ));
+        }
         set_message_output_id(&mut output, &response_id);
+        if refused {
+            let index = output.len() - 1;
+            self.emit_refusal(index, &output[index]);
+        }
         let response_body = json!({
             "id": response_id,
             "object": "response",
@@ -366,6 +379,11 @@ impl MessagesStreamBridge {
             "usage": responses_usage(self.usage.as_ref()),
         });
         let mut continuation = request.bridge_state;
+        continuation.reusable = status == "completed" && !refused;
+        if continuation.record_response_tool_calls(&output).is_err() {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
         continuation.append_assistant_content(content);
         self.completed = Some(MessagesBridgeResponse {
             response_body: response_body.clone(),
@@ -387,6 +405,25 @@ impl MessagesStreamBridge {
         self.terminal = true;
     }
 
+    fn emit_refusal(&mut self, output_index: usize, item: &Value) {
+        let item_id = &item["id"];
+        let part = &item["content"][0];
+        self.frame("response.output_item.added", json!({"type":"response.output_item.added","output_index":output_index,"item":{"id":item_id,"type":"message","role":"assistant","status":"in_progress","content":[]}}));
+        self.frame("response.content_part.added", json!({"type":"response.content_part.added","output_index":output_index,"item_id":item_id,"content_index":0,"part":{"type":"refusal","refusal":""}}));
+        if part["refusal"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+        {
+            self.frame("response.refusal.delta", json!({"type":"response.refusal.delta","output_index":output_index,"item_id":item_id,"content_index":0,"delta":part["refusal"]}));
+        }
+        self.frame("response.refusal.done", json!({"type":"response.refusal.done","output_index":output_index,"item_id":item_id,"content_index":0,"refusal":part["refusal"]}));
+        self.frame("response.content_part.done", json!({"type":"response.content_part.done","output_index":output_index,"item_id":item_id,"content_index":0,"part":part}));
+        self.frame(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","output_index":output_index,"item":item}),
+        );
+    }
+
     pub(super) fn fail(&mut self, error: AdapterError) {
         if self.terminal {
             return;
@@ -402,7 +439,9 @@ impl MessagesStreamBridge {
         self.terminal = true;
     }
 
-    fn frame(&mut self, event: &str, event_payload: Value) {
+    fn frame(&mut self, event: &str, mut event_payload: Value) {
+        event_payload["sequence_number"] = self.sequence_number.into();
+        self.sequence_number = self.sequence_number.saturating_add(1);
         if !push_sse_frame(&mut self.output, event, &event_payload) {
             self.terminal = true;
         }

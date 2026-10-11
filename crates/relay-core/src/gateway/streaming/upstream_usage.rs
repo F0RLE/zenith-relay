@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct UpstreamUsage {
     pending: Vec<u8>,
     event: UsageEvent,
+    usage_snapshot: Option<Value>,
     expected_model: Option<String>,
     rejection: Option<&'static str>,
     forward_pending: Vec<u8>,
@@ -14,6 +15,7 @@ impl UpstreamUsage {
         Self {
             pending: Vec::new(),
             event,
+            usage_snapshot: None,
             expected_model,
             rejection: None,
             forward_pending: Vec::new(),
@@ -68,7 +70,10 @@ impl UpstreamUsage {
             }
             let parsed = parse_sse_event(&frame);
             if let Some(usage) = &parsed.usage {
-                apply_usage(&mut self.event, usage);
+                crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
+                if let Some(snapshot) = &self.usage_snapshot {
+                    apply_usage(&mut self.event, snapshot);
+                }
             }
             if parsed.applied_service_tier.is_some() {
                 self.event.applied_service_tier = parsed.applied_service_tier;
@@ -174,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn split_messages_usage_keeps_actual_cache_ttl_and_unknown_totals() {
+    fn split_messages_usage_keeps_actual_cache_ttl_and_derives_total() {
         let mut capture =
             UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None);
         let frames = b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":30,\"cache_creation\":{\"ephemeral_1h_input_tokens\":30}}}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n";
@@ -188,7 +193,7 @@ mod tests {
         assert_eq!(event.output_tokens, Some(4));
         assert_eq!(event.cache_write_input_tokens, Some(30));
         assert_eq!(event.cache_write_ttl.as_deref(), Some("1h"));
-        assert_eq!(event.total_tokens, None);
+        assert_eq!(event.total_tokens, Some(64));
     }
 
     #[test]

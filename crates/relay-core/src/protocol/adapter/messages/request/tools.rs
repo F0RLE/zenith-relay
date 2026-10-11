@@ -15,7 +15,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools>
             continue;
         };
         match tool.get("type").and_then(Value::as_str) {
-            Some("function" | "custom") => {
+            Some("function" | "custom") | None => {
                 translate_client_tool(&mut upstream, &mut client_tools, tool, None, None)?;
             }
             Some("namespace") => {

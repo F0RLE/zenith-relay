@@ -15,6 +15,17 @@ impl<S> UsageStream<S> {
         if event.success {
             event.tool_use.finish();
         }
+        if !event.success {
+            if let Some(routing) = event.routing.as_mut() {
+                routing.attempt_outcome = Some(
+                    if event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED) {
+                        crate::AttemptOutcome::ClientDisconnected
+                    } else {
+                        crate::AttemptOutcome::ReturnedFailure
+                    },
+                );
+            }
+        }
         if !event.success
             && event.http_status < 400
             && event.error_category.as_deref() != Some(error_codes::RESPONSE_INCOMPLETE)
@@ -138,6 +149,9 @@ impl<S> UsageStream<S> {
         bytes: &[u8],
         origin: crate::ErrorOrigin,
     ) -> Vec<u8> {
+        if self.native_gemini {
+            return bytes.to_vec();
+        }
         self.sse_forward_pending.extend_from_slice(bytes);
         let mut forwarded = Vec::with_capacity(bytes.len());
         loop {
@@ -222,13 +236,11 @@ impl<S> UsageStream<S> {
                 self.apply_fast_response_delta(delta);
                 continue;
             }
-            let terminal = parse_sse_event(&event);
+            let mut terminal = parse_sse_event(&event);
             // Reported consumption remains real even when identity validation
             // rejects the response before it can reach the client.
             if let Some(usage) = terminal.usage {
-                if let Some(usage_event) = self.event.as_mut() {
-                    apply_usage(usage_event, &usage);
-                }
+                self.merge_usage_snapshot(&usage);
             }
             if let Some(service_tier) = terminal.applied_service_tier {
                 if let Some(usage_event) = self.event.as_mut() {
@@ -251,39 +263,61 @@ impl<S> UsageStream<S> {
                 self.fail_stream(error_codes::STREAM_INVALID);
                 return false;
             }
-            // A terminal marker from another wire protocol cannot prove this
-            // request or its continuation state completed successfully.
-            let valid_terminal = self
-                .event
-                .as_ref()
-                .is_some_and(|event| match event.wire_api {
-                    WireApi::Responses => {
-                        terminal
-                            .event_payload
-                            .as_ref()
-                            .is_some_and(|terminal_payload| {
-                                matches!(
-                                    terminal_payload.get("type").and_then(Value::as_str),
-                                    Some("response.completed" | "response.done")
-                                )
-                            })
+            if !matches!(terminal.outcome, Some(TerminalOutcome::Failure)) {
+                let completion = match self.event.as_ref().map(|event| event.wire_api) {
+                    Some(WireApi::ChatCompletions) => match terminal.event_payload.as_ref() {
+                        Some(payload) => self.chat_completion.observe(payload).map(|()| None),
+                        None if terminal.has_data => Ok(Some(self.chat_completion.outcome())),
+                        None => Ok(None),
+                    },
+                    Some(WireApi::Messages) => match terminal.event_payload.as_ref() {
+                        Some(payload) => self.messages_completion.observe(payload),
+                        None if terminal.has_data => Err(()),
+                        None => Ok(None),
+                    },
+                    Some(WireApi::Responses)
+                        if terminal.has_data
+                            && terminal.event_payload.is_none()
+                            && !terminal.is_compaction =>
+                    {
+                        // The transport ended without a Responses document.
+                        // Keep this separate from a provider's explicit
+                        // response.incomplete, which can contain useful output.
+                        self.sse_pending.clear();
+                        self.fail_stream(error_codes::STREAM_INCOMPLETE);
+                        return false;
                     }
-                    WireApi::ChatCompletions => terminal.event_payload.is_none(),
-                    WireApi::Messages => {
-                        terminal
-                            .event_payload
-                            .as_ref()
-                            .is_some_and(|terminal_payload| {
-                                terminal_payload.get("type").and_then(Value::as_str)
-                                    == Some("message_stop")
-                            })
+                    _ => Ok(None),
+                };
+                match completion {
+                    Ok(Some(ResponseCompletion::Completed)) => {
+                        terminal.outcome = Some(TerminalOutcome::Success)
                     }
-                    WireApi::Gemini => false,
-                });
-            if terminal.outcome == Some(TerminalOutcome::Success) && !valid_terminal {
-                self.sse_pending.clear();
-                self.fail_stream(error_codes::STREAM_INCOMPLETE);
-                return false;
+                    Ok(Some(ResponseCompletion::Incomplete)) => {
+                        terminal.outcome = Some(TerminalOutcome::Incomplete);
+                        terminal.error_category = Some(error_codes::RESPONSE_INCOMPLETE);
+                    }
+                    Ok(Some(ResponseCompletion::Invalid)) | Err(()) => {
+                        self.sse_pending.clear();
+                        self.fail_stream(error_codes::STREAM_INVALID);
+                        return false;
+                    }
+                    Ok(None) => {
+                        let protocol_terminal = self.event.as_ref().is_some_and(|event| {
+                            event.wire_api == WireApi::Responses
+                                && terminal
+                                    .event_payload
+                                    .as_ref()
+                                    .and_then(ResponseCompletion::from_responses_event)
+                                    .is_some()
+                        });
+                        if terminal.outcome.is_some() && !protocol_terminal {
+                            self.sse_pending.clear();
+                            self.fail_stream(error_codes::STREAM_INVALID);
+                            return false;
+                        }
+                    }
+                }
             }
             if let Some(terminal_event_payload) = terminal.event_payload.as_ref() {
                 if let Some(usage_event) = self.event.as_mut() {
@@ -360,6 +394,9 @@ impl<S> UsageStream<S> {
         }
         while let Some(event) = crate::protocol::take_sse_event(&mut self.sse_pending) {
             let terminal = parse_sse_event(&event);
+            if let Some(usage) = terminal.usage.as_ref() {
+                self.merge_usage_snapshot(usage);
+            }
             if terminal.has_data && !terminal.valid {
                 self.set_upstream_error(terminal.upstream_error);
                 self.fail_stream(error_codes::STREAM_INVALID);
@@ -380,26 +417,28 @@ impl<S> UsageStream<S> {
                 self.terminated = true;
                 return true;
             }
-            if terminal.outcome == Some(TerminalOutcome::Incomplete) {
-                self.native_gemini_incomplete = true;
-            }
-            // Gemini has no generic [DONE] or Responses-style terminal event.
-            // Only a candidate's own finish reason proves a completed generation.
-            if terminal
-                .event_payload
-                .as_ref()
-                .is_some_and(|terminal_payload| {
-                    terminal_payload
-                        .pointer("/candidates/0/finishReason")
-                        .and_then(Value::as_str)
-                        == Some("STOP")
-                })
-            {
-                self.native_gemini_finished = true;
-            }
-            if let Some(usage) = terminal.usage {
-                if let Some(usage_event) = self.event.as_mut() {
-                    apply_usage(usage_event, &usage);
+            if terminal.has_data {
+                if terminal
+                    .event_payload
+                    .as_ref()
+                    .is_some_and(|payload| self.native_gemini_completion.observe(payload).is_err())
+                {
+                    self.fail_stream(error_codes::STREAM_INVALID);
+                    return false;
+                }
+                if terminal.event_payload.is_none() {
+                    let completion = self.native_gemini_completion.outcome();
+                    if completion == ResponseCompletion::Invalid {
+                        self.fail_stream(error_codes::STREAM_INCOMPLETE);
+                        return false;
+                    }
+                    let complete = completion == ResponseCompletion::Completed;
+                    self.finish(
+                        Some(complete),
+                        (!complete).then_some(error_codes::RESPONSE_INCOMPLETE),
+                    );
+                    self.terminated = true;
+                    return true;
                 }
             }
             if terminal.has_output_delta
@@ -414,6 +453,13 @@ impl<S> UsageStream<S> {
             }
         }
         true
+    }
+
+    fn merge_usage_snapshot(&mut self, usage: &Value) {
+        crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
+        if let (Some(event), Some(snapshot)) = (self.event.as_mut(), self.usage_snapshot.as_ref()) {
+            apply_usage(event, snapshot);
+        }
     }
 
     fn set_upstream_error(&mut self, details: Option<crate::usage::UpstreamErrorDetails>) {

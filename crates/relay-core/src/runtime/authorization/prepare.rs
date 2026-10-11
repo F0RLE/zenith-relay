@@ -32,6 +32,7 @@ impl GatewayRuntime {
                 identity: None,
                 token_generation: None,
                 token_revision: None,
+                account_plan_supported: true,
                 agent_task_id: None,
                 agent_credential_fingerprint: None,
                 agent_identity_revision: None,
@@ -65,6 +66,7 @@ impl GatewayRuntime {
                         ),
                         token_generation: None,
                         token_revision: None,
+                        account_plan_supported: true,
                         agent_task_id: agent.task_id().map(str::to_string),
                         agent_credential_fingerprint: Some(agent_credential_fingerprint(&agent)),
                         agent_identity_revision: Some(
@@ -132,6 +134,14 @@ impl GatewayRuntime {
             ),
             token_generation: Some(prepared.tokens.generation()),
             token_revision: Some(prepared.dispatch_revision),
+            account_plan_supported: account
+                .oauth_client_kind
+                .validate_plan(
+                    None,
+                    prepared.tokens.id_token(),
+                    Some(prepared.tokens.access_token()),
+                )
+                .is_ok(),
             agent_task_id: None,
             agent_credential_fingerprint: None,
             agent_identity_revision: None,
@@ -141,7 +151,7 @@ impl GatewayRuntime {
     pub(crate) async fn refresh_authorization_after_unauthorized(
         &self,
         candidate_id: &str,
-        failed_generation: Option<u64>,
+        rejected: &PreparedAuthorization,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let account = self
@@ -151,11 +161,15 @@ impl GatewayRuntime {
         if !account.active.load(Ordering::Acquire) {
             return Err(ExecutorPrepareError::Authentication);
         }
+        let revision = rejected
+            .token_revision
+            .as_ref()
+            .ok_or(ExecutorPrepareError::InvalidCredential)?;
         account
             .token_authority
-            .invalidate_access_generation_and_persist(
+            .invalidate_access_revision_and_persist(
                 &account.id,
-                failed_generation,
+                revision,
                 now_ms,
                 account.persistence_adapter.as_ref(),
             )

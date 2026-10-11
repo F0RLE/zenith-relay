@@ -150,6 +150,13 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// A successful wake remains owned by its automation until quota verification.
+    pub fn is_natural_account_use(&self) -> bool {
+        self.success
+            && self.account_id.is_some()
+            && self.error_category.as_deref() != Some("codex_wake")
+    }
+
     /// Attributes a failed attempt to the component that produced its error.
     /// A Relay-origin error was constructed locally; otherwise the selected
     /// account or API source is responsible for the upstream result.

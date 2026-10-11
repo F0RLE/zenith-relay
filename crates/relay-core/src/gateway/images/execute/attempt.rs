@@ -92,6 +92,15 @@ pub(super) async fn run_selected_attempt(
             },
         )
         .body(request_body);
+    let authorization_event = ImageAttempt {
+        request_id,
+        attempt: u16::from(budget.dispatches()),
+        key,
+        route: &route,
+        prepared,
+        started,
+    }
+    .event(false, StatusCode::UNAUTHORIZED, None);
     let upstream_result = runtime
         .send_authorized_request(
             &route.candidate_id,
@@ -108,6 +117,7 @@ pub(super) async fn run_selected_attempt(
                 turn_scope: None,
                 budget: Some(budget),
                 lease: Some(lease),
+                usage_event: Some((&authorization_event, started)),
             },
         )
         .await;

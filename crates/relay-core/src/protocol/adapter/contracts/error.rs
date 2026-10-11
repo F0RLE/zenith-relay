@@ -72,7 +72,7 @@ impl AdapterError {
         }
     }
 
-    pub(in crate::protocol::adapter) const fn continuation_missing() -> Self {
+    pub(crate) const fn continuation_missing() -> Self {
         Self {
             code: error_codes::ADAPTER_CONTINUATION_MISSING,
             message: "the adapter no longer has the prior response needed for this continuation",
@@ -80,7 +80,7 @@ impl AdapterError {
         }
     }
 
-    pub(in crate::protocol::adapter) const fn continuation_mismatch() -> Self {
+    pub(crate) const fn continuation_mismatch() -> Self {
         Self {
             code: error_codes::ADAPTER_CONTINUATION_MISMATCH,
             message: "the continuation belongs to a different model or source route",
@@ -115,7 +115,7 @@ impl AdapterError {
     pub(crate) const fn upstream_response_invalid() -> Self {
         Self {
             code: error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
-            message: "the upstream response cannot be represented as a Responses response",
+            message: "the upstream response cannot be represented by the selected client protocol",
             parameter: None,
         }
     }
@@ -123,7 +123,7 @@ impl AdapterError {
     pub(crate) const fn upstream_stream_invalid() -> Self {
         Self {
             code: error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,
-            message: "the upstream stream cannot be represented as a Responses stream",
+            message: "the upstream stream is incomplete, invalid, or cannot be represented by the selected client protocol",
             parameter: None,
         }
     }

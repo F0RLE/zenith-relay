@@ -11,7 +11,7 @@ pub use estimate::{
     resolve_candidate_price, CandidatePriceQuery, CatalogPriceResolver,
 };
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiModelPriceOverride {
     pub input_micro_usd_per_million: u64,
@@ -22,6 +22,46 @@ pub struct ApiModelPriceOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::TokenRateSet::is_empty_ref"
+    )]
+    pub flex: crate::pricing::TokenRateSet,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::TokenRateSet::is_empty_ref"
+    )]
+    pub priority: crate::pricing::TokenRateSet,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::TokenRateSet::is_empty_ref"
+    )]
+    pub ultrafast: crate::pricing::TokenRateSet,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::LongContextRates::is_empty_ref"
+    )]
+    pub above_100k: crate::pricing::LongContextRates,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::LongContextRates::is_empty_ref"
+    )]
+    pub above_128k: crate::pricing::LongContextRates,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::LongContextRates::is_empty_ref"
+    )]
+    pub above_200k: crate::pricing::LongContextRates,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::LongContextRates::is_empty_ref"
+    )]
+    pub above_272k: crate::pricing::LongContextRates,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pricing::LongContextRates::is_empty_ref"
+    )]
+    pub above_512k: crate::pricing::LongContextRates,
 }
 
 /// Price provenance for a compatible API source.
@@ -46,14 +86,14 @@ pub type SourceModelPriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelP
 
 /// Which published token schedule applies to a usage group.
 ///
-/// `fast` is Priority. Standard, default, auto, and Ultrafast stay on the
-/// base schedule: Ultrafast has no price in this catalog contract.
+/// `fast` and `priority` share one schedule. Ultrafast has its own rates.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UsagePriceClass {
     #[default]
     Standard,
     Flex,
     Priority,
+    Ultrafast,
 }
 
 impl UsagePriceClass {
@@ -66,6 +106,7 @@ impl UsagePriceClass {
         {
             "flex" => Self::Flex,
             "priority" | "fast" => Self::Priority,
+            "ultrafast" => Self::Ultrafast,
             _ => Self::Standard,
         }
     }
@@ -74,7 +115,17 @@ impl UsagePriceClass {
         match price_class_label {
             "flex" => Self::Flex,
             "priority" => Self::Priority,
+            "ultrafast" => Self::Ultrafast,
             _ => Self::Standard,
+        }
+    }
+
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Flex => "flex",
+            Self::Priority => "priority",
+            Self::Ultrafast => "ultrafast",
         }
     }
 }
@@ -85,45 +136,92 @@ impl UsagePriceClass {
 pub enum UsageContextBand {
     #[default]
     Base,
+    Above100k,
+    Above128k,
     Above200k,
     Above272k,
+    Above512k,
 }
 
 impl UsageContextBand {
-    pub const ABOVE_200K_TOKENS: u64 = 200_000;
-    pub const ABOVE_272K_TOKENS: u64 = 272_000;
+    pub const fn threshold(self) -> u64 {
+        match self {
+            Self::Base => 0,
+            Self::Above100k => 100_000,
+            Self::Above128k => 128_000,
+            Self::Above200k => 200_000,
+            Self::Above272k => 272_000,
+            Self::Above512k => 512_000,
+        }
+    }
 
     pub fn from_input_tokens(input_tokens: Option<u64>) -> Self {
-        match input_tokens.unwrap_or_default() {
-            tokens if tokens > Self::ABOVE_272K_TOKENS => Self::Above272k,
-            tokens if tokens > Self::ABOVE_200K_TOKENS => Self::Above200k,
-            _ => Self::Base,
-        }
+        [
+            Self::Above512k,
+            Self::Above272k,
+            Self::Above200k,
+            Self::Above128k,
+            Self::Above100k,
+        ]
+        .into_iter()
+        .find(|band| input_tokens.unwrap_or_default() > band.threshold())
+        .unwrap_or_default()
     }
 
     pub fn from_label(context_band_label: &str) -> Self {
         match context_band_label {
+            "above_100k" => Self::Above100k,
+            "above_128k" => Self::Above128k,
             "above_200k" => Self::Above200k,
             "above_272k" => Self::Above272k,
+            "above_512k" => Self::Above512k,
             _ => Self::Base,
+        }
+    }
+
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Above100k => "above_100k",
+            Self::Above128k => "above_128k",
+            Self::Above200k => "above_200k",
+            Self::Above272k => "above_272k",
+            Self::Above512k => "above_512k",
         }
     }
 }
 
 /// SQL expression for [`UsagePriceClass`], shared by desktop and server aggregates.
-pub const USAGE_PRICE_CLASS_SQL: &str = "\
-CASE lower(COALESCE(applied_service_tier, '')) \
-WHEN 'flex' THEN 'flex' \
-WHEN 'priority' THEN 'priority' \
-WHEN 'fast' THEN 'priority' \
-ELSE 'standard' END";
+#[macro_export]
+macro_rules! usage_price_class_sql {
+    () => {
+        "CASE lower(trim(COALESCE(applied_service_tier, ''))) \
+         WHEN 'flex' THEN 'flex' \
+         WHEN 'priority' THEN 'priority' \
+         WHEN 'fast' THEN 'priority' \
+         WHEN 'ultrafast' THEN 'ultrafast' \
+         ELSE 'standard' END"
+    };
+}
+
+pub const USAGE_PRICE_CLASS_SQL: &str = usage_price_class_sql!();
+
+/// Allows host archive statements to embed the same expression with `concat!`.
+#[macro_export]
+macro_rules! usage_context_band_sql {
+    () => {
+        "CASE \
+         WHEN COALESCE(input_tokens, 0) > 512000 THEN 'above_512k' \
+         WHEN COALESCE(input_tokens, 0) > 272000 THEN 'above_272k' \
+         WHEN COALESCE(input_tokens, 0) > 200000 THEN 'above_200k' \
+         WHEN COALESCE(input_tokens, 0) > 128000 THEN 'above_128k' \
+         WHEN COALESCE(input_tokens, 0) > 100000 THEN 'above_100k' \
+         ELSE 'base' END"
+    };
+}
 
 /// SQL expression for [`UsageContextBand`]. NULL input stays in the base band.
-pub const USAGE_CONTEXT_BAND_SQL: &str = "\
-CASE \
-WHEN COALESCE(input_tokens, 0) > 272000 THEN 'above_272k' \
-WHEN COALESCE(input_tokens, 0) > 200000 THEN 'above_200k' \
-ELSE 'base' END";
+pub const USAGE_CONTEXT_BAND_SQL: &str = usage_context_band_sql!();
 
 /// Token measurements required to estimate an API-equivalent value.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

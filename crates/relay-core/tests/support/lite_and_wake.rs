@@ -107,14 +107,8 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
 async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
     let mut lite_catalog = default_upstream_model_catalog();
     lite_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
-    let (lite_upstream, lite_state) = spawn_upstream_with_catalog(
-        vec![success_reply_for_model(
-            "full-compact",
-            OFFICIAL_CODEX_MODEL,
-        )],
-        lite_catalog,
-    )
-    .await;
+    let (lite_upstream, lite_state) =
+        spawn_upstream_with_catalog(vec![compaction_reply("full-compact")], lite_catalog).await;
     let mut full_catalog = default_upstream_model_catalog();
     full_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     full_catalog["models"][0]["use_responses_lite"] = Value::Bool(false);
@@ -402,8 +396,8 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
         Reply::Json(
             StatusCode::OK,
             json!({
-                "type": "compaction",
-                "items": [],
+                "object": "response.compaction",
+                "output": [{"type": "compaction", "encrypted_content": "synthetic-checkpoint"}],
                 "usage": {
                     "input_tokens": 1200,
                     "input_tokens_details": {"cached_tokens": 800},
@@ -441,7 +435,10 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
         .await
         .unwrap();
     assert_eq!(compact.status(), StatusCode::OK);
-    assert_eq!(compact.json::<Value>().await.unwrap()["type"], "compaction");
+    assert_eq!(
+        compact.json::<Value>().await.unwrap()["object"],
+        "response.compaction"
+    );
 
     let search = client
         .post(format!("{}/v1/alpha/search", gateway.base_url))

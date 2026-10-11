@@ -1,4 +1,7 @@
 use super::*;
+use crate::protocol::completion::{
+    ChatStreamCompletion, GeminiStreamCompletion, MessagesStreamCompletion, ResponseCompletion,
+};
 
 mod ingest;
 
@@ -12,8 +15,10 @@ pub(super) struct UsageStream<S> {
     pub(super) response_id: Option<String>,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
     pub(super) native_gemini: bool,
-    native_gemini_incomplete: bool,
-    native_gemini_finished: bool,
+    native_gemini_completion: GeminiStreamCompletion,
+    chat_completion: ChatStreamCompletion,
+    messages_completion: MessagesStreamCompletion,
+    usage_snapshot: Option<Value>,
     native_replay_capture: NativeReplayCapture,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
@@ -56,8 +61,10 @@ impl<S> UsageStream<S> {
             response_id: None,
             native_response,
             native_gemini,
-            native_gemini_incomplete: false,
-            native_gemini_finished: false,
+            native_gemini_completion: GeminiStreamCompletion::default(),
+            chat_completion: ChatStreamCompletion::default(),
+            messages_completion: MessagesStreamCompletion::default(),
+            usage_snapshot: None,
             native_replay_capture: NativeReplayCapture::default(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
@@ -169,12 +176,19 @@ where
                     if this.native_gemini {
                         if !this.sse_pending.is_empty() {
                             this.fail_stream(error_codes::STREAM_INCOMPLETE);
-                        } else if this.native_gemini_incomplete {
-                            this.finish(Some(false), Some(error_codes::RESPONSE_INCOMPLETE));
-                        } else if this.native_gemini_finished {
-                            this.finish(Some(true), None);
                         } else {
-                            this.fail_stream(error_codes::STREAM_INCOMPLETE);
+                            match this.native_gemini_completion.outcome() {
+                                ResponseCompletion::Completed => this.finish(Some(true), None),
+                                ResponseCompletion::Incomplete => {
+                                    this.finish(
+                                        Some(false),
+                                        Some(error_codes::RESPONSE_INCOMPLETE),
+                                    );
+                                }
+                                ResponseCompletion::Invalid => {
+                                    this.fail_stream(error_codes::STREAM_INCOMPLETE);
+                                }
+                            }
                         }
                         this.sse_pending.clear();
                         this.terminated = true;

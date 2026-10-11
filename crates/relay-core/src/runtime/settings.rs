@@ -3,6 +3,24 @@
 use super::*;
 
 impl GatewayRuntime {
+    pub fn set_request_timezone(&self, policy: crate::RequestTimezonePolicy) -> Result<()> {
+        policy
+            .validate()
+            .map_err(|message| Error::Validation(message.into()))?;
+        *crate::poison::write(&self.request_timezone) = policy;
+        Ok(())
+    }
+
+    pub(crate) fn apply_request_timezone(&self, candidate_id: &str, body: &mut Value) {
+        if !self.chatgpt_accounts.contains_key(candidate_id) {
+            return;
+        }
+        let policy = crate::poison::read(&self.request_timezone);
+        if let Some(timezone) = policy.timezone_for(candidate_id) {
+            crate::request_timezone::rewrite_request_timezone(body, timezone);
+        }
+    }
+
     /// Installs a lightweight observer for request start/end activity.
     /// The callback carries only routing identifiers and live counts; request
     /// data and provider responses never cross the host boundary.
@@ -167,32 +185,37 @@ impl GatewayRuntime {
                 "max retry candidates must be between 1 and 8".into(),
             ));
         }
-        let mut updates = key_scopes.iter().collect::<Vec<_>>();
-        updates.sort_by(|(left, _), (right, _)| left.cmp(right));
-        let mut seen = BTreeSet::new();
-        let mut keys = Vec::with_capacity(updates.len());
-        for (id, scope) in updates {
-            if !seen.insert(id) {
+        let mut sorted_scope_updates = key_scopes.iter().collect::<Vec<_>>();
+        sorted_scope_updates
+            .sort_by(|(left_key_id, _), (right_key_id, _)| left_key_id.cmp(right_key_id));
+        let mut seen_key_ids = BTreeSet::new();
+        let mut keys_to_update = Vec::with_capacity(sorted_scope_updates.len());
+        for (key_id, requested_scope) in sorted_scope_updates {
+            if !seen_key_ids.insert(key_id) {
                 return Err(Error::Validation(
                     "duplicate gateway key scope update".into(),
                 ));
             }
-            let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == *id) else {
+            let Some(key) = self
+                .keys
+                .iter()
+                .find(|key| key.enabled && key.id == *key_id)
+            else {
                 return Ok(false);
             };
-            keys.push((key, scope));
+            keys_to_update.push((key, requested_scope));
         }
-        let mut locked = Vec::with_capacity(keys.len());
-        for (key, scope) in keys {
-            locked.push((key, scope, crate::poison::write(&key.scope)));
+        let mut locked_key_scopes = Vec::with_capacity(keys_to_update.len());
+        for (key, requested_scope) in keys_to_update {
+            locked_key_scopes.push((key, requested_scope, crate::poison::write(&key.scope)));
         }
         let mut scheduler = self.lock_scheduler();
         scheduler.set_pool_routing(policy)?;
         self.max_retry_candidates
             .store(usize::from(max_retry_candidates), Ordering::Relaxed);
-        for (key, scope, mut existing_scope) in locked {
-            if *existing_scope != *scope {
-                *existing_scope = scope.clone();
+        for (key, requested_scope, mut existing_scope) in locked_key_scopes {
+            if *existing_scope != *requested_scope {
+                *existing_scope = requested_scope.clone();
                 key.scope_revision.fetch_add(1, Ordering::AcqRel);
             }
         }

@@ -4,7 +4,7 @@ use crate::error_codes;
 use crate::quota::QuotaRefreshFailure;
 use chrono::{TimeZone, Utc};
 use serde_json::{Map, Value};
-pub(super) fn parse_accounts_check(
+pub fn parse_accounts_check(
     account_check_response: &Value,
     preferred_account_id: &str,
 ) -> Result<CodexSubscriptionMetadata, QuotaRefreshFailure> {

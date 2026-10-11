@@ -28,13 +28,18 @@ fn responses_bridges_reject_malformed_controls_and_unknown_tool_fields() {
     }
 }
 #[test]
-fn generic_messages_translation_rejects_provider_owned_and_unknown_fields() {
+fn generic_messages_translation_retains_signed_thinking_and_rejects_unknown_fields() {
     let response = json!({
         "id": "msg_invalid",
         "stop_reason": "end_turn",
         "content": [{"type": "thinking", "thinking": "plan", "signature": "opaque"}]
     });
-    assert!(response::decode(WireApi::Messages, &response, "seed").is_err());
+    let decoded = response::decode(WireApi::Messages, &response, "seed").unwrap();
+    assert_eq!(
+        decoded.native_output,
+        response["content"].as_array().unwrap().clone()
+    );
+    assert!(matches!(&decoded.blocks[0], Block::Reasoning(text) if text == "plan"));
 
     let mut bridge = prepare(
         WireApi::ChatCompletions,
@@ -198,7 +203,7 @@ fn chat_bridge_keeps_apply_patch_as_a_custom_tool_call() {
         .contains("function_call"));
 }
 #[test]
-fn chat_bridge_flattens_codex_namespaces_and_restores_them_on_output() {
+fn chat_bridge_flattens_selected_codex_namespace_and_restores_it_on_output() {
     let request = json!({
         "model": "grok",
         "input": [
@@ -237,7 +242,7 @@ fn chat_bridge_flattens_codex_namespaces_and_restores_them_on_output() {
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 1);
     let flattened = tools
         .iter()
         .filter_map(|tool| tool["function"]["name"].as_str())
@@ -274,4 +279,99 @@ fn chat_bridge_flattens_codex_namespaces_and_restores_them_on_output() {
     assert_eq!(item["type"], "function_call");
     assert_eq!(item["name"], "lookup");
     assert_eq!(item["namespace"], "mcp__synthetic");
+}
+
+fn custom_response_events() -> Vec<Value> {
+    let item = json!({"type":"custom_tool_call","id":"ctc_synthetic","call_id":"call_patch","name":"apply_patch","input":""});
+    let complete = json!({"type":"custom_tool_call","id":"ctc_synthetic","call_id":"call_patch","name":"apply_patch","input":"line one\nline two"});
+    vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":item}),
+        json!({"type":"response.custom_tool_call_input.delta","output_index":0,"item_id":"ctc_synthetic","delta":"line one\n"}),
+        json!({"type":"response.custom_tool_call_input.delta","output_index":0,"item_id":"ctc_synthetic","delta":"line two"}),
+        json!({"type":"response.custom_tool_call_input.done","output_index":0,"item_id":"ctc_synthetic","input":"line one\nline two"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":complete}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[complete]}}),
+    ]
+}
+
+fn custom_chat_request() -> Value {
+    json!({"messages":[{"role":"user","content":"Apply the patch"}],
+        "tools":[{"type":"function","function":{"name":"apply_patch","parameters":{"type":"object","properties":{"input":{"type":"string"}}}}}]})
+}
+
+#[test]
+fn responses_custom_input_is_wrapped_once_in_json_and_fragmented_streams() {
+    let events = custom_response_events();
+    for stream in [false, true] {
+        let prepared = prepare(
+            WireApi::ChatCompletions,
+            WireApi::Responses,
+            &custom_chat_request(),
+            stream,
+        );
+        let body = if stream {
+            let mut bridge = prepared.into_stream_bridge().unwrap();
+            for event in &events {
+                for fragment in format!("data: {event}\n\n").as_bytes().chunks(3) {
+                    bridge.push(fragment);
+                }
+            }
+            bridge.finish();
+            bridge
+                .completed()
+                .expect("custom input stream completes")
+                .response_body
+                .clone()
+        } else {
+            prepared
+                .translate_response_bytes(
+                    &serde_json::to_vec(&events.last().unwrap()["response"]).unwrap(),
+                )
+                .unwrap()
+                .unwrap()
+                .response_body()
+                .clone()
+        };
+        let call = &body["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "call_patch");
+        assert_eq!(call["function"]["name"], "apply_patch");
+        let arguments: Value =
+            serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"input":"line one\nline two"}));
+        assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+    }
+}
+
+#[test]
+fn responses_custom_input_rejects_conflicting_identity_done_and_terminal_data() {
+    for mutation in 0..5 {
+        let mut events = custom_response_events();
+        match mutation {
+            0 => events[2]["item_id"] = "different_item".into(),
+            1 => events[3]["input"] = "different input".into(),
+            2 => events[4]["item"]["call_id"] = "different_call".into(),
+            3 => events[5]["response"]["output"][0]["input"] = "different input".into(),
+            4 => events.insert(4, events[2].clone()),
+            _ => unreachable!(),
+        }
+        let mut bridge = prepare(
+            WireApi::ChatCompletions,
+            WireApi::Responses,
+            &custom_chat_request(),
+            true,
+        )
+        .into_stream_bridge()
+        .unwrap();
+        for event in events {
+            bridge.push(format!("data: {event}\n\n").as_bytes());
+        }
+        bridge.finish();
+        assert!(bridge.completed().is_none(), "mutation {mutation}");
+        let output = std::iter::from_fn(|| bridge.pop_output())
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("adapter_upstream_stream_invalid"));
+    }
 }

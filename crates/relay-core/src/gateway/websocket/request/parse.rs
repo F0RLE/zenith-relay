@@ -74,7 +74,7 @@ impl super::ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
-        let service_tier_policy = if is_managed_codex_client(headers) {
+        let mut service_tier_policy = if is_managed_codex_client(headers) {
             ServiceTierPolicy::pool_owned(&request_body)
         } else {
             ServiceTierPolicy::client_owned(&request_body)
@@ -105,6 +105,11 @@ impl super::ClientRequest {
                     .flatten()
             })
             .ok_or_else(GatewayFailure::model_not_found)?;
+        service_tier_policy.capture_pool_default(
+            runtime,
+            &resolved_model,
+            &runtime.client_service_tiers(key, &resolved_model, crate::WireApi::Responses),
+        );
         let responses_lite = headers
             .contains_key(crate::gateway::request::CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&request_body, RESPONSES_LITE_METADATA_KEY);

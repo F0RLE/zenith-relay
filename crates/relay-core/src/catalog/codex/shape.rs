@@ -130,7 +130,7 @@ pub fn normalize_native_codex_catalog_entry(
     let mut catalog_value = Value::Object(catalog_entry);
     set_codex_service_tiers(
         &mut catalog_value,
-        super::super::model_service_tiers(model, None),
+        &super::super::model_service_tiers(model, &[]),
     );
     codex_catalog_entry_is_compatible(&catalog_value).then_some(catalog_value)
 }

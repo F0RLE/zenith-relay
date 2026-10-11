@@ -21,6 +21,27 @@ pub struct UpstreamErrorDetails {
 }
 
 impl UpstreamErrorDetails {
+    pub fn from_response(
+        http_status: Option<u16>,
+        response_body: &[u8],
+        headers: &reqwest::header::HeaderMap,
+    ) -> Self {
+        let mut details = Self::from_response_body(http_status, response_body);
+        if details.request_id.is_none() {
+            for name in ["x-request-id", "openai-request-id", "request-id"] {
+                if let Some(value) = headers.get(name) {
+                    let request_id = value.to_str().ok().and_then(safe_request_id);
+                    details.redacted |= request_id.is_none();
+                    if request_id.is_some() {
+                        details.request_id = request_id;
+                        break;
+                    }
+                }
+            }
+        }
+        details
+    }
+
     pub fn from_response_body(http_status: Option<u16>, response_body: &[u8]) -> Self {
         if response_body.len() > MAX_BODY_BYTES {
             return Self {
@@ -231,6 +252,21 @@ fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn response_headers_supply_only_safe_request_ids_without_body_echoes() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-request-id", "req_synthetic1234".parse().unwrap());
+        let details = super::UpstreamErrorDetails::from_response(
+            Some(403),
+            br#"{"error":{"code":"model_not_allowed"}}"#,
+            &headers,
+        );
+        assert_eq!(details.request_id.as_deref(), Some("req_synthetic1234"));
+        headers.insert("x-request-id", "synthetic-secret-material".parse().unwrap());
+        let details = super::UpstreamErrorDetails::from_response(Some(403), b"{}", &headers);
+        assert!(details.request_id.is_none());
+        assert!(details.redacted);
+    }
     use super::*;
     use serde_json::json;
 

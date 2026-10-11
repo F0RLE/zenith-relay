@@ -130,6 +130,28 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     assert!(response["models"][0]
         .get("auto_compact_token_limit")
         .is_none());
+
+    runtime.set_chatgpt_context_policy(
+        crate::catalog::context_policy::ApplicationContextPolicy::Custom { tokens: 1_000_000 },
+    );
+    let explicit = build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
+    assert_eq!(explicit["models"][0]["context_window"], 256_000);
+    assert_eq!(explicit["models"][0]["max_context_window"], 256_000);
+    assert!(
+        explicit["models"][0]["auto_compact_token_limit"]
+            .as_u64()
+            .unwrap()
+            < 256_000
+    );
+    let unknown =
+        build_codex_models_response(&runtime, &key, &visible, Some(&missing_context)).unwrap();
+    assert!(unknown["models"][0].get("context_window").is_none());
+    runtime.set_chatgpt_context_policy(
+        crate::catalog::context_policy::ApplicationContextPolicy::Client,
+    );
+    let restored = build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
+    assert_eq!(restored["models"][0]["context_window"], 128_000);
+    assert_eq!(restored["models"][0]["auto_compact_token_limit"], 110_000);
 }
 
 #[test]
@@ -226,7 +248,7 @@ fn native_catalog_follows_inventory_replacement_without_a_model_name_allowlist()
             let id = model["slug"].as_str().unwrap();
             assert!(inventory.contains(&id));
             assert_eq!(model["display_name"], crate::codex_model_display_name(id));
-            assert_eq!(model["supports_parallel_tool_calls"], true);
+            assert_eq!(model["supports_parallel_tool_calls"], false);
             assert_eq!(
                 model["priority"],
                 crate::CODEX_CATALOG_PRIORITY_BASE + index as u64
@@ -276,7 +298,7 @@ fn native_card_selection_skips_invalid_owners_without_borrowing_foreign_cards() 
         let model = &models[0];
         assert_eq!(model["slug"], "gpt-native");
         assert_eq!(model["display_name"], "GPT Native");
-        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert_eq!(model["supports_parallel_tool_calls"], false);
         assert_eq!(
             model["supported_reasoning_levels"]
                 .as_array()
@@ -323,7 +345,7 @@ fn missing_native_card_keeps_identity_without_inheriting_capabilities() {
             assert_eq!(model["slug"], display_id);
             assert_eq!(model["display_name"], "GPT Native");
             assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
-            assert_eq!(model["supports_parallel_tool_calls"], true);
+            assert_eq!(model["supports_parallel_tool_calls"], false);
             assert_eq!(model["supported_reasoning_levels"], json!([]));
             for field in ["use_responses_lite", "future_native_capability"] {
                 assert!(model.get(field).is_none(), "unexpected capability: {field}");
@@ -361,7 +383,7 @@ fn native_card_preserves_the_key_model_prefix() {
     .unwrap();
     let model = &response["models"][0];
     assert_eq!(model["slug"], "local/gpt-native");
-    assert_eq!(model["supports_parallel_tool_calls"], true);
+    assert_eq!(model["supports_parallel_tool_calls"], false);
     assert_eq!(
         runtime.resolve_configured_account_model(&key, model["slug"].as_str().unwrap()),
         Some("gpt-native".into()),

@@ -6,13 +6,16 @@ pub(super) fn request(
     protocol: WireApi,
     model: &str,
     stream: bool,
+    native_turns: &BTreeMap<usize, Vec<Value>>,
+    reasoning_mode: MessagesReasoningMode,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<Value> {
     let mut request_fields = Map::new();
     if protocol != WireApi::Gemini {
         request_fields.insert("model".into(), model.into());
         request_fields.insert("stream".into(), stream.into());
     }
-    let (history, system) = conversation(request, protocol)?;
+    let (history, system) = conversation(request, protocol, native_turns)?;
     request_fields.insert(
         match protocol {
             WireApi::Responses => "input",
@@ -46,7 +49,14 @@ pub(super) fn request(
     if let Some(format) = &request.output_format {
         parts::output_format(&mut request_fields, &mut generation, format, protocol)?;
     }
-    write_reasoning(&mut request_fields, &mut generation, request, protocol)?;
+    write_reasoning(
+        &mut request_fields,
+        &mut generation,
+        request,
+        protocol,
+        reasoning_mode,
+        capabilities,
+    )?;
     if protocol == WireApi::Gemini && !generation.is_empty() {
         request_fields.insert("generationConfig".into(), generation.into());
     }
@@ -59,10 +69,20 @@ pub(super) fn request(
     Ok(request_fields.into())
 }
 
-fn conversation(request: &Request, protocol: WireApi) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
-    let mut history = Vec::new();
+fn conversation(
+    request: &Request,
+    protocol: WireApi,
+    native_turns: &BTreeMap<usize, Vec<Value>>,
+) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
+    let mut history: Vec<Value> = Vec::new();
     let mut system = Vec::new();
-    for message in request.instructions.iter().chain(&request.messages) {
+    let mut gemini_call_ids = BTreeMap::new();
+    for (position, message) in request
+        .instructions
+        .iter()
+        .chain(&request.messages)
+        .enumerate()
+    {
         if message.role == Role::System && matches!(protocol, WireApi::Messages | WireApi::Gemini) {
             for block in &message.blocks {
                 let Block::Text(text) = block else {
@@ -76,7 +96,75 @@ fn conversation(request: &Request, protocol: WireApi) -> AdapterResult<(Vec<Valu
             }
             continue;
         }
-        history.extend(parts::message_value(message, protocol)?);
+        let native = position
+            .checked_sub(usize::from(request.instructions.is_some()))
+            .and_then(|index| native_turns.get(&index));
+        let items = if let Some(native) = native {
+            if message.role != Role::Assistant {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            if protocol == WireApi::Gemini {
+                let client_calls = message
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::ToolCall { id, name, .. } => Some((id, name)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let provider_calls = native
+                    .iter()
+                    .filter_map(|part| part.get("functionCall"))
+                    .collect::<Vec<_>>();
+                if client_calls.len() != provider_calls.len() {
+                    return Err(AdapterError::continuation_mismatch());
+                }
+                for ((id, name), call) in client_calls.into_iter().zip(provider_calls) {
+                    if call.get("name").and_then(Value::as_str) != Some(name) {
+                        return Err(AdapterError::continuation_mismatch());
+                    }
+                    gemini_call_ids.insert(
+                        id.clone(),
+                        call.get("id").and_then(Value::as_str).map(str::to_owned),
+                    );
+                }
+            }
+            continuation::replay_items(protocol, native)
+        } else {
+            let items = parts::message_value(message, protocol)?;
+            if protocol == WireApi::Gemini {
+                let mut items = Value::Array(items);
+                super::super::gemini::restore_provider_call_ids(&mut items, &gemini_call_ids)?;
+                items.as_array().expect("encoded history").clone()
+            } else {
+                items
+            }
+        };
+        for item in items {
+            if matches!(protocol, WireApi::Messages | WireApi::Gemini) {
+                let content_key = if protocol == WireApi::Messages {
+                    "content"
+                } else {
+                    "parts"
+                };
+                if let Some(previous_content) = history
+                    .last_mut()
+                    .filter(|previous| previous.get("role") == item.get("role"))
+                    .and_then(|previous| previous.get_mut(content_key))
+                    .and_then(Value::as_array_mut)
+                {
+                    previous_content.extend(
+                        item.get(content_key)
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
+                    continue;
+                }
+            }
+            history.push(item);
+        }
     }
     Ok((history, system))
 }
@@ -137,12 +225,20 @@ fn write_tools(
     request: &Request,
     protocol: WireApi,
 ) -> AdapterResult<()> {
-    if !request.tools.is_empty() {
-        let declarations = request
-            .tools
-            .iter()
-            .map(|tool| parts::function(tool, protocol))
-            .collect::<AdapterResult<Vec<_>>>()?;
+    if request.tools.is_empty()
+        && matches!(
+            request.tool_choice,
+            Some(ToolChoice::Required | ToolChoice::Function(_))
+        )
+    {
+        return Err(AdapterError::parameter_unsupported_for("tool_choice"));
+    }
+    let declarations = request
+        .tools
+        .iter()
+        .map(|tool| parts::function(tool, protocol))
+        .collect::<AdapterResult<Vec<_>>>()?;
+    if !declarations.is_empty() {
         request_fields.insert(
             "tools".into(),
             if protocol == WireApi::Gemini {
@@ -186,26 +282,21 @@ fn write_reasoning(
     generation: &mut Map<String, Value>,
     request: &Request,
     protocol: WireApi,
+    mode: MessagesReasoningMode,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<()> {
     let Some(reasoning) = &request.reasoning else {
         return Ok(());
     };
-    if protocol == WireApi::Messages
-        && !matches!(reasoning, Reasoning::Effort(effort) if effort == "none")
-    {
-        if request.temperature.is_some() || request.top_p.is_some() {
-            return Err(AdapterError::parameter_unsupported());
-        }
-        if let Reasoning::Budget(budget) = reasoning {
-            if request.max_tokens.is_some_and(|limit| limit <= *budget) {
-                return Err(AdapterError::parameter_unsupported());
-            }
-            if request.max_tokens.is_none() {
-                request_fields.insert("max_tokens".into(), budget.saturating_add(1024).into());
-            }
-        }
-    }
-    parts::thinking(request_fields, generation, reasoning, protocol)
+    parts::thinking(
+        request_fields,
+        generation,
+        reasoning,
+        protocol,
+        mode,
+        request.max_tokens.is_some(),
+        capabilities,
+    )
 }
 
 mod parts;

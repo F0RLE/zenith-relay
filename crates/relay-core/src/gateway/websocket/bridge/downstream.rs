@@ -115,7 +115,7 @@ async fn start_next_request(
         state.last_response_id = None;
     }
     if same_response_id && !model_switch_reset {
-        let tried = HashSet::new();
+        let tried = client_request.service_tier_exclusions(runtime, key)?;
         let selected = runtime
             .select_and_reserve_with_budget(
                 key,
@@ -207,8 +207,8 @@ async fn start_next_request(
         route.account_token_generation = prepared.token_generation;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = client_context_fingerprint(headers);
-        client_request.apply_service_tier_for_route(runtime, &route);
-        route.service_tier = client_request.service_tier(runtime, &route);
+        client_request.apply_service_tier();
+        route.service_tier = client_request.service_tier();
         let started = Instant::now();
         let upstream_origin = route_error_origin(&route);
         let request_payload = client_request.observed_payload_for(runtime, &mut route)?;
@@ -244,6 +244,7 @@ async fn start_next_request(
             request: client_request.clone(),
             route: route.clone(),
             event,
+            usage_snapshot: None,
             started,
             response_id: None,
             prompt_affinity_key: client_request.prompt_affinity_key,

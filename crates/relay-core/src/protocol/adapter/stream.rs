@@ -5,6 +5,7 @@ mod frame;
 mod gemini;
 mod messages;
 
+pub(crate) use frame::merge_usage;
 pub use gemini::GeminiStreamBridge;
 pub use messages::MessagesStreamBridge;
 
@@ -27,6 +28,20 @@ impl AdapterStreamBridge {
             Self::Messages(bridge) => bridge.finish(),
             Self::Gemini(bridge) => bridge.finish(),
             Self::Translated(bridge) => bridge.finish(),
+        }
+    }
+    pub(crate) fn awaiting_upstream_end(&self) -> bool {
+        match self {
+            Self::Messages(_) => false,
+            Self::Gemini(bridge) => bridge.awaiting_upstream_end(),
+            Self::Translated(bridge) => bridge.awaiting_upstream_end(),
+        }
+    }
+    pub(crate) fn abort(&mut self) {
+        match self {
+            Self::Messages(bridge) => bridge.finish(),
+            Self::Gemini(bridge) => bridge.abort(),
+            Self::Translated(bridge) => bridge.abort(),
         }
     }
     pub fn pop_output(&mut self) -> Option<Vec<u8>> {
@@ -83,6 +98,8 @@ data: {"candidates":[{"content":{"parts":[{"text":"Hello world"}]},"finishReason
 
 "#,
         );
+        assert!(bridge.completed().is_none());
+        bridge.finish();
         let output = std::iter::from_fn(|| bridge.pop_output())
             .flat_map(|frame| {
                 String::from_utf8(frame)
@@ -120,6 +137,7 @@ data: {"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetad
 
 "#,
         );
+        bridge.finish();
         let output = std::iter::from_fn(|| bridge.pop_output())
             .map(|frame| String::from_utf8(frame).unwrap())
             .collect::<Vec<_>>()
@@ -159,10 +177,13 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"json
 
 data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.unit","stringValue":"C","willContinue":true}],"willContinue":true}}]}}]}
 
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.location"},{"jsonPath":"$.unit"}],"willContinue":true}}]}}]}
+
 data: {"candidates":[{"content":{"parts":[{"functionCall":{}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}}
 
 "#,
         );
+        bridge.finish();
         let output = std::iter::from_fn(|| bridge.pop_output())
             .map(|frame| String::from_utf8(frame).unwrap())
             .collect::<Vec<_>>()
@@ -178,9 +199,11 @@ data: {"candidates":[{"content":{"parts":[{"functionCall":{}}]},"finishReason":"
             completed.response_body["output"][0]["arguments"],
             r#"{"location":"Paris","unit":"C"}"#
         );
+        let native_tool_part = &completed.continuation.messages[1]["parts"][0];
+        assert_eq!(native_tool_part["thoughtSignature"], "sig");
         assert_eq!(
-            completed.continuation.messages[1]["parts"][0]["functionCall"]["thoughtSignature"],
-            "sig"
+            native_tool_part["functionCall"]["args"],
+            json!({"location": "Paris", "unit": "C"})
         );
     }
 }

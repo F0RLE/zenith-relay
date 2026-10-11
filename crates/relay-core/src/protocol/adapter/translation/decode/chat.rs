@@ -66,7 +66,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 blocks: vec![Block::ToolResult {
                     id: required_text(message, "tool_call_id")?.into(),
                     name: String::new(),
-                    content: super::content::plain_text(
+                    content: super::content::tool_result_blocks(
                         message.get("content").unwrap_or(&Value::Null),
                         WireApi::ChatCompletions,
                     )?,

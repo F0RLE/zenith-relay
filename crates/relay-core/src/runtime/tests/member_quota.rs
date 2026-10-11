@@ -13,6 +13,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            service_tiers: None,
         },
         ModelEndpointCapability {
             model_id: "test".into(),
@@ -22,6 +23,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            service_tiers: None,
         },
     ];
     let runtime = GatewayRuntime::from_pool(
@@ -244,6 +246,7 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        service_tiers: None,
     }];
     let runtime = GatewayRuntime::from_pool(
         vec![configured],

@@ -1,7 +1,7 @@
 use super::prelude::*;
 use super::recovery::{
-    adapter_error_response, recover_stale_tool_history, replay_native_tool_continuation,
-    try_repair_legacy_responses_call_ids, LegacyCallIdRepair,
+    adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
+    replay_native_tool_continuation, try_repair_legacy_responses_call_ids, LegacyCallIdRepair,
 };
 use crate::gateway::streaming::UpstreamStream;
 use crate::runtime::ExecutorRoute;
@@ -168,6 +168,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 Some(failure.category.to_string()),
                 started.elapsed().as_millis() as u64,
             );
+            populate_tokens(&mut event, &bootstrap_failure.partial_body);
             event.upstream_error = upstream_error.map(|mut details| {
                 details.http_status = Some(status.as_u16());
                 details
@@ -187,6 +188,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 })
             {
                 lease.settle_rotation_repair(now_ms());
+                emit_repair(runtime, &mut event);
                 return OpenedStream::Continue(retry(
                     request,
                     request_id,
@@ -234,7 +236,11 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                         );
                     }
                     Ok(false) => {}
-                    Err(error) => return OpenedStream::Respond(adapter_error_response(error)),
+                    Err(error) => {
+                        emit_usage(runtime, mark_adapter_failure(event, &error));
+                        lease.settle_rotation_terminal(now_ms());
+                        return OpenedStream::Respond(adapter_error_response(error));
+                    }
                 }
             }
             if safe_to_repair
@@ -321,7 +327,7 @@ fn continue_after_history_repair(
     requires_affinity_owner: &mut bool,
     has_unpaired_tool_output: &mut bool,
     tried: &mut HashSet<String>,
-    event: UsageEvent,
+    mut event: UsageEvent,
     failure: AttemptFailure,
     last_failure: &mut Option<AttemptFailure>,
     last_failure_origin: &mut ErrorOrigin,
@@ -340,7 +346,7 @@ fn continue_after_history_repair(
     }
     tried.remove(candidate_id);
     lease.allow_rotation_repair();
-    emit_usage(runtime, event);
+    emit_repair(runtime, &mut event);
     *last_failure = Some(failure);
     *last_failure_origin = selected_error_origin;
     lease.settle_rotation_repair(now_ms());

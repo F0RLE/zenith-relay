@@ -14,6 +14,14 @@ pub fn translate_messages_response(
     request: MessagesBridgeRequest,
     upstream_response: &Value,
 ) -> AdapterResult<MessagesBridgeResponse> {
+    if crate::protocol::completion::ResponseCompletion::for_protocol(
+        crate::WireApi::Messages,
+        upstream_response,
+    ) == crate::protocol::completion::ResponseCompletion::Invalid
+    {
+        return Err(AdapterError::upstream_response_invalid());
+    }
+    let refused = upstream_response.get("stop_reason").and_then(Value::as_str) == Some("refusal");
     let (status, incomplete_reason) =
         messages_response_terminal(upstream_response.get("stop_reason").and_then(Value::as_str))?;
     let upstream_id = upstream_response
@@ -31,9 +39,17 @@ pub fn translate_messages_response(
     let (mut response_items, _) = responses_output_from_messages_content(
         &message_content,
         &request.bridge_state,
-        status == "incomplete",
+        status == "incomplete" || refused,
     )?;
     let response_id = bridged_response_id_scoped(request.response_scope(), upstream_id);
+    if refused {
+        response_items.push(refusal_message(
+            upstream_response
+                .pointer("/stop_details/explanation")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ));
+    }
     set_message_output_id(&mut response_items, &response_id);
     let usage = responses_usage(upstream_response.get("usage"));
     let response_body = json!({
@@ -50,12 +66,19 @@ pub fn translate_messages_response(
         "usage": usage,
     });
     let mut continuation = request.bridge_state;
+    continuation.reusable = status == "completed" && !refused;
+    continuation
+        .record_response_tool_calls(response_body["output"].as_array().expect("response output"))?;
     continuation.append_assistant_content(message_content);
     Ok(MessagesBridgeResponse {
         response_body,
         response_id,
         continuation,
     })
+}
+
+pub(in crate::protocol::adapter) fn refusal_message(explanation: &str) -> Value {
+    json!({"type":"message","status":"completed","role":"assistant","content":[{"type":"refusal","refusal":explanation}]})
 }
 
 /// Map only terminal Messages reasons that a Responses client can represent.
@@ -65,8 +88,10 @@ pub(in crate::protocol::adapter) fn messages_response_terminal(
 ) -> AdapterResult<(&'static str, Option<&'static str>)> {
     match stop_reason {
         Some("end_turn" | "stop_sequence" | "tool_use") => Ok(("completed", None)),
-        Some("max_tokens") => Ok(("incomplete", Some("max_output_tokens"))),
-        Some("refusal") => Ok(("incomplete", Some("content_filter"))),
+        Some("max_tokens" | "model_context_window_exceeded" | "pause_turn") => {
+            Ok(("incomplete", Some("max_output_tokens")))
+        }
+        Some("refusal") => Ok(("completed", None)),
         _ => Err(AdapterError::upstream_response_invalid()),
     }
 }
@@ -133,7 +158,9 @@ pub(in crate::protocol::adapter) fn validate_messages_tool_calls(
         let tool_name = nonempty_block_str(content_block, "name")?;
         if !content_block.get("input").is_some_and(Value::is_object)
             || !bridge_state.allows_tool_name(tool_name)
+            || bridge_state.tool_call_targets.contains_key(call_id)
             || !call_ids.insert(call_id.to_string())
+            || (!bridge_state.allows_parallel_tool_calls() && call_ids.len() > 1)
         {
             return Err(AdapterError::upstream_response_invalid());
         }
@@ -180,6 +207,7 @@ pub(in crate::protocol::adapter) fn responses_output_from_messages_content(
         }));
     };
     for content_block in message_content {
+        super::validate_response_block(content_block)?;
         let content_block = content_block
             .as_object()
             .ok_or_else(AdapterError::upstream_response_invalid)?;
@@ -241,10 +269,17 @@ pub(in crate::protocol::adapter) fn responses_output_from_messages_content(
                 response_items.push(response_item);
                 preserved.push(Value::Object(content_block.clone()));
             }
-            Some("thinking" | "redacted_thinking") => {
-                // The native block (including its signature) must survive in bridge
-                // state, but it is intentionally not exposed as fake Responses
-                // encrypted content.
+            Some("thinking") => {
+                content_block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .ok_or_else(AdapterError::upstream_response_invalid)?;
+                nonempty_block_str(content_block, "signature")?;
+                // Preserve signed native thinking only in local continuation state.
+                preserved.push(Value::Object(content_block.clone()));
+            }
+            Some("redacted_thinking") => {
+                nonempty_block_str(content_block, "data")?;
                 preserved.push(Value::Object(content_block.clone()));
             }
             _ => return Err(AdapterError::upstream_response_invalid()),
@@ -276,10 +311,19 @@ pub(in crate::protocol::adapter) fn custom_tool_input(tool_input: &Value) -> Ada
 
 pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Value {
     let mut usage_details = Map::new();
-    if let Some(input_tokens) = usage
-        .and_then(|usage| usage.get("input_tokens"))
-        .and_then(Value::as_u64)
-    {
+    let counter = |field: &str| {
+        usage
+            .and_then(|usage| usage.get(field))
+            .and_then(Value::as_u64)
+    };
+    // Messages counts cache reads and writes separately from uncached input.
+    // Responses includes all three in input_tokens, with cache details below.
+    let input_tokens = counter("input_tokens")
+        .and_then(|input| input.checked_add(counter("cache_read_input_tokens").unwrap_or_default()))
+        .and_then(|input| {
+            input.checked_add(counter("cache_creation_input_tokens").unwrap_or_default())
+        });
+    if let Some(input_tokens) = input_tokens {
         usage_details.insert("input_tokens".to_string(), Value::from(input_tokens));
     }
     if let Some(output_tokens) = usage
@@ -325,21 +369,7 @@ pub(in crate::protocol::adapter) fn responses_usage(usage: Option<&Value>) -> Va
                 Value::String(cache_write_ttl.to_string()),
             );
     }
-    // Anthropic never reports a total and counts cache reads and writes outside
-    // `input_tokens`; the gateway counts them as input, so the total does too.
-    let counter = |field: &str| {
-        usage
-            .and_then(|usage| usage.get(field))
-            .and_then(Value::as_u64)
-    };
-    let derived_total = counter("input_tokens")
-        .zip(counter("output_tokens"))
-        .and_then(|(input, output)| input.checked_add(output))
-        .and_then(|total| total.checked_add(counter("cache_read_input_tokens").unwrap_or_default()))
-        .and_then(|total| {
-            total.checked_add(counter("cache_creation_input_tokens").unwrap_or_default())
-        });
-    super::super::responses_usage::complete(usage_details, derived_total)
+    super::super::responses_usage::complete(usage_details, None)
 }
 
 fn cache_write_ttl_from_usage(usage: &Value) -> Option<&'static str> {

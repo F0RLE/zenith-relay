@@ -19,6 +19,7 @@ pub(super) struct InFlight {
     request: ClientRequest,
     route: ExecutorRoute,
     event: UsageEvent,
+    usage_snapshot: Option<Value>,
     started: Instant,
     response_id: Option<String>,
     prompt_affinity_key: Option<String>,
@@ -152,6 +153,7 @@ pub(super) async fn bridge(
             request: connected.request.clone(),
             route: connected.route,
             event: initial_event,
+            usage_snapshot: None,
             started: connected.started,
             response_id: None,
             prompt_affinity_key,
@@ -167,6 +169,7 @@ pub(super) async fn bridge(
     };
     for message in connected.initial_messages {
         if !handle_upstream_message(&mut downstream, &runtime, &mut bridge_state, message).await {
+            finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
             return;
         }
     }
@@ -272,4 +275,5 @@ pub(super) async fn bridge(
             }
         }
     }
+    finish_incomplete(&runtime, &mut bridge_state, error_codes::CLIENT_CANCELLED);
 }

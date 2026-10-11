@@ -34,14 +34,15 @@ impl ModelMetadataCatalog {
 
     pub fn apply_codex_capabilities(&self, model: &str, catalog_entry: &mut Value) {
         self.capabilities_for(model).apply_to_codex(catalog_entry);
-        crate::catalog::set_codex_service_tiers(catalog_entry, self.service_tiers_for(model));
+        crate::catalog::set_codex_service_tiers(catalog_entry, &self.service_tiers_for(model));
     }
 
-    pub fn service_tiers_for(&self, model: &str) -> &'static [crate::DefaultServiceTier] {
+    pub fn service_tiers_for(&self, model: &str) -> Vec<crate::DefaultServiceTier> {
         crate::catalog::model_service_tiers(
             model,
             self.resolve(model)
-                .map(|metadata| metadata.provider.as_str()),
+                .map(|metadata| metadata.capabilities.service_tiers.as_slice())
+                .unwrap_or_default(),
         )
     }
 
@@ -54,6 +55,7 @@ impl ModelMetadataCatalog {
             entries: BTreeMap::new(),
             leaf_matches: BTreeMap::new(),
             ambiguous_leaves: BTreeSet::new(),
+            family_providers: BTreeMap::new(),
         }
     }
 
@@ -74,6 +76,7 @@ impl ModelMetadataCatalog {
         let mut leaf_matches = BTreeMap::new();
         let mut ambiguous_leaves = BTreeSet::new();
         let mut leaf_priorities = BTreeMap::new();
+        let mut family_providers = BTreeMap::<String, Option<String>>::new();
 
         for (source_id, metadata_record) in metadata_records {
             let provider_namespace = source_id
@@ -86,13 +89,35 @@ impl ModelMetadataCatalog {
             };
             let normalized_model_id = order::normalize(&source_id);
             let leaf = order::model_leaf(&normalized_model_id).to_string();
+            let priority = reference::identity_priority(metadata_record);
+            // Only the primary identity catalog can establish the owner of a
+            // family. Hosting records may supply a canonical ID for their own
+            // model, but must not redefine a whole family's manufacturer.
+            if priority == 0 {
+                if let (Some(family), Some(provider)) = (
+                    metadata.family.as_deref().map(order::normalize),
+                    metadata
+                        .canonical_model_id
+                        .as_deref()
+                        .and_then(order::canonical_namespace)
+                        .or_else(|| order::provider_key(&metadata.provider)),
+                ) {
+                    family_providers
+                        .entry(family)
+                        .and_modify(|existing| {
+                            if existing.as_ref() != Some(&provider) {
+                                *existing = None;
+                            }
+                        })
+                        .or_insert(Some(provider));
+                }
+            }
             metadata_entries.insert(normalized_model_id.clone(), metadata);
 
             // Supplemental hosting catalogs must not make a canonical model
             // lose its unqualified identity. Equal-priority conflicts remain
             // ambiguous unless their semantic metadata is equivalent; exact
             // qualified IDs always resolve independently.
-            let priority = reference::identity_priority(metadata_record);
             match leaf_priorities.get(&leaf) {
                 Some(previous_priority) if *previous_priority < priority => continue,
                 Some(previous_priority) if *previous_priority == priority => {}
@@ -145,6 +170,7 @@ impl ModelMetadataCatalog {
             entries: metadata_entries,
             leaf_matches,
             ambiguous_leaves,
+            family_providers,
         })
     }
 
@@ -162,6 +188,47 @@ impl ModelMetadataCatalog {
         self.leaf_matches
             .get(leaf)
             .and_then(|model_id| self.entries.get(model_id))
+    }
+
+    /// Presentation only: prefer the canonical manufacturer, then a family
+    /// with one owner in the primary catalog or an unambiguous leaf reference.
+    /// A record without either keeps its reference namespace.
+    /// Name-based fallback is limited to unresolved familiar model IDs. It
+    /// must never choose a protocol, grant a route, or merge model identities.
+    pub fn display_provider_for(&self, model: &str) -> Option<String> {
+        let Some(metadata) = self.resolve(model) else {
+            let normalized = order::normalize(model);
+            if self
+                .ambiguous_leaves
+                .contains(order::model_leaf(&normalized))
+            {
+                return None;
+            }
+            return order::inferred_provider(model);
+        };
+        metadata
+            .canonical_model_id
+            .as_deref()
+            .and_then(order::canonical_namespace)
+            .or_else(|| {
+                metadata.family.as_deref().and_then(|family| {
+                    self.family_providers
+                        .get(&order::normalize(family))
+                        .cloned()
+                        .flatten()
+                })
+            })
+            .or_else(|| {
+                let normalized_id = order::normalize(&metadata.source_model_id);
+                let reference_id = self.leaf_matches.get(order::model_leaf(&normalized_id))?;
+                let reference = self.entries.get(reference_id)?;
+                reference
+                    .canonical_model_id
+                    .as_deref()
+                    .and_then(order::canonical_namespace)
+                    .or_else(|| order::provider_key(&reference.provider))
+            })
+            .or_else(|| order::provider_key(&metadata.provider))
     }
 
     /// The protocol native to the model's own group, independent of the host
@@ -195,6 +262,11 @@ impl ModelMetadataCatalog {
             .as_deref()
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
+        // Capability-only metadata must not turn the configured endpoint into
+        // a Chat Completions route without a provider or family identity.
+        if group.is_none() && metadata.provider.trim().is_empty() && family.is_empty() {
+            return None;
+        }
         // Every model outside the three first-party groups falls to the
         // family, and then to Chat Completions. This last arm is the single
         // place that defines "all other models".
@@ -229,13 +301,8 @@ impl ModelMetadataCatalog {
         let mut indexed = source_model_ids.into_iter().enumerate().collect::<Vec<_>>();
         indexed.sort_by(
             |(left_position, left_model_id), (right_position, right_model_id)| {
-                order::compare_metadata(
-                    left_model_id,
-                    self.resolve(left_model_id),
-                    right_model_id,
-                    self.resolve(right_model_id),
-                )
-                .then_with(|| left_position.cmp(right_position))
+                order::compare_model_groups(self, left_model_id, right_model_id)
+                    .then_with(|| left_position.cmp(right_position))
             },
         );
         indexed.into_iter().map(|(_, model_id)| model_id).collect()
@@ -249,7 +316,21 @@ impl ModelMetadataCatalog {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        crate::merge_model_display_order(self.order_model_ids(models), saved_order)
+        let models = self.order_model_ids(models);
+        if saved_order.is_empty() {
+            return models;
+        }
+        let groups = models
+            .iter()
+            .map(|model| {
+                (
+                    crate::model_id_key(model),
+                    self.display_provider_for(model)
+                        .unwrap_or_else(|| "other".to_string()),
+                )
+            })
+            .collect();
+        crate::catalog::merge_model_display_order_with_groups(models, saved_order, &groups)
     }
 }
 

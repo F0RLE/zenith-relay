@@ -1,7 +1,8 @@
 use super::super::*;
 use super::messages::first_message_terminal;
 use super::telemetry::{
-    record_connect_affinity_miss, record_connect_failure_with_hint, record_connect_rejection,
+    record_connect_affinity_miss, record_connect_failure_with_outcome, record_connect_rejection,
+    record_identifier_repair,
 };
 use super::{ConnectProgress, ConnectScope};
 
@@ -121,6 +122,7 @@ fn continue_after_item_prefix_repair(
     // failure. Settling the terminal first would mark the outcome unknown
     // and stop this retry.
     lease.settle_rotation_repair(now_ms());
+    record_identifier_repair(&scope.trace());
     *progress.last_failure = None;
     true
 }
@@ -140,6 +142,7 @@ fn continue_after_legacy_call_links(
     progress.repairs.legacy_call_id = true;
     progress.tried.remove(&scope.route.candidate_id);
     scope.lease.settle_rotation_repair(now_ms());
+    record_identifier_repair(&scope.trace());
     true
 }
 
@@ -263,11 +266,12 @@ fn continue_after_cache_write_rejection(
         .invalidate_prompt_affinity(scope.request.prompt_affinity_key.as_deref());
     let failure =
         classified_terminal_failure(status, category, scope.source_error_origin, terminal);
-    record_connect_failure_with_hint(
+    record_connect_failure_with_outcome(
         &scope.trace(),
         &failure,
         Some(&terminal.headers),
         terminal.body_hint,
+        Some(crate::AttemptOutcome::RetrySelection),
     );
     *progress.last_failure = Some(failure);
     true
@@ -299,11 +303,12 @@ fn retry_initial_terminal(
             .invalidate_response_affinity(scope.request.response_affinity_key.as_deref());
         record_connect_affinity_miss(&scope.trace(), status);
     } else {
-        record_connect_failure_with_hint(
+        record_connect_failure_with_outcome(
             &scope.trace(),
             &failure,
             Some(&terminal.headers),
             terminal.body_hint,
+            Some(crate::AttemptOutcome::RetrySelection),
         );
         if scope.response_affinity_hit && !scope.request.requires_affinity_owner {
             scope.request.response_affinity_key = None;

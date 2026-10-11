@@ -49,12 +49,15 @@ pub(super) async fn connect_upstream(
                 }
             }
         }
+        let incompatible = request.service_tier_exclusions(runtime, key)?;
+        let mut selection_exclusions = tried.clone();
+        selection_exclusions.extend(incompatible.iter().cloned());
         let selected = runtime
             .select_and_reserve_with_budget(
                 key,
                 &request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
-                &tried,
+                &selection_exclusions,
                 (
                     request.response_affinity_key.as_deref(),
                     request.prompt_affinity_key.as_deref(),
@@ -69,6 +72,7 @@ pub(super) async fn connect_upstream(
                 key,
                 client_request: &mut request,
                 tried: &mut tried,
+                incompatible: &incompatible,
                 last_failure: &last_failure,
                 http_fallback_origin: &websocket_http_fallback_origin,
                 allow_previous_response_reset,
@@ -141,11 +145,12 @@ pub(super) async fn connect_upstream(
     if let Some(origin) = websocket_http_fallback_origin {
         return Err(GatewayFailure::websocket_http_fallback(origin));
     }
+    let incompatible = request.service_tier_exclusions(runtime, key)?;
     if let Some(retry_at_ms) = runtime.earliest_retry_at(
         key,
         &request.resolved_model,
         WEBSOCKET_PROTOCOLS,
-        &HashSet::new(),
+        &incompatible,
         request.response_affinity_key.as_deref(),
         now_ms(),
         crate::scheduler::rotation::RotationOperation::Text,

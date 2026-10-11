@@ -20,8 +20,9 @@ mod usage;
 
 pub use account::{
     api_equivalent_projection_window, model_has_native_account_route, AccountRefreshState,
-    AccountSummary, QuotaWindowUsage, RefreshStatus, RemoteAccountLocation,
-    RevealedAccountIdentity, SourceRefreshState, SourceSummary, SourceSummaryRecord,
+    AccountSummary, CredentialDiagnostics, CredentialRecovery, CredentialStatus, QuotaWindowUsage,
+    RefreshStatus, RemoteAccountLocation, RevealedAccountIdentity, SourceRefreshState,
+    SourceSummary, SourceSummaryRecord,
 };
 pub use model::{
     apply_member_model_display_order, apply_model_display_order,

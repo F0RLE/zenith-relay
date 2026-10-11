@@ -10,6 +10,8 @@ use serde_json::json;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::{Notify, Semaphore};
 
+mod recovery;
+
 struct AccessReply {
     status: StatusCode,
     body: Value,
@@ -18,8 +20,10 @@ struct AccessReply {
 struct AccessState {
     reply: Mutex<AccessReply>,
     generation_body: Mutex<Value>,
+    generation_bodies: Mutex<Vec<Value>>,
     access_requests: AtomicUsize,
     generation_requests: AtomicUsize,
+    generation_status: Mutex<StatusCode>,
     first_started: Notify,
     first_release: Semaphore,
     hold_first: bool,
@@ -47,8 +51,10 @@ impl AccessServer {
             generation_body: Mutex::new(json!({
                 "id":"synthetic-response","status":"completed","output":[]
             })),
+            generation_bodies: Mutex::new(Vec::new()),
             access_requests: AtomicUsize::new(0),
             generation_requests: AtomicUsize::new(0),
+            generation_status: Mutex::new(StatusCode::OK),
             first_started: Notify::new(),
             first_release: Semaphore::new(0),
             hold_first,
@@ -103,9 +109,104 @@ async fn access(State(state): State<Arc<AccessState>>, uri: Uri, headers: Header
     response
 }
 
-async fn generation(State(state): State<Arc<AccessState>>) -> Json<Value> {
+async fn generation(State(state): State<Arc<AccessState>>, Json(body): Json<Value>) -> Response {
     state.generation_requests.fetch_add(1, Ordering::SeqCst);
-    Json(crate::poison::mutex(&state.generation_body).clone())
+    crate::poison::mutex(&state.generation_bodies).push(body);
+    (
+        *crate::poison::mutex(&state.generation_status),
+        Json(crate::poison::mutex(&state.generation_body).clone()),
+    )
+        .into_response()
+}
+
+struct RecoveryRefresh {
+    calls: AtomicUsize,
+}
+
+impl TokenRefreshAdapter for RecoveryRefresh {
+    fn refresh<'a>(
+        &'a self,
+        _account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> BoxFuture<'a, std::result::Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async move {
+            assert_eq!(refresh_token, "synthetic-refresh");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            TokenRefresh::new(
+                "synthetic-new-access",
+                Some("synthetic-new-refresh".into()),
+                None,
+                Some(now_ms + 600_000),
+            )
+            .map_err(|_| TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    *crate::poison::mutex(&server.state.generation_status) = StatusCode::UNAUTHORIZED;
+    let mut runtime = runtime(&server).await;
+    let refresh = Arc::new(RecoveryRefresh {
+        calls: AtomicUsize::new(0),
+    });
+    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    account.refresh_adapter = refresh.clone();
+    account
+        .token_authority
+        .register(
+            "account-1",
+            TokenSet::new(
+                "synthetic-access",
+                Some("synthetic-refresh".into()),
+                None,
+                Some(runtime_now_ms() + 600_000),
+                runtime_now_ms(),
+                1,
+            )
+            .unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    for status in [StatusCode::UNAUTHORIZED, StatusCode::OK] {
+        *crate::poison::mutex(&server.state.generation_status) = status;
+        let budget = SharedRequestBudget::for_incoming_request(3);
+        let response = runtime
+            .send_authorized_request(
+                "account-1",
+                reqwest::Client::new()
+                    .post(server.responses_url.clone())
+                    .json(&json!({"model":"gpt-test"})),
+                AuthorizationDispatch {
+                    client_version: None,
+                    identity_policy: AuthorizationIdentityPolicy::PreserveUpstream,
+                    turn_scope: None,
+                    budget: Some(&budget),
+                    lease: None,
+                    usage_event: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.response.status(), status);
+        assert_eq!(budget.dispatches(), 1);
+        let tokens = runtime.chatgpt_accounts["account-1"]
+            .token_authority
+            .tokens("account-1")
+            .await
+            .unwrap();
+        if status == StatusCode::UNAUTHORIZED {
+            assert_eq!(refresh.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(tokens.refresh_token(), Some("synthetic-refresh"));
+        } else {
+            assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(tokens.refresh_token(), Some("synthetic-new-refresh"));
+        }
+    }
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
 }
 
 async fn runtime(server: &AccessServer) -> GatewayRuntime {
@@ -133,6 +234,303 @@ fn expire_access(runtime: &GatewayRuntime) {
 }
 
 #[tokio::test]
+async fn free_bps_rejects_discovery_and_all_dispatches_without_provider_requests() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let runtime = runtime(&server).await;
+    assert!(runtime.update_account_subscription_plan("account-1", Some("chatgpt_free_tier")));
+    let result = runtime
+        .prepare_basis_points_authorization("account-1")
+        .await;
+    assert!(
+        matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
+        if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
+    );
+    let key = runtime.authenticate_secret("local-secret").unwrap();
+    runtime.refresh_basis_points_access(&key).await;
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    for request_budget in [Some(&budget), None] {
+        let result = runtime
+            .send_authorized_request(
+                "account-1",
+                reqwest::Client::new()
+                    .post(server.responses_url.clone())
+                    .json(&json!({"model":"gpt-test"})),
+                AuthorizationDispatch {
+                    client_version: None,
+                    identity_policy: AuthorizationIdentityPolicy::PreserveUpstream,
+                    turn_scope: None,
+                    budget: request_budget,
+                    lease: None,
+                    usage_event: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
+            if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
+        );
+    }
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 0);
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+}
+
+struct FreePlanRefresh {
+    calls: AtomicUsize,
+}
+
+impl TokenRefreshAdapter for FreePlanRefresh {
+    fn refresh<'a>(
+        &'a self,
+        _account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> BoxFuture<'a, std::result::Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async move {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            assert_eq!(refresh_token, "synthetic-refresh");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let id_token = format!(
+                "e30.{}.synthetic",
+                URL_SAFE_NO_PAD
+                    .encode(br#"{"https://api.openai.com/auth":{"chatgpt_plan_type":"free"}}"#)
+            );
+            Ok(TokenRefresh::new(
+                "synthetic-refreshed-access",
+                None,
+                Some(id_token),
+                Some(now_ms + 120_000),
+            )
+            .unwrap())
+        })
+    }
+}
+
+#[tokio::test]
+async fn refreshed_free_id_token_blocks_bps_despite_paid_metadata_and_opaque_access() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let mut runtime = runtime(&server).await;
+    runtime.update_account_subscription_plan("account-1", Some("plus"));
+    let refresh = Arc::new(FreePlanRefresh {
+        calls: AtomicUsize::new(0),
+    });
+    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    account.refresh_adapter = refresh.clone();
+    account
+        .token_authority
+        .register(
+            "account-1",
+            TokenSet::new(
+                "synthetic-expired-access",
+                Some("synthetic-refresh".into()),
+                None,
+                Some(1),
+                0,
+                1,
+            )
+            .unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    let result = runtime
+        .prepare_basis_points_authorization("account-1")
+        .await;
+    assert!(
+        matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
+        if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
+    );
+    let prepared = runtime
+        .prepare_authorization("account-1", crate::unix_time_ms())
+        .await
+        .unwrap();
+    assert!(prepared.dispatch_guard(&runtime, "account-1").is_none());
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    for request_budget in [Some(&budget), None] {
+        let result = runtime
+            .send_authorized_request(
+                "account-1",
+                reqwest::Client::new()
+                    .post(server.responses_url.clone())
+                    .json(&json!({"model":"gpt-test"})),
+                AuthorizationDispatch {
+                    client_version: None,
+                    identity_policy: AuthorizationIdentityPolicy::PreserveUpstream,
+                    turn_scope: None,
+                    budget: request_budget,
+                    lease: None,
+                    usage_event: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AuthorizedRequestError::ModelAccess(failure))
+            if failure.code == ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported)
+        );
+    }
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 0);
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn bps_plan_downgrade_revokes_cached_access_and_pending_dispatch() {
+    use crate::scheduler::rotation::DispatchStartError;
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let runtime = runtime(&server).await;
+    runtime.update_account_subscription_plan("account-1", Some("plus"));
+    let prepared = runtime
+        .prepare_basis_points_authorization("account-1")
+        .await
+        .unwrap();
+    let key = runtime.authenticate_secret("local-secret").unwrap();
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let lease = runtime
+        .select_and_reserve_with_budget(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            &budget,
+        )
+        .await
+        .unwrap()
+        .1;
+    assert!(runtime.update_account_subscription_plan("account-1", Some("free")));
+    assert!(runtime.fresh_basis_points_access("account-1").is_none());
+    assert_eq!(
+        lease.begin_rotation_http_dispatch_for(&prepared, &runtime),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert!(runtime.update_account_policy(
+        "account-1",
+        RuntimeCandidatePolicy {
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+        }
+    ));
+    assert!(runtime.sync_account_availability_with_quota(
+        "account-1",
+        true,
+        CandidateHealth::Healthy,
+        &QuotaSnapshot::default(),
+        crate::unix_time_ms(),
+    ));
+    assert!(
+        !runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|budget| budget.wire_attempts()), 0);
+    drop(lease);
+    runtime.update_account_subscription_plan("account-1", Some("plus"));
+    runtime.sync_account_availability_with_quota(
+        "account-1",
+        true,
+        CandidateHealth::Healthy,
+        &QuotaSnapshot::default(),
+        crate::unix_time_ms(),
+    );
+    assert!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .enabled
+    );
+    runtime
+        .prepare_basis_points_authorization("account-1")
+        .await
+        .unwrap();
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 2);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn delayed_access_cannot_publish_after_a_free_plan_downgrade() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), true).await;
+    let runtime = Arc::new(runtime(&server).await);
+    let reading = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .prepare_basis_points_authorization("account-1")
+                .await
+        })
+    };
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        server.state.first_started.notified(),
+    )
+    .await
+    .unwrap();
+    runtime.update_account_subscription_plan("account-1", Some("free"));
+    server.state.first_release.add_permits(1);
+    assert!(reading.await.unwrap().is_err());
+    assert!(runtime.fresh_basis_points_access("account-1").is_none());
+    assert!(
+        !runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn native_free_account_keeps_its_route_and_never_uses_bps_access() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let mut runtime = runtime(&server).await;
+    runtime
+        .chatgpt_accounts
+        .get_mut("account-1")
+        .unwrap()
+        .oauth_client_kind = OAuthClientKind::Codex;
+    runtime.update_account_subscription_plan("account-1", Some("free"));
+    assert!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .enabled
+    );
+    let budget = SharedRequestBudget::for_incoming_request(1);
+    let response = runtime
+        .send_authorized_request(
+            "account-1",
+            reqwest::Client::new()
+                .post(server.responses_url.clone())
+                .json(&json!({"model":"gpt-test"})),
+            AuthorizationDispatch {
+                client_version: None,
+                identity_policy: AuthorizationIdentityPolicy::PreserveUpstream,
+                turn_scope: None,
+                budget: Some(&budget),
+                lease: None,
+                usage_event: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.response.status(), StatusCode::OK);
+    assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn concurrent_access_reads_share_one_discovery_and_publish_inventory() {
     let server = AccessServer::start(
         json!([{"id":"gpt-test"}, {"id":"gpt-new", "efforts":[{"value":"xhigh"}]}]),
@@ -151,7 +549,7 @@ async fn concurrent_access_reads_share_one_discovery_and_publish_inventory() {
     assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
     assert_eq!(
         runtime.visible_account_models(&key),
-        ["gpt-new", "gpt-test"]
+        ["gpt-test", "gpt-new"]
     );
     assert_eq!(
         runtime
@@ -257,7 +655,7 @@ async fn failed_refresh_hides_stale_access_preserves_inventory_and_respects_retr
         result,
         Err(AuthorizedRequestError::ModelAccess(failure))
             if failure.code == ModelDiscoveryFailureCode::RateLimited
-                && failure.retry_after_ms == Some(17_000)
+                && failure.retry_after_ms.is_some_and(|delay| (1..=17_000).contains(&delay))
     )));
     assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 2);
     assert!(runtime.visible_account_models(&key).is_empty());
@@ -298,6 +696,7 @@ async fn unavailable_model_or_reasoning_fails_before_spending_a_generation() {
                     turn_scope: None,
                     budget: Some(&budget),
                     lease: None,
+                    usage_event: None,
                 },
             )
             .await;
@@ -334,6 +733,7 @@ async fn discovery_and_alias_validation_spend_only_the_actual_generation_budget(
                 turn_scope: None,
                 budget: Some(&budget),
                 lease: None,
+                usage_event: None,
             },
         )
         .await

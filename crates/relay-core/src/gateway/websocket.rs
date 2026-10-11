@@ -33,7 +33,6 @@ use reqwest_websocket::{
     WebSocket as UpstreamWebSocket,
 };
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval_at, sleep_until, timeout, Instant as TokioInstant, MissedTickBehavior};

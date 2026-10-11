@@ -127,14 +127,36 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 _ => return Err(AdapterError::parameter_unsupported()),
             };
         }
-        if let Some(thinking) = generation_config.get("thinkingConfig") {
+        if let Some(thinking) = generation_config
+            .get("thinkingConfig")
+            .filter(|thinking| !thinking.is_null())
+        {
             checked(thinking, &["thinkingLevel", "thinkingBudget"])?;
-            decoded_request.reasoning =
-                if let Some(level) = thinking.get("thinkingLevel").and_then(Value::as_str) {
-                    Some(Reasoning::Effort(level.to_ascii_lowercase()))
-                } else {
-                    optional_u64(thinking, "thinkingBudget")?.map(Reasoning::Budget)
-                };
+            let budget = thinking
+                .get("thinkingBudget")
+                .filter(|value| !value.is_null());
+            if budget.is_some_and(|budget| budget.as_u64().is_none() && budget.as_i64() != Some(-1))
+            {
+                return Err(AdapterError::invalid_request()
+                    .with_parameter("generationConfig.thinkingConfig.thinkingBudget"));
+            }
+            decoded_request.reasoning = if thinking
+                .get("thinkingLevel")
+                .is_some_and(|level| !level.is_null())
+            {
+                if budget.is_some() {
+                    return Err(AdapterError::reasoning_unsupported());
+                }
+                Some(Reasoning::Effort(
+                    required_text(thinking, "thinkingLevel")?.into(),
+                ))
+            } else {
+                budget.map(|budget| match budget.as_u64() {
+                    Some(0) => Reasoning::Effort("none".into()),
+                    Some(budget) => Reasoning::Budget(budget),
+                    None => Reasoning::DynamicBudget,
+                })
+            };
         }
     }
     Ok(decoded_request)

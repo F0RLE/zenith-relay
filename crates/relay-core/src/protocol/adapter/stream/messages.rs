@@ -20,12 +20,15 @@ pub struct MessagesStreamBridge {
     upstream_id: Option<String>,
     usage: Option<Value>,
     stop_reason: Option<String>,
+    completion: crate::protocol::completion::MessagesStreamCompletion,
+    refusal_explanation: Option<String>,
     text_output: Option<TextOutput>,
     next_output_index: usize,
     next_message_index: usize,
     completed: Option<MessagesBridgeResponse>,
     upstream_error: Option<Value>,
     terminal: bool,
+    sequence_number: u64,
 }
 #[derive(Clone, Debug)]
 enum StreamBlock {
@@ -83,12 +86,15 @@ impl MessagesStreamBridge {
             upstream_id: None,
             usage: None,
             stop_reason: None,
+            completion: crate::protocol::completion::MessagesStreamCompletion::default(),
+            refusal_explanation: None,
             text_output: None,
             next_output_index: 0,
             next_message_index: 0,
             completed: None,
             upstream_error: None,
             terminal: false,
+            sequence_number: 0,
         }
     }
 

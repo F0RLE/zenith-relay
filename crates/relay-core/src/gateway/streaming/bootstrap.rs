@@ -6,6 +6,7 @@ use super::super::errors::{
 use super::events::{is_empty_responses_incomplete, parse_sse_event, TerminalOutcome};
 use super::UpstreamStream;
 use crate::error_codes;
+use crate::protocol::completion::{GeminiStreamCompletion, ResponseCompletion};
 use crate::protocol::sse_event_end;
 use axum::body::Bytes;
 use futures_util::StreamExt;
@@ -63,6 +64,8 @@ pub(in crate::gateway) async fn bootstrap_stream(
     let mut inspected = 0;
     let mut saw_output = false;
     let mut completed_output_items = 0_usize;
+    let mut gemini_completion = GeminiStreamCompletion::default();
+    let mut native_gemini = false;
     // `response.created` and other setup frames do not make a response safe to
     // commit. Keep them private until the source produces real output or a
     // terminal event, so a pre-output provider failure can use another route.
@@ -89,11 +92,13 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             failure.execution =
                                 crate::scheduler::rotation::ExecutionObservation::accepted();
                         }
+                        failure.partial_body = buffered;
                         return Err(failure);
                     }
                     if event.has_data && !event.valid {
                         return Err(StreamBootstrapFailure {
                             upstream_error: event.upstream_error,
+                            partial_body: buffered,
                             ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
                         });
                     }
@@ -127,18 +132,17 @@ pub(in crate::gateway) async fn bootstrap_stream(
                                 .event_payload
                                 .as_ref()
                                 .is_some_and(responses_tool_call_links_rejected_value),
-                            partial_body: buffered.clone(),
+                            partial_body: buffered,
                         });
                     }
                     if event.output_item.is_some() && !event.is_compaction {
                         completed_output_items = completed_output_items.saturating_add(1);
                     }
                     saw_output |= event.semantic_output;
-                    // A zero-token incomplete response has not committed any
-                    // client-visible output. Treat it as a pre-output source
-                    // failure, allowing the request executor to retry another
-                    // candidate. A non-empty incomplete response remains a
-                    // terminal client response (for example max output).
+                    // An empty incomplete response is a source failure, but
+                    // does not prove that generation was never accepted.
+                    // Its execution stays unknown, so no automatic retry is safe.
+                    // A non-empty incomplete response belongs to the client.
                     if event
                         .event_payload
                         .as_ref()
@@ -150,10 +154,29 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             )
                         })
                     {
-                        return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into());
+                        return Err(StreamBootstrapFailure {
+                            partial_body: buffered,
+                            ..AttemptFailure::stream(error_codes::RESPONSE_INCOMPLETE).into()
+                        });
                     }
-                    let terminal = event.outcome.is_some();
-                    ready_to_forward |= terminal || event.semantic_output;
+                    if let Some(payload) = event.event_payload.as_ref() {
+                        native_gemini |= payload.get("candidates").is_some()
+                            || payload.get("promptFeedback").is_some()
+                            || payload.get("usageMetadata").is_some();
+                        if native_gemini && gemini_completion.observe(payload).is_err() {
+                            return Err(StreamBootstrapFailure {
+                                partial_body: buffered,
+                                ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
+                            });
+                        }
+                    }
+                    // A Gemini finish reason closes one candidate, not the
+                    // transport. Retain the rest of this chunk and late usage.
+                    let terminal = event.outcome.is_some() && !native_gemini;
+                    ready_to_forward |= terminal
+                        || event.semantic_output
+                        || native_gemini
+                            && gemini_completion.outcome() != ResponseCompletion::Invalid;
                     inspected = absolute_end;
                     if terminal {
                         // A transport chunk may also contain later frames. The
@@ -166,8 +189,18 @@ pub(in crate::gateway) async fn bootstrap_stream(
                     return Ok((headers, Bytes::from(buffered), stream));
                 }
             }
-            Some(Err(error)) => return Err(AttemptFailure::transport(&error).into()),
-            None => return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()),
+            Some(Err(error)) => {
+                return Err(StreamBootstrapFailure {
+                    partial_body: buffered,
+                    ..AttemptFailure::transport(&error).into()
+                })
+            }
+            None => {
+                return Err(StreamBootstrapFailure {
+                    partial_body: buffered,
+                    ..AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()
+                })
+            }
         }
     }
 }

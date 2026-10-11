@@ -116,9 +116,41 @@ pub(super) fn merge_reference_records(
             ("supports_response_schema", "structured_output"),
             ("supports_vision", "attachment"),
             ("supports_reasoning", "reasoning"),
+            ("supports_prompt_caching", "prompt_caching"),
+            ("supports_parallel_function_calling", "parallel_tool_call"),
+            ("supports_tool_choice", "tool_choice"),
+            ("supports_native_streaming", "streaming"),
         ] {
             if let Some(flag) = pricing_record.get(from).and_then(Value::as_bool) {
                 projected_record.insert(to.into(), json!(flag));
+            }
+        }
+        for field in [
+            "supported_modalities",
+            "supported_output_modalities",
+            "supported_service_tiers",
+            "service_tiers",
+            "supported_parameters",
+            "reasoning_options",
+        ] {
+            if let Some(value) = pricing_record.get(field) {
+                projected_record.insert(field.into(), value.clone());
+            }
+        }
+        if let Some(record) = pricing_record.as_object() {
+            let efforts = super::reasoning::parse_effort_flags(record);
+            if !efforts.is_empty() {
+                projected_record.insert("reasoning_effort_levels".into(), json!(efforts));
+            }
+        }
+        for (from, to) in [
+            ("supported_modalities", "input"),
+            ("supported_output_modalities", "output"),
+        ] {
+            if let Some(value) = pricing_record.get(from).filter(|value| value.is_array()) {
+                projected_record
+                    .entry("modalities")
+                    .or_insert_with(|| json!({}))[to] = value.clone();
             }
         }
         let mut token_limits = Map::new();
@@ -191,7 +223,15 @@ fn fill_missing(target: &mut Value, fallback: Value) {
     if let (Some(target), Value::Object(fallback)) = (target.as_object_mut(), fallback) {
         for (field_name, fallback_value) in fallback {
             if let Some(existing_value) = target.get_mut(&field_name) {
-                fill_missing(existing_value, fallback_value);
+                // An explicit empty mode list means no faster reference
+                // modes. It is not a missing list to fill from another source.
+                if !matches!(
+                    field_name.as_str(),
+                    "service_tiers" | "supported_service_tiers"
+                ) || !existing_value.is_array()
+                {
+                    fill_missing(existing_value, fallback_value);
+                }
             } else {
                 target.insert(field_name, fallback_value);
             }

@@ -129,7 +129,8 @@ pub(super) fn parse_metadata(
                 .or(reasoning_options.budget[2]),
             reasoning_effort_levels,
             default_reasoning_effort: string("default_reasoning_effort")
-                .or_else(|| string("defaultReasoningEffort")),
+                .or_else(|| string("defaultReasoningEffort"))
+                .map(|level| crate::catalog::canonical_reasoning_level(&level)),
             tool_call: direct_or_supported("tool_call", "tools"),
             structured_output: direct_or_supported("structured_output", "structured_outputs")
                 .or_else(|| {
@@ -141,6 +142,21 @@ pub(super) fn parse_metadata(
                 }),
             attachment: boolean("attachment"),
             open_weights: boolean("open_weights"),
+            temperature: direct_or_supported("temperature", "temperature"),
+            prompt_caching: boolean("prompt_caching"),
+            parallel_tool_call: direct_or_supported("parallel_tool_call", "parallel_tool_calls"),
+            tool_choice: direct_or_supported("tool_choice", "tool_choice"),
+            streaming: boolean("streaming"),
+            service_tiers: crate::catalog::reference_service_tiers(metadata_value),
+            reasoning_modes: metadata_value
+                .pointer("/experimental/modes")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, mode)| mode.pointer("/provider/body/reasoning/mode")?.as_str())
+                .filter(|mode| matches!(*mode, "standard" | "pro"))
+                .map(str::to_owned)
+                .collect(),
             input_modalities,
             output_modalities,
             context_limit: limits

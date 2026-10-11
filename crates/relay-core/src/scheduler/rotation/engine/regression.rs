@@ -427,3 +427,35 @@ fn outcomes_from_a_closed_incident_cannot_join_a_later_incident() {
         .unwrap();
     assert_eq!(engine.circuit("a", "responses:text"), before);
 }
+
+#[test]
+fn fresh_authorization_and_other_route_success_do_not_reset_a_model_rate_deadline() {
+    let mut engine = engine(&["a"]);
+    let mut candidate = member("a");
+    candidate.add_route("responses:other", "other-model", RotationOperation::Text);
+    engine.upsert(candidate.clone()).unwrap();
+    engine.sync_candidate_route_rate(
+        "a",
+        "responses:text",
+        RateState::Limited { not_before_ms: 800 },
+    );
+    engine.set_auth("a", AuthState::NeedsRefresh);
+    // A new bearer restores authorization, independently of the provider rate limit.
+    engine.set_auth("a", AuthState::Ready);
+    candidate.weight = 10;
+    engine.upsert(candidate).unwrap();
+    let other = RotationRequest::new(RequestId(10), "responses:other", "other-model");
+    let lease = engine.reserve(&other, 1).unwrap();
+    outcome(&mut engine, lease, HealthObservation::Success, 2);
+    assert_eq!(
+        engine.candidate_availability(&request(11), "a", 799),
+        CandidateAvailability::WaitUntil {
+            at_ms: 800,
+            reason: CandidateBlockReason::RateLimited
+        }
+    );
+    assert!(matches!(
+        engine.candidate_availability(&request(12), "a", 800),
+        CandidateAvailability::Ready { .. }
+    ));
+}

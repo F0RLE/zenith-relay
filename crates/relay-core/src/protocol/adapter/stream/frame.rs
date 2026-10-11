@@ -1,27 +1,65 @@
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 
-pub(super) fn merge_usage(usage_snapshot: &mut Option<Value>, next_usage: &Value) {
-    let Some(next_usage_object) = next_usage.as_object() else {
-        *usage_snapshot = Some(next_usage.clone());
+pub(crate) fn merge_usage(usage_snapshot: &mut Option<Value>, next_usage: &Value) {
+    if !next_usage.is_object() {
+        return;
+    }
+    let snapshot = usage_snapshot.get_or_insert_with(|| json!({}));
+    merge_usage_fields(snapshot, next_usage);
+}
+
+fn merge_usage_fields(snapshot: &mut Value, next: &Value) {
+    let Some(next_fields) = next.as_object() else {
         return;
     };
-    let Some(previous_usage) = usage_snapshot.as_mut().and_then(Value::as_object_mut) else {
-        *usage_snapshot = Some(next_usage.clone());
-        return;
-    };
-    for (usage_key, next_value) in next_usage_object {
-        if let (Some(previous_field), Some(next_field)) = (
-            previous_usage
-                .get_mut(usage_key)
-                .and_then(Value::as_object_mut),
-            next_value.as_object(),
-        ) {
-            for (nested_key, nested_value) in next_field {
-                previous_field.insert(nested_key.clone(), nested_value.clone());
+    if !snapshot.is_object() {
+        *snapshot = json!({});
+    }
+    let previous_fields = snapshot
+        .as_object_mut()
+        .expect("usage snapshot is an object");
+    let counts_changed = [
+        "input_tokens",
+        "prompt_tokens",
+        "output_tokens",
+        "completion_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "thoughtsTokenCount",
+    ]
+    .iter()
+    .any(|field| {
+        next_fields.get(*field).is_some_and(|value| {
+            value.as_u64().is_some() && previous_fields.get(*field) != Some(value)
+        })
+    });
+    if counts_changed {
+        // A prior total belongs to the prior counters. Derive a fresh total
+        // when a later cumulative update changes them without a new total.
+        for field in ["total_tokens", "totalTokenCount"] {
+            if next_fields.get(field).and_then(Value::as_u64).is_none() {
+                previous_fields.remove(field);
             }
+        }
+    }
+    for (field, value) in next_fields {
+        // Providers use null for unavailable counters, including in terminal
+        // snapshots. It must not erase consumption reported in earlier frames.
+        if value.is_null() {
+            continue;
+        }
+        if value.is_object() {
+            merge_usage_fields(
+                previous_fields
+                    .entry(field.clone())
+                    .or_insert_with(|| json!({})),
+                value,
+            );
         } else {
-            previous_usage.insert(usage_key.clone(), next_value.clone());
+            previous_fields.insert(field.clone(), value.clone());
         }
     }
 }
@@ -78,13 +116,6 @@ pub(super) fn sse_done(event: &[u8]) -> bool {
     })
 }
 
-pub(super) fn incremental_delta(previous_text: &str, incoming_text: &str) -> String {
-    incoming_text
-        .strip_prefix(previous_text)
-        .unwrap_or(incoming_text)
-        .to_string()
-}
-
 pub(super) fn parse_sse_data(event: &[u8]) -> Option<Value> {
     let sse_payload = crate::protocol::sse_data(event);
     (!sse_payload.is_empty())
@@ -97,14 +128,6 @@ pub(super) fn sse_event_has_data(event: &[u8]) -> bool {
         line.strip_prefix(b"data:")
             .is_some_and(|line_payload| line_payload.iter().any(|byte| !byte.is_ascii_whitespace()))
     })
-}
-
-pub(super) fn is_ignorable_metadata_event(kind: &str) -> bool {
-    matches!(
-        kind,
-        "message_metadata" | "content_block_metadata" | "citation" | "message_citation"
-    ) || kind.ends_with("_metadata")
-        || kind.ends_with("_citation")
 }
 
 pub(super) fn tool_arguments_value(arguments: &str) -> Option<Value> {

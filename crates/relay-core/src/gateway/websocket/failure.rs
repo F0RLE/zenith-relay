@@ -112,6 +112,13 @@ impl GatewayFailure {
         }
     }
 
+    pub(super) fn unsupported_service_tier() -> Self {
+        Self {
+            category: error_codes::ADAPTER_PARAMETER_UNSUPPORTED,
+            ..Self::invalid_request("service_tier is not supported by the configured routes")
+        }
+    }
+
     pub(super) fn invalid_stream_id() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

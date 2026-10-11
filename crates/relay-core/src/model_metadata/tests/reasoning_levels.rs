@@ -266,7 +266,11 @@ fn recognizes_litellm_camel_case_effort_flags_without_openrouter() {
     let models = serde_json::json!({"provider/model": {"reasoning": true}});
     let litellm = serde_json::json!({"provider/model": {
         "supportsLowReasoningEffort": true,
-        "supportsHighReasoningEffort": true
+        "supportsHighReasoningEffort": true,
+        "supportsVeryHighReasoningEffort": true,
+        "supports_very_high_reasoning_effort": true,
+        "supports_extra_high_reasoning_effort": true,
+        "supportsMaxReasoningEffort": false
     }});
     let catalog = ModelMetadataCatalog::from_metadata_payload(
         &enrich_reasoning_metadata(&models, None, Some(&litellm)),
@@ -277,7 +281,10 @@ fn recognizes_litellm_camel_case_effort_flags_without_openrouter() {
     .unwrap();
     let capabilities = catalog.capabilities_for("provider/model");
     assert_eq!(capabilities.reasoning_method, Some(ReasoningMethod::Effort));
-    assert_eq!(capabilities.reasoning_effort_levels, ["low", "high"]);
+    assert_eq!(
+        capabilities.reasoning_effort_levels,
+        ["low", "high", "xhigh"]
+    );
 }
 
 #[test]

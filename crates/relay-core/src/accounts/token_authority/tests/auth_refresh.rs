@@ -324,6 +324,44 @@ async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
 
 struct MustNotRefresh;
 
+#[tokio::test]
+async fn late_401_cannot_expire_a_reinstalled_login_with_identical_tokens() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let tokens = TokenSet::new(
+        "synthetic-access",
+        Some("synthetic-refresh".into()),
+        None,
+        Some(60_000),
+        1,
+        7,
+    )
+    .unwrap();
+    authority
+        .register("account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let rejected = authority
+        .prepare("account", 2, 0, &MustNotRefresh)
+        .await
+        .unwrap();
+    authority
+        .register("account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let persistence = CapturePersistence::default();
+    assert!(!authority
+        .invalidate_access_revision_and_persist(
+            "account",
+            &rejected.dispatch_revision,
+            10,
+            &persistence,
+        )
+        .await
+        .unwrap());
+    assert_eq!(authority.tokens("account").await, Some(tokens));
+    assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+}
+
 impl TokenRefreshAdapter for MustNotRefresh {
     fn refresh<'a>(
         &'a self,

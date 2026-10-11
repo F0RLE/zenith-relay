@@ -129,7 +129,7 @@ pub(super) fn detected_model_price(
             "1h",
         )
     });
-    ApiModelPriceOverride::from_optional_fields(
+    let mut price = ApiModelPriceOverride::from_optional_fields(
         Some(input_price),
         cache_read_price,
         short_cache_write_price,
@@ -137,7 +137,31 @@ pub(super) fn detected_model_price(
         Some(output_price),
     )
     .ok()
-    .flatten()
+    .flatten()?;
+    // Relay's explicit microUSD schedules can be supplied by a compatible
+    // catalog too. Never infer tier multipliers from a provider/model name.
+    let schedules = pricing_record.unwrap_or(model_record);
+    for (field, target) in [
+        ("flex", &mut price.flex),
+        ("priority", &mut price.priority),
+        ("ultrafast", &mut price.ultrafast),
+    ] {
+        if let Some(schedule) = schedules.get(field) {
+            *target = serde_json::from_value(schedule.clone()).ok()?;
+        }
+    }
+    for (field, target) in [
+        ("above100k", &mut price.above_100k),
+        ("above128k", &mut price.above_128k),
+        ("above200k", &mut price.above_200k),
+        ("above272k", &mut price.above_272k),
+        ("above512k", &mut price.above_512k),
+    ] {
+        if let Some(schedule) = schedules.get(field) {
+            *target = serde_json::from_value(schedule.clone()).ok()?;
+        }
+    }
+    price.is_valid().then_some(price)
 }
 
 fn price_component(
@@ -254,6 +278,7 @@ mod tests {
                 cache_write_5m_micro_usd_per_million: Some(3_125_000),
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 15_000_000,
+                ..Default::default()
             })
         );
     }
@@ -299,6 +324,7 @@ mod tests {
                 cache_write_5m_micro_usd_per_million: Some(3_125_000),
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 15_000_000,
+                ..Default::default()
             })
         );
     }
@@ -376,6 +402,7 @@ mod tests {
                 cache_write_5m_micro_usd_per_million: None,
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 2_500_000,
+                ..Default::default()
             })
         );
     }

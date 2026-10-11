@@ -6,6 +6,32 @@ use sha2::{Digest, Sha256};
 const VOLATILE_RESPONSE_PREFIX: &str = "volatile-response:";
 
 impl GatewayRuntime {
+    pub(crate) fn load_adapter_continuation(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        local_key_id: &str,
+        request: &Value,
+        now_ms: u64,
+    ) -> crate::AdapterResult<Option<crate::MessagesBridgeState>> {
+        let Some(key) =
+            route
+                .adapter
+                .continuation_key(route.client_wire_api, request, &route.source_model)?
+        else {
+            return Ok(None);
+        };
+        match self.load_messages_bridge_state(local_key_id, &key, &route.candidate_id, now_ms) {
+            Ok(state) => Ok(Some(state)),
+            Err(error)
+                if route.client_wire_api != crate::WireApi::Responses
+                    && error == crate::AdapterError::continuation_missing() =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn load_messages_bridge_state(
         &self,
         local_key_id: &str,
@@ -28,9 +54,16 @@ impl GatewayRuntime {
         response: &crate::MessagesBridgeResponse,
         now_ms: u64,
     ) {
+        if !response.continuation.is_reusable()
+            || crate::protocol::completion::ResponseCompletion::from_body(&response.response_body)
+                != crate::protocol::completion::ResponseCompletion::Completed
+        {
+            return;
+        }
+        let storage_key = response.continuation.storage_key(&response.response_id);
         let stored = crate::poison::mutex(&self.messages_bridge_store).insert_if_stored(
             local_key_id,
-            &response.response_id,
+            storage_key,
             candidate_id,
             response.continuation.clone(),
             now_ms,

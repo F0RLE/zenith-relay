@@ -41,11 +41,21 @@ impl AdapterResponse {
     /// keeps the legacy name above source-compatible while making persistence
     /// protocol-agnostic.
     pub fn continuation(&self) -> Option<(&str, &MessagesBridgeState)> {
+        if crate::protocol::completion::ResponseCompletion::from_body(self.response_body())
+            != crate::protocol::completion::ResponseCompletion::Completed
+        {
+            return None;
+        }
         match self {
-            Self::Messages(response) | Self::Translated(response) => {
+            Self::Messages(response) | Self::Translated(response)
+                if response.continuation.is_reusable() =>
+            {
                 Some((&response.response_id, &response.continuation))
             }
-            Self::Gemini(response) => Some((&response.response_id, &response.continuation)),
+            Self::Gemini(response) if response.continuation.is_reusable() => {
+                Some((&response.response_id, &response.continuation))
+            }
+            _ => None,
         }
     }
 }

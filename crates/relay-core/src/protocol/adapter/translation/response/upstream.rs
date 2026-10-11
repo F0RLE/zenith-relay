@@ -11,6 +11,10 @@ pub(in crate::protocol::adapter::translation) fn decode(
     if upstream_response
         .get("error")
         .is_some_and(|error| !error.is_null())
+        || crate::protocol::completion::ResponseCompletion::for_protocol(
+            protocol,
+            upstream_response,
+        ) == crate::protocol::completion::ResponseCompletion::Invalid
     {
         return Err(invalid());
     }
@@ -21,8 +25,10 @@ pub(in crate::protocol::adapter::translation) fn decode(
             .unwrap_or(seed)
             .into(),
         blocks: Vec::new(),
+        citations: BTreeMap::new(),
         usage: usage(protocol, upstream_response),
         finish: Finish::Stop,
+        native_output: Vec::new(),
     };
     match protocol {
         WireApi::ChatCompletions => {
@@ -66,14 +72,31 @@ fn decode_chat_completion(
             .ok_or_else(invalid)?,
     )?;
     let message = choice.get("message").ok_or_else(invalid)?;
-    let refusal = message
+    checked(
+        message,
+        &[
+            "role",
+            "content",
+            "tool_calls",
+            "refusal",
+            "reasoning_content",
+            "annotations",
+        ],
+    )
+    .map_err(|_| invalid())?;
+    if message
+        .get("role")
+        .is_some_and(|role| !role.is_null() && role.as_str() != Some("assistant"))
+    {
+        return Err(invalid());
+    }
+    let mut refusal = message
         .get("refusal")
         .filter(|refusal_value| !refusal_value.is_null())
         .map(|refusal_value| refusal_value.as_str().ok_or_else(invalid))
-        .transpose()?
-        .filter(|refusal_text| !refusal_text.is_empty());
-    if refusal.is_some() {
-        response.finish = Finish::Filter;
+        .transpose()?;
+    if refusal.is_some() && response.finish == Finish::Stop {
+        response.finish = Finish::Refusal;
     }
     if let Some(reasoning) = message
         .get("reasoning_content")
@@ -83,43 +106,61 @@ fn decode_chat_completion(
             reasoning.as_str().ok_or_else(invalid)?.into(),
         ));
     }
-    if let Some(text) = message
+    if let Some(content) = message
         .get("content")
         .filter(|content_value| !content_value.is_null())
     {
-        if let Some(text) = text.as_str() {
-            response.blocks.push(Block::Text(text.into()));
+        let mut text = String::new();
+        let mut has_text = false;
+        if let Some(value) = content.as_str() {
+            text.push_str(value);
+            has_text = true;
         } else {
-            for part in text.as_array().ok_or_else(invalid)? {
+            for part in content.as_array().ok_or_else(invalid)? {
                 match part.get("type").and_then(Value::as_str) {
-                    Some("text") => response.blocks.push(Block::Text(
-                        part.get("text")
-                            .and_then(Value::as_str)
-                            .ok_or_else(invalid)?
-                            .into(),
-                    )),
-                    Some("refusal") => {
-                        response.finish = Finish::Filter;
-                        response.blocks.push(Block::Text(
-                            part.get("refusal")
+                    Some("text") => {
+                        checked(part, &["type", "text"]).map_err(|_| invalid())?;
+                        text.push_str(
+                            part.get("text")
                                 .and_then(Value::as_str)
-                                .ok_or_else(invalid)?
-                                .into(),
-                        ));
+                                .ok_or_else(invalid)?,
+                        );
+                        has_text = true;
+                    }
+                    Some("refusal") => {
+                        checked(part, &["type", "refusal"]).map_err(|_| invalid())?;
+                        let text = part
+                            .get("refusal")
+                            .and_then(Value::as_str)
+                            .ok_or_else(invalid)?;
+                        if refusal.is_some_and(|existing| existing != text) {
+                            return Err(invalid());
+                        }
+                        refusal = Some(text);
+                        if response.finish == Finish::Stop {
+                            response.finish = Finish::Refusal;
+                        }
                     }
                     _ => return Err(invalid()),
                 }
             }
         }
-    } else if let Some(refusal) = refusal {
-        response.blocks.push(Block::Text(refusal.into()));
+        if has_text {
+            response.blocks.push(Block::Text(text));
+        }
     }
-    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-        for call in calls {
+    citations::set_chat_annotations(response, message.get("annotations"))?;
+    if let Some(refusal) = refusal {
+        response.blocks.push(Block::Refusal(refusal.into()));
+    }
+    if let Some(calls) = message.get("tool_calls").filter(|calls| !calls.is_null()) {
+        for call in calls.as_array().ok_or_else(invalid)? {
+            checked(call, &["id", "type", "function"]).map_err(|_| invalid())?;
             if call.get("type").and_then(Value::as_str) != Some("function") {
                 return Err(invalid());
             }
             let function = call.get("function").ok_or_else(invalid)?;
+            checked(function, &["name", "arguments"]).map_err(|_| invalid())?;
             response.blocks.push(Block::ToolCall {
                 id: required_text(call, "id").map_err(|_| invalid())?.into(),
                 name: required_text(function, "name")
@@ -164,25 +205,36 @@ fn decode_responses(
                     .and_then(Value::as_array)
                     .ok_or_else(invalid)?
                 {
+                    if response_content.get("type").and_then(Value::as_str) == Some("refusal") {
+                        response.blocks.push(Block::Refusal(
+                            response_content
+                                .get("refusal")
+                                .and_then(Value::as_str)
+                                .ok_or_else(invalid)?
+                                .into(),
+                        ));
+                        if response.finish == Finish::Stop {
+                            response.finish = Finish::Refusal;
+                        }
+                        continue;
+                    }
                     if response_content.get("type").and_then(Value::as_str) != Some("output_text") {
                         return Err(invalid());
                     }
-                    if response_content
-                        .get("annotations")
-                        .and_then(Value::as_array)
-                        .is_some_and(|annotation_items| !annotation_items.is_empty())
-                    {
-                        return Err(invalid());
+                    let text = response_content
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(invalid)?;
+                    let citations =
+                        citations::parse_annotations(response_content.get("annotations"), text)?;
+                    if !citations.is_empty() {
+                        response.citations.insert(response.blocks.len(), citations);
                     }
-                    response.blocks.push(Block::Text(
-                        response_content
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .ok_or_else(invalid)?
-                            .into(),
-                    ));
+                    response.blocks.push(Block::Text(text.into()));
                 }
             }
+            Some("web_search_call")
+                if response_item.get("status").and_then(Value::as_str) == Some("completed") => {}
             Some("function_call") => response.blocks.push(Block::ToolCall {
                 id: required_text(response_item, "call_id")
                     .map_err(|_| invalid())?
@@ -194,18 +246,40 @@ fn decode_responses(
                     .map_err(|_| invalid())?
                     .into(),
             }),
+            Some("custom_tool_call") => response.blocks.push(Block::ToolCall {
+                id: required_text(response_item, "call_id")
+                    .map_err(|_| invalid())?
+                    .into(),
+                name: required_text(response_item, "name")
+                    .map_err(|_| invalid())?
+                    .into(),
+                arguments: serde_json::json!({"input": response_item.get("input")
+                    .and_then(Value::as_str).ok_or_else(invalid)?})
+                .to_string(),
+            }),
             Some("reasoning") => {
                 if response_item
                     .get("encrypted_content")
-                    .is_some_and(|encrypted_content| !encrypted_content.is_null())
+                    .is_some_and(|value| !value.is_null() && !value.is_string())
                 {
                     return Err(invalid());
                 }
-                for reasoning_summary in response_item
-                    .get("summary")
-                    .and_then(Value::as_array)
-                    .ok_or_else(invalid)?
-                {
+                let summaries = match response_item.get("summary") {
+                    Some(summaries) => Some(summaries.as_array().ok_or_else(invalid)?),
+                    None if response_item
+                        .get("encrypted_content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty()) =>
+                    {
+                        None
+                    }
+                    None => return Err(invalid()),
+                };
+                for reasoning_summary in summaries.into_iter().flatten() {
+                    if reasoning_summary.get("type").and_then(Value::as_str) != Some("summary_text")
+                    {
+                        return Err(invalid());
+                    }
                     response.blocks.push(Block::Reasoning(
                         reasoning_summary
                             .get("text")
@@ -218,6 +292,10 @@ fn decode_responses(
             _ => return Err(invalid()),
         }
     }
+    response.native_output = upstream_response["output"]
+        .as_array()
+        .ok_or_else(invalid)?
+        .clone();
     if response.finish == Finish::Stop
         && response
             .blocks
@@ -248,9 +326,9 @@ fn decode_messages(
         .and_then(Value::as_array)
         .ok_or_else(invalid)?
     {
+        super::super::super::messages::validate_response_block(message_block)?;
         match message_block.get("type").and_then(Value::as_str) {
             Some("text") => {
-                checked(message_block, &["type", "text"])?;
                 response.blocks.push(Block::Text(
                     message_block
                         .get("text")
@@ -260,7 +338,7 @@ fn decode_messages(
                 ));
             }
             Some("thinking") => {
-                checked(message_block, &["type", "thinking"])?;
+                required_text(message_block, "signature").map_err(|_| invalid())?;
                 response.blocks.push(Block::Reasoning(
                     message_block
                         .get("thinking")
@@ -269,8 +347,10 @@ fn decode_messages(
                         .into(),
                 ));
             }
+            Some("redacted_thinking") => {
+                required_text(message_block, "data").map_err(|_| invalid())?;
+            }
             Some("tool_use") => {
-                checked(message_block, &["type", "id", "name", "input"])?;
                 response.blocks.push(Block::ToolCall {
                     id: required_text(message_block, "id")
                         .map_err(|_| invalid())?
@@ -285,11 +365,22 @@ fn decode_messages(
                         .to_string(),
                 });
             }
-            // Signed thinking is provider-owned continuation state.
-            // It cannot be converted to another client's history.
             _ => return Err(invalid()),
         }
     }
+    if response.finish == Finish::Refusal {
+        response.blocks.push(Block::Refusal(
+            upstream_response
+                .pointer("/stop_details/explanation")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
+        ));
+    }
+    response.native_output = upstream_response["content"]
+        .as_array()
+        .ok_or_else(invalid)?
+        .clone();
 
     Ok(())
 }
@@ -305,7 +396,11 @@ fn decode_gemini(
         .get("candidates")
         .and_then(Value::as_array)
         .ok_or_else(invalid)?;
-    if candidates.len() != 1 {
+    if candidates.len() != 1
+        || candidates[0]
+            .get("index")
+            .is_some_and(|index| index.as_u64() != Some(0))
+    {
         return Err(invalid());
     }
     let candidate = &candidates[0];
@@ -323,9 +418,8 @@ fn decode_gemini(
         return Err(invalid());
     }
     for (index, part) in parts.into_iter().flatten().enumerate() {
-        if part.get("thoughtSignature").is_some() {
-            return Err(invalid());
-        }
+        super::super::super::gemini::validate_response_part(part)?;
+        let mut native_part = part.clone();
         if let Some(text) = part.get("text").and_then(Value::as_str) {
             response.blocks.push(
                 if part.get("thought").and_then(Value::as_bool) == Some(true) {
@@ -335,22 +429,38 @@ fn decode_gemini(
                 },
             );
         } else if let Some(call) = part.get("functionCall") {
+            checked(call, &["id", "name", "args", "partialArgs", "willContinue"])?;
+            if call
+                .get("id")
+                .is_some_and(|id| id.as_str().is_none_or(|id| id.trim().is_empty()))
+                || call.get("willContinue").is_some_and(|flag| flag != false)
+            {
+                return Err(invalid());
+            }
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{seed}_call_{index}"));
+            let arguments = super::super::super::gemini::function_call_args(
+                call.as_object().ok_or_else(invalid)?,
+            )
+            .map_err(|_| invalid())?;
             response.blocks.push(Block::ToolCall {
-                id: call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("{seed}_call_{index}")),
+                id,
                 name: required_text(call, "name").map_err(|_| invalid())?.into(),
-                arguments: call
-                    .get("args")
-                    .filter(|args| args.is_object())
-                    .ok_or_else(invalid)?
-                    .to_string(),
+                arguments: arguments.to_string(),
             });
-        } else {
+            native_part["functionCall"]["args"] = arguments;
+            let fields = native_part["functionCall"]
+                .as_object_mut()
+                .ok_or_else(invalid)?;
+            fields.remove("partialArgs");
+            fields.remove("willContinue");
+        } else if part.get("thoughtSignature").is_none() {
             return Err(invalid());
         }
+        response.native_output.push(native_part);
     }
     if response.finish == Finish::Stop
         && response

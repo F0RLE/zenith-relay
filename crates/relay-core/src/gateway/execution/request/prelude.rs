@@ -23,7 +23,7 @@ pub(super) use super::super::super::request::{
     unpaired_tool_output_ids, RequestToolPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
 pub(super) use super::super::super::response::{
-    collect_upstream_response, emit_usage, populate_tokens, proxy_error_response,
+    collect_upstream_response, emit_repair, emit_usage, populate_tokens, proxy_error_response,
     proxy_json_response, proxy_response, proxy_sse_response, route_error_origin,
     upstream_body_error_response, usage_event, UsageAttempt,
 };

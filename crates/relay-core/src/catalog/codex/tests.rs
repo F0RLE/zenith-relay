@@ -111,7 +111,7 @@ fn routed_models_strip_native_only_selectors_from_template() {
     assert!(catalog_entry.get("service_tiers").is_none());
     assert_eq!(catalog_entry["supports_reasoning_summaries"], false);
     assert_eq!(catalog_entry["supports_parallel_tool_calls"], false);
-    assert_eq!(catalog_entry["input_modalities"], json!(["text", "image"]));
+    assert_eq!(catalog_entry["input_modalities"], json!(["text"]));
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn native_models_keep_bare_slug_and_upstream_capabilities() {
 
     assert_eq!(catalog_entry["slug"], "gpt-5.6-sol");
     assert_eq!(catalog_entry["default_reasoning_level"], "high");
-    assert_eq!(catalog_entry["service_tiers"][0]["id"], "priority");
+    assert_eq!(catalog_entry["service_tiers"], json!([]));
     assert_eq!(catalog_entry["supports_parallel_tool_calls"], true);
     assert_eq!(catalog_entry["use_responses_lite"], true);
     assert_eq!(catalog_entry["input_modalities"], json!(["text"]));

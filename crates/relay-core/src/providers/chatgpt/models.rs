@@ -32,6 +32,7 @@ pub struct AccountModelsClient {
     endpoint_is_custom: bool,
     scope: ManagementHttpScope,
     client_kind: super::OAuthClientKind,
+    subscription_plan_type: Option<String>,
 }
 
 impl AccountModelsClient {
@@ -93,6 +94,7 @@ impl AccountModelsClient {
             endpoint_is_custom: false,
             scope: ManagementHttpScope::default(),
             client_kind: super::OAuthClientKind::Codex,
+            subscription_plan_type: None,
         })
     }
 
@@ -110,6 +112,11 @@ impl AccountModelsClient {
 
     pub fn with_http_scope(mut self, scope: ManagementHttpScope) -> Self {
         self.scope = scope;
+        self
+    }
+
+    pub fn with_subscription_plan_type(mut self, plan_type: Option<&str>) -> Self {
+        self.subscription_plan_type = plan_type.map(str::to_owned);
         self
     }
 
@@ -135,6 +142,20 @@ impl AccountModelsClient {
         chatgpt_account_id: &str,
         client_version: &str,
     ) -> Result<Vec<String>, ModelDiscoveryFailure> {
+        self.client_kind
+            .validate_plan(
+                self.subscription_plan_type.as_deref(),
+                None,
+                authorization
+                    .to_str()
+                    .ok()
+                    .and_then(|header| header.strip_prefix("Bearer ")),
+            )
+            .map_err(|_| {
+                ModelDiscoveryFailure::new(
+                    ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+                )
+            })?;
         parse::validate_account_id(chatgpt_account_id)?;
         let basis_points = self.client_kind == super::OAuthClientKind::ExcelBps;
         let mut request_url = self.endpoint.clone();

@@ -24,7 +24,10 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         ],
     )?;
     let mut decoded_request = Request::default();
-    if let Some(system) = request_body.get("system") {
+    if let Some(system) = request_body
+        .get("system")
+        .filter(|system| !system.is_null())
+    {
         decoded_request.messages.push(Message {
             role: Role::System,
             blocks: super::content::text_blocks(system, WireApi::Messages)?,
@@ -49,7 +52,10 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Messages)?;
     decoded_request.tool_choice =
         super::content::choice(request_body.get("tool_choice"), WireApi::Messages)?;
-    if let Some(choice) = request_body.get("tool_choice") {
+    if let Some(choice) = request_body
+        .get("tool_choice")
+        .filter(|choice| !choice.is_null())
+    {
         checked(choice, &["type", "name", "disable_parallel_tool_use"])?;
         decoded_request.parallel_tools =
             optional_bool(choice, "disable_parallel_tool_use")?.map(|disabled| !disabled);
@@ -68,24 +74,41 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         checked(output_config, &["format", "effort"])?;
         decoded_request.output_format =
             super::content::output_format(output_config.get("format").unwrap_or(&Value::Null))?;
-        decoded_request.reasoning = output_config
+        if output_config
             .get("effort")
-            .and_then(Value::as_str)
-            .map(|effort| Reasoning::Effort(effort.into()));
+            .is_some_and(|effort| !effort.is_null())
+        {
+            let effort = required_text(output_config, "effort")?;
+            decoded_request.reasoning = Some(Reasoning::Effort(effort.into()));
+        }
     }
     if let Some(thinking) = request_body
         .get("thinking")
         .filter(|thinking_value| !thinking_value.is_null())
     {
         checked(thinking, &["type", "budget_tokens"])?;
+        let budget = optional_u64(thinking, "budget_tokens")?;
         match required_text(thinking, "type")? {
-            "disabled" => decoded_request.reasoning = Some(Reasoning::Effort("none".into())),
-            "adaptive" if decoded_request.reasoning.is_some() => {}
-            "enabled" => {
-                decoded_request.reasoning = Some(Reasoning::Budget(
-                    optional_u64(thinking, "budget_tokens")?
-                        .ok_or_else(AdapterError::invalid_request)?,
-                ))
+            "disabled" if budget.is_none() => {
+                if decoded_request.reasoning
+                    .as_ref()
+                    .is_some_and(|reasoning| !matches!(reasoning, Reasoning::Effort(effort) if effort.trim().eq_ignore_ascii_case("none")))
+                {
+                    return Err(AdapterError::reasoning_unsupported());
+                }
+                decoded_request.reasoning = Some(Reasoning::Effort("none".into()));
+            }
+            "adaptive" if budget.is_none() => match decoded_request.reasoning.as_ref() {
+                None => decoded_request.reasoning = Some(Reasoning::Adaptive),
+                Some(Reasoning::Effort(effort)) if !effort.trim().eq_ignore_ascii_case("none") => {}
+                _ => return Err(AdapterError::reasoning_unsupported()),
+            },
+            "enabled" if decoded_request.reasoning.is_none() => {
+                let budget = budget.ok_or_else(AdapterError::invalid_request)?;
+                if budget < 1_024 {
+                    return Err(AdapterError::reasoning_unsupported());
+                }
+                decoded_request.reasoning = Some(Reasoning::Budget(budget));
             }
             _ => return Err(AdapterError::reasoning_unsupported()),
         }

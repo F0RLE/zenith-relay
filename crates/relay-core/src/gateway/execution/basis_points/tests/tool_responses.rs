@@ -39,6 +39,112 @@ fn response_translates_v014_direct_reference_envelope() {
 }
 
 #[test]
+fn response_translates_direct_function_call() {
+    let request = request_with_tool();
+    let translated =
+        translate_response(&tool_response(r#"exec_command({"cmd":"pwd"})"#), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["name"], "exec_command");
+    assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn response_translates_direct_function_call_with_return_await_prefix() {
+    let request = request_with_tool();
+    let translated = translate_response(
+        &tool_response(r#"return await exec_command({"cmd":"pwd"})"#),
+        &request,
+    )
+    .unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["name"], "exec_command");
+    assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn response_translates_namespaced_direct_function_call() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": "Inspect the repo",
+        "tools": [{
+            "type": "namespace",
+            "name": "functions",
+            "tools": [{
+                "type": "function",
+                "name": "exec",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"]
+                }
+            }]
+        }]
+    });
+    let translated =
+        translate_response(&tool_response(r#"functions.exec({"cmd":"pwd"})"#), &request).unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["name"], "exec");
+    assert_eq!(translated["output"][0]["namespace"], "functions");
+    assert_eq!(translated["output"][0]["arguments"], "{\"cmd\":\"pwd\"}");
+}
+
+#[test]
+fn response_translates_direct_custom_call() {
+    let request = json!({
+        "model": "gpt-6-astra",
+        "input": "Apply the patch",
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch",
+            "format": {"type": "text"}
+        }]
+    });
+    let translated = translate_response(
+        &tool_response(r#"apply_patch("diff --git a/a b/a")"#),
+        &request,
+    )
+    .unwrap();
+    let translated: Value = serde_json::from_slice(&translated).unwrap();
+    assert_eq!(translated["output"][0]["type"], "custom_tool_call");
+    assert_eq!(translated["output"][0]["name"], "apply_patch");
+    assert_eq!(translated["output"][0]["input"], "diff --git a/a b/a");
+}
+
+#[test]
+fn direct_tool_call_must_be_a_single_complete_call() {
+    let request = request_with_tool();
+    for code in [
+        r#"functions.exec_command({"cmd":"pwd"}) trailing"#,
+        r#"functions.exec_command({"cmd":"pwd"}); functions.exec_command({"cmd":"ls"})"#,
+    ] {
+        let error = translate_response(&tool_response(code), &request).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.code"));
+    }
+}
+
+#[test]
+fn direct_function_call_arguments_must_be_an_object() {
+    for code in [
+        r#"exec_command("pwd")"#,
+        r#"exec_command("{\"cmd\":\"pwd\"}")"#,
+    ] {
+        let error = translate_response(&tool_response(code), &request_with_tool()).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.args"));
+    }
+}
+
+#[test]
+fn direct_unknown_tool_call_is_rejected_by_the_catalog() {
+    let error = translate_response(
+        &tool_response(r#"unknown_tool({"cmd":"pwd"})"#),
+        &request_with_tool(),
+    )
+    .unwrap_err();
+    assert_eq!(error.parameter(), Some("output.run_officejs.tool"));
+}
+
+#[test]
 fn unknown_historical_tool_calls_are_restored_to_the_transport() {
     let request = json!({
         "model": "gpt-6-astra",

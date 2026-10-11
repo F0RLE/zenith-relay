@@ -173,13 +173,13 @@ async fn invalid_foreign_compaction_does_not_retry_or_rotate_in_manual_order() {
         ),
         Reply::Json(
             StatusCode::OK,
-            json!({"type":"compaction","items":[],"usage":{"input_tokens":1}}),
+            compaction_body("owner-compaction"),
         ),
     ])
     .await;
     let (other_upstream, other_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::OK,
-        json!({"type":"compaction","items":[],"usage":{"input_tokens":1}}),
+        compaction_body("other-compaction"),
     )])
     .await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -237,10 +237,7 @@ async fn compact_account_repairs_legacy_call_ids_after_strict_rejection() {
             StatusCode::BAD_REQUEST,
             json!({"error": {"message": "Missing required field: call_id"}}),
         ),
-        Reply::Json(
-            StatusCode::OK,
-            json!({"type": "compaction", "items": [], "usage": {"input_tokens": 2}}),
-        ),
+        Reply::Json(StatusCode::OK, compaction_body("repaired-compaction")),
     ])
     .await;
     let authority = ready_authority("relay-legacy-account", "account-access").await;
@@ -282,7 +279,16 @@ async fn compact_account_repairs_legacy_call_ids_after_strict_rejection() {
         requests[1].body["input"][1]["call_id"]
     );
     drop(requests);
-    assert_eq!(events.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome),
+        Some(zenith_relay_core::AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -292,7 +298,7 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\",\"output_format\":\"png\"}}\n\n",
         ),
         StreamChunk::Data(
-            "data: {\"type\":\"response.completed\",\"response\":{\"created_at\":7,\"output\":[],\"tool_usage\":{\"image_gen\":{\"image_tokens\":4}}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"created_at\":7,\"output\":[],\"tool_usage\":{\"image_gen\":{\"image_tokens\":4}}}}\n\n",
         ),
     ])])
     .await;

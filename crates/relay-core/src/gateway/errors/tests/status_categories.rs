@@ -3,6 +3,8 @@ use super::*;
 #[test]
 fn basis_points_access_and_policy_refusals_are_not_quota_errors() {
     for (body, category) in [
+        (br#"{"error":{"code":"basispoints_model_access_changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
+        (br#"{"error":{"code":"model_not_allowed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
         (b"403: Model access has changed".as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
         (br#"{"error":{"code":"insufficient_quota","message":"Model access has changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),
         (b"403: This request was blocked by our usage policy.".as_slice(), error_codes::UPSTREAM_CONTENT_POLICY),

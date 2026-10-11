@@ -1,4 +1,6 @@
 //! Shared, loss-checked conversion contracts. Native traffic never enters this module.
+mod citations;
+mod continuation;
 mod decode;
 mod encode;
 mod response;
@@ -9,14 +11,22 @@ mod tests;
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
     AdapterError, AdapterRequestContext, AdapterResult, ClientToolTarget, MessagesBridgeResponse,
-    MessagesBridgeState, ResponsesToolKind,
+    MessagesBridgeState, ResponsesToolKind, ToolChoice,
 };
 use crate::{MessagesReasoningMode, WireApi};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use stream::TranslationStream;
+
+pub(crate) fn continuation_key(
+    client: WireApi,
+    request: &Value,
+    model: &str,
+) -> AdapterResult<Option<String>> {
+    continuation::request_key(client, request, model)
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(super) enum Block {
@@ -33,10 +43,11 @@ pub(super) enum Block {
     ToolResult {
         id: String,
         name: String,
-        content: String,
+        content: Vec<Block>,
         is_error: bool,
     },
     Reasoning(String),
+    Refusal(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -61,14 +72,6 @@ struct Function {
 }
 
 #[derive(Clone, Debug)]
-enum ToolChoice {
-    Auto,
-    None,
-    Required,
-    Function(String),
-}
-
-#[derive(Clone, Debug)]
 enum OutputFormat {
     JsonObject,
     JsonSchema {
@@ -82,6 +85,8 @@ enum OutputFormat {
 enum Reasoning {
     Effort(String),
     Budget(u64),
+    Adaptive,
+    DynamicBudget,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -120,14 +125,19 @@ enum Finish {
     Tools,
     Length,
     Filter,
+    Refusal,
 }
 
 #[derive(Clone, Debug)]
 struct Response {
     id: String,
     blocks: Vec<Block>,
+    citations: BTreeMap<usize, Vec<citations::UrlCitation>>,
     usage: Usage,
     finish: Finish,
+    /// Exact provider-owned assistant items, separate from portable content.
+    /// They are only replayed to the source protocol that produced them.
+    native_output: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,39 +150,92 @@ pub struct TranslationRequest {
     reasoning_mode: MessagesReasoningMode,
     history: Vec<Message>,
     client_tools: BTreeMap<String, ClientToolTarget>,
+    allowed_tool_names: BTreeSet<String>,
+    parallel_tools: bool,
+    response_tools: Option<Vec<Value>>,
+    native_turns: BTreeMap<usize, Vec<Value>>,
 }
 
 impl TranslationRequest {
     pub(super) fn prepare(
         context: AdapterRequestContext<'_>,
         upstream: WireApi,
+        capabilities: Option<&crate::model_metadata::ModelCapabilities>,
     ) -> AdapterResult<Self> {
-        let mut decoded_request = decode::request(context.client_wire_api, context.request)?;
-        if context.client_wire_api == WireApi::Responses
+        let mut effective_request = std::borrow::Cow::Borrowed(context.request);
+        let response_tools = if context.client_wire_api == WireApi::Responses {
+            let supplied = super::contracts::request_tool_catalog(
+                context
+                    .request
+                    .as_object()
+                    .ok_or_else(AdapterError::invalid_request)?,
+            )?;
+            if supplied.is_none()
+                && context
+                    .request
+                    .get("previous_response_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+            {
+                if let Some(tools) = context
+                    .previous
+                    .as_ref()
+                    .and_then(|previous| previous.response_tools.clone())
+                {
+                    effective_request.to_mut()["tools"] = Value::Array(tools);
+                }
+            }
+            super::contracts::request_tool_catalog(
+                effective_request.as_object().expect("request object"),
+            )?
+        } else {
+            None
+        };
+        let mut decoded_request = decode::request(context.client_wire_api, &effective_request)?;
+        let has_previous = context.client_wire_api == WireApi::Responses
             && context
                 .request
                 .get("previous_response_id")
                 .and_then(Value::as_str)
-                .is_some_and(|response_id_value| !response_id_value.is_empty())
-        {
-            let previous_context = context
-                .previous
-                .ok_or_else(AdapterError::continuation_missing)?;
-            if previous_context.model != context.model {
-                return Err(AdapterError::continuation_mismatch());
-            }
-            if previous_context.reasoning_mode != context.reasoning_mode {
-                return Err(AdapterError::continuation_mismatch());
-            }
-            let mut history = previous_context
-                .portable_history
-                .ok_or_else(AdapterError::continuation_mismatch)?;
-            history.append(&mut decoded_request.messages);
-            decoded_request.messages = history;
+                .is_some_and(|response_id_value| !response_id_value.is_empty());
+        if has_previous && context.previous.is_none() {
+            return Err(AdapterError::continuation_missing());
         }
+        let native_turns = if let Some(previous) = context.previous {
+            continuation::restore(
+                &mut decoded_request,
+                previous,
+                context.client_wire_api,
+                upstream,
+                context.model,
+                context.reasoning_mode,
+            )?
+        } else {
+            // Plain tool history is portable for a confirmed non-reasoning model.
+            // Otherwise these protocols may require opaque assistant state that
+            // the client cannot reconstruct after a restart or cache expiry.
+            if upstream != WireApi::ChatCompletions
+                && !capabilities.is_some_and(|capabilities| capabilities.reasoning == Some(false))
+                && decoded_request
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .any(|block| matches!(block, Block::ToolResult { .. }))
+            {
+                return Err(AdapterError::continuation_missing());
+            }
+            BTreeMap::new()
+        };
         decode::resolve_tool_history(&mut decoded_request.messages)?;
-        let mut upstream_body =
-            encode::request(&decoded_request, upstream, context.model, context.stream)?;
+        let mut upstream_body = encode::request(
+            &decoded_request,
+            upstream,
+            context.model,
+            context.stream,
+            &native_turns,
+            context.reasoning_mode,
+            capabilities,
+        )?;
         if upstream == WireApi::Messages {
             super::messages::apply_cache_write_ttl(&mut upstream_body, context.cache_write_ttl)?;
         }
@@ -189,6 +252,18 @@ impl TranslationRequest {
             reasoning_mode: context.reasoning_mode,
             history: decoded_request.messages,
             client_tools: decoded_request.client_tools,
+            allowed_tool_names: decoded_request
+                .tools
+                .into_iter()
+                .filter_map(|tool| match &decoded_request.tool_choice {
+                    Some(ToolChoice::None) => None,
+                    Some(ToolChoice::Function(name)) if name != &tool.name => None,
+                    _ => Some(tool.name),
+                })
+                .collect(),
+            parallel_tools: decoded_request.parallel_tools.unwrap_or(true),
+            response_tools,
+            native_turns,
         })
     }
 
@@ -206,21 +281,67 @@ impl TranslationRequest {
     }
 
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
+        self.validate_tool_calls(&response.blocks)?;
         response.id = self.response_id.clone();
         let response_body =
             response::encode(self.client, &response, &self.model, &self.client_tools)?;
         let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
+        continuation.reusable = matches!(response.finish, Finish::Stop | Finish::Tools);
         let mut history = self.history;
+        continuation.native_turns = self.native_turns;
+        if !response.native_output.is_empty() {
+            continuation
+                .native_turns
+                .insert(history.len(), response.native_output);
+        }
+        continuation.upstream_protocol = Some(self.upstream);
         history.push(Message {
             role: Role::Assistant,
             blocks: response.blocks,
         });
         continuation.portable_history = Some(history);
+        continuation.response_tools = self.response_tools;
+        if self.client != WireApi::Responses {
+            continuation.history_key = Some(continuation::history_key(
+                self.client,
+                &self.model,
+                continuation
+                    .portable_history
+                    .as_deref()
+                    .expect("portable history"),
+            )?);
+        }
         Ok(MessagesBridgeResponse {
             response_body,
             response_id: self.response_id,
             continuation,
         })
+    }
+
+    fn validate_tool_call(&self, id: &str, name: &str) -> AdapterResult<()> {
+        if id.is_empty()
+            || !self.allowed_tool_names.contains(name)
+            || self.history.iter().flat_map(|message| &message.blocks).any(
+                |block| matches!(block, Block::ToolCall { id: previous_id, .. } if previous_id == id),
+            )
+        {
+            return Err(AdapterError::upstream_response_invalid());
+        }
+        Ok(())
+    }
+
+    fn validate_tool_calls(&self, blocks: &[Block]) -> AdapterResult<()> {
+        let mut calls = 0;
+        for block in blocks {
+            if let Block::ToolCall { id, name, .. } = block {
+                self.validate_tool_call(id, name)?;
+                calls += 1;
+            }
+        }
+        if !self.parallel_tools && calls > 1 {
+            return Err(AdapterError::upstream_response_invalid());
+        }
+        Ok(())
     }
 }
 

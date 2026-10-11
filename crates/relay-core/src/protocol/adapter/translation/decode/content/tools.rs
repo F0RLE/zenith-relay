@@ -36,7 +36,7 @@ pub(in crate::protocol::adapter::translation::decode) fn tools(
             functions.push(function(
                 tool,
                 "input_schema",
-                &["name", "description", "input_schema", "type"],
+                &["name", "description", "input_schema", "type", "strict"],
                 false,
             )?);
         } else {

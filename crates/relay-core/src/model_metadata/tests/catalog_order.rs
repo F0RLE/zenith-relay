@@ -331,11 +331,13 @@ fn native_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
         r#"{
             "alpha/shared": {"name": "Alpha Name"},
             "beta/shared": {"name": "Beta Name"},
-            "openai/gpt-test": {"name": "GPT Test", "family": "gpt"}
+            "openai/gpt-test": {"name": "GPT Test", "family": "gpt"},
+            "gpt-capabilities-only": {"service_tiers": ["priority", "ultrafast"]}
         }"#,
     );
     assert_eq!(catalog.native_protocol_for("unlisted-model"), None);
     assert_eq!(catalog.native_protocol_for("shared"), None);
+    assert_eq!(catalog.native_protocol_for("gpt-capabilities-only"), None);
 }
 
 #[test]

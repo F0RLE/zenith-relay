@@ -144,9 +144,35 @@ pub(super) async fn complete_buffered_response(
         Ok(bytes) => bytes,
         Err(step) => return step,
     };
-    let mut event = usage(true, status.as_u16(), None);
+    let completion = serde_json::from_slice::<Value>(&bytes)
+        .map(|body| {
+            crate::protocol::completion::ResponseCompletion::for_protocol(
+                if account_route {
+                    WireApi::Responses
+                } else {
+                    route.adapter.upstream_protocol(client_wire_api).wire_api()
+                },
+                &body,
+            )
+        })
+        .unwrap_or(crate::protocol::completion::ResponseCompletion::Invalid);
+    let completed = completion == crate::protocol::completion::ResponseCompletion::Completed;
+    let mut event = usage(
+        completed,
+        status.as_u16(),
+        (!completed).then(|| error_codes::RESPONSE_INCOMPLETE.to_string()),
+    );
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
+    if completion == crate::protocol::completion::ResponseCompletion::Invalid {
+        let error = AdapterError::upstream_response_invalid();
+        emit_usage(runtime, mark_adapter_failure(event, &error));
+        lease.settle_rotation_unknown(now_ms());
+        return CompletionStep::Respond(adapter_error_response_for_origin(
+            error,
+            selected_error_origin,
+        ));
+    }
     let translated = if let Some(responses_request) = basis_points_request.as_ref() {
         translate_basis_points_completed(adapter_request, &bytes, responses_request, stream)
     } else {
@@ -183,23 +209,28 @@ pub(super) async fn complete_buffered_response(
             ));
         }
     }
-    let recovered = runtime.record_success_with_metrics(
-        &route.candidate_id,
-        source_model,
-        now_ms(),
-        event.output_tokens,
-        event.generation_ms.unwrap_or(event.latency_ms),
-    );
-    event.consecutive_failures = recovered.then_some(0);
-    lease.settle_rotation_success(now_ms());
-    runtime.bind_prompt_affinity(
-        prompt_affinity_key.as_deref(),
-        &route.candidate_id,
-        now_ms(),
-    );
+    if completed {
+        let recovered = runtime.record_success_with_metrics(
+            &route.candidate_id,
+            source_model,
+            now_ms(),
+            event.output_tokens,
+            event.generation_ms.unwrap_or(event.latency_ms),
+        );
+        event.consecutive_failures = recovered.then_some(0);
+        lease.settle_rotation_success(now_ms());
+        runtime.bind_prompt_affinity(
+            prompt_affinity_key.as_deref(),
+            &route.candidate_id,
+            now_ms(),
+        );
+    } else {
+        lease.settle_rotation_terminal(now_ms());
+    }
     emit_usage(runtime, event);
     if let Some((response_id, continuation)) = bridge_response
         .as_ref()
+        .filter(|_| completed)
         .and_then(|response| response.continuation())
     {
         runtime.save_messages_bridge_response(
@@ -217,7 +248,7 @@ pub(super) async fn complete_buffered_response(
             now_ms(),
         );
     }
-    if client_wire_api == WireApi::Responses {
+    if completed && client_wire_api == WireApi::Responses {
         bind_responses_turn(
             runtime,
             &key.id,
@@ -387,13 +418,16 @@ async fn read_completed_body(
                         read.lease.allow_rotation_repair();
                         event.error_category =
                             Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
-                        emit_usage(read.runtime, event);
+                        emit_repair(read.runtime, &mut event);
+                        read.lease.settle_rotation_repair(now_ms());
                         *read.last_failure = Some(failure);
                         *read.last_failure_origin = read.selected_error_origin;
                         return Err(CompletionStep::Continue);
                     }
                     Ok(false) => {}
                     Err(error) => {
+                        emit_usage(read.runtime, mark_adapter_failure(event, &error));
+                        read.lease.settle_rotation_terminal(now_ms());
                         return Err(CompletionStep::Respond(adapter_error_response(error)));
                     }
                 }

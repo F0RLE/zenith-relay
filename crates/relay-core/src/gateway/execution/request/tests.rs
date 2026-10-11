@@ -139,17 +139,23 @@ fn basis_points_messages_tool_result_keeps_the_call_link() {
         ]
     });
     let prepared = SourceAdapter::MessagesToResponses
-        .prepare_request(AdapterRequestContext {
-            client_wire_api: WireApi::Messages,
-            request: &input,
-            model: "test",
-            stream: false,
-            reasoning_mode: MessagesReasoningMode::Adaptive,
-            cache_write_ttl: CacheWriteTtl::Provider,
-            previous: None,
-            response_scope: "test-account",
-            response_id_seed: "test-request",
-        })
+        .prepare_request_with_capabilities(
+            AdapterRequestContext {
+                client_wire_api: WireApi::Messages,
+                request: &input,
+                model: "test",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "test-account",
+                response_id_seed: "test-request",
+            },
+            &crate::model_metadata::ModelCapabilities {
+                reasoning: Some(false),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let basis_points =
         super::super::basis_points::prepare_request(prepared.upstream_body()).unwrap();
@@ -208,6 +214,15 @@ fn requested_reasoning_effort_uses_only_the_matching_client_contract() {
         ),
         None
     );
+    for alias in ["x_high", "extra-high", "very_high", "Very high"] {
+        assert_eq!(
+            requested_reasoning_effort(
+                &json!({"reasoning": {"effort": alias}}),
+                WireApi::Responses
+            ),
+            Some("xhigh".to_string())
+        );
+    }
 }
 
 #[test]

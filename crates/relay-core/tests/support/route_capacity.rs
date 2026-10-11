@@ -640,7 +640,7 @@ async fn assert_tool_affinity_retry(
         Reply::Json(
             StatusCode::OK,
             json!({
-                "id": "tool-owner-response", "object": "response", "model": MODEL,
+                "id": "tool-owner-response", "object": "response", "status": "completed", "model": MODEL,
                 "output": [call.clone()]
             }),
         ),

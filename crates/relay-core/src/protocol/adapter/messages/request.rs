@@ -5,7 +5,7 @@ use super::{
     MessagesBridgeRequest, MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind,
     TranslatedTools,
 };
-use crate::CacheWriteTtl;
+use crate::{AdapterRequestContext, CacheWriteTtl};
 use serde_json::{json, Map, Value};
 
 /// Converts a Codex Responses request to the Anthropic Messages contract.
@@ -43,31 +43,41 @@ pub fn prepare_responses_to_messages_scoped(
     previous_bridge_state: Option<MessagesBridgeState>,
     response_scope: &str,
 ) -> AdapterResult<MessagesBridgeRequest> {
-    prepare_responses_to_messages_scoped_with_cache_ttl(
+    prepare_responses_to_messages_with_capabilities(
+        AdapterRequestContext {
+            client_wire_api: crate::WireApi::Responses,
+            request,
+            model,
+            stream,
+            reasoning_mode,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: previous_bridge_state,
+            response_scope,
+            response_id_seed: "",
+        },
+        None,
+    )
+}
+
+pub(crate) fn prepare_responses_to_messages_with_capabilities(
+    context: AdapterRequestContext<'_>,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
+) -> AdapterResult<MessagesBridgeRequest> {
+    let AdapterRequestContext {
         request,
         model,
         stream,
         reasoning_mode,
-        CacheWriteTtl::Provider,
-        previous_bridge_state,
+        cache_write_ttl,
+        previous,
         response_scope,
-    )
-}
-
-pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
-    request: &Value,
-    model: &str,
-    stream: bool,
-    reasoning_mode: MessagesReasoningMode,
-    cache_write_ttl: CacheWriteTtl,
-    previous_bridge_state: Option<MessagesBridgeState>,
-    response_scope: &str,
-) -> AdapterResult<MessagesBridgeRequest> {
+        ..
+    } = context;
     let (request_object, mut bridge_state) = prepare_bridge_state(
         request,
         model,
         reasoning_mode,
-        previous_bridge_state,
+        previous,
         crate::WireApi::Messages,
     )?;
 
@@ -78,12 +88,6 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
         } = tools::translate_tools(&tools)?;
         bridge_state.tools = (!upstream.is_empty()).then_some(upstream);
         bridge_state.tool_targets = client_tools;
-        // A Responses request that supplies a new tool catalog without an
-        // explicit choice returns to the protocol default of automatic
-        // selection. Retaining a previous restricted list would silently hide
-        // newly supplied tools.
-        bridge_state.tool_choice = None;
-        bridge_state.tool_allow_list = None;
     }
     if let Some(tool_choice) = request_object.get("tool_choice") {
         let translated = tools::translate_tool_choice(tool_choice, &bridge_state)?;
@@ -97,6 +101,7 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
             .get("input")
             .ok_or_else(AdapterError::invalid_request)?,
     )?;
+    bridge_state.validate_tool_history(crate::WireApi::Messages)?;
     if bridge_state.messages.is_empty() {
         return Err(AdapterError::invalid_request());
     }
@@ -119,6 +124,7 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
             "max_tokens".to_string(),
             request_object
                 .get("max_output_tokens")
+                .filter(|limit| !limit.is_null())
                 .cloned()
                 .unwrap_or_else(|| Value::from(8_192_u64)),
         ),
@@ -128,9 +134,9 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
     }
     if let Some(tools) = bridge_state.upstream_tools() {
         upstream_fields.insert("tools".to_string(), Value::Array(tools));
-    }
-    if let Some(tool_choice) = bridge_state.tool_choice.clone() {
-        upstream_fields.insert("tool_choice".to_string(), tool_choice);
+        if let Some(tool_choice) = bridge_state.tool_choice.clone() {
+            upstream_fields.insert("tool_choice".to_string(), tool_choice);
+        }
     }
     if let Some(parallel) = request_object
         .get("parallel_tool_calls")
@@ -139,10 +145,13 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
         let parallel = parallel
             .as_bool()
             .ok_or_else(AdapterError::invalid_request)?;
-        upstream_fields
-            .entry("tool_choice")
-            .or_insert_with(|| json!({"type":"auto"}))["disable_parallel_tool_use"] =
-            (!parallel).into();
+        if upstream_fields.contains_key("tools") {
+            let choice = upstream_fields
+                .entry("tool_choice")
+                .or_insert_with(|| json!({"type":"auto"}));
+            choice["disable_parallel_tool_use"] = (!parallel).into();
+            bridge_state.tool_choice = Some(choice.clone());
+        }
     }
     if let Some(format) = request_object
         .get("text")
@@ -164,20 +173,37 @@ pub(crate) fn prepare_responses_to_messages_scoped_with_cache_ttl(
             _ => return Err(AdapterError::parameter_unsupported()),
         }
     }
-    if let Some(temperature) = request_object.get("temperature") {
+    if let Some(temperature) = request_object
+        .get("temperature")
+        .filter(|value| !value.is_null())
+    {
+        if temperature.as_f64().is_none() {
+            return Err(AdapterError::invalid_request().with_parameter("temperature"));
+        }
         upstream_fields.insert("temperature".to_string(), temperature.clone());
     }
-    if let Some(top_p) = request_object.get("top_p") {
+    if let Some(top_p) = request_object.get("top_p").filter(|value| !value.is_null()) {
+        if top_p.as_f64().is_none() {
+            return Err(AdapterError::invalid_request().with_parameter("top_p"));
+        }
         upstream_fields.insert("top_p".to_string(), top_p.clone());
     }
-    if let Some(stop_sequences) = request_object.get("stop") {
-        upstream_fields.insert("stop_sequences".to_string(), stop_sequences.clone());
+    if let Some(stop) = request_object.get("stop").filter(|value| !value.is_null()) {
+        let sequences = match stop {
+            Value::String(sequence) => vec![Value::String(sequence.clone())],
+            Value::Array(sequences) if sequences.iter().all(Value::is_string) => sequences.clone(),
+            _ => return Err(AdapterError::invalid_request().with_parameter("stop")),
+        };
+        upstream_fields.insert("stop_sequences".to_string(), Value::Array(sequences));
     }
     apply_reasoning(
         &mut upstream_fields,
         request_object.get("reasoning"),
         reasoning_mode,
-        request_object.contains_key("max_output_tokens"),
+        request_object
+            .get("max_output_tokens")
+            .is_some_and(|limit| !limit.is_null()),
+        capabilities,
     )?;
     let mut upstream_body = Value::Object(upstream_fields);
     apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
@@ -258,13 +284,17 @@ pub(crate) fn apply_cache_write_ttl(
 }
 
 fn set_last_cache_control(content_value: &mut Value, ttl: &str) -> bool {
-    if let Some(block) = content_value
-        .as_array_mut()
-        .and_then(|content_blocks| content_blocks.last_mut())
-    {
-        return set_cache_control(block, ttl);
+    if let Some(blocks) = content_value.as_array_mut() {
+        return blocks
+            .iter_mut()
+            .rev()
+            .any(|block| set_cache_control(block, ttl));
     }
-    let Some(text) = content_value.as_str().map(str::to_string) else {
+    let Some(text) = content_value
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+    else {
         return false;
     };
     *content_value = Value::Array(vec![json!({
@@ -279,6 +309,18 @@ fn set_cache_control(block: &mut Value, ttl: &str) -> bool {
     let Some(block) = block.as_object_mut() else {
         return false;
     };
+    // Native thinking stays unchanged; empty text is not a valid cache breakpoint.
+    if matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("thinking" | "redacted_thinking")
+    ) || (block.get("type").and_then(Value::as_str) == Some("text")
+        && block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty))
+    {
+        return false;
+    }
     block.insert(
         "cache_control".to_string(),
         json!({"type": "ephemeral", "ttl": ttl}),
@@ -291,72 +333,13 @@ fn apply_reasoning(
     reasoning: Option<&Value>,
     mode: MessagesReasoningMode,
     explicit_max_tokens: bool,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<()> {
-    let effort = reasoning
-        .and_then(Value::as_object)
-        .and_then(|reasoning| reasoning.get("effort"))
-        .and_then(Value::as_str)
-        .map(|effort| effort.trim().to_ascii_lowercase())
-        .filter(|effort| !effort.is_empty());
-    let Some(effort) = effort else {
+    let Some(effort) = super::super::contracts::responses_reasoning_effort(reasoning)? else {
         return Ok(());
     };
-    if effort == "none" {
-        message_fields.insert("thinking".to_string(), json!({"type":"disabled"}));
-        return Ok(());
-    }
-    if ["temperature", "top_p"].iter().any(|parameter_name| {
-        message_fields
-            .get(*parameter_name)
-            .is_some_and(|parameter_value| !parameter_value.is_null())
-    }) {
-        return Err(AdapterError::parameter_unsupported());
-    }
-    match mode {
-        MessagesReasoningMode::Disabled => Err(AdapterError::reasoning_unsupported()),
-        MessagesReasoningMode::Budget => {
-            let budget_tokens = match effort.as_str() {
-                "minimal" => 1_024,
-                "low" => 4_096,
-                "high" => 16_384,
-                "xhigh" => 24_576,
-                "max" | "ultra" => 32_000,
-                "medium" => 8_192,
-                _ => return Err(AdapterError::reasoning_unsupported()),
-            };
-            let minimum_max_tokens = budget_tokens + 1_024;
-            if explicit_max_tokens
-                && message_fields
-                    .get("max_tokens")
-                    .and_then(Value::as_u64)
-                    .is_none_or(|limit| limit < minimum_max_tokens)
-            {
-                return Err(AdapterError::parameter_unsupported());
-            }
-            let max_tokens = message_fields
-                .get("max_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-                .max(minimum_max_tokens);
-            message_fields.insert("max_tokens".to_string(), Value::from(max_tokens));
-            message_fields.insert(
-                "thinking".to_string(),
-                json!({"type": "enabled", "budget_tokens": budget_tokens}),
-            );
-            Ok(())
-        }
-        MessagesReasoningMode::Adaptive => {
-            let effort = match effort.as_str() {
-                "low" | "medium" | "high" | "max" => effort.as_str(),
-                _ => return Err(AdapterError::reasoning_unsupported()),
-            };
-            message_fields.insert("thinking".to_string(), json!({"type": "adaptive"}));
-            message_fields
-                .entry("output_config")
-                .or_insert_with(|| json!({}))["effort"] = effort.into();
-            Ok(())
-        }
-    }
+    super::super::contracts::ReasoningPolicy::new(crate::WireApi::Messages, mode, capabilities)
+        .apply_effort(message_fields, &effort, explicit_max_tokens)
 }
 
 mod content;

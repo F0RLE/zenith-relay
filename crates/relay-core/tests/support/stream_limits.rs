@@ -106,7 +106,7 @@ async fn stream_prelude_is_buffered_until_the_first_text_output() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\"}}\n\n");
+    assert_eq!(second, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\",\"annotations\":[]}]}]}}\n\n");
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();
@@ -123,6 +123,76 @@ async fn stream_prelude_is_buffered_until_the_first_text_output() {
     assert!(events[0]
         .ttft_ms
         .is_some_and(|ttft| ttft <= events[0].latency_ms));
+}
+
+#[tokio::test]
+async fn failed_stream_bootstrap_keeps_reported_usage_without_replaying() {
+    for (tail, category, expected_status) in [
+        ("data: {broken\n\n", "stream_invalid", StatusCode::BAD_GATEWAY),
+        (
+            "data: {\"type\":\"response.completed\"",
+            "stream_incomplete",
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"output\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null}}}\n\n",
+            "response_incomplete",
+            StatusCode::OK,
+        ),
+    ] {
+        let frames = format!(
+            "{}{}{}",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic-response\",\"usage\":{\"input_tokens\":17,\"input_tokens_details\":{\"cached_tokens\":5},\"total_tokens\":17}}}\n\n",
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n",
+            tail,
+        );
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded_requests = requests.clone();
+        let upstream = spawn(Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let frames = frames.clone();
+                let requests = recorded_requests.clone();
+                async move {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(frames))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({
+                "model": "gpt-test",
+                "input": "synthetic-private-bootstrap",
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status, "{category}");
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("synthetic-private-bootstrap"));
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{category}");
+        let event = &events[0];
+        assert!(!event.success);
+        assert_eq!(event.error_category.as_deref(), Some(category));
+        assert_eq!(event.input_tokens, Some(17));
+        assert_eq!(event.output_tokens, Some(3));
+        assert_eq!(event.cached_input_tokens, Some(5));
+        assert_eq!(event.reasoning_tokens, Some(1));
+        assert_eq!(event.total_tokens, Some(20));
+        assert!(!serde_json::to_string(event)
+            .unwrap()
+            .contains("synthetic-private-bootstrap"));
+    }
 }
 
 #[tokio::test]

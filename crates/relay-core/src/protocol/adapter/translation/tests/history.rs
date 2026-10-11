@@ -166,7 +166,16 @@ fn reasoning_preserves_schema_and_honors_output_limits() {
     }
     let invalid = json!({"messages":[{"role":"user","content":"Hello"}],"thinking":{"type":"enabled","budget_tokens":2048},"max_tokens":100});
     let parsed = decode::request(WireApi::Messages, &invalid).unwrap();
-    assert!(encode::request(&parsed, WireApi::Messages, "test", false).is_err());
+    assert!(encode::request(
+        &parsed,
+        WireApi::Messages,
+        "test",
+        false,
+        &Default::default(),
+        MessagesReasoningMode::Adaptive,
+        None,
+    )
+    .is_err());
 }
 #[test]
 fn messages_thinking_blocks_are_translated_as_reasoning() {
@@ -176,7 +185,7 @@ fn messages_thinking_blocks_are_translated_as_reasoning() {
             "id":"msg_thinking",
             "stop_reason":"end_turn",
             "content":[
-                {"type":"thinking","thinking":"plan first"},
+                {"type":"thinking","thinking":"plan first","signature":"synthetic-signature"},
                 {"type":"text","text":"answer"}
             ],
             "usage":{"input_tokens":4,"output_tokens":3}
@@ -187,10 +196,22 @@ fn messages_thinking_blocks_are_translated_as_reasoning() {
     assert!(matches!(&response.blocks[0], Block::Reasoning(text) if text == "plan first"));
     assert!(matches!(&response.blocks[1], Block::Text(text) if text == "answer"));
 
-    let encoded =
-        response::encode(WireApi::Messages, &response, "test", &Default::default()).unwrap();
-    assert_eq!(encoded["content"][0]["type"], "thinking");
-    assert_eq!(encoded["content"][0]["thinking"], "plan first");
+    let encoded = response::encode(
+        WireApi::ChatCompletions,
+        &response,
+        "test",
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        encoded["choices"][0]["message"]["reasoning_content"],
+        "plan first"
+    );
+    assert_eq!(
+        response.native_output[0]["signature"],
+        "synthetic-signature"
+    );
+    assert!(response::encode(WireApi::Messages, &response, "test", &Default::default()).is_err());
 }
 #[test]
 fn messages_stream_thinking_blocks_complete_without_dropping_reasoning() {
@@ -206,6 +227,7 @@ fn messages_stream_thinking_blocks_complete_without_dropping_reasoning() {
         json!({"type":"message_start","message":{"id":"msg_thinking","usage":{"input_tokens":4}}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"plan "}}),
         json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"synthetic-signature"}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"answer"}}),
         json!({"type":"content_block_stop","index":1}),
@@ -222,10 +244,45 @@ fn messages_stream_thinking_blocks_complete_without_dropping_reasoning() {
         completed.continuation.messages[1]["content"][0]["thinking"],
         "plan first"
     );
+    assert_eq!(
+        completed.continuation.messages[1]["content"][0]["signature"],
+        "synthetic-signature"
+    );
+}
+
+#[test]
+fn messages_stream_rejects_thinking_without_a_signature() {
+    let mut bridge = prepare(
+        WireApi::Responses,
+        WireApi::Messages,
+        &json!({"input":"Hello"}),
+        true,
+    )
+    .into_stream_bridge()
+    .unwrap();
+    for event in [
+        json!({"type":"message_start","message":{"id":"msg_thinking"}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"plan"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+        json!({"type":"message_stop"}),
+    ] {
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+    }
+    bridge.finish();
+    assert!(bridge.is_terminal());
+    assert!(bridge.completed().is_none());
+    let output = std::iter::from_fn(|| bridge.pop_output())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("adapter_upstream_stream_invalid"));
 }
 #[test]
 fn responses_to_chat_continuation_resolves_results_after_loading_history() {
     let mut previous = MessagesBridgeState::new("test", MessagesReasoningMode::Adaptive);
+    previous.upstream_protocol = Some(WireApi::ChatCompletions);
     previous.portable_history = Some(vec![Message {
         role: Role::Assistant,
         blocks: vec![Block::ToolCall {
@@ -255,4 +312,95 @@ fn responses_to_chat_continuation_resolves_results_after_loading_history() {
         "call_saved"
     );
     assert_eq!(prepared.upstream_body()["messages"][1]["content"], "found");
+}
+
+#[test]
+fn unknown_or_reasoning_models_require_native_state_for_tool_result_history() {
+    let request = tool_history(WireApi::ChatCompletions);
+    for upstream in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {
+        for reasoning in [None, Some(true)] {
+            let capabilities = crate::model_metadata::ModelCapabilities {
+                reasoning,
+                ..Default::default()
+            };
+            let error = TranslationRequest::prepare(
+                AdapterRequestContext {
+                    client_wire_api: WireApi::ChatCompletions,
+                    request: &request,
+                    model: "test",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: CacheWriteTtl::Provider,
+                    previous: None,
+                    response_scope: "source-test",
+                    response_id_seed: "missing-native-state",
+                },
+                upstream,
+                Some(&capabilities),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code(),
+                "adapter_continuation_missing",
+                "{upstream:?}: {reasoning:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn encrypted_responses_reasoning_without_public_summary_is_preserved_for_replay() {
+    let response = response::decode(WireApi::Responses, &json!({
+        "status":"completed","output":[
+            {"type":"reasoning","id":"rs_synthetic","encrypted_content":"synthetic-encrypted-state"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer","annotations":[]}]}
+        ]
+    }), "seed").unwrap();
+    assert_eq!(response.blocks, vec![Block::Text("answer".into())]);
+    assert_eq!(
+        response.native_output[0]["encrypted_content"],
+        "synthetic-encrypted-state"
+    );
+    let completed = TranslationRequest::prepare(
+        AdapterRequestContext {
+            client_wire_api: WireApi::ChatCompletions,
+            request: &input(WireApi::ChatCompletions),
+            model: "test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: None,
+            response_scope: "source-test",
+            response_id_seed: "encrypted-state",
+        },
+        WireApi::Responses,
+        None,
+    )
+    .unwrap()
+    .complete(response)
+    .unwrap();
+    let request = json!({"messages":[
+        {"role":"user","content":"Hello"},{"role":"assistant","content":"answer"},{"role":"user","content":"Continue"}
+    ]});
+    let replay = TranslationRequest::prepare(
+        AdapterRequestContext {
+            client_wire_api: WireApi::ChatCompletions,
+            request: &request,
+            model: "test",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: CacheWriteTtl::Provider,
+            previous: Some(completed.continuation),
+            response_scope: "source-test",
+            response_id_seed: "replayed-state",
+        },
+        WireApi::Responses,
+        None,
+    )
+    .unwrap();
+    assert!(replay.upstream_body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["encrypted_content"] == "synthetic-encrypted-state"));
 }

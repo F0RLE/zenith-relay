@@ -59,6 +59,23 @@ pub struct ModelCapabilities {
     pub attachment: Option<bool>,
     pub open_weights: Option<bool>,
     #[serde(default)]
+    pub temperature: Option<bool>,
+    #[serde(default)]
+    pub prompt_caching: Option<bool>,
+    #[serde(default)]
+    pub parallel_tool_call: Option<bool>,
+    #[serde(default)]
+    pub tool_choice: Option<bool>,
+    #[serde(default)]
+    pub streaming: Option<bool>,
+    /// Explicit service modes in a trusted reference. Prices and model names
+    /// never populate this list; a transport may narrow it further.
+    #[serde(default)]
+    pub service_tiers: Vec<crate::DefaultServiceTier>,
+    /// Known reasoning modes are metadata, not arbitrary provider-body presets.
+    #[serde(default)]
+    pub reasoning_modes: Vec<String>,
+    #[serde(default)]
     pub input_modalities: Vec<String>,
     #[serde(default)]
     pub output_modalities: Vec<String>,
@@ -107,6 +124,8 @@ pub struct ModelMetadataCatalog {
     entries: BTreeMap<String, ModelMetadata>,
     leaf_matches: BTreeMap<String, String>,
     ambiguous_leaves: BTreeSet<String>,
+    /// None marks a family claimed by several primary catalog providers.
+    family_providers: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

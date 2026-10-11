@@ -89,6 +89,7 @@ pub(crate) fn failure_category_affects_account_state(category: &str) -> bool {
                 | error_codes::UPSTREAM_UNAVAILABLE
                 | error_codes::UPSTREAM_GATEWAY_TIMEOUT
                 | error_codes::IMAGE_GENERATION_NOT_ENABLED
+                | error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID
         )
 }
 

@@ -32,6 +32,10 @@ fn pool_snapshot_configuration_keeps_model_speed_without_a_running_listener() {
         provider_stats: None,
     };
     let mut models = pool_model_summaries(std::slice::from_ref(&source), &[], &[]);
+    models[0].catalog_capabilities = Some(crate::model_metadata::ModelCapabilities {
+        service_tiers: vec![DefaultServiceTier::Fast],
+        ..Default::default()
+    });
     let price_overrides = BTreeMap::from([(
         "gpt-test".to_string(),
         ApiModelPriceOverride {
@@ -40,6 +44,7 @@ fn pool_snapshot_configuration_keeps_model_speed_without_a_running_listener() {
             cache_write_5m_micro_usd_per_million: Some(18),
             cache_write_1h_micro_usd_per_million: Some(9),
             output_micro_usd_per_million: 34,
+            ..Default::default()
         },
     )]);
     let reasoning_allowed_levels =
@@ -72,7 +77,7 @@ fn pool_snapshot_configuration_keeps_model_speed_without_a_running_listener() {
     assert_eq!(pool_candidate_count(&[source], &[]), 1);
 }
 #[test]
-fn pool_snapshot_applies_the_model_speed_policy_without_participant_evidence() {
+fn pool_snapshot_applies_reference_speed_with_a_configured_transport() {
     let source = SourceSummary {
         resolved_protocol_bindings: None,
         id: "source_1".into(),
@@ -117,6 +122,12 @@ fn pool_snapshot_applies_the_model_speed_policy_without_participant_evidence() {
         })],
         GatewayRuntimeOptions {
             default_service_tier: DefaultServiceTier::Fast,
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    r#"{"gpt-test":{"service_tiers":["priority"]}}"#,
+                )
+                .unwrap(),
+            )),
             ..Default::default()
         },
         Arc::new(|_| {}),
@@ -203,7 +214,7 @@ fn pool_model_summaries_include_the_runtime_messages_bridge() {
             .collect::<Vec<_>>(),
         ["gpt-routed", "claude-native"]
     );
-    assert!(models[0].speed_supported);
+    assert!(!models[0].speed_supported);
     assert!(!models[1].speed_supported);
     assert_eq!(models[1].speed_tier, DefaultServiceTier::Standard);
 }

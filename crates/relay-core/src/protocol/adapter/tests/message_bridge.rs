@@ -256,7 +256,7 @@ fn messages_bridge_preserves_output_limit_and_rejects_unknown_terminal_reason() 
         limited.response_body["incomplete_details"]["reason"],
         "max_output_tokens"
     );
-    for reason in [None, Some("pause_turn")] {
+    for reason in [None, Some("unknown_terminal_reason")] {
         let mut upstream = json!({"id":"msg_unknown","content":[{"type":"text","text":"partial"}]});
         if let Some(reason) = reason {
             upstream["stop_reason"] = reason.into();
@@ -286,12 +286,13 @@ fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
         &json!({"id":"msg_empty_refusal","stop_reason":"refusal","content":[]}),
     )
     .unwrap();
-    assert_eq!(json.response_body["status"], "incomplete");
-    assert_eq!(json.response_body["output"], json!([]));
+    assert_eq!(json.response_body["status"], "completed");
     assert_eq!(
-        json.response_body["incomplete_details"]["reason"],
-        "content_filter"
+        json.response_body["output"][0]["content"][0],
+        json!({"type":"refusal","refusal":""})
     );
+    assert!(json.response_body["incomplete_details"].is_null());
+    assert!(!json.continuation.is_reusable());
 
     let mut stream = MessagesStreamBridge::new(make_request(true));
     for event in [
@@ -302,16 +303,18 @@ fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
         stream.push(format!("data: {event}\n\n").as_bytes());
     }
     let completed = stream.completed().expect("empty refusal should complete");
-    assert_eq!(completed.response_body["status"], "incomplete");
-    assert_eq!(completed.response_body["output"], json!([]));
+    assert_eq!(completed.response_body["status"], "completed");
     assert_eq!(
-        completed.response_body["incomplete_details"]["reason"],
-        "content_filter"
+        completed.response_body["output"][0]["content"][0],
+        json!({"type":"refusal","refusal":""})
     );
+    assert!(completed.response_body["incomplete_details"].is_null());
+    assert!(!completed.continuation.is_reusable());
     let events = std::iter::from_fn(|| stream.pop_output())
         .map(|chunk| String::from_utf8(chunk).unwrap())
         .collect::<String>();
-    assert!(events.contains("response.incomplete"));
+    assert!(events.contains("response.refusal.done"));
+    assert!(events.contains("event: response.completed"));
     assert!(!events.contains("response.failed"));
 }
 #[test]
@@ -337,9 +340,6 @@ data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location"}}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}

@@ -38,8 +38,14 @@ pub(super) fn incompatible_routes(
     for route in runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
     {
         let validate = || {
+            let capability = runtime
+                .model_capabilities(&route.source_model)
+                .for_route(route.route_capability.as_ref());
+            let selected = tier_policy.selected_tier();
+            if !GatewayRuntime::route_supports_service_tier(&route, selected) {
+                return Err(AdapterError::parameter_unsupported_for("service_tier"));
+            }
             if route.account_transport == AccountTransport::ExcelBasisPoints {
-                let selected = tier_policy.select_for_model(runtime, &route.source_model);
                 if let Some(error) =
                     basis_points_route_error(request, stream, tier_policy, selected)
                 {
@@ -51,7 +57,20 @@ pub(super) fn incompatible_routes(
             // constrain conversions. A raw /models listing alone is not
             // capability evidence. Native payloads still pass through.
             if !route.adapter.is_passthrough() {
-                let capability = runtime.model_capabilities(&route.source_model);
+                if capability.temperature == Some(false)
+                    && request
+                        .get("temperature")
+                        .is_some_and(|value| !value.is_null())
+                {
+                    return Err(AdapterError::parameter_unsupported_for("temperature"));
+                }
+                if capability.parallel_tool_call == Some(false)
+                    && request.get("parallel_tool_calls").and_then(Value::as_bool) == Some(true)
+                {
+                    return Err(AdapterError::parameter_unsupported_for(
+                        "parallel_tool_calls",
+                    ));
+                }
                 let supported =
                     capability.protocol_features_for_route(route.route_capability.as_ref());
                 if let Some(feature) = features
@@ -69,8 +88,7 @@ pub(super) fn incompatible_routes(
                     }));
                 }
                 if effort.as_ref().is_some_and(|effort| {
-                    let levels = capability
-                        .reasoning_effort_levels_for_route(route.route_capability.as_ref());
+                    let levels = &capability.reasoning_effort_levels;
                     !levels.is_empty()
                         && !levels
                             .iter()
@@ -91,42 +109,30 @@ pub(super) fn incompatible_routes(
                     .map(drop);
             }
 
-            let continuation_state = if route.adapter.uses_local_continuation_state() {
-                request
-                    .get("previous_response_id")
-                    .and_then(Value::as_str)
-                    .filter(|response_id| !response_id.trim().is_empty())
-                    .map(|response_id| {
-                        runtime.load_messages_bridge_state(
-                            &key.id,
-                            response_id,
-                            &route.candidate_id,
-                            now_ms,
-                        )
-                    })
-                    .transpose()?
-            } else {
-                None
-            };
+            let continuation_state =
+                runtime.load_adapter_continuation(&route, &key.id, request, now_ms)?;
             let mut candidate_request = request.clone();
             tier_policy.prepare_for_candidate(
                 &mut candidate_request,
-                tier_policy.select_for_model(runtime, &route.source_model),
+                tier_policy.selected_tier(),
                 client,
             );
             route
                 .adapter
-                .prepare_request(AdapterRequestContext {
-                    client_wire_api: client,
-                    request: &candidate_request,
-                    model: &route.source_model,
-                    stream,
-                    reasoning_mode: route.reasoning_mode,
-                    cache_write_ttl: route.cache_write_ttl,
-                    previous: continuation_state,
-                    response_scope: &route.candidate_id,
-                    response_id_seed: "admission",
-                })
+                .prepare_request_with_capabilities(
+                    AdapterRequestContext {
+                        client_wire_api: client,
+                        request: &candidate_request,
+                        model: &route.source_model,
+                        stream,
+                        reasoning_mode: route.reasoning_mode,
+                        cache_write_ttl: route.cache_write_ttl,
+                        previous: continuation_state,
+                        response_scope: &route.candidate_id,
+                        response_id_seed: "admission",
+                    },
+                    &capability,
+                )
                 .map(drop)
         };
         if let Err(error) = validate() {
@@ -250,15 +256,18 @@ fn has_image(request_value: &Value) -> bool {
     match request_value {
         Value::Array(request_items) => request_items.iter().any(has_image),
         Value::Object(request_object) => {
-            request_object.contains_key("inlineData")
-                || request_object.contains_key("fileData")
-                || matches!(
-                    request_object.get("type").and_then(Value::as_str),
-                    Some("input_image" | "image_url" | "image")
-                )
-                || ["content", "parts"]
-                    .iter()
-                    .any(|field_name| request_object.get(*field_name).is_some_and(has_image))
+            ["inlineData", "fileData"].iter().any(|field| {
+                request_object
+                    .get(*field)
+                    .and_then(|media| media.get("mimeType"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|mime| mime.starts_with("image/"))
+            }) || matches!(
+                request_object.get("type").and_then(Value::as_str),
+                Some("input_image" | "image_url" | "image")
+            ) || ["content", "parts"]
+                .iter()
+                .any(|field_name| request_object.get(*field_name).is_some_and(has_image))
         }
         _ => false,
     }

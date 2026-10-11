@@ -183,11 +183,13 @@ fn model_summary(
         catalog_context_limit: None,
         catalog_input_limit: None,
         catalog_output_limit: None,
+        catalog_capabilities: None,
         input_micro_usd_per_million: input_price,
         cached_input_micro_usd_per_million: cache_read_price,
         cache_write_5m_micro_usd_per_million: short_cache_write_price,
         cache_write_1h_micro_usd_per_million: long_cache_write_price,
         output_micro_usd_per_million: output_price,
+        token_price: quote,
         image_request_prices,
         custom_price: false,
         reasoning_levels: Vec::new(),
@@ -237,11 +239,16 @@ fn resolve_pool_model_price(
                 if quote.priority.is_empty() {
                     quote.priority = candidate_quote.priority;
                 }
-                if quote.above_200k.is_empty() {
-                    quote.above_200k = candidate_quote.above_200k;
-                }
-                if quote.above_272k.is_empty() {
-                    quote.above_272k = candidate_quote.above_272k;
+                for (target, candidate) in [
+                    (&mut quote.above_100k, candidate_quote.above_100k),
+                    (&mut quote.above_128k, candidate_quote.above_128k),
+                    (&mut quote.above_200k, candidate_quote.above_200k),
+                    (&mut quote.above_272k, candidate_quote.above_272k),
+                    (&mut quote.above_512k, candidate_quote.above_512k),
+                ] {
+                    if target.is_empty() {
+                        *target = candidate;
+                    }
                 }
                 current.quote = Some(quote);
                 resolved = Some(current);

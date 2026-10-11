@@ -8,9 +8,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod credential;
 mod quota;
 mod source;
 
+pub use credential::{CredentialDiagnostics, CredentialRecovery, CredentialStatus};
 pub use quota::{api_equivalent_projection_window, QuotaWindowUsage};
 pub use source::{SourceRefreshState, SourceSummary, SourceSummaryRecord};
 
@@ -72,6 +74,8 @@ pub struct AccountSummary {
     pub basis_points_available: bool,
     #[serde(default)]
     pub basis_points_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_diagnostics: Option<CredentialDiagnostics>,
     pub enabled: bool,
     #[serde(default)]
     pub in_pool: bool,

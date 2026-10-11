@@ -184,6 +184,21 @@ pub(super) async fn dispatch_account_attempt(
                 upstream_request.header(CODEX_RESPONSES_LITE_HEADER, responses_lite_header.clone());
         }
     }
+    let authorization_event = usage_event(
+        UsageAttempt {
+            request_id,
+            attempt: u16::from(budget.dispatches()),
+            local_key_id: &key.id,
+            route: &route,
+            reasoning_effort: Some(&reasoning_effort),
+            requested_model,
+            tool_use: tool_use.clone(),
+        },
+        false,
+        401,
+        None,
+        started.elapsed().as_millis() as u64,
+    );
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
@@ -200,6 +215,7 @@ pub(super) async fn dispatch_account_attempt(
                 turn_scope: turn_scope.as_ref(),
                 budget: Some(budget),
                 lease: Some(lease),
+                usage_event: Some((&authorization_event, started)),
             },
         )
         .await;

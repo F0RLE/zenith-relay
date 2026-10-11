@@ -46,6 +46,7 @@ fn event(
             dispatches_before: 0,
             endpoint_kind: Some("responses".into()),
             cache_context: Some(diagnostics),
+            attempt_outcome: None,
         }),
         requested_model: Some("synthetic".into()),
         resolved_model: Some("synthetic".into()),

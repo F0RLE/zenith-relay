@@ -78,11 +78,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
         drop(upgrade);
         refresh_fence = runtime.fence_execution(&route.candidate_id);
         match runtime
-            .refresh_authorization_after_unauthorized(
-                &route.candidate_id,
-                prepared.token_generation,
-                now_ms(),
-            )
+            .refresh_authorization_after_unauthorized(&route.candidate_id, prepared, now_ms())
             .await
         {
             Ok(refreshed) => *prepared = refreshed,

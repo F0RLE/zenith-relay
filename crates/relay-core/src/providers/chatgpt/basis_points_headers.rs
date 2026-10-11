@@ -252,6 +252,7 @@ pub(crate) fn basis_points_headers(
         captured_headers.apply(&mut headers);
     }
     for (header_name, header_value) in [
+        ("user-agent", "Mozilla/5.0"),
         ("x-basispoints-auth-mode", "chatgpt"),
         (
             "x-openai-internal-basispoints-client-agent-profile",

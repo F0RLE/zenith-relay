@@ -271,7 +271,21 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         }
         _ => None,
     };
-    let error_category = upstream_error_category.or_else(|| {
+    let completion =
+        crate::protocol::completion::ResponseCompletion::from_responses_event(&event_json);
+    let completion_error = match completion {
+        Some(crate::protocol::completion::ResponseCompletion::Invalid) => {
+            Some(error_codes::STREAM_INVALID)
+        }
+        Some(crate::protocol::completion::ResponseCompletion::Incomplete) => {
+            Some(error_codes::RESPONSE_INCOMPLETE)
+        }
+        _ => None,
+    };
+    if completion == Some(crate::protocol::completion::ResponseCompletion::Incomplete) {
+        outcome = Some(TerminalOutcome::Incomplete);
+    }
+    let error_category = upstream_error_category.or(completion_error).or_else(|| {
         (outcome == Some(TerminalOutcome::Incomplete)).then_some(error_codes::RESPONSE_INCOMPLETE)
     });
     if let Some(category) = error_category {

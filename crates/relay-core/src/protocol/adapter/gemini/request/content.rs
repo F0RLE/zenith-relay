@@ -1,6 +1,8 @@
 //! Responses input items translated into Gemini content parts.
 
-use super::{AdapterError, AdapterResult, MessagesBridgeState};
+use super::{
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, ResponsesToolKind,
+};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
 
@@ -20,23 +22,34 @@ pub(super) fn append_responses_input(
                 let input_item = input_value
                     .as_object()
                     .ok_or_else(AdapterError::invalid_request)?;
-                if input_item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                if matches!(
+                    input_item.get("type").and_then(Value::as_str),
+                    Some("additional_tools" | "tool_search_call" | "tool_search_output")
+                ) {
                     continue;
                 }
                 match input_item.get("type").and_then(Value::as_str) {
                     Some("function_call_output" | "custom_tool_call_output") => {
                         let call_id = input_item
                             .get("call_id")
-                            .or_else(|| input_item.get("id"))
                             .and_then(Value::as_str)
+                            .filter(|call_id| !call_id.trim().is_empty())
                             .ok_or_else(AdapterError::invalid_request)?;
-                        let tool_name = find_call_name(bridge_state, call_id)
-                            .or_else(|| input_item.get("name").and_then(Value::as_str))
-                            .ok_or_else(AdapterError::invalid_request)?;
-                        let function_response = if input_item.get("type").and_then(Value::as_str)
-                            == Some("custom_tool_call_output")
+                        let tool_name = pending_call_name(bridge_state, call_id)?;
+                        let kind = ResponsesToolKind::from_output_item(input_item)?;
+                        let expected = bridge_state
+                            .tool_call_targets
+                            .get(call_id)
+                            .ok_or_else(AdapterError::continuation_mismatch)?;
+                        if expected.kind != kind
+                            || input_item.get("namespace").is_some_and(|namespace| {
+                                namespace.as_str() != expected.namespace.as_deref()
+                            })
                         {
-                            json!({"input": output_text(input_item.get("output").ok_or_else(AdapterError::invalid_request)?)?})
+                            return Err(AdapterError::continuation_mismatch());
+                        }
+                        let mut function_response = if kind == ResponsesToolKind::Custom {
+                            json!({"response":{"output":output_text(input_item.get("output").ok_or_else(AdapterError::invalid_request)?)?}})
                         } else {
                             output_value(
                                 input_item
@@ -44,27 +57,17 @@ pub(super) fn append_responses_input(
                                     .ok_or_else(AdapterError::invalid_request)?,
                             )?
                         };
+                        function_response["name"] = Value::String(tool_name.to_string());
+                        function_response["id"] = Value::String(call_id.to_string());
                         append_message(
                             bridge_state,
                             "user",
-                            vec![
-                                json!({"functionResponse":{"name":tool_name,"response":function_response,"id":call_id}}),
-                            ],
+                            vec![json!({"functionResponse":function_response})],
                         );
                     }
                     Some("function_call" | "custom_tool_call") => {
-                        let tool_name = input_item
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .ok_or_else(AdapterError::invalid_request)?;
-                        let namespace = input_item
-                            .get("namespace")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|namespace_candidate| !namespace_candidate.is_empty());
-                        let upstream_name = bridge_state
-                            .upstream_tool_name(namespace, tool_name)
-                            .ok_or_else(AdapterError::invalid_request)?;
+                        let target = ClientToolTarget::from_call(input_item)?;
+                        let upstream_name = target.upstream_name();
                         let call_id = input_item
                             .get("call_id")
                             .or_else(|| input_item.get("id"))
@@ -86,6 +89,7 @@ pub(super) fn append_responses_input(
                         if !function_arguments.is_object() {
                             return Err(AdapterError::invalid_request());
                         }
+                        bridge_state.record_tool_call(call_id, target)?;
                         append_message(
                             bridge_state,
                             "model",
@@ -154,20 +158,45 @@ pub(in crate::protocol::adapter) fn append_message(
         .push(json!({"role": role, "parts": parts}));
 }
 
-fn find_call_name<'a>(bridge_state: &'a MessagesBridgeState, call_id: &str) -> Option<&'a str> {
-    bridge_state.messages.iter().rev().find_map(|message| {
-        message
+fn pending_call_name<'a>(
+    bridge_state: &'a MessagesBridgeState,
+    call_id: &str,
+) -> AdapterResult<&'a str> {
+    let mut history = bridge_state.messages.iter().rev();
+    let mut assistant = history
+        .next()
+        .ok_or_else(AdapterError::continuation_missing)?;
+    if assistant.get("role").and_then(Value::as_str) == Some("user") {
+        let results = assistant
             .get("parts")
             .and_then(Value::as_array)
-            .and_then(|parts| {
-                parts.iter().rev().find_map(|part| {
-                    let call = part.get("functionCall")?.as_object()?;
-                    (call.get("id").and_then(Value::as_str) == Some(call_id))
-                        .then(|| call.get("name").and_then(Value::as_str))
-                        .flatten()
-                })
+            .ok_or_else(AdapterError::continuation_mismatch)?;
+        if !results
+            .iter()
+            .any(|part| part.get("functionResponse").is_some())
+            || results.iter().any(|part| {
+                part.pointer("/functionResponse/id").and_then(Value::as_str) == Some(call_id)
             })
-    })
+        {
+            return Err(AdapterError::continuation_mismatch());
+        }
+        assistant = history
+            .next()
+            .ok_or_else(AdapterError::continuation_missing)?;
+    }
+    if assistant.get("role").and_then(Value::as_str) != Some("model") {
+        return Err(AdapterError::continuation_mismatch());
+    }
+    assistant
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("functionCall"))
+        .find(|call| call.get("id").and_then(Value::as_str) == Some(call_id))
+        .and_then(|call| call.get("name"))
+        .and_then(Value::as_str)
+        .ok_or_else(AdapterError::continuation_mismatch)
 }
 
 pub(super) fn append_system_parts(
@@ -265,27 +294,22 @@ fn file_part(part: &Map<String, Value>) -> AdapterResult<Value> {
 }
 
 fn output_text(output_value: &Value) -> AdapterResult<String> {
-    match output_value {
-        Value::String(text_value) => Ok(text_value.clone()),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|text_part| text_part.get("text").and_then(Value::as_str))
-            .map(str::to_string)
-            .reduce(|mut left, right| {
-                left.push_str(&right);
-                left
-            })
-            .ok_or_else(AdapterError::invalid_request),
-        _ => Err(AdapterError::invalid_request()),
-    }
+    output_value
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(AdapterError::invalid_request)
 }
 
 fn output_value(output_value: &Value) -> AdapterResult<Value> {
     match output_value {
         Value::String(output_text) => {
-            Ok(serde_json::from_str(output_text).unwrap_or_else(|_| json!({"output":output_text})))
+            let response = serde_json::from_str::<Value>(output_text)
+                .ok()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({"output":output_text}));
+            Ok(json!({"response":response}))
         }
-        Value::Object(_) => Ok(output_value.clone()),
+        Value::Object(_) => Ok(json!({"response":output_value})),
         Value::Array(parts) => {
             let mut text_parts = Vec::new();
             let mut media_parts = Vec::new();
@@ -302,7 +326,21 @@ fn output_value(output_value: &Value) -> AdapterResult<Value> {
                             .to_string(),
                     ),
                     Some("input_image" | "output_image" | "input_file" | "output_file") => {
-                        media_parts.push(content_part(output_part)?);
+                        let part = content_part(output_part)?;
+                        let mime = part.pointer("/inlineData/mimeType").and_then(Value::as_str);
+                        if !matches!(
+                            mime,
+                            Some(
+                                "image/png"
+                                    | "image/jpeg"
+                                    | "image/webp"
+                                    | "application/pdf"
+                                    | "text/plain"
+                            )
+                        ) {
+                            return Err(AdapterError::parameter_unsupported_for("input.output"));
+                        }
+                        media_parts.push(part);
                     }
                     _ => text_parts.push(
                         serde_json::to_string(output_part)
@@ -314,13 +352,14 @@ fn output_value(output_value: &Value) -> AdapterResult<Value> {
             if !text_parts.is_empty() {
                 response_object.insert("output".to_string(), Value::String(text_parts.join("\n")));
             }
-            if !media_parts.is_empty() {
-                response_object.insert("parts".to_string(), Value::Array(media_parts));
-            }
             if response_object.is_empty() {
                 response_object.insert("output".to_string(), Value::String(String::new()));
             }
-            Ok(Value::Object(response_object))
+            let mut function_response = json!({"response":response_object});
+            if !media_parts.is_empty() {
+                function_response["parts"] = Value::Array(media_parts);
+            }
+            Ok(function_response)
         }
         _ => Err(AdapterError::invalid_request()),
     }

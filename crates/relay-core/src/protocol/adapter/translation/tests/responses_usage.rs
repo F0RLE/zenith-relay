@@ -133,3 +133,29 @@ fn other_clients_do_not_gain_a_total() {
     assert_eq!(usage["output_tokens"], 2);
     assert!(usage.get("total_tokens").is_none());
 }
+
+#[test]
+fn messages_cache_writes_and_lifetimes_survive_generic_openai_conversion() {
+    let creation = json!({"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3});
+    let body = json!({"id":"msg_synthetic","stop_reason":"end_turn","content":[{"type":"text","text":"answer"}],
+        "usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":10,
+            "cache_creation_input_tokens":5,"cache_creation":creation}});
+    for client in [WireApi::Responses, WireApi::ChatCompletions] {
+        // Exercise the shared converter as well as the dedicated Responses bridge.
+        let decoded = response::decode(WireApi::Messages, &body, "seed").unwrap();
+        let encoded = response::encode(client, &decoded, "test", &Default::default()).unwrap();
+        let field = if client == WireApi::Responses {
+            "input_tokens_details"
+        } else {
+            "prompt_tokens_details"
+        };
+        assert_eq!(encoded["usage"][field]["cached_tokens"], 10);
+        assert_eq!(encoded["usage"][field]["cache_write_tokens"], 5);
+        assert_eq!(encoded["usage"][field]["cache_creation"], creation);
+        let roundtrip = response::decode(client, &encoded, "seed").unwrap();
+        assert_eq!(roundtrip.usage.input, Some(18));
+        assert_eq!(roundtrip.usage.cache_write, Some(5));
+        assert_eq!(roundtrip.usage.cache_write_5m, Some(2));
+        assert_eq!(roundtrip.usage.cache_write_1h, Some(3));
+    }
+}

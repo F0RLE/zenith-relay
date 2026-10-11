@@ -8,40 +8,35 @@
 use chrono::{Datelike, NaiveDate};
 use std::cmp::Ordering;
 
-use super::ModelMetadata;
+use super::ModelMetadataCatalog;
 
 /// Compare provider blocks while leaving models from one provider equal.
 ///
 /// `ModelMetadataCatalog::order_model_ids` applies this comparator with the
 /// original source position as the final key. That gives us stable provider
 /// blocks without reordering the models returned by an account or API source.
-pub(super) fn compare_metadata(
+pub(super) fn compare_model_groups(
+    catalog: &ModelMetadataCatalog,
     left_id: &str,
-    left: Option<&ModelMetadata>,
     right_id: &str,
-    right: Option<&ModelMetadata>,
 ) -> Ordering {
-    let left_provider = presentation_provider(left_id, left);
-    let right_provider = presentation_provider(right_id, right);
+    let left_provider = catalog.display_provider_for(left_id);
+    let right_provider = catalog.display_provider_for(right_id);
 
     match (left_provider, right_provider) {
-        (Some(left), Some(right)) => {
-            let left = canonical_provider(&left);
-            let right = canonical_provider(&right);
-            provider_order(&left)
-                .cmp(&provider_order(&right))
-                .then_with(|| left.cmp(&right))
-        }
+        (Some(left), Some(right)) => provider_order(&left).cmp(&provider_order(&right)),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
 }
 
-fn presentation_provider(model_id: &str, metadata: Option<&ModelMetadata>) -> Option<String> {
-    metadata
-        .and_then(provider_key)
-        .or_else(|| inferred_provider(model_id))
+pub(super) fn canonical_namespace(model_id: &str) -> Option<String> {
+    let (namespace, model) = model_id.trim().split_once('/')?;
+    if model.is_empty() {
+        return None;
+    }
+    provider_key(namespace)
 }
 
 /// Keep common provider aliases in one presentation block. The metadata
@@ -69,7 +64,7 @@ fn provider_order(provider: &str) -> (u8, &str) {
 /// Display-only provider for a native model ID when the reference catalog has
 /// no exact or unique leaf match. This keeps discovered ChatGPT models in the
 /// OpenAI block without changing their route IDs.
-fn inferred_provider(model_id: &str) -> Option<String> {
+pub(super) fn inferred_provider(model_id: &str) -> Option<String> {
     let normalized = normalize(model_id);
     let model_leaf_id = model_leaf(strip_reasoning_effort(&normalized));
     let provider = if is_openai_model(model_leaf_id) {
@@ -105,8 +100,8 @@ fn is_openai_model(model: &str) -> bool {
         || model.starts_with("computer-use-")
 }
 
-fn provider_key(metadata: &ModelMetadata) -> Option<String> {
-    let provider = canonical_provider(&metadata.provider);
+pub(super) fn provider_key(provider: &str) -> Option<String> {
+    let provider = canonical_provider(provider);
     (!provider.is_empty()).then_some(provider)
 }
 

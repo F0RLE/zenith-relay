@@ -137,6 +137,7 @@ async fn serve_http_fallback_request(
             request_id: client_request.request_id.clone(),
             budget: client_request.budget.clone(),
             transport: crate::UsageTransport::Websocket,
+            service_tier_policy: client_request.service_tier_policy.clone(),
         });
     let upstream_response = await_while_client_connected(
         downstream,

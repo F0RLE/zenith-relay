@@ -103,6 +103,7 @@ impl ImportWarning {
 #[serde(rename_all = "snake_case")]
 pub enum ImportIssueCode {
     AmbiguousCredentials,
+    BasisPointsFreeAccountUnsupported,
     DuplicateItem,
     InvalidCredentials,
     MalformedJson,

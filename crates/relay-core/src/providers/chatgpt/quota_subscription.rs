@@ -10,9 +10,10 @@ pub use metadata::{
     CodexSubscriptionMetadata, SUBSCRIPTION_REFRESH_INTERVAL_MS,
 };
 pub use parse::{
-    account_ids_from_check_response, parse_subscription_timestamp_ms,
-    parse_subscription_timestamp_text, resolve_account_check_account_id,
-    unverified_chatgpt_account_id_hints, AccountCheckIdentityError,
+    account_ids_from_check_response, parse_accounts_check as parse_account_check_subscription,
+    parse_subscription_timestamp_ms, parse_subscription_timestamp_text,
+    resolve_account_check_account_id, unverified_chatgpt_account_id_hints,
+    AccountCheckIdentityError,
 };
 
 #[cfg(test)]

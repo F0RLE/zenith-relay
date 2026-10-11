@@ -4,7 +4,7 @@ use super::*;
 async fn codex_compatibility_aliases_reach_the_canonical_account_endpoints() {
     let (upstream, state) = spawn_upstream(vec![
         success_reply("alias-response"),
-        Reply::Json(StatusCode::OK, json!({"type": "compaction"})),
+        compaction_reply("alias-compaction"),
         Reply::Json(StatusCode::OK, json!({"results": []})),
     ])
     .await;
@@ -530,7 +530,7 @@ async fn api_pool_removal_releases_only_self_contained_tool_continuations() {
             });
             let (owner, owner_state) = spawn_upstream(vec![Reply::Json(
                 StatusCode::OK,
-                json!({"id": "api-tool-response", "model": MODEL, "output": [call.clone()]}),
+                json!({"id": "api-tool-response", "status": "completed", "model": MODEL, "output": [call.clone()]}),
             )])
             .await;
             let (replacement, replacement_state) = spawn_upstream(vec![if stream {
@@ -779,27 +779,16 @@ fn set_account_remainder(runtime: &GatewayRuntime, account_id: &str, remaining: 
     ));
 }
 
-fn reply_without_saved_history(id: &str) -> Reply {
-    Reply::Json(
-        StatusCode::OK,
-        json!({
-            "id": id,
-            "object": "response",
-            "model": MODEL,
-            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-        }),
-    )
-}
-
 #[tokio::test]
-async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() {
+async fn account_compact_replays_plaintext_history_only_for_a_larger_fresh_remainder() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
         success_reply("owner-compact"),
         success_reply("owner-stays"),
         success_reply("owner-after-shrink"),
     ])
     .await;
-    let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-compact")]).await;
+    let (other_upstream, other_state) =
+        spawn_upstream(vec![compaction_reply("other-compact")]).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "owner-account", "owner-access").await;
     register_ready(&authority, "other-account", "other-access").await;
@@ -821,7 +810,7 @@ async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() 
     let client = reqwest::Client::new();
 
     let first: Value = client
-        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({"model": MODEL, "input": "first"}))
         .send()
@@ -833,7 +822,7 @@ async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() 
     assert_eq!(first["id"], "owner-compact");
 
     let stayed: Value = client
-        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": MODEL,
@@ -898,7 +887,7 @@ async fn account_compact_continuation_moves_only_for_a_larger_fresh_remainder() 
 #[tokio::test]
 async fn account_continuation_without_saved_history_stays_on_its_owner() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
-        reply_without_saved_history("owner-opaque"),
+        success_reply("owner-opaque"),
         success_reply("owner-follow-up"),
     ])
     .await;
@@ -923,9 +912,11 @@ async fn account_continuation_without_saved_history_stays_on_its_owner() {
     set_account_remainder(&runtime, "other-account", 3_300);
     let client = reqwest::Client::new();
     let first: Value = client
-        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": MODEL, "input": "first"}))
+        .json(&json!({
+            "model": MODEL, "input": "first", "conversation": "synthetic-conversation"
+        }))
         .send()
         .await
         .unwrap()

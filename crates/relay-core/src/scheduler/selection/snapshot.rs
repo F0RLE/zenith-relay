@@ -79,6 +79,21 @@ pub struct RoutingDiagnostics {
     pub endpoint_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
+    /// The executor's actual disposition, never inferred from HTTP status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_outcome: Option<AttemptOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    Completed,
+    RetrySelection,
+    RetryRepair,
+    RetryAuthorization,
+    ReturnedFailure,
+    ExecutionUncertain,
+    ClientDisconnected,
 }
 
 impl PoolScheduler {
@@ -268,6 +283,7 @@ impl PoolScheduler {
             dispatches_before: self.dispatch_count(candidate_id, lane),
             endpoint_kind: None,
             cache_context: None,
+            attempt_outcome: None,
         })
     }
 }

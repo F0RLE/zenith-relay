@@ -1,9 +1,11 @@
 use super::{ExecutorRoute, GatewayFailure};
 use crate::gateway::request::{RequestToolPolicy, ServiceTierPolicy};
+use crate::runtime::AccountTransport;
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
 use serde_json::Value;
+use std::collections::HashSet;
 
 mod continuation;
 mod parse;
@@ -18,7 +20,7 @@ pub(super) struct ClientRequest {
     pub(super) resolved_model: String,
     pub(super) stream_id: Option<String>,
     pub(super) responses_lite: bool,
-    service_tier_policy: ServiceTierPolicy,
+    pub(in crate::gateway::websocket) service_tier_policy: ServiceTierPolicy,
     responses_lite_candidates: Vec<String>,
     pub(super) response_affinity_key: Option<String>,
     pub(super) requires_affinity_owner: bool,
@@ -35,30 +37,48 @@ impl ClientRequest {
             ));
     }
 
-    pub(super) fn apply_service_tier_for_route(
-        &mut self,
-        runtime: &GatewayRuntime,
-        route: &ExecutorRoute,
-    ) {
+    pub(super) fn apply_service_tier(&mut self) {
         self.service_tier_policy.prepare_for_candidate(
             &mut self.request_body,
-            self.service_tier_policy
-                .select_for_model(runtime, &route.source_model),
+            self.service_tier_policy.selected_tier(),
             WireApi::Responses,
         );
     }
 
-    pub(super) fn service_tier(
-        &self,
-        runtime: &GatewayRuntime,
-        route: &ExecutorRoute,
-    ) -> DefaultServiceTier {
+    pub(super) fn service_tier(&self) -> DefaultServiceTier {
         self.service_tier_policy.effective_tier(
             &self.request_body,
-            self.service_tier_policy
-                .select_for_model(runtime, &route.source_model),
+            self.service_tier_policy.selected_tier(),
             WireApi::Responses,
         )
+    }
+
+    pub(super) fn service_tier_exclusions(
+        &self,
+        runtime: &GatewayRuntime,
+        key: &crate::runtime::AuthenticatedKey,
+    ) -> Result<HashSet<String>, GatewayFailure> {
+        let routes = runtime.configured_executor_routes(
+            key,
+            &self.resolved_model,
+            &[WireApi::Responses],
+            false,
+        );
+        let excluded = routes
+            .iter()
+            .filter(|route| {
+                !GatewayRuntime::route_supports_service_tier(
+                    route,
+                    self.service_tier_policy.selected_tier(),
+                ) || (route.account_transport == AccountTransport::ExcelBasisPoints
+                    && self.service_tier_policy.rejects_basis_points_client_speed())
+            })
+            .map(|route| route.candidate_id.clone())
+            .collect::<HashSet<_>>();
+        if !routes.is_empty() && excluded.len() == routes.len() {
+            return Err(GatewayFailure::unsupported_service_tier());
+        }
+        Ok(excluded)
     }
 
     #[cfg(test)]
@@ -73,7 +93,11 @@ impl ClientRequest {
         runtime: &GatewayRuntime,
         route: &mut ExecutorRoute,
     ) -> Result<String, GatewayFailure> {
-        let (filtered_request, _) = self.filtered_value_for(route)?;
+        if !GatewayRuntime::route_supports_service_tier(route, self.service_tier()) {
+            return Err(GatewayFailure::unsupported_service_tier());
+        }
+        let (mut filtered_request, _) = self.filtered_value_for(route)?;
+        runtime.apply_request_timezone(&route.candidate_id, &mut filtered_request);
         let payload = serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
         self.tool_policy
@@ -109,6 +133,7 @@ impl ClientRequest {
         ReasoningEffortDiagnostics::from_bodies(
             &self.request_body,
             &self.request_for_route(route),
+            WireApi::Responses,
             WireApi::Responses,
         )
     }

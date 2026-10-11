@@ -234,7 +234,9 @@ async fn chat_completions_forwards_reasoning_without_admission_gate() {
         .send()
         .await
         .unwrap();
-    assert_eq!(low.status(), StatusCode::OK);
+    let low_status = low.status();
+    let low_body = low.text().await.unwrap();
+    assert_eq!(low_status, StatusCode::OK, "{low_body}");
 
     let high = client
         .post(format!("{}/v1/chat/completions", gateway.base_url))
@@ -388,13 +390,19 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": MODEL,
-            "messages": [{"role": "user", "content": "hello"}]
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "PowerShell", "parameters": {"type": "object"}}
+            }]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
+    let status = response.status();
+    let response_body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{response_body}");
+    let body: Value = serde_json::from_str(&response_body).unwrap();
     assert_eq!(body["object"], "chat.completion");
     assert_eq!(body["choices"][0]["message"]["content"], "I will continue.");
     assert_eq!(
@@ -696,6 +704,7 @@ async fn round_robin_ignores_session_affinity_between_independent_requests() {
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
             tool_policy: Default::default(),
+            request_timezone: Default::default(),
             model_metadata_catalog: None,
             max_retry_candidates: 3,
             pool_routing: Some(zenith_relay_core::PoolRoutingPolicy {

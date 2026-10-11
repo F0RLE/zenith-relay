@@ -125,7 +125,11 @@ const RULES: &[Rule] = &[
         error_codes::UPSTREAM_CONTENT_POLICY,
     ),
     Rule::Phrases(
-        &["model access has changed"],
+        &[
+            "model access has changed",
+            "basispoints_model_access_changed",
+            "model_not_allowed",
+        ],
         error_codes::UPSTREAM_MODEL_UNAVAILABLE,
     ),
     Rule::Custom(quota_exhausted),

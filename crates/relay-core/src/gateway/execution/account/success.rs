@@ -1,10 +1,12 @@
 use super::super::super::now_ms;
+use super::super::super::request::AccountEndpoint;
 use super::super::super::response::{
     emit_usage, populate_tokens, proxy_response, proxy_sse_response, usage_event, UsageAttempt,
 };
 use super::super::super::turn_state::relay_account_response_header;
 use super::super::bind_responses_turn;
 use super::super::request::{adapter_error_response_for_origin, mark_adapter_failure};
+use crate::protocol::completion::ResponseCompletion;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorRoute};
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics};
 use crate::{ErrorOrigin, GatewayRuntime};
@@ -14,6 +16,7 @@ use serde_json::Value;
 use std::time::Instant;
 
 pub(super) struct AccountSuccessInput<'a> {
+    pub(super) endpoint: AccountEndpoint,
     pub(super) status: StatusCode,
     pub(super) bytes: Vec<u8>,
     pub(super) response_headers: &'a HeaderMap,
@@ -40,6 +43,7 @@ pub(super) fn complete_account_response(
     account_success_input: AccountSuccessInput<'_>,
 ) -> Response<Body> {
     let AccountSuccessInput {
+        endpoint,
         status,
         bytes,
         response_headers,
@@ -76,12 +80,12 @@ pub(super) fn complete_account_response(
         started.elapsed().as_millis() as u64,
     );
     populate_tokens(&mut event, &bytes);
-    if runtime.block_degraded_routes_enabled() {
-        if let Err(rejected) = super::super::super::response::completed_upstream_response(
-            &bytes,
-            false,
-            Some(&route.source_model),
-        ) {
+    let expected_model = runtime
+        .block_degraded_routes_enabled()
+        .then_some(route.source_model.as_str());
+    let (bytes, completion) = match account_response(&bytes, endpoint, expected_model) {
+        Ok(response) => response,
+        Err(rejected) => {
             let mut failure = rejected.failure;
             // This account-only endpoint has already collected a full response.
             // Reject the result without starting another generation.
@@ -105,7 +109,11 @@ pub(super) fn complete_account_response(
                 request_id,
             );
         }
-    }
+    };
+    let completed = completion == ResponseCompletion::Completed;
+    event.success = completed;
+    event.error_category =
+        (!completed).then(|| crate::error_codes::RESPONSE_INCOMPLETE.to_string());
     let client_bytes = if basis_points_route {
         match super::super::basis_points::translate_response(&bytes, request) {
             Ok(bytes) => bytes,
@@ -130,30 +138,34 @@ pub(super) fn complete_account_response(
     } else {
         None
     };
-    let recovered = runtime.record_success_with_metrics(
-        &route.candidate_id,
-        &route.source_model,
-        now_ms(),
-        event.output_tokens,
-        event.generation_ms.unwrap_or(event.latency_ms),
-    );
-    event.consecutive_failures = recovered.then_some(0);
-    runtime.bind_prompt_affinity(
-        prompt_affinity_key.as_deref(),
-        &route.candidate_id,
-        now_ms(),
-    );
-    bind_responses_turn(
-        runtime,
-        &key.id,
-        &route.candidate_id,
-        request,
-        &route.source_model,
-        &client_bytes,
-        true,
-    );
+    if completed {
+        let recovered = runtime.record_success_with_metrics(
+            &route.candidate_id,
+            &route.source_model,
+            now_ms(),
+            event.output_tokens,
+            event.generation_ms.unwrap_or(event.latency_ms),
+        );
+        event.consecutive_failures = recovered.then_some(0);
+        runtime.bind_prompt_affinity(
+            prompt_affinity_key.as_deref(),
+            &route.candidate_id,
+            now_ms(),
+        );
+        bind_responses_turn(
+            runtime,
+            &key.id,
+            &route.candidate_id,
+            request,
+            &route.source_model,
+            &client_bytes,
+            true,
+        );
+        lease.settle_rotation_success(now_ms());
+    } else {
+        lease.settle_rotation_terminal(now_ms());
+    }
     emit_usage(runtime, event);
-    lease.settle_rotation_success(now_ms());
     if let Some(stream_body) = basis_points_stream {
         let mut response = proxy_sse_response(status, response_headers, Body::from(stream_body));
         relay_account_response_header(client_headers, response_headers, &mut response);
@@ -164,4 +176,37 @@ pub(super) fn complete_account_response(
         relay_account_response_header(client_headers, response_headers, &mut response);
     }
     response
+}
+
+fn account_response(
+    bytes: &[u8],
+    endpoint: AccountEndpoint,
+    expected_model: Option<&str>,
+) -> Result<
+    (Vec<u8>, ResponseCompletion),
+    Box<super::super::super::streaming::StreamBootstrapFailure>,
+> {
+    use super::super::super::errors::AttemptFailure;
+    use super::super::super::response::{completed_upstream_response, validate_upstream_response};
+
+    let bytes = if matches!(endpoint, AccountEndpoint::Wake)
+        || serde_json::from_slice::<Value>(bytes).is_err()
+    {
+        completed_upstream_response(bytes, true, expected_model)?
+    } else {
+        bytes.to_vec()
+    };
+    let body = serde_json::from_slice::<Value>(&bytes)
+        .map_err(|_| Box::new(AttemptFailure::stream(crate::error_codes::STREAM_INVALID).into()))?;
+    validate_upstream_response(&body, expected_model)?;
+    let completion = match endpoint {
+        AccountEndpoint::Wake => ResponseCompletion::for_protocol(crate::WireApi::Responses, &body),
+        AccountEndpoint::Compact => {
+            super::super::super::compaction::compaction_document(&body)
+                .map_err(|failure| Box::new(failure.into()))?;
+            ResponseCompletion::Completed
+        }
+        AccountEndpoint::AlphaSearch => ResponseCompletion::Completed,
+    };
+    Ok((bytes, completion))
 }

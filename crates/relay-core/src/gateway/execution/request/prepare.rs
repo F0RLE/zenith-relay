@@ -84,7 +84,11 @@ pub(super) fn prepare_request_attempt(
     ) else {
         return RequestPrepare::Continue;
     };
-    let selected_service_tier = service_tier_policy.select_for_model(runtime, &route.source_model);
+    let selected_service_tier = service_tier_policy.selected_tier();
+    if !GatewayRuntime::route_supports_service_tier(&route, selected_service_tier) {
+        *last_adapter_error = Some(AdapterError::parameter_unsupported_for("service_tier"));
+        return RequestPrepare::Continue;
+    }
     service_tier_policy.prepare_for_candidate(request, selected_service_tier, client_wire_api);
     route.half_open_probe = half_open_probe;
     route.routing = Some(diagnostics);
@@ -150,6 +154,7 @@ pub(super) fn prepare_request_attempt(
         }
     }
     let mut adapter_request = match translate_prepared_request(
+        runtime,
         &route,
         client_wire_api,
         &compaction_plan,
@@ -165,6 +170,7 @@ pub(super) fn prepare_request_attempt(
     };
     if account_route {
         normalize_prepared_account_body(&mut adapter_request, route_responses_lite.is_some());
+        runtime.apply_request_timezone(candidate_id, adapter_request.upstream_body_mut());
     }
     if let Some(step) = apply_prepared_tool_policy(tool_policy, &mut adapter_request) {
         return step;
@@ -175,11 +181,20 @@ pub(super) fn prepare_request_attempt(
             return step;
         }
     }
-    let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
-        request,
-        adapter_request.upstream_body(),
-        client_wire_api,
-    );
+    let reasoning_effort = if basis_points_route {
+        ReasoningEffortDiagnostics::from_basis_points_bodies(
+            request,
+            adapter_request.upstream_body(),
+            client_wire_api,
+        )
+    } else {
+        ReasoningEffortDiagnostics::from_bodies(
+            request,
+            adapter_request.upstream_body(),
+            client_wire_api,
+            route.adapter.upstream_protocol(client_wire_api).wire_api(),
+        )
+    };
     let adapter_is_passthrough = adapter_request.is_passthrough();
     let Ok(request_body) = serde_json::to_vec(adapter_request.upstream_body()) else {
         return RequestPrepare::Respond(api_error(
@@ -284,12 +299,8 @@ fn load_prepared_continuation(
     if !route.adapter.uses_local_continuation_state() {
         return Ok(None);
     }
-    let Some(response_id) = previous_response_id(request) else {
-        return Ok(None);
-    };
     runtime
-        .load_messages_bridge_state(key_id, response_id, &route.candidate_id, now_ms())
-        .map(Some)
+        .load_adapter_continuation(route, key_id, request, now_ms())
         .map_err(adapter_error_response)
 }
 
@@ -311,6 +322,7 @@ fn prepare_attempt_compaction(
 
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
 fn translate_prepared_request(
+    runtime: &GatewayRuntime,
     route: &ExecutorRoute,
     client_wire_api: WireApi,
     compaction: &BridgedCompaction,
@@ -321,17 +333,23 @@ fn translate_prepared_request(
     request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<PreparedAdapterRequest, RequestPrepare> {
-    match route.adapter.prepare_request(AdapterRequestContext {
-        client_wire_api,
-        request: compaction.request(request),
-        model: source_model,
-        stream,
-        reasoning_mode: route.reasoning_mode,
-        cache_write_ttl: route.cache_write_ttl,
-        previous: previous_bridge_state,
-        response_scope: &route.candidate_id,
-        response_id_seed: request_id,
-    }) {
+    let capabilities = runtime
+        .model_capabilities(source_model)
+        .for_route(route.route_capability.as_ref());
+    match route.adapter.prepare_request_with_capabilities(
+        AdapterRequestContext {
+            client_wire_api,
+            request: compaction.request(request),
+            model: source_model,
+            stream,
+            reasoning_mode: route.reasoning_mode,
+            cache_write_ttl: route.cache_write_ttl,
+            previous: previous_bridge_state,
+            response_scope: &route.candidate_id,
+            response_id_seed: request_id,
+        },
+        &capabilities,
+    ) {
         Ok(request) => Ok(request),
         Err(error) => Err(stop_for_adapter_error(error, last_adapter_error)),
     }

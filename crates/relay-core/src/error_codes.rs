@@ -68,6 +68,7 @@ error_codes! {
     ALL_SOURCES_COOLING_DOWN => ("all_sources_cooling_down", "all_sources_cooling_down", None),
     ALL_SOURCES_TEMPORARILY_UNAVAILABLE => ("all_sources_temporarily_unavailable", "all_sources_temporarily_unavailable", None),
     AMBIGUOUS_CREDENTIALS => ("ambiguous_credentials", "ambiguous_credentials", None),
+    BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED => ("basis_points_free_account_unsupported", "basis_points_free_account_unsupported", None),
     API_KEY_MISSING => ("api_key_missing", "api_key_missing", None),
     CALLBACK_ALREADY_RECEIVED => ("callback_already_received", "callback_already_received", None),
     CALLBACK_INVALID => ("callback_invalid", "callback_invalid", None),

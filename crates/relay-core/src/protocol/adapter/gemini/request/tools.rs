@@ -86,7 +86,7 @@ fn translate_gemini_tool(
         declaration.insert("description".to_string(), Value::String(description));
     }
     let parameters = if tool_kind == ResponsesToolKind::Custom {
-        json!({"type":"object","properties":{"input":{"type":"string"}},"required":["input"]})
+        super::super::super::messages::custom_tool_input_schema(tool)?
     } else {
         tool.get("parameters")
             .or_else(|| tool.get("parameters_json_schema"))
@@ -115,76 +115,21 @@ pub(super) fn translate_tool_choice(
     choice: &Value,
     bridge_state: &MessagesBridgeState,
 ) -> AdapterResult<(Option<Value>, Option<BTreeSet<String>>)> {
-    let requested_mode = choice.as_str().or_else(|| {
-        choice
-            .get("mode")
-            .filter(|_| choice.get("type").and_then(Value::as_str) != Some("allowed_tools"))
-            .and_then(Value::as_str)
-    });
-    if let Some(requested_mode) = requested_mode {
-        let calling_mode = match requested_mode.to_ascii_lowercase().as_str() {
-            "none" => "NONE",
-            "required" => "ANY",
-            _ => "AUTO",
-        };
-        return Ok((
-            Some(json!({"functionCallingConfig":{"mode":calling_mode}})),
-            None,
-        ));
-    }
-    let choice_object = choice
-        .as_object()
-        .ok_or_else(AdapterError::invalid_request)?;
-    if choice_object.get("type").and_then(Value::as_str) == Some("allowed_tools") {
-        let calling_mode = match choice_object
-            .get("mode")
-            .and_then(Value::as_str)
-            .unwrap_or("auto")
-        {
-            "required" => "ANY",
-            "none" => "NONE",
-            _ => "AUTO",
-        };
-        let mut allowed = BTreeSet::new();
-        if let Some(tools) = choice_object.get("tools") {
-            for tool in tools.as_array().ok_or_else(AdapterError::invalid_request)? {
-                if let Some(tool) = tool.as_object() {
-                    if tool.get("type").and_then(Value::as_str) == Some("namespace") {
-                        let namespace = tool
-                            .get("name")
-                            .or_else(|| tool.get("namespace"))
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|namespace_name| !namespace_name.is_empty());
-                        if let Some(namespace) = namespace {
-                            allowed.extend(bridge_state.tool_targets.iter().filter_map(
-                                |(upstream_name, target)| {
-                                    (target.namespace.as_deref() == Some(namespace)
-                                        && bridge_state.allows_tool_name(upstream_name))
-                                    .then_some(upstream_name.clone())
-                                },
-                            ));
-                        }
-                    } else if let Some(name) = bridge_state.selected_upstream_tool_name(tool) {
-                        allowed.insert(name);
-                    }
-                }
-            }
+    use crate::protocol::adapter::contracts::{resolve_responses_tool_choice, ToolChoice};
+
+    let available = bridge_state.available_tool_targets();
+    let (choice, allowed) = resolve_responses_tool_choice(choice, &available)?;
+    let config = choice.and_then(|choice| {
+        if available.is_empty() {
+            return None;
         }
-        return Ok((
-            Some(
-                json!({"functionCallingConfig":{"mode":calling_mode,"allowedFunctionNames":allowed.iter().cloned().collect::<Vec<_>>()}}),
-            ),
-            (!allowed.is_empty()).then_some(allowed),
-        ));
-    }
-    let Some(upstream_name) = bridge_state.selected_upstream_tool_name(choice_object) else {
-        return Err(AdapterError::invalid_request());
-    };
-    Ok((
-        Some(
-            json!({"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":[upstream_name]}}),
-        ),
-        Some(BTreeSet::from([upstream_name])),
-    ))
+        let calling = match choice {
+            ToolChoice::Auto => json!({"mode":"AUTO"}),
+            ToolChoice::None => json!({"mode":"NONE"}),
+            ToolChoice::Required => json!({"mode":"ANY"}),
+            ToolChoice::Function(name) => json!({"mode":"ANY","allowedFunctionNames":[name]}),
+        };
+        Some(json!({"functionCallingConfig":calling}))
+    });
+    Ok((config, allowed))
 }

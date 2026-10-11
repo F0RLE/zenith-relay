@@ -140,8 +140,8 @@ pub(super) fn finish_terminal(
     };
     // `response.incomplete` is a terminal event for this request, so the
     // client WebSocket may carry its next independent request. It is not a
-    // successful response: do not retain response/session affinity or reset
-    // slot health from a partially completed stream.
+    // successful response: do not persist affinity or reset slot health.
+    // An owner binding below is limited to this live connection.
     let terminal_success = matches!(outcome, EventTerminalOutcome::Success);
     let keep_client_socket = !matches!(outcome, EventTerminalOutcome::Failure);
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
@@ -151,6 +151,11 @@ pub(super) fn finish_terminal(
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
     in_flight.event.success = terminal_success;
+    if let Some(routing) = in_flight.event.routing.as_mut() {
+        routing
+            .attempt_outcome
+            .get_or_insert(crate::AttemptOutcome::ReturnedFailure);
+    }
     if terminal_success {
         in_flight.event.tool_use.finish();
     }
@@ -279,6 +284,15 @@ pub(super) fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeStat
     };
     in_flight.event.success = false;
     in_flight.event.error_category = Some(category.to_string());
+    if let Some(routing) = in_flight.event.routing.as_mut() {
+        routing.attempt_outcome = Some(
+            if matches!(category, error_codes::CLIENT_CANCELLED | "client_websocket") {
+                crate::AttemptOutcome::ClientDisconnected
+            } else {
+                crate::AttemptOutcome::ExecutionUncertain
+            },
+        );
+    }
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     if let Some(status) = incomplete_status(category) {
         in_flight.event.http_status = status.as_u16();

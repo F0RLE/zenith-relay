@@ -1,9 +1,12 @@
+mod account_trash;
 mod adapter;
 mod capabilities;
+pub(crate) mod completion;
 mod management;
 pub(crate) mod sse;
 mod version;
 
+pub use account_trash::TrashedAccountSummary;
 pub use adapter::{
     bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,
     prepare_responses_to_messages_scoped, translate_messages_response, AdapterError,
@@ -13,10 +16,10 @@ pub use adapter::{
     NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
 };
 pub(crate) use adapter::{
-    ensure_compaction_trigger, gemini_incomplete, is_compaction_checkpoint_type,
-    prepare_bridged_compaction, remove_item_prefixed_message_ids,
-    repair_call_prefixed_function_item_ids, repair_custom_tool_item_ids,
-    wrap_compaction_response_bytes, BridgedCompaction,
+    candidate_incomplete_reason, ensure_compaction_trigger, gemini_incomplete,
+    is_compaction_checkpoint_type, merge_usage, prepare_bridged_compaction, prompt_blocked,
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+    repair_custom_tool_item_ids, wrap_compaction_response_bytes, BridgedCompaction,
 };
 pub use adapter::{AdapterStreamBridge, GeminiStreamBridge};
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
@@ -40,14 +43,15 @@ pub use management::{
     AccountRoutingBlockReason, AccountSummary, ApiError, ClientWireApi, ConfigurationPreset,
     ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetChange,
     ConfigurationPresetDocument, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
-    ConfigurationPresetSettings, ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse,
-    ModelCatalogIdentity, ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus,
-    PoolMembershipInput, PresetQuotaPolicy, PresetRoutingPolicy, ProfileKeyRotation, ProxyMode,
-    QuotaRefreshStatus, QuotaWindowUsage, RefreshStatus, RemoteAccountLocation,
-    RevealedAccountIdentity, RuntimeStateSnapshot, RuntimeTargetSummary, SetModelEnabledInput,
-    SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput, SetModelServiceTierInput,
-    SourcePresetRule, SourceRefreshState, SourceSummary, SourceSummaryRecord, UsageBucket,
-    UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals,
+    ConfigurationPresetSettings, CredentialDiagnostics, CredentialRecovery, CredentialStatus,
+    ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelCatalogIdentity,
+    ModelPolicyError, ModelProtocolRoute, ModelSummary, OperationalStatus, PoolMembershipInput,
+    PresetQuotaPolicy, PresetRoutingPolicy, ProfileKeyRotation, ProxyMode, QuotaRefreshStatus,
+    QuotaWindowUsage, RefreshStatus, RemoteAccountLocation, RevealedAccountIdentity,
+    RuntimeStateSnapshot, RuntimeTargetSummary, SetModelEnabledInput, SetModelOrderInput,
+    SetModelPriceInput, SetModelReasoningInput, SetModelServiceTierInput, SourcePresetRule,
+    SourceRefreshState, SourceSummary, SourceSummaryRecord, UsageBucket, UsageGroup, UsagePage,
+    UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown, UsageTotals,
     CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION, DEFAULT_MAX_RETRY_CANDIDATES,
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS, MAX_MAX_RETRY_CANDIDATES,
     MAX_QUOTA_REQUEST_TIMEOUT_SECONDS, MIN_MAX_RETRY_CANDIDATES, MIN_QUOTA_REQUEST_TIMEOUT_SECONDS,

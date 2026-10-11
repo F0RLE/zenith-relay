@@ -96,7 +96,10 @@ pub(super) fn build_accounts(
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             protocol: WireApi::Responses,
-            enabled: account.enabled,
+            enabled: account.enabled
+                && account
+                    .oauth_client_kind
+                    .supports_pool(account.subscription_plan_type.as_deref()),
             draining: account.draining,
             priority: account.priority,
             weight: account.weight,
@@ -127,6 +130,7 @@ pub(super) fn build_accounts(
             account.id.clone(),
             ChatGptAccountExecutor {
                 oauth_client_kind: account.oauth_client_kind,
+                subscription_plan_type: RwLock::new(account.subscription_plan_type),
                 id: account.id,
                 source_id: account.source_id,
                 chatgpt_account_id: account.chatgpt_account_id,

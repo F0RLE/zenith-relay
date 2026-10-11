@@ -1,6 +1,6 @@
 use super::{
     validate_responses_bridge_request, AdapterError, AdapterResult, ClientToolTarget,
-    MessagesReasoningMode, ResponsesToolKind,
+    MessagesReasoningMode,
 };
 use crate::WireApi;
 use serde::Serialize;
@@ -31,28 +31,46 @@ pub(in crate::protocol::adapter) fn prepare_bridge_state<'a>(
         return Err(AdapterError::continuation_mismatch());
     }
     bridge_state.system = bridge_state.historical_system.take();
+    bridge_state.tool_choice = None;
+    bridge_state.tool_allow_list = None;
     Ok((request_object, bridge_state))
 }
 
-/// Volatile continuation state for a Responses-to-Messages bridge. It is
+/// Volatile continuation state for converted protocol routes. It is
 /// intentionally local-only and is never serialized into diagnostics or usage
 /// records because it contains the user's conversation content.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MessagesBridgeState {
     pub(in crate::protocol::adapter) portable_history:
         Option<Vec<super::super::translation::Message>>,
+    pub(in crate::protocol::adapter) response_tools: Option<Vec<Value>>,
+    pub(in crate::protocol::adapter) upstream_protocol: Option<WireApi>,
+    pub(in crate::protocol::adapter) native_turns: BTreeMap<usize, Vec<Value>>,
+    pub(in crate::protocol::adapter) history_key: Option<String>,
+    pub(in crate::protocol::adapter) reusable: bool,
     pub(in crate::protocol::adapter) model: String,
     pub(in crate::protocol::adapter) system: Option<Value>,
     pub(in crate::protocol::adapter) historical_system: Option<Value>,
     pub(in crate::protocol::adapter) messages: Vec<Value>,
     pub(in crate::protocol::adapter) tools: Option<Vec<Value>>,
     pub(in crate::protocol::adapter) tool_targets: BTreeMap<String, ClientToolTarget>,
+    pub(in crate::protocol::adapter) tool_call_targets: BTreeMap<String, ClientToolTarget>,
+    /// Client call IDs are stable even when Gemini supplies its ID later.
+    pub(in crate::protocol::adapter) gemini_tool_call_ids: BTreeMap<String, Option<String>>,
     pub(in crate::protocol::adapter) tool_choice: Option<Value>,
     pub(in crate::protocol::adapter) tool_allow_list: Option<BTreeSet<String>>,
     pub(in crate::protocol::adapter) reasoning_mode: MessagesReasoningMode,
 }
 
 impl MessagesBridgeState {
+    pub(crate) fn storage_key<'a>(&'a self, response_id: &'a str) -> &'a str {
+        self.history_key.as_deref().unwrap_or(response_id)
+    }
+
+    pub(crate) fn is_reusable(&self) -> bool {
+        self.reusable
+    }
+
     pub(in crate::protocol::adapter) fn new(
         model: &str,
         reasoning_mode: MessagesReasoningMode,
@@ -60,11 +78,18 @@ impl MessagesBridgeState {
         Self {
             model: model.to_string(),
             portable_history: None,
+            response_tools: None,
+            upstream_protocol: None,
+            native_turns: BTreeMap::new(),
+            history_key: None,
+            reusable: true,
             system: None,
             historical_system: None,
             messages: Vec::new(),
             tools: None,
             tool_targets: BTreeMap::new(),
+            tool_call_targets: BTreeMap::new(),
+            gemini_tool_call_ids: BTreeMap::new(),
             tool_choice: None,
             tool_allow_list: None,
             reasoning_mode,
@@ -75,11 +100,136 @@ impl MessagesBridgeState {
         &self.model
     }
 
-    pub(in crate::protocol::adapter) fn append_assistant_content(&mut self, content: Vec<Value>) {
-        if !content.is_empty() {
-            self.messages
-                .push(json!({"role": "assistant", "content": content}));
+    pub(in crate::protocol::adapter) fn record_tool_call(
+        &mut self,
+        call_id: &str,
+        target: ClientToolTarget,
+    ) -> AdapterResult<()> {
+        if call_id.trim().is_empty() || self.tool_call_targets.contains_key(call_id) {
+            return Err(AdapterError::continuation_mismatch());
         }
+        self.tool_call_targets.insert(call_id.to_owned(), target);
+        Ok(())
+    }
+
+    pub(in crate::protocol::adapter) fn record_response_tool_calls(
+        &mut self,
+        output: &[Value],
+    ) -> AdapterResult<()> {
+        for item in output {
+            if !matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call" | "custom_tool_call")
+            ) {
+                continue;
+            }
+            let fields = item
+                .as_object()
+                .ok_or_else(AdapterError::upstream_response_invalid)?;
+            let call_id = fields
+                .get("call_id")
+                .and_then(Value::as_str)
+                .ok_or_else(AdapterError::upstream_response_invalid)?;
+            let target = ClientToolTarget::from_call(fields)
+                .map_err(|_| AdapterError::upstream_response_invalid())?;
+            self.record_tool_call(call_id, target)
+                .map_err(|_| AdapterError::upstream_response_invalid())?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::protocol::adapter) fn validate_tool_history(
+        &self,
+        protocol: WireApi,
+    ) -> AdapterResult<()> {
+        let (assistant_role, content_key, call_key, result_key, result_id_key) = match protocol {
+            WireApi::Messages => (
+                "assistant",
+                "content",
+                "tool_use",
+                "tool_result",
+                "tool_use_id",
+            ),
+            WireApi::Gemini => ("model", "parts", "functionCall", "functionResponse", "id"),
+            _ => return Err(AdapterError::unsupported_binding()),
+        };
+        let mut seen = BTreeSet::new();
+        let mut pending = BTreeMap::new();
+        for message in &self.messages {
+            let role = message.get("role").and_then(Value::as_str);
+            for block in message
+                .get(content_key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let (call, result) = if protocol == WireApi::Messages {
+                    let kind = block.get("type").and_then(Value::as_str);
+                    (
+                        (kind == Some(call_key)).then_some(block),
+                        (kind == Some(result_key)).then_some(block),
+                    )
+                } else {
+                    (block.get(call_key), block.get(result_key))
+                };
+                if let Some(call) = call {
+                    let id = call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(AdapterError::continuation_mismatch)?;
+                    let name = call
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(AdapterError::continuation_mismatch)?;
+                    if role != Some(assistant_role) || !seen.insert(id) {
+                        return Err(AdapterError::continuation_mismatch());
+                    }
+                    pending.insert(id, name);
+                } else if let Some(result) = result {
+                    let id = result
+                        .get(result_id_key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(AdapterError::continuation_mismatch)?;
+                    let name = pending
+                        .remove(id)
+                        .ok_or_else(AdapterError::continuation_mismatch)?;
+                    if role != Some("user")
+                        || (protocol == WireApi::Gemini
+                            && result.get("name").and_then(Value::as_str) != Some(name))
+                    {
+                        return Err(AdapterError::continuation_mismatch());
+                    }
+                } else if role != Some(assistant_role) && !pending.is_empty() {
+                    return Err(AdapterError::continuation_mismatch());
+                }
+            }
+            if role != Some(assistant_role) && !pending.is_empty() {
+                return Err(AdapterError::continuation_mismatch());
+            }
+        }
+        if !pending.is_empty() {
+            return Err(AdapterError::continuation_mismatch());
+        }
+        Ok(())
+    }
+
+    pub(in crate::protocol::adapter) fn append_assistant_content(&mut self, content: Vec<Value>) {
+        if content.is_empty() {
+            return;
+        }
+        if let Some(previous) = self
+            .messages
+            .last_mut()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+        {
+            previous.extend(content);
+            return;
+        }
+        self.messages
+            .push(json!({"role": "assistant", "content": content}));
     }
 
     pub(in crate::protocol::adapter) fn upstream_tools(&self) -> Option<Vec<Value>> {
@@ -95,13 +245,36 @@ impl MessagesBridgeState {
     }
 
     pub(in crate::protocol::adapter) fn allows_tool_name(&self, upstream_tool_name: &str) -> bool {
-        self.upstream_tools().is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                tool.get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|candidate_tool_name| candidate_tool_name == upstream_tool_name)
+        self.tool_allow_list
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(upstream_tool_name))
+            && self.tools.as_ref().is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|candidate_tool_name| {
+                            candidate_tool_name == upstream_tool_name
+                        })
+                })
             })
-        })
+    }
+
+    pub(in crate::protocol::adapter) fn allows_parallel_tool_calls(&self) -> bool {
+        self.tool_choice
+            .as_ref()
+            .and_then(|choice| choice.get("disable_parallel_tool_use"))
+            .and_then(Value::as_bool)
+            != Some(true)
+    }
+
+    pub(in crate::protocol::adapter) fn available_tool_targets(
+        &self,
+    ) -> BTreeMap<String, ClientToolTarget> {
+        self.tool_targets
+            .iter()
+            .filter(|(name, _)| self.allows_tool_name(name))
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect()
     }
 
     pub(in crate::protocol::adapter) fn client_tool(
@@ -111,53 +284,6 @@ impl MessagesBridgeState {
         self.tool_targets
             .get(upstream_name)
             .filter(|_| self.allows_tool_name(upstream_name))
-    }
-
-    pub(in crate::protocol::adapter) fn client_tool_kind(
-        &self,
-        upstream_name: &str,
-    ) -> Option<ResponsesToolKind> {
-        self.client_tool(upstream_name).map(|tool| tool.kind)
-    }
-
-    pub(in crate::protocol::adapter) fn upstream_tool_name(
-        &self,
-        namespace: Option<&str>,
-        client_tool_name: &str,
-    ) -> Option<&str> {
-        self.tool_targets.iter().find_map(|(upstream_name, tool)| {
-            (tool.namespace.as_deref() == namespace
-                && tool.name == client_tool_name
-                && self.allows_tool_name(upstream_name))
-            .then_some(upstream_name.as_str())
-        })
-    }
-
-    /// Resolves a client tool choice to the upstream name already registered
-    /// for this bridge. A present namespace must be usable text; an absent
-    /// namespace selects the unnamed tool. A malformed namespace does not
-    /// fall back to another tool.
-    pub(in crate::protocol::adapter) fn selected_upstream_tool_name(
-        &self,
-        tool: &Map<String, Value>,
-    ) -> Option<String> {
-        let kind = ResponsesToolKind::from_definition(tool).ok()?;
-        let tool_name = tool
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|tool_name| !tool_name.is_empty())?;
-        let namespace = match tool.get("namespace") {
-            None => None,
-            Some(namespace) => Some(
-                namespace
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|namespace| !namespace.is_empty())?,
-            ),
-        };
-        let upstream_name = self.upstream_tool_name(namespace, tool_name)?;
-        (self.client_tool_kind(upstream_name) == Some(kind)).then(|| upstream_name.to_string())
     }
 }
 

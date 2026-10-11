@@ -51,7 +51,7 @@ fn api_sources_generate_strict_codex_models_without_hidden_or_media_rows() {
     assert_eq!(claude["display_name"], "Claude Opus 4.8");
     assert_eq!(claude["supported_reasoning_levels"], json!([]));
     assert!(claude.get("default_reasoning_level").is_none());
-    assert_eq!(claude["input_modalities"], json!(["text", "image"]));
+    assert_eq!(claude["input_modalities"], json!(["text"]));
     assert!(models
         .iter()
         .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));
@@ -93,7 +93,7 @@ fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
         let model = models.iter().find(|model| model["slug"] == id).unwrap();
         assert!(codex_catalog_entry_is_compatible(model));
         assert_eq!(model["comp_hash"], crate::CODEX_RELAY_CATALOG_HASH);
-        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert_eq!(model["supports_parallel_tool_calls"], false);
         assert_eq!(model["supported_reasoning_levels"], json!([]));
         assert!(model.get("use_responses_lite").is_none());
     }
@@ -225,10 +225,10 @@ fn messages_bridge_does_not_invent_codex_ultra_from_max() {
             .iter()
             .filter_map(|level| level["effort"].as_str())
             .collect::<Vec<_>>(),
-        ["low", "medium", "high", "max"]
+        ["low", "medium", "high", "xhigh", "max"]
     );
-    // The adapter can forward Max but cannot forward xhigh. Codex Ultra
-    // is a client orchestration mode, not a synonym for this route's Max.
+    // The reference and adaptive transport allow xhigh and max. Codex Ultra
+    // remains a separate client orchestration mode.
     assert_eq!(
         runtime.model_capabilities(model).reasoning_effort_levels,
         ["low", "medium", "high", "xhigh", "max"]
@@ -327,18 +327,15 @@ fn codex_catalog_names_do_not_merge_routes_or_grant_native_transport() {
                 .as_ref(),
             Some(id)
         );
-        assert_eq!(row["supports_parallel_tool_calls"], true);
+        assert_eq!(row["supports_parallel_tool_calls"], false);
         assert_eq!(row["supported_reasoning_levels"], json!([]));
         assert!(row.get("use_responses_lite").is_none());
-        assert_eq!(
-            row["service_tiers"].as_array().map(Vec::len),
-            Some(if id == "openai/future-model" { 2 } else { 0 })
-        );
+        assert_eq!(row["service_tiers"].as_array().map(Vec::len), Some(0));
     }
     assert_ne!(rows[1]["slug"], rows[2]["slug"]);
 }
 #[test]
-fn codex_catalog_uses_shared_image_defaults_for_unknown_models() {
+fn codex_catalog_does_not_invent_image_support_for_unknown_models() {
     let runtime =
         capability_test_runtime(&["vendor/claude-fable-5"], GatewayRuntimeOptions::default());
     let key = runtime
@@ -348,10 +345,7 @@ fn codex_catalog_uses_shared_image_defaults_for_unknown_models() {
     let response =
         build_codex_models_response(&runtime, &key, &visible, None).expect("coding model catalog");
 
-    assert_eq!(
-        response["models"][0]["input_modalities"],
-        json!(["text", "image"])
-    );
+    assert_eq!(response["models"][0]["input_modalities"], json!(["text"]));
     assert!(codex_catalog_entry_is_compatible(&response["models"][0]));
 }
 #[test]
@@ -428,7 +422,7 @@ fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
     // A generic Responses source can reuse an OpenAI-looking model ID
     // without supporting Codex's native tool contract. Only account
     // manifests are authoritative for this capability.
-    assert_eq!(models[0]["supports_parallel_tool_calls"], true);
+    assert_eq!(models[0]["supports_parallel_tool_calls"], false);
 }
 #[test]
 fn mixed_upstream_and_fallback_catalog_rows_get_unique_priorities() {

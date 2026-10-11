@@ -160,6 +160,7 @@ fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values(
             "output_config": {"effort": " Low "}
         }),
         WireApi::Responses,
+        WireApi::Messages,
     );
     assert_eq!(bridge.requested.as_deref(), Some("max"));
     assert_eq!(bridge.effective.as_deref(), Some("low"));
@@ -168,6 +169,7 @@ fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values(
         &json!({"reasoning_effort": "high"}),
         &json!({"thinking": {"type": "enabled", "budget_tokens": 32_000}}),
         WireApi::ChatCompletions,
+        WireApi::Messages,
     );
     assert_eq!(budget.requested.as_deref(), Some("high"));
     assert_eq!(budget.effective.as_deref(), Some("max"));
@@ -176,8 +178,82 @@ fn reasoning_effort_diagnostics_keep_only_normalized_request_and_payload_values(
         &json!({"reasoning": {"effort": "untrusted value"}}),
         &json!({"thinking": {"budget_tokens": 123}}),
         WireApi::Responses,
+        WireApi::Messages,
     );
     assert_eq!(absent, ReasoningEffortDiagnostics::default());
+}
+
+#[test]
+fn reasoning_effort_diagnostics_read_messages_and_gemini_controls() {
+    for (wire_api, body) in [
+        (
+            WireApi::Messages,
+            json!({"output_config":{"effort":"Very high"}}),
+        ),
+        (
+            WireApi::Gemini,
+            json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}),
+        ),
+    ] {
+        let observed = ReasoningEffortDiagnostics::from_bodies(&body, &body, wire_api, wire_api);
+        let expected = if wire_api == WireApi::Messages {
+            "xhigh"
+        } else {
+            "high"
+        };
+        assert_eq!(observed.requested.as_deref(), Some(expected));
+        assert_eq!(observed.effective.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn reasoning_effort_diagnostics_use_the_exact_upstream_contract() {
+    let body = json!({
+        "reasoning":{"effort":"low"},
+        "reasoning_effort":"medium",
+        "output_config":{"effort":"high"},
+        "generationConfig":{"thinkingConfig":{"thinkingLevel":"Very high"}}
+    });
+    for (wire_api, expected) in [
+        (WireApi::Responses, "low"),
+        (WireApi::ChatCompletions, "medium"),
+        (WireApi::Messages, "high"),
+        (WireApi::Gemini, "xhigh"),
+    ] {
+        let observed = ReasoningEffortDiagnostics::from_bodies(&body, &body, wire_api, wire_api);
+        assert_eq!(observed.requested.as_deref(), Some(expected));
+        assert_eq!(observed.effective.as_deref(), Some(expected));
+    }
+    let bps = ReasoningEffortDiagnostics::from_basis_points_bodies(
+        &json!({"reasoning":{"effort":"max"}}),
+        &json!({"reasoning_effort":"xhigh"}),
+        WireApi::Responses,
+    );
+    assert_eq!(bps.requested.as_deref(), Some("max"));
+    assert_eq!(bps.effective.as_deref(), Some("xhigh"));
+
+    for (wire_api, controls, expected) in [
+        (
+            WireApi::Messages,
+            json!({"thinking":{"type":"disabled"}}),
+            "none",
+        ),
+        (
+            WireApi::Gemini,
+            json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}),
+            "none",
+        ),
+        (
+            WireApi::Gemini,
+            json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":24_576}}}),
+            "xhigh",
+        ),
+    ] {
+        let observed =
+            ReasoningEffortDiagnostics::from_bodies(&controls, &controls, wire_api, wire_api);
+        assert_eq!(observed.requested.as_deref(), Some(expected));
+        assert_eq!(observed.effective.as_deref(), Some(expected));
+    }
 }
 
 #[test]

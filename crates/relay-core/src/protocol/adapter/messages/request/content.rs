@@ -47,14 +47,23 @@ pub(super) fn append_responses_input(
                     tool_results.push(tool_result_block(bridge_state, response_item)?);
                     continue;
                 }
-                flush_tool_results(bridge_state, &mut tool_results)?;
-                if response_item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                if matches!(
+                    response_item.get("type").and_then(Value::as_str),
+                    Some("additional_tools" | "tool_search_call" | "tool_search_output")
+                ) {
                     // Tool definitions were collected before the Messages body was
                     // built. This Responses control item has no conversation
                     // equivalent and must not be emitted as a user message.
                     continue;
                 }
+                flush_tool_results(bridge_state, &mut tool_results)?;
                 if let Some(role) = response_item.get("role").and_then(Value::as_str) {
+                    if !matches!(
+                        response_item.get("type").and_then(Value::as_str),
+                        None | Some("message")
+                    ) {
+                        return Err(AdapterError::invalid_request());
+                    }
                     match role {
                         "system" | "developer" => {
                             append_system_value(
@@ -84,29 +93,10 @@ pub(super) fn append_responses_input(
                         append_assistant_tool_use(bridge_state, response_item)?
                     }
                     Some("reasoning") => {
-                        // A bridge continuation retains native thinking blocks locally. A
-                        // standalone Responses reasoning item has no Anthropic signature and
-                        // cannot be replayed safely.
-                        if bridge_state.messages.is_empty() {
-                            return Err(AdapterError::continuation_missing());
-                        }
-                    }
-                    Some("message") => {
-                        let role = response_item
-                            .get("role")
-                            .and_then(Value::as_str)
-                            .ok_or_else(AdapterError::invalid_request)?;
-                        if role != "user" {
-                            return Err(AdapterError::invalid_request());
-                        }
-                        append_user_blocks(
-                            bridge_state,
-                            content_to_messages_blocks(
-                                response_item
-                                    .get("content")
-                                    .ok_or_else(AdapterError::invalid_request)?,
-                            )?,
-                        )?;
+                        // Native thinking is retained in bridge state. Public Responses
+                        // reasoning supplied in input is separate content and cannot be
+                        // silently dropped or replayed as signed Anthropic thinking.
+                        return Err(AdapterError::reasoning_unsupported());
                     }
                     _ => return Err(AdapterError::invalid_request()),
                 }
@@ -126,9 +116,7 @@ fn append_assistant_from_responses_item(
         .map(content_to_messages_blocks)
         .transpose()?;
     if let Some(content) = content.filter(|content| !content.is_empty()) {
-        bridge_state
-            .messages
-            .push(json!({"role": "assistant", "content": content}));
+        bridge_state.append_assistant_content(content);
     }
     Ok(())
 }
@@ -139,6 +127,16 @@ fn append_user_blocks(
 ) -> AdapterResult<()> {
     if blocks.is_empty() {
         return Err(AdapterError::invalid_request());
+    }
+    if let Some(previous) = bridge_state
+        .messages
+        .last_mut()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    {
+        previous.extend(blocks);
+        return Ok(());
     }
     bridge_state
         .messages

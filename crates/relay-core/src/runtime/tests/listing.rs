@@ -7,9 +7,9 @@ fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
         {"slug":"gpt-test", "input_modalities":["text"], "supported_reasoning_levels":[{"effort":"high","description":"high"}]}
     ]}), current_time_ms());
     let capabilities = runtime.model_capabilities("gpt-test");
-    assert_eq!(capabilities.input_modalities, ["text", "image"]);
+    assert_eq!(capabilities.input_modalities, ["text"]);
     assert!(capabilities.reasoning_effort_levels.is_empty());
-    assert_eq!(capabilities.tool_call, Some(true));
+    assert_eq!(capabilities.tool_call, None);
 }
 #[test]
 fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
@@ -27,6 +27,7 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: vec!["low".into(), "xhigh".into()],
+            service_tiers: None,
         }];
         configured
     });
@@ -53,7 +54,7 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         .unwrap();
     assert_eq!(
         runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
-        ["low"]
+        ["low", "xhigh"]
     );
     assert_eq!(
         runtime.client_reasoning_levels(&key, "test", WireApi::Messages),
@@ -342,18 +343,32 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
         .any(|binding| binding.wire_api == WireApi::ChatCompletions));
 }
 #[test]
-fn speed_choices_and_preferences_are_independent_of_source_metadata_and_health() {
+fn reference_speed_choices_survive_temporary_route_health_changes() {
     let model = "gpt-future-synthetic";
     let runtime = GatewayRuntime::from_pool(
         vec![
             RuntimeSource::unrestricted(source("source-1", "synthetic-one", &[model])),
             RuntimeSource::unrestricted(source("source-2", "synthetic-two", &[model])),
-        ],
+        ]
+        .into_iter()
+        .map(|mut source| {
+            source.protocol_config.endpoint_hint = Some(WireApi::Responses);
+            source
+        })
+        .collect(),
         vec![RuntimeLocalKey::unrestricted(key(
             "key-1",
             "synthetic-pool",
         ))],
-        GatewayRuntimeOptions::default(),
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    r#"{"gpt-future-synthetic":{"service_tiers":["priority","ultrafast"]}}"#,
+                )
+                .unwrap(),
+            )),
+            ..GatewayRuntimeOptions::default()
+        },
         Arc::new(|_| {}),
     )
     .unwrap();

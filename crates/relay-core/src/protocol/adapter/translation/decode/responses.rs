@@ -40,19 +40,22 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             {
                 "message" => {
                     checked(response_item, &["type", "role", "content", "id", "status"])?;
-                    decoded_request.messages.push(Message {
-                        role: super::content::role(response_item)?,
-                        blocks: super::content::text_blocks(
-                            response_item
-                                .get("content")
-                                .ok_or_else(AdapterError::invalid_request)?,
-                            WireApi::Responses,
-                        )?,
-                    });
+                    let role = super::content::role(response_item)?;
+                    let blocks = super::content::text_blocks(
+                        response_item
+                            .get("content")
+                            .ok_or_else(AdapterError::invalid_request)?,
+                        WireApi::Responses,
+                    )?;
+                    if role == Role::Assistant {
+                        append_assistant_blocks(&mut decoded_request.messages, blocks);
+                    } else {
+                        decoded_request.messages.push(Message { role, blocks });
+                    }
                 }
                 // Tools loaded during the turn are part of the catalog, which
                 // `responses_tools` reads; they are not conversation content.
-                "additional_tools" => {}
+                "additional_tools" | "tool_search_call" | "tool_search_output" => {}
                 "function_call" => {
                     checked(
                         response_item,
@@ -88,7 +91,10 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                             "input",
                         ],
                     )?;
-                    let tool_input = required_text(response_item, "input")?;
+                    let tool_input = response_item
+                        .get("input")
+                        .and_then(Value::as_str)
+                        .ok_or_else(AdapterError::invalid_request)?;
                     append_assistant_blocks(
                         &mut decoded_request.messages,
                         vec![Block::ToolCall {
@@ -109,7 +115,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                         blocks: vec![Block::ToolResult {
                             id: required_text(response_item, "call_id")?.into(),
                             name: String::new(),
-                            content: super::content::plain_text(
+                            content: super::content::tool_result_blocks(
                                 response_item
                                     .get("output")
                                     .ok_or_else(AdapterError::invalid_request)?,
@@ -150,8 +156,16 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     }
     (decoded_request.tools, decoded_request.client_tools) =
         super::content::responses_tools(request_body)?;
-    decoded_request.tool_choice =
-        super::content::choice(request_body.get("tool_choice"), WireApi::Responses)?;
+    let (choice, allowed) = super::super::super::contracts::resolve_responses_tool_choice(
+        request_body.get("tool_choice").unwrap_or(&Value::Null),
+        &decoded_request.client_tools,
+    )?;
+    if let Some(allowed) = allowed {
+        decoded_request
+            .tools
+            .retain(|tool| allowed.contains(&tool.name));
+    }
+    decoded_request.tool_choice = choice;
     decoded_request.parallel_tools = optional_bool(request_body, "parallel_tool_calls")?;
     super::content::common(
         &mut decoded_request,

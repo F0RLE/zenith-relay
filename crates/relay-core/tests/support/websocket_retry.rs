@@ -18,7 +18,7 @@ async fn failed_initial_websocket_response_with_output_is_not_retried() {
     let (second, second_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
             "type": "response.completed",
-            "response": {"id": "must-not-replay", "model": MODEL, "output": []}
+            "response": {"id": "must-not-replay", "status": "completed", "model": MODEL, "output": []}
         })])))
         .await;
     let authority = ready_authority("first", "synthetic-first").await;
@@ -164,9 +164,9 @@ async fn websocket_discards_late_response_frames_after_terminal() {
     let (upstream, state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
             json!({"type":"response.output_text.delta","delta":"once"}),
-            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.completed","response":{"id":"ws-once","status":"completed","output":[]}}),
             json!({"type":"response.output_text.delta","delta":"duplicate"}),
-            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.completed","response":{"id":"ws-once","status":"completed","output":[]}}),
         ])))
         .await;
     let authority = ready_authority("once-account", "once-access").await;

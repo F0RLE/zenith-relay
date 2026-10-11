@@ -142,6 +142,14 @@ async fn generic_client_keeps_tier_ownership_without_managed_codex_defaults() {
 
 #[tokio::test]
 async fn codex_catalog_exposes_api_speed_choices_and_honors_explicit_selection() {
+    use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let reference = ModelMetadataCatalogHandle::new(
+        ModelMetadataCatalog::from_models_dev_json(
+            &json!({(MODEL): {"service_tiers": ["priority", "ultrafast"]}}).to_string(),
+        )
+        .unwrap(),
+    );
     for default_tier in [DefaultServiceTier::Standard, DefaultServiceTier::Ultrafast] {
         let (upstream, state) = spawn_upstream("synthetic-speed-key", Vec::new()).await;
         let (gateway, _) = spawn_gateway_with_options(
@@ -154,6 +162,7 @@ async fn codex_catalog_exposes_api_speed_choices_and_honors_explicit_selection()
             )],
             vec![local_key("key", LOCAL_KEY, None)],
             GatewayRuntimeOptions {
+                model_metadata_catalog: Some(reference.clone()),
                 default_service_tier: default_tier,
                 ..GatewayRuntimeOptions::default()
             },

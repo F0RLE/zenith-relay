@@ -57,9 +57,9 @@ impl BasisPointsModel {
 
 /// The request codec and access checks must use the same BPS wire identifier.
 pub(crate) fn normalize_basis_points_reasoning_effort(effort: &str) -> String {
-    let effort = effort.trim().to_ascii_lowercase();
+    let effort = crate::catalog::canonical_reasoning_level(effort);
     match effort.as_str() {
-        "x-high" | "extra-high" | "extra_high" | "max" => "xhigh".to_string(),
+        "max" => "xhigh".to_string(),
         _ => effort,
     }
 }
@@ -182,6 +182,9 @@ mod tests {
             "x-high",
             "extra-high",
             "extra_high",
+            "very_high",
+            "Very high",
+            "x_high",
             " MAX ",
         ] {
             assert!(access.models[0].supports_reasoning_effort(alias), "{alias}");

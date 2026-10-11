@@ -1,10 +1,11 @@
 //! Responses requests translated into Gemini generateContent bodies.
 
+use super::MessagesBridgeState;
 use super::{
     bridged_namespace_tool_name, prepare_bridge_state, request_tool_catalog, AdapterError,
-    AdapterResult, ClientToolTarget, GeminiBridgeRequest, MessagesBridgeState,
-    MessagesReasoningMode, ResponsesToolKind,
+    AdapterResult, ClientToolTarget, GeminiBridgeRequest, MessagesReasoningMode, ResponsesToolKind,
 };
+use crate::AdapterRequestContext;
 use serde_json::{json, Map, Value};
 
 /// Compatibility entry point used by protocol-level callers without a
@@ -13,14 +14,14 @@ use serde_json::{json, Map, Value};
 pub fn prepare_responses_to_gemini(
     request: &Value,
     model: &str,
-    _stream: bool,
+    stream: bool,
     response_scope: &str,
     response_id_seed: &str,
 ) -> AdapterResult<GeminiBridgeRequest> {
     prepare_responses_to_gemini_with_reasoning(
         request,
         model,
-        _stream,
+        stream,
         MessagesReasoningMode::Disabled,
         None,
         response_scope,
@@ -28,28 +29,56 @@ pub fn prepare_responses_to_gemini(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_responses_to_gemini_with_reasoning(
     request: &Value,
     model: &str,
-    _stream: bool,
+    stream: bool,
     reasoning_mode: MessagesReasoningMode,
     previous_bridge_state: Option<MessagesBridgeState>,
     response_scope: &str,
     response_id_seed: &str,
 ) -> AdapterResult<GeminiBridgeRequest> {
+    prepare_responses_to_gemini_with_capabilities(
+        AdapterRequestContext {
+            client_wire_api: crate::WireApi::Responses,
+            request,
+            model,
+            stream,
+            reasoning_mode,
+            cache_write_ttl: crate::CacheWriteTtl::Provider,
+            previous: previous_bridge_state,
+            response_scope,
+            response_id_seed,
+        },
+        None,
+    )
+}
+
+pub(crate) fn prepare_responses_to_gemini_with_capabilities(
+    context: AdapterRequestContext<'_>,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
+) -> AdapterResult<GeminiBridgeRequest> {
+    let AdapterRequestContext {
+        request,
+        model,
+        reasoning_mode,
+        previous,
+        response_scope,
+        response_id_seed,
+        ..
+    } = context;
     let (request_object, mut bridge_state) = prepare_bridge_state(
         request,
         model,
         reasoning_mode,
-        previous_bridge_state,
+        previous,
         crate::WireApi::Gemini,
     )?;
     if let Some(tools) = request_tool_catalog(request_object)? {
         let (declarations, targets) = tools::translate_tools(&tools)?;
         bridge_state.tools = (!declarations.is_empty()).then_some(declarations);
         bridge_state.tool_targets = targets;
-        bridge_state.tool_choice = None;
-        bridge_state.tool_allow_list = None;
     }
     if let Some(choice) = request_object.get("tool_choice") {
         let (translated, allowed) = tools::translate_tool_choice(choice, &bridge_state)?;
@@ -62,6 +91,7 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
             .get("input")
             .ok_or_else(AdapterError::invalid_request)?,
     )?;
+    bridge_state.validate_tool_history(crate::WireApi::Gemini)?;
     if bridge_state.messages.is_empty() {
         return Err(AdapterError::invalid_request());
     }
@@ -73,10 +103,9 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
         content::append_system_parts(&mut bridge_state, content::content_parts(instructions)?)?;
     }
 
-    let mut gemini_request_fields = Map::from_iter([(
-        "contents".to_string(),
-        Value::Array(bridge_state.messages.clone()),
-    )]);
+    let mut contents = Value::Array(bridge_state.messages.clone());
+    super::restore_provider_call_ids(&mut contents, &bridge_state.gemini_tool_call_ids)?;
+    let mut gemini_request_fields = Map::from_iter([("contents".to_string(), contents)]);
     if let Some(system) = bridge_state.system.clone() {
         gemini_request_fields.insert("systemInstruction".to_string(), system);
     }
@@ -85,9 +114,9 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
             "tools".to_string(),
             json!([{"functionDeclarations": tools}]),
         );
-    }
-    if let Some(tool_config) = bridge_state.tool_choice.clone() {
-        gemini_request_fields.insert("toolConfig".to_string(), tool_config);
+        if let Some(tool_config) = bridge_state.tool_choice.clone() {
+            gemini_request_fields.insert("toolConfig".to_string(), tool_config);
+        }
     }
     let mut generation = Map::new();
     copy_number(
@@ -128,6 +157,7 @@ pub(crate) fn prepare_responses_to_gemini_with_reasoning(
         request_object.get("reasoning"),
         reasoning_mode,
         &mut generation,
+        capabilities,
     )?;
     if !generation.is_empty() {
         gemini_request_fields.insert("generationConfig".to_string(), Value::Object(generation));
@@ -202,49 +232,16 @@ fn apply_response_format(
 }
 
 fn apply_reasoning(
-    reasoning_value: Option<&Value>,
+    reasoning: Option<&Value>,
     mode: MessagesReasoningMode,
     generation_fields: &mut Map<String, Value>,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<()> {
-    let effort = reasoning_value
-        .and_then(Value::as_object)
-        .and_then(|reasoning_object| reasoning_object.get("effort"))
-        .and_then(Value::as_str)
-        .map(|effort_text| effort_text.trim().to_ascii_lowercase());
-    let Some(effort) = effort else {
+    let Some(effort) = super::super::contracts::responses_reasoning_effort(reasoning)? else {
         return Ok(());
     };
-    if mode == MessagesReasoningMode::Disabled {
-        return Err(AdapterError::reasoning_unsupported());
-    }
-    if mode == MessagesReasoningMode::Adaptive {
-        if !super::super::contracts::SourceAdapter::ResponsesToGemini
-            .supports_reasoning_effort(mode, &effort)
-        {
-            return Err(AdapterError::reasoning_unsupported());
-        }
-        generation_fields.insert(
-            "thinkingConfig".to_string(),
-            json!({"thinkingLevel":effort,"includeThoughts":true}),
-        );
-        return Ok(());
-    }
-    let budget = match effort.as_str() {
-        "none" => 0,
-        "minimal" => 1_024,
-        "low" => 4_096,
-        "medium" => 8_192,
-        "high" => 16_384,
-        "xhigh" => 24_576,
-        "max" | "ultra" => 32_000,
-        _ => return Err(AdapterError::reasoning_unsupported()),
-    };
-    let mut config = Map::from_iter([("includeThoughts".to_string(), Value::Bool(true))]);
-    if mode == MessagesReasoningMode::Budget {
-        config.insert("thinkingBudget".to_string(), Value::from(budget));
-    }
-    generation_fields.insert("thinkingConfig".to_string(), Value::Object(config));
-    Ok(())
+    super::super::contracts::ReasoningPolicy::new(crate::WireApi::Gemini, mode, capabilities)
+        .apply_effort(generation_fields, &effort, false)
 }
 
 fn copy_number(

@@ -1,4 +1,5 @@
 use super::*;
+use zenith_relay_core::AttemptOutcome;
 
 #[tokio::test]
 async fn native_responses_replays_http_tool_continuation_when_upstream_requires_websocket() {
@@ -393,8 +394,16 @@ async fn native_responses_repair_call_prefixed_function_item_ids_after_strict_re
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome),
+        Some(AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -437,8 +446,16 @@ async fn native_responses_repair_legacy_call_ids_after_explicit_strict_rejection
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome),
+        Some(AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -477,8 +494,16 @@ async fn native_responses_stream_repairs_legacy_call_ids_after_terminal_error() 
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome),
+        Some(AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -511,7 +536,17 @@ async fn native_tool_links_recover_item_ids_without_losing_results_in_json_and_s
                 expected[0]["call_id"] = json!(call_id.unwrap_or("ctc_item"));
                 expected[1]["call_id"] = expected[0]["call_id"].clone();
                 assert_eq!(bodies[1]["input"], expected);
-                assert!(events.lock().unwrap().iter().all(|event| event.success));
+                let events = events.lock().unwrap();
+                assert_eq!(events.len(), 2);
+                assert!(!events[0].success);
+                assert_eq!(
+                    events[0]
+                        .routing
+                        .as_ref()
+                        .and_then(|routing| routing.attempt_outcome),
+                    Some(AttemptOutcome::RetryRepair)
+                );
+                assert!(events[1].success);
             }
         }
     }
@@ -590,8 +625,16 @@ async fn native_responses_repair_custom_tool_item_ids_after_strict_rejection() {
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome),
+        Some(AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -651,6 +694,11 @@ async fn native_responses_remove_item_prefixed_message_ids_after_strict_rejectio
     drop(bodies);
 
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].success);
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].routing.as_ref().unwrap().attempt_outcome,
+        Some(AttemptOutcome::RetryRepair)
+    );
+    assert!(events[1].success);
 }

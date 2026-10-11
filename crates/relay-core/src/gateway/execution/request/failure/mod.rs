@@ -131,6 +131,9 @@ pub(super) async fn handle_upstream_failure(
         None,
         started.elapsed().as_millis() as u64,
     );
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+    }
     let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
     let bytes = match crate::transport::collect_with_progress(
         upstream,
@@ -153,12 +156,18 @@ pub(super) async fn handle_upstream_failure(
             let failure_state =
                 settle_route_failure(runtime, lease, route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
+            if let Some(routing) = event.routing.as_mut() {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+            }
             emit_usage(runtime, event);
             *last_failure = Some(failure);
             *last_failure_origin = selected_error_origin;
             return FailureStep::Continue;
         }
         Err(error) => {
+            if let Some(routing) = event.routing.as_mut() {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::ExecutionUncertain);
+            }
             lease.settle_rotation_unknown(now_ms());
             populate_tokens(&mut event, &error.bytes);
             if error.timed_out {

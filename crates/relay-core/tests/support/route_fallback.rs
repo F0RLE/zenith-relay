@@ -10,7 +10,7 @@ async fn account_non_stream_client_buffers_codex_stream_response() {
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
         ),
         StreamChunk::Data(
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response\",\"object\":\"response\",\"model\":\"gpt-p3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-p3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ),
         StreamChunk::Data("data: [DONE]\n\n"),
     ])])

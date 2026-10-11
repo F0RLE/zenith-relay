@@ -59,7 +59,12 @@ impl MessagesStreamBridge {
                 raw_arguments: arguments,
                 output_index,
             }),
-            StreamBlock::Thinking { .. } | StreamBlock::RedactedThinking { .. } => {}
+            StreamBlock::Thinking { signature, .. } => {
+                if signature.is_none_or(|signature| signature.trim().is_empty()) {
+                    self.fail(AdapterError::upstream_stream_invalid());
+                }
+            }
+            StreamBlock::RedactedThinking { .. } => {}
         }
     }
 
@@ -104,6 +109,7 @@ impl MessagesStreamBridge {
                 "item_id": item_id,
                 "output_index": output_index,
                 "content_index": content_index,
+                "part": {"type": "output_text", "text": block_text, "annotations": []},
             }),
         );
     }
@@ -212,6 +218,16 @@ impl MessagesStreamBridge {
             return;
         };
         let response_id = self.response_id.clone();
+        self.frame(
+            "response.custom_tool_call_input.delta",
+            json!({
+                "type": "response.custom_tool_call_input.delta",
+                "response_id": response_id,
+                "item_id": item_id,
+                "output_index": output_index,
+                "delta": raw_input,
+            }),
+        );
         self.frame(
             "response.custom_tool_call_input.done",
             json!({

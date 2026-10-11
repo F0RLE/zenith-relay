@@ -19,6 +19,12 @@ impl MessagesStreamBridge {
             self.fail(AdapterError::upstream_stream_invalid());
             return;
         };
+        if super::super::super::super::messages::validate_response_delta(&upstream_event["delta"])
+            .is_err()
+        {
+            self.fail(AdapterError::upstream_stream_invalid());
+            return;
+        }
         if self.closed_blocks.contains(&index) {
             self.fail(AdapterError::upstream_stream_invalid());
             return;

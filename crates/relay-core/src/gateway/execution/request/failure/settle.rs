@@ -93,6 +93,9 @@ pub(super) fn settle_collected_rejection(
                 // the owner in `tried`: replay has materialized the
                 // conversation specifically so the next attempt can
                 // be handed to a different slot.
+                if let Some(routing) = event.routing.as_mut() {
+                    routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+                }
                 emit_usage(runtime, event.clone());
                 *last_failure = Some(failure);
                 *last_failure_origin = selected_error_origin;
@@ -116,6 +119,9 @@ pub(super) fn settle_collected_rejection(
         } else {
             let failure_state = rejection_state.clone();
             apply_failure_state(event, failure_state);
+        }
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
         }
         emit_usage(runtime, event.clone());
         *last_failure = Some(failure);

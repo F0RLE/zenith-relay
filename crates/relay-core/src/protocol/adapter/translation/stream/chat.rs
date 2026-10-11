@@ -6,6 +6,9 @@ impl TranslationStream {
         upstream_event: &Value,
     ) -> AdapterResult<bool> {
         let invalid = AdapterError::upstream_stream_invalid;
+        self.chat_completion
+            .observe(upstream_event)
+            .map_err(|_| invalid())?;
         let choices = upstream_event
             .get("choices")
             .and_then(Value::as_array)
@@ -19,8 +22,8 @@ impl TranslationStream {
         let choice = &choices[0];
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             let finish = response::finish(WireApi::ChatCompletions, reason)?;
-            self.finish_reason = Some(if self.saw_refusal {
-                Finish::Filter
+            self.finish_reason = Some(if self.saw_refusal && finish == Finish::Stop {
+                Finish::Refusal
             } else {
                 finish
             });
@@ -34,25 +37,36 @@ impl TranslationStream {
                 "tool_calls",
                 "reasoning_content",
                 "refusal",
+                "annotations",
             ],
         )?;
+        if let Some(annotations) = delta.get("annotations").filter(|value| !value.is_null()) {
+            for annotation in annotations.as_array().ok_or_else(invalid)? {
+                if !self.chat_annotations.contains(annotation) {
+                    self.chat_annotations.push(annotation.clone());
+                }
+            }
+        }
+        if delta
+            .get("role")
+            .is_some_and(|role| !role.is_null() && role.as_str() != Some("assistant"))
+        {
+            return Err(invalid());
+        }
         if let Some(refusal) = delta
             .get("refusal")
             .filter(|refusal_value| !refusal_value.is_null())
         {
             let refusal = refusal.as_str().ok_or_else(invalid)?;
-            if !refusal.is_empty() {
-                self.saw_refusal = true;
-                self.finish_reason = Some(Finish::Filter);
-                let index = match self.indices.get("text") {
-                    Some(index) => *index,
-                    None => self.insert("text".into(), Block::Text(String::new()))?,
-                };
-                let Block::Text(text) = &mut self.decoded_response.blocks[index] else {
-                    return Err(invalid());
-                };
-                text.push_str(refusal);
-            }
+            self.saw_refusal = true;
+            let index = match self.indices.get("refusal") {
+                Some(index) => *index,
+                None => self.insert("refusal".into(), Block::Refusal(String::new()))?,
+            };
+            let Block::Refusal(text) = &mut self.decoded_response.blocks[index] else {
+                return Err(invalid());
+            };
+            text.push_str(refusal);
         }
         for (field, key, reasoning) in [
             ("reasoning_content", "reasoning", true),
@@ -90,8 +104,7 @@ impl TranslationStream {
                 checked(call, &["index", "id", "type", "function"])?;
                 if call
                     .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| kind != "function")
+                    .is_some_and(|kind| !kind.is_null() && kind.as_str() != Some("function"))
                 {
                     return Err(invalid());
                 }
@@ -120,19 +133,24 @@ impl TranslationStream {
                 else {
                     return Err(invalid());
                 };
-                if let Some(fragment) = call.get("id").and_then(Value::as_str) {
-                    id.push_str(fragment);
+                if let Some(fragment) = call.get("id").filter(|value| !value.is_null()) {
+                    id.push_str(fragment.as_str().ok_or_else(invalid)?);
                 }
-                if let Some(function) = call.get("function") {
+                if let Some(function) = call.get("function").filter(|value| !value.is_null()) {
                     checked(function, &["name", "arguments"])?;
-                    if let Some(fragment) = function.get("name").and_then(Value::as_str) {
-                        name.push_str(fragment);
+                    if let Some(fragment) = function.get("name").filter(|value| !value.is_null()) {
+                        name.push_str(fragment.as_str().ok_or_else(invalid)?);
                     }
-                    if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
-                        arguments.push_str(fragment);
+                    if let Some(fragment) =
+                        function.get("arguments").filter(|value| !value.is_null())
+                    {
+                        arguments.push_str(fragment.as_str().ok_or_else(invalid)?);
                     }
                 }
             }
+        }
+        if self.saw_refusal && self.finish_reason == Some(Finish::Stop) {
+            self.finish_reason = Some(Finish::Refusal);
         }
         Ok(false)
     }

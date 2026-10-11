@@ -1,4 +1,6 @@
-use super::super::{AdapterError, AdapterResult, MessagesBridgeState, ResponsesToolKind};
+use super::super::{
+    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, ResponsesToolKind,
+};
 use super::{image_block_from_data_uri, text_block};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -15,29 +17,11 @@ pub(in crate::protocol::adapter::messages::request) fn append_assistant_tool_use
         .map(str::trim)
         .filter(|call_id_text| !call_id_text.is_empty())
         .ok_or_else(AdapterError::invalid_request)?;
-    let tool_name = tool_call_item
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|tool_name| !tool_name.is_empty())
-        .ok_or_else(AdapterError::invalid_request)?;
-    let namespace = match tool_call_item.get("namespace") {
-        None => None,
-        Some(namespace) => Some(
-            namespace
-                .as_str()
-                .map(str::trim)
-                .filter(|namespace_text| !namespace_text.is_empty())
-                .ok_or_else(AdapterError::invalid_request)?,
-        ),
-    };
-    let upstream_name = state
-        .upstream_tool_name(namespace, tool_name)
-        .map(str::to_string)
-        .ok_or_else(AdapterError::invalid_request)?;
-    if state.client_tool_kind(&upstream_name) != Some(kind) {
-        return Err(AdapterError::invalid_request());
-    }
+    // Historical calls can refer to tools outside this turn's active catalog.
+    // Their identity comes from the call, never from the current allow-list.
+    let target = ClientToolTarget::from_call(tool_call_item)?;
+    let upstream_name = target.upstream_name();
+    state.record_tool_call(call_id, target)?;
     let tool_input = match kind {
         ResponsesToolKind::Function => {
             let arguments = tool_call_item
@@ -57,10 +41,9 @@ pub(in crate::protocol::adapter::messages::request) fn append_assistant_tool_use
             json!({"input": custom_input})
         }
     };
-    state.messages.push(json!({
-        "role": "assistant",
-        "content": [{"type": "tool_use", "id": call_id, "name": upstream_name, "input": tool_input}],
-    }));
+    state.append_assistant_content(vec![
+        json!({"type": "tool_use", "id": call_id, "name": upstream_name, "input": tool_input}),
+    ]);
     Ok(())
 }
 
@@ -109,6 +92,9 @@ pub(in crate::protocol::adapter::messages::request) fn flush_tool_results(
             return Err(AdapterError::continuation_mismatch());
         }
     }
+    if returned_call_ids.len() != known_call_ids.len() {
+        return Err(AdapterError::continuation_mismatch());
+    }
     let content = std::mem::take(results);
     state
         .messages
@@ -138,9 +124,7 @@ pub(in crate::protocol::adapter::messages::request) fn tool_result_block(
                     && block.get("id").and_then(Value::as_str) == Some(call_id)
             })
         })
-        .and_then(|block| block.get("name"))
-        .and_then(Value::as_str)
-        .and_then(|tool_name| state.client_tool(tool_name))
+        .and_then(|_| state.tool_call_targets.get(call_id))
         .ok_or_else(AdapterError::continuation_mismatch)?;
     if kind != expected.kind {
         return Err(AdapterError::continuation_mismatch());
@@ -181,11 +165,18 @@ fn function_tool_result_content(tool_output: Option<&Value>) -> AdapterResult<Va
             else {
                 return Ok(Value::String(output_text.clone()));
             };
+            if !output_parts
+                .iter()
+                .any(|part| part.get("type").and_then(Value::as_str) == Some("input_image"))
+            {
+                return Ok(Value::String(output_text.clone()));
+            }
             match function_tool_output_parts(&output_parts)? {
                 Some(content) => Ok(content),
                 None => Ok(Value::String(output_text.clone())),
             }
         }
+        Some(Value::Array(parts)) if parts.is_empty() => Ok(Value::Array(Vec::new())),
         Some(Value::Array(parts)) => match function_tool_output_parts(parts)? {
             Some(content) => Ok(content),
             None => Ok(Value::String(
@@ -198,15 +189,16 @@ fn function_tool_result_content(tool_output: Option<&Value>) -> AdapterResult<Va
     }
 }
 
-/// Converts a Responses tool output array only when it contains an image.
-/// Ordinary JSON arrays keep their previous string representation.
+/// Recognizes explicit content blocks while leaving ordinary JSON arrays intact.
 fn function_tool_output_parts(parts: &[Value]) -> AdapterResult<Option<Value>> {
-    let contains_image = parts.iter().any(|part| {
+    let contains_content = parts.iter().any(|part| {
         part.get("type")
             .and_then(Value::as_str)
-            .is_some_and(|kind| kind == "input_image")
+            .is_some_and(|kind| {
+                matches!(kind, "input_text" | "output_text" | "text" | "input_image")
+            })
     });
-    if !contains_image {
+    if !contains_content {
         return Ok(None);
     }
 
@@ -232,9 +224,6 @@ fn function_tool_output_parts(parts: &[Value]) -> AdapterResult<Option<Value>> {
             )?),
             _ => return Err(AdapterError::invalid_request()),
         }
-    }
-    if blocks.is_empty() {
-        return Err(AdapterError::invalid_request());
     }
     Ok(Some(Value::Array(blocks)))
 }

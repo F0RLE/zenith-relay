@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelDiscoveryFailureCode {
     AgentTaskInvalid,
+    BasisPointsFreeAccountUnsupported,
     Forbidden,
     HttpStatus,
     InvalidAccessToken,
@@ -24,6 +25,9 @@ impl ModelDiscoveryFailureCode {
     pub fn management_code(self) -> &'static str {
         match self {
             Self::AgentTaskInvalid => error_codes::MODELS_AGENT_TASK_INVALID,
+            Self::BasisPointsFreeAccountUnsupported => {
+                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED
+            }
             Self::Forbidden => error_codes::MODELS_FORBIDDEN,
             Self::HttpStatus => error_codes::MODELS_HTTP_STATUS,
             Self::InvalidAccessToken => error_codes::MODELS_INVALID_ACCESS_TOKEN,
@@ -85,6 +89,9 @@ impl fmt::Display for ModelDiscoveryFailure {
         formatter.write_str(match self.code {
             ModelDiscoveryFailureCode::AgentTaskInvalid => {
                 "Agent Identity task must be registered again"
+            }
+            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported => {
+                super::super::BASIS_POINTS_FREE_ACCOUNT_MESSAGE
             }
             ModelDiscoveryFailureCode::Forbidden => "model discovery is forbidden",
             ModelDiscoveryFailureCode::HttpStatus => "model discovery request was rejected",

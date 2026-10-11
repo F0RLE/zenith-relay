@@ -4,41 +4,35 @@ use serde_json::{json, Value};
 impl ModelCapabilities {
     pub fn unknown_model() -> Self {
         Self {
-            input_modalities: vec!["text".into(), "image".into()],
+            input_modalities: vec!["text".into()],
             output_modalities: vec!["text".into()],
-            attachment: Some(true),
-            tool_call: Some(true),
-            structured_output: Some(true),
             ..Self::default()
         }
     }
 
-    /// Fill absent reference fields with Relay's baseline. An explicit false
-    /// from a trusted reference remains false. Numeric limits, prices and
-    /// unknown reasoning enums are never guessed.
+    /// Supply the text baseline without guessing optional capabilities.
     pub fn with_defaults(mut self) -> Self {
         let baseline = Self::unknown_model();
+        if self.attachment.is_none()
+            && self
+                .input_modalities
+                .iter()
+                .any(|modality| modality == "image")
+        {
+            self.attachment = Some(true);
+        }
         if self.input_modalities.is_empty() {
-            self.input_modalities = if self.attachment == Some(false) {
-                vec!["text".into()]
-            } else {
-                baseline.input_modalities
-            };
+            self.input_modalities = baseline.input_modalities;
         }
         if self.output_modalities.is_empty() {
             self.output_modalities = baseline.output_modalities;
         }
-        self.tool_call = self.tool_call.or(baseline.tool_call);
-        self.structured_output = self.structured_output.or(baseline.structured_output);
-        self.attachment = self.attachment.or_else(|| {
-            Some(
-                self.input_modalities
-                    .iter()
-                    .any(|modality| modality == "image"),
-            )
-        });
         self.reasoning_effort_levels =
             crate::canonicalize_reasoning_levels(self.reasoning_effort_levels);
+        self.default_reasoning_effort = self
+            .default_reasoning_effort
+            .as_deref()
+            .map(crate::catalog::canonical_reasoning_level);
         if self.reasoning == Some(false) {
             self.reasoning_effort_levels.clear();
         } else if !self.reasoning_effort_levels.is_empty() {
@@ -70,7 +64,10 @@ impl ModelCapabilities {
         };
         std::collections::BTreeMap::from([
             (ProtocolFeature::Text, CapabilityStatus::Declared),
-            (ProtocolFeature::Streaming, CapabilityStatus::Declared),
+            (
+                ProtocolFeature::Streaming,
+                capability_status(self.streaming),
+            ),
             (ProtocolFeature::Images, capability_status(self.attachment)),
             (
                 ProtocolFeature::FunctionTools,
@@ -78,7 +75,7 @@ impl ModelCapabilities {
             ),
             (
                 ProtocolFeature::ToolChoice,
-                capability_status(self.tool_call),
+                capability_status(self.tool_choice),
             ),
             (
                 ProtocolFeature::StructuredOutput,
@@ -104,7 +101,7 @@ impl ModelCapabilities {
     ) -> std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus> {
         use crate::{CapabilityStatus, ProtocolFeature};
 
-        let reference_features = self.clone().with_defaults().protocol_features();
+        let reference_features = self.protocol_features();
         let Some(route) = route else {
             return reference_features;
         };
@@ -181,6 +178,27 @@ impl ModelCapabilities {
             .collect()
     }
 
+    pub(crate) fn for_route(&self, route: Option<&crate::ModelEndpointCapability>) -> Self {
+        let mut capabilities = self.clone().with_defaults();
+        let route_efforts = self.reasoning_effort_levels_for_route(route);
+        let conflicting_efforts = !capabilities.reasoning_effort_levels.is_empty()
+            && route.is_some_and(|route| !route.reasoning_efforts.is_empty())
+            && route_efforts.is_empty();
+        capabilities.reasoning_effort_levels = route_efforts;
+        if conflicting_efforts
+            || self
+                .protocol_features_for_route(route)
+                .get(&crate::ProtocolFeature::Reasoning)
+                == Some(&crate::CapabilityStatus::Unsupported)
+        {
+            capabilities.reasoning = Some(false);
+        }
+        capabilities.default_reasoning_effort = capabilities
+            .default_reasoning_effort
+            .filter(|default| capabilities.reasoning_effort_levels.contains(default));
+        capabilities
+    }
+
     /// Project reference semantics while retaining the owning account's Codex
     /// context policy. A reference maximum is not a native conversation window.
     pub fn apply_to_native_codex(&self, catalog_entry: &mut Value) {
@@ -238,7 +256,7 @@ impl ModelCapabilities {
         catalog_object.insert("output_modalities".into(), json!(self.output_modalities));
         catalog_object.insert(
             "supports_parallel_tool_calls".into(),
-            json!(self.tool_call == Some(true)),
+            json!(self.parallel_tool_call.or(self.tool_call) == Some(true)),
         );
         catalog_object.insert("supports_search_tool".into(), json!(false));
         catalog_object.insert("supports_image_detail_original".into(), json!(false));
@@ -308,12 +326,13 @@ mod tests {
         let known = catalog.capabilities_for("text-only");
         assert_eq!(known.input_modalities, ["text"]);
         assert_eq!(known.tool_call, Some(false));
-        assert_eq!(known.structured_output, Some(true));
+        assert_eq!(known.structured_output, None);
         assert!(known.reasoning_effort_levels.is_empty());
         assert_eq!(known.context_limit, None);
         let unknown = catalog.capabilities_for("new-model");
-        assert_eq!(unknown.input_modalities, ["text", "image"]);
-        assert_eq!(unknown.tool_call, Some(true));
+        assert_eq!(unknown.input_modalities, ["text"]);
+        assert_eq!(unknown.attachment, None);
+        assert_eq!(unknown.tool_call, None);
         assert_eq!(unknown.context_limit, None);
     }
 
@@ -356,9 +375,9 @@ mod tests {
         );
         assert!(crate::codex_catalog_entry_is_compatible(&catalog_entry));
         catalog.apply_codex_capabilities("astra-other", &mut catalog_entry);
-        assert_eq!(catalog_entry["input_modalities"], json!(["text", "image"]));
+        assert_eq!(catalog_entry["input_modalities"], json!(["text"]));
         assert_eq!(catalog_entry["supported_reasoning_levels"], json!([]));
-        assert_eq!(catalog_entry["supports_parallel_tool_calls"], true);
+        assert_eq!(catalog_entry["supports_parallel_tool_calls"], false);
         assert!(catalog_entry.get("context_window").is_none());
         assert!(crate::codex_catalog_entry_is_compatible(&catalog_entry));
     }
@@ -388,6 +407,7 @@ mod tests {
                 ),
             ]),
             reasoning_efforts: vec!["low".into(), "max".into()],
+            service_tiers: None,
         };
         let features = reference.protocol_features_for_route(Some(&route));
         assert_eq!(
@@ -417,6 +437,7 @@ mod tests {
                 crate::CapabilityStatus::Unsupported,
             )]),
             reasoning_efforts: Vec::new(),
+            service_tiers: None,
         };
         let features = ModelCapabilities::default().protocol_features_for_route(Some(&route));
         assert_eq!(
@@ -443,6 +464,7 @@ mod tests {
                 crate::CapabilityStatus::Declared,
             )]),
             reasoning_efforts: vec!["low".into(), "high".into()],
+            service_tiers: None,
         };
         assert!(reference
             .reasoning_effort_levels_for_route(Some(&route))

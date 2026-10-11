@@ -31,8 +31,8 @@ use crate::WireApi;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub use snapshot::{
-    ActiveModelRuntime, CandidateRuntimeSnapshot, ModelRetryRuntime, RoutingDiagnostics,
-    SelectionReason,
+    ActiveModelRuntime, AttemptOutcome, CandidateRuntimeSnapshot, ModelRetryRuntime,
+    RoutingDiagnostics, SelectionReason,
 };
 
 // Keep response ownership across busy personal pools without allowing an

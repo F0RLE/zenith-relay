@@ -93,7 +93,7 @@ pub(super) fn block(
             Ok(Block::ToolResult {
                 id: required_text(content_part, "tool_use_id")?.into(),
                 name: String::new(),
-                content: plain_text(
+                content: tool_result_blocks(
                     content_part.get("content").unwrap_or(&Value::Null),
                     protocol,
                 )?,
@@ -160,10 +160,25 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
         });
     }
     if let Some(function_response) = gemini_part.get("functionResponse") {
-        checked(function_response, &["id", "name", "response"])?;
+        checked(function_response, &["id", "name", "response", "parts"])?;
         let response_payload = function_response
             .get("response")
+            .filter(|response| response.is_object())
             .ok_or_else(AdapterError::invalid_request)?;
+        let mut content = vec![Block::Text(response_payload.to_string())];
+        if let Some(parts) = function_response
+            .get("parts")
+            .filter(|parts| !parts.is_null())
+        {
+            for part in parts.as_array().ok_or_else(AdapterError::invalid_request)? {
+                checked(part, &["inlineData"])?;
+                let media = gemini_block(part)?;
+                if !matches!(media, Block::Image { .. }) {
+                    return Err(AdapterError::parameter_unsupported());
+                }
+                content.push(media);
+            }
+        }
         return Ok(Block::ToolResult {
             id: function_response
                 .get("id")
@@ -171,7 +186,7 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
                 .unwrap_or_default()
                 .into(),
             name: required_text(function_response, "name")?.into(),
-            content: response_payload.to_string(),
+            content,
             is_error: response_payload.get("error").is_some(),
         });
     }
@@ -245,13 +260,15 @@ pub(super) fn image(url: String, detail: Option<String>) -> AdapterResult<Block>
     Ok(Block::Image { url, detail })
 }
 
-pub(super) fn plain_text(content_value: &Value, protocol: WireApi) -> AdapterResult<String> {
-    let mut plain_text = String::new();
-    for block in text_blocks(content_value, protocol)? {
-        let Block::Text(text) = block else {
+pub(super) fn tool_result_blocks(
+    content_value: &Value,
+    protocol: WireApi,
+) -> AdapterResult<Vec<Block>> {
+    let blocks = text_blocks(content_value, protocol)?;
+    for block in &blocks {
+        if !matches!(block, Block::Text(_) | Block::Image { .. }) {
             return Err(AdapterError::parameter_unsupported());
-        };
-        plain_text.push_str(&text);
+        }
     }
-    Ok(plain_text)
+    Ok(blocks)
 }

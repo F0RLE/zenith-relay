@@ -51,6 +51,7 @@ fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
         provider_family: None,
         basis_points_available: false,
         basis_points_enabled: false,
+        credential_diagnostics: None,
         enabled: true,
         in_pool,
         draining: false,
@@ -124,6 +125,7 @@ fn test_token_price(input: u64, output: u64) -> TokenPrice {
         priority: crate::pricing::TokenRateSet::EMPTY,
         above_200k: crate::pricing::LongContextRates::EMPTY,
         above_272k: crate::pricing::LongContextRates::EMPTY,
+        ..Default::default()
     }
 }
 

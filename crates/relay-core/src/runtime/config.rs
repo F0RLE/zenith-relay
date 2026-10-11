@@ -233,9 +233,9 @@ pub enum DefaultServiceTier {
     Ultrafast,
 }
 
-/// Normalizes the explicit per-model policy. Capability is resolved only from
-/// a live route's confirmed upstream manifest, so persistence must retain a
-/// valid model ID without inferring support from its spelling.
+/// Normalizes the saved per-model policy. Reference modes and configured
+/// transports determine support separately; persistence retains a valid
+/// model ID without inferring support from its spelling.
 pub fn normalize_model_service_tier_overrides(
     overrides: BTreeMap<String, DefaultServiceTier>,
 ) -> std::result::Result<BTreeMap<String, DefaultServiceTier>, &'static str> {
@@ -331,6 +331,7 @@ pub trait ResponseAffinityStore: Send + Sync {
 #[derive(Clone)]
 pub struct GatewayRuntimeOptions {
     pub tool_policy: crate::ToolPolicy,
+    pub request_timezone: crate::RequestTimezonePolicy,
     pub max_retry_candidates: usize,
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub hidden_models: Vec<String>,
@@ -385,6 +386,7 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             tool_policy: crate::ToolPolicy::default(),
+            request_timezone: crate::RequestTimezonePolicy::default(),
             max_retry_candidates: 3,
             pool_routing: None,
             hidden_models: Vec::new(),

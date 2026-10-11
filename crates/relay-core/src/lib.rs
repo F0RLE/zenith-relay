@@ -47,6 +47,7 @@ pub mod providers;
 pub mod proxy;
 pub mod quota;
 mod record_impl;
+pub mod request_timezone;
 mod runtime;
 pub mod scheduler;
 pub mod sources;
@@ -93,6 +94,7 @@ pub use protocol::{
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
+pub use request_timezone::{RequestTimezonePolicy, RequestTimezoneUpdate};
 pub use runtime::{
     changed_runtime_source_policy_updates, normalize_image_base_model,
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
@@ -127,11 +129,12 @@ pub use scheduler::rotation::{
     RotationSelectionReason, RotationSettlement, SettlementError as RotationSettlementError,
 };
 pub use scheduler::{
-    account_candidate_health, resolve_pool_routing, ActiveModelRuntime, CandidateHealth,
-    CandidateKind, CandidateQuota, CandidateQuotaState, CandidateRuntimeSnapshot, CandidateScope,
-    ModelRetryRuntime, PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
-    PoolScheduler, RoutingDiagnostics, RuntimeCandidate, Selection, SelectionReason,
-    SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
+    account_candidate_health, resolve_pool_routing, ActiveModelRuntime, AttemptOutcome,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateQuotaState, CandidateRuntimeSnapshot,
+    CandidateScope, ModelRetryRuntime, PoolMemberKind, PoolRoutingMember, PoolRoutingMode,
+    PoolRoutingPolicy, PoolScheduler, RoutingDiagnostics, RuntimeCandidate, Selection,
+    SelectionReason, SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS,
+    RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     apply_source_priorities, cache_write_model_ids, discover_source_models,

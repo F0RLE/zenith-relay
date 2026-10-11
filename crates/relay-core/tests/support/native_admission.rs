@@ -17,15 +17,41 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
             for reference_support in [false, true] {
                 let observed = Arc::new(Mutex::new(Vec::new()));
                 let captured = observed.clone();
-                let upstream = spawn(Router::new().fallback(post(move |Json(body): Json<Value>| {
-                captured.lock().unwrap().push(body);
-                async { Json(json!({
-                    "id":"resp_synthetic", "output":[], "type":"message", "role":"assistant",
-                    "model":"synthetic-model", "content":[{"type":"text","text":"synthetic response"}],
-                    "stop_reason":"end_turn", "usage":{"input_tokens":3,"output_tokens":2}
-                })) }
-            })))
-            .await;
+                let response_body = match upstream_wire_api {
+                    WireApi::Responses => json!({
+                        "id":"resp_synthetic",
+                        "status":"completed",
+                        "output":[],
+                        "model":"synthetic-model",
+                        "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+                    }),
+                    WireApi::ChatCompletions => json!({
+                        "id":"chatcmpl_synthetic",
+                        "object":"chat.completion",
+                        "model":"synthetic-model",
+                        "choices":[{"index":0,"message":{"role":"assistant","content":"synthetic response"},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+                    }),
+                    WireApi::Messages => json!({
+                        "id":"msg_synthetic",
+                        "type":"message",
+                        "role":"assistant",
+                        "content":[{"type":"text","text":"synthetic response"}],
+                        "stop_reason":"end_turn",
+                        "usage":{"input_tokens":3,"output_tokens":2}
+                    }),
+                    WireApi::Gemini => json!({
+                        "responseId":"gemini_synthetic",
+                        "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"synthetic response"}]},"finishReason":"STOP"}],
+                        "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
+                    }),
+                };
+                let upstream =
+                    spawn(Router::new().fallback(post(move |Json(body): Json<Value>| {
+                        captured.lock().unwrap().push(body);
+                        async move { Json(response_body) }
+                    })))
+                    .await;
                 let mut source = RuntimeSource::unrestricted(ProviderSource {
                     id: "synthetic-source".into(),
                     name: "Synthetic source".into(),
@@ -43,6 +69,7 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                     checked_at_ms: 1,
                     features: [(ProtocolFeature::Reasoning, reasoning_status)].into(),
                     reasoning_efforts: declared_effort.into_iter().map(str::to_owned).collect(),
+                    service_tiers: None,
                 }];
                 let runtime = GatewayRuntime::from_pool(
                 vec![source],

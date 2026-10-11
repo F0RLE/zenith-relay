@@ -16,7 +16,7 @@ pub(in crate::gateway) fn requested_reasoning_effort(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|effort| !effort.is_empty() && !effort.eq_ignore_ascii_case("none"))
-        .map(str::to_ascii_lowercase)
+        .map(crate::catalog::canonical_reasoning_level)
 }
 
 pub(in crate::gateway) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {

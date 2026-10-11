@@ -200,14 +200,18 @@ pub(super) fn build_codex_models_response_from_manifests(
             .configured_executor_routes(key, &upstream_id, &[WireApi::Responses], false)
             .iter()
             .any(|route| {
-                route
-                    .adapter
-                    .supports_reasoning_effort(route.reasoning_mode, "ultra")
-                    && runtime.basis_points_reasoning_available(
-                        &route.candidate_id,
-                        &route.source_model,
-                        "ultra",
-                    )
+                let capabilities = runtime
+                    .model_capabilities(&route.source_model)
+                    .for_route(route.route_capability.as_ref());
+                route.adapter.supports_reasoning_effort_for_model(
+                    route.reasoning_mode,
+                    "ultra",
+                    &capabilities,
+                ) && runtime.basis_points_reasoning_available(
+                    &route.candidate_id,
+                    &route.source_model,
+                    "ultra",
+                )
             });
         if (native_ultra || installed_ultra)
             && ultra_route_available
@@ -230,13 +234,17 @@ pub(super) fn build_codex_models_response_from_manifests(
                 .collect::<Vec<_>>();
             apply_model_reasoning_allowed_levels(&mut catalog_model, Some(&allowed));
         }
-        // Speed follows the model family. Basis Points stays standard-only
-        // and does not remove the picker.
+        // Key scope and transport restrictions narrow the reference modes.
         set_codex_service_tiers(
             &mut catalog_model,
-            runtime.model_supported_service_tiers(&upstream_id),
+            &runtime.client_service_tiers(key, &upstream_id, WireApi::Responses),
         );
         sort_supported_reasoning_levels(&mut catalog_model);
+        runtime.apply_chatgpt_context_policy(
+            &mut catalog_model,
+            &upstream_id,
+            has_native_account_route,
+        );
         models.push(catalog_model);
     }
 
@@ -255,21 +263,25 @@ pub(super) fn sort_supported_reasoning_levels(model: &mut Value) {
     else {
         return;
     };
-    let order = crate::canonicalize_reasoning_levels(
-        levels
-            .iter()
-            .filter_map(|level| level.get("effort").and_then(Value::as_str)),
-    );
+    let mut seen = HashSet::new();
+    levels.retain_mut(|level| {
+        let Some(effort) = level.get("effort").and_then(Value::as_str) else {
+            return false;
+        };
+        let effort = crate::catalog::canonical_reasoning_level(effort);
+        if effort.is_empty() || !seen.insert(effort.clone()) {
+            return false;
+        }
+        level["effort"] = json!(effort);
+        true
+    });
     levels.sort_by_key(|level| {
-        let effort = level
-            .get("effort")
-            .and_then(Value::as_str)
-            .map(|effort_text| effort_text.trim().to_ascii_lowercase())
-            .unwrap_or_default();
-        order
-            .iter()
-            .position(|candidate| candidate == &effort)
-            .unwrap_or(order.len())
+        crate::reasoning_level_rank(
+            level
+                .get("effort")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
     });
 }
 
@@ -299,8 +311,9 @@ pub(super) fn apply_model_reasoning_allowed_levels(
         .unwrap_or_default();
     let detected_by_effort = detected_levels
         .into_iter()
-        .filter_map(|level| {
-            let effort = level.get("effort")?.as_str()?.trim().to_ascii_lowercase();
+        .filter_map(|mut level| {
+            let effort = crate::catalog::canonical_reasoning_level(level.get("effort")?.as_str()?);
+            level["effort"] = json!(effort);
             (!effort.is_empty()).then_some((effort, level))
         })
         .collect::<BTreeMap<_, _>>();

@@ -71,6 +71,10 @@ pub async fn execute_account_wake(
             error_codes::NO_ELIGIBLE_SOURCE,
         );
     };
+    // Scheduler-owned requests bypass the public Responses handler, which
+    // normally refreshes the short-lived Basis Points access catalog before
+    // model resolution and account selection.
+    runtime.refresh_basis_points_access(&key).await;
     let Some(resolved_model) = runtime.resolve_configured_account_model(&key, model_id) else {
         return errors::api_error(
             StatusCode::NOT_FOUND,

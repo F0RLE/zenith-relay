@@ -24,21 +24,25 @@ pub fn usd_to_micro(price_value: &Value, unit_scale: u128) -> Result<u64, Pricin
 
 /// Converts USD/token into microUSD per million tokens.
 pub fn usd_per_token_to_micro_usd_per_million(price_value: &Value) -> Result<u64, PricingError> {
-    parse_decimal_value(price_value, 1_000_000_000_000)
+    parse_decimal_value(price_value, 1_000_000_000_000, true)
 }
 
 /// Converts USD/request into microUSD per request.
 pub fn usd_per_request_to_micro_usd(price_value: &Value) -> Result<u64, PricingError> {
-    parse_decimal_value(price_value, 1_000_000)
+    parse_decimal_value(price_value, 1_000_000, false)
 }
 
-fn parse_decimal_value(price_value: &Value, scale: u128) -> Result<u64, PricingError> {
+fn parse_decimal_value(
+    price_value: &Value,
+    scale: u128,
+    allow_zero: bool,
+) -> Result<u64, PricingError> {
     let price_text = price_value
         .as_str()
         .map(str::to_owned)
         .or_else(|| price_value.as_number().map(ToString::to_string))
         .ok_or(PricingError::InvalidAmount)?;
-    parse_decimal_to_scaled(&price_text, scale, false)
+    parse_decimal_to_scaled(&price_text, scale, allow_zero)
 }
 
 pub(crate) fn decimal_to_scaled_allow_zero(text: &str, scale: u128) -> Result<u64, PricingError> {
@@ -146,6 +150,8 @@ mod tests {
 
     #[test]
     fn parses_decimal_and_scientific_token_prices_without_float_math() {
+        assert_eq!(usd_per_token_to_micro_usd_per_million(&json!(0)), Ok(0));
+        assert_eq!(usd_per_token_to_micro_usd_per_million(&json!("0.0")), Ok(0));
         assert_eq!(
             usd_per_token_to_micro_usd_per_million(&json!("0.0000025")),
             Ok(2_500_000)

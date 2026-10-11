@@ -205,6 +205,7 @@ fn failed_generation_probe_does_not_remove_catalog_models() {
         checked_at_ms: 2,
         features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Unsupported)]),
         reasoning_efforts: vec![],
+        service_tiers: None,
     });
     let resolved = config
         .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
@@ -245,6 +246,7 @@ fn successful_generation_probe_does_not_override_catalog_routes() {
         checked_at_ms: 2,
         features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Confirmed)]),
         reasoning_efforts: vec![],
+        service_tiers: None,
     });
 
     let routes = config
@@ -270,6 +272,7 @@ fn stored_participant_features_do_not_override_endpoint_identity() {
             checked_at_ms: 1,
             features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Unsupported)]),
             reasoning_efforts: vec![],
+            service_tiers: None,
         }],
         ..Default::default()
     };
@@ -300,6 +303,7 @@ fn old_configuration_ignores_legacy_mode_and_checks_probe_revision() {
         checked_at_ms: 42,
         features: BTreeMap::new(),
         reasoning_efforts: vec![],
+        service_tiers: None,
     };
     config.invalidate("https://example.test/v1");
     assert!(!config.apply_probe(0, observation.clone()));
@@ -349,6 +353,7 @@ fn known_responses_service_keeps_unprobed_catalog_models_routable() {
         checked_at_ms: 42,
         features: BTreeMap::from([(ProtocolFeature::Text, CapabilityStatus::Confirmed)]),
         reasoning_efforts: vec![],
+        service_tiers: None,
     });
 
     let routes = config
@@ -519,6 +524,7 @@ fn unsupported_native_protocol_falls_through_instead_of_failing_the_route() {
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        service_tiers: None,
     });
     let routes = config
         .resolve_with_catalog(
@@ -552,6 +558,7 @@ fn catch_all_chat_guess_yields_to_declared_source_evidence() {
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        service_tiers: None,
     });
     let routes = config
         .resolve_with_catalog(url, &models, &[], WireApi::Responses, Some(&catalog))
@@ -575,6 +582,7 @@ fn rejected_legacy_protocol_does_not_override_an_available_fallback() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            service_tiers: None,
         }],
         ..SourceProtocolConfig::automatic(url)
     };
@@ -615,6 +623,7 @@ fn rejected_endpoints_are_not_recreated_by_hints_or_fallback() {
                 checked_at_ms: 1,
                 features: BTreeMap::new(),
                 reasoning_efforts: Vec::new(),
+                service_tiers: None,
             })
             .collect(),
         ..SourceProtocolConfig::automatic(url)

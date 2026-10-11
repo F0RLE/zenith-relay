@@ -65,7 +65,7 @@ pub struct SourceSummary {
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     /// Complete token prices discovered from this source's model catalog.
-    /// Manual source overrides always take precedence.
+    /// Usage resolves provider prices before reference and manual fallbacks.
     #[serde(default)]
     pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
     #[serde(default)]

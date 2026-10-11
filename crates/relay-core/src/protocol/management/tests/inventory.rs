@@ -97,6 +97,7 @@ fn pool_inventory_enriches_unavailable_models_without_creating_routes() {
                 cache_write_5m_micro_usd_per_million: None,
                 cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 34,
+                ..Default::default()
             },
         )]),
         &BTreeMap::from([("future".into(), vec!["high".into()])]),

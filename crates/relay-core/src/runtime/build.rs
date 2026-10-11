@@ -60,6 +60,10 @@ pub(super) struct KeyRuntimeParts {
 }
 
 pub(super) fn validate_runtime_options(options: &GatewayRuntimeOptions) -> Result<()> {
+    options
+        .request_timezone
+        .validate()
+        .map_err(|message| Error::Validation(message.into()))?;
     if let Some(policy) = &options.pool_routing {
         policy
             .validate_activation()
@@ -306,6 +310,7 @@ impl GatewayRuntime {
 
         Ok(Self {
             tool_policy: RwLock::new(tool_policy),
+            request_timezone: RwLock::new(options.request_timezone.clone()),
             clients,
             discovery_client,
             sources: source_parts.executors,
@@ -330,6 +335,8 @@ impl GatewayRuntime {
             model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
             model_service_tier_overrides: Mutex::new(BTreeMap::new()),
             model_display_order: Mutex::new(Vec::new()),
+            chatgpt_context_policy: Mutex::new(Default::default()),
+            chatgpt_context_prices: Mutex::new(BTreeMap::new()),
             model_metadata_catalog: options.model_metadata_catalog.clone(),
             passive_quotas: Mutex::new(account_parts.passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),

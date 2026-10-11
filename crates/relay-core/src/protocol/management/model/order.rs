@@ -51,6 +51,12 @@ pub fn member_model_catalog(
         source
             .models
             .iter()
+            .chain(
+                source
+                    .protocol_bindings
+                    .iter()
+                    .flat_map(|binding| &binding.model_ids),
+            )
             .chain(&source.allowed_models)
             .chain(&source.excluded_models)
             .chain(source.model_price_overrides.keys())
@@ -66,12 +72,13 @@ pub fn member_model_catalog(
     source_models
         .chain(account_models)
         .filter_map(|model_id| {
-            let metadata = catalog.resolve(model_id)?;
             Some((
                 crate::model_id_key(model_id),
                 ModelCatalogIdentity {
-                    catalog_provider: metadata.provider.clone(),
-                    catalog_family: metadata.family.clone(),
+                    catalog_provider: catalog.display_provider_for(model_id)?,
+                    catalog_family: catalog
+                        .resolve(model_id)
+                        .and_then(|metadata| metadata.family.clone()),
                 },
             ))
         })
@@ -87,12 +94,19 @@ pub fn apply_member_model_display_order(
     saved_order: &[String],
     catalog: &ModelMetadataCatalog,
 ) {
-    for models in sources
-        .iter_mut()
-        .map(|source| &mut source.models)
-        .chain(accounts.iter_mut().map(|account| &mut account.models))
-    {
-        *models = catalog.merge_display_order(models.iter(), saved_order);
+    for source in sources {
+        source.models = catalog.merge_display_order(
+            source.models.iter().chain(
+                source
+                    .protocol_bindings
+                    .iter()
+                    .flat_map(|binding| &binding.model_ids),
+            ),
+            saved_order,
+        );
+    }
+    for account in accounts {
+        account.models = catalog.merge_display_order(account.models.iter(), saved_order);
     }
 }
 
@@ -103,7 +117,7 @@ pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadata
         // removed from metadata cannot retain fields from an older snapshot.
         let metadata = catalog.resolve(&model.id);
         model.codex_display_name = catalog.codex_display_name(&model.id);
-        model.catalog_provider = metadata.map(|metadata| metadata.provider.clone());
+        model.catalog_provider = catalog.display_provider_for(&model.id);
         model.catalog_source_model_id = metadata.map(|metadata| metadata.source_model_id.clone());
         model.catalog_canonical_model_id =
             metadata.and_then(|metadata| metadata.canonical_model_id.clone());
@@ -113,6 +127,7 @@ pub fn apply_model_metadata(models: &mut [ModelSummary], catalog: &ModelMetadata
         model.catalog_last_updated = metadata.and_then(|metadata| metadata.last_updated.clone());
         model.catalog_status = metadata.and_then(|metadata| metadata.status.clone());
         let capabilities = catalog.capabilities_for(&model.id);
+        model.catalog_capabilities = Some(capabilities.clone());
         model.catalog_reasoning = capabilities.reasoning;
         model.catalog_reasoning_method = capabilities.reasoning_method;
         model.catalog_reasoning_effort_levels = capabilities.reasoning_effort_levels;

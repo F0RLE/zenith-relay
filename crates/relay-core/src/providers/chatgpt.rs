@@ -35,14 +35,14 @@ pub use models::{
     CODEX_MODELS_ENDPOINT, MAX_BASIS_POINTS_ACCESS_BYTES,
 };
 pub use oauth::{
-    OAuthClientKind, BASIS_POINTS_OAUTH_CLIENT_ID, BASIS_POINTS_OAUTH_REDIRECT_URI,
-    CODEX_OAUTH_CLIENT_ID,
+    OAuthClientKind, BASIS_POINTS_FREE_ACCOUNT_MESSAGE, BASIS_POINTS_OAUTH_CLIENT_ID,
+    BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{
     account_ids_from_check_response, merge_subscription_metadata, merge_subscription_metadata_at,
-    parse_subscription_timestamp_ms, parse_subscription_timestamp_text,
-    resolve_account_check_account_id, subscription_refresh_due,
+    parse_account_check_subscription, parse_subscription_timestamp_ms,
+    parse_subscription_timestamp_text, resolve_account_check_account_id, subscription_refresh_due,
     unverified_chatgpt_account_id_hints, AccountCheckIdentityError, CodexSubscriptionClient,
     CodexSubscriptionMetadata, CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT,
     SUBSCRIPTION_REFRESH_INTERVAL_MS,
@@ -74,6 +74,9 @@ pub fn credit_balance_key(provider_account_id: &str) -> Option<[u8; 32]> {
 /// Official Responses endpoint used by the Excel/Basis Points route. It is a
 /// fixed provider route; user supplied API sources never use it.
 pub const BASIS_POINTS_RESPONSES_URL: &str = "https://bps.openai.com/basispoints/api/responses";
+
+/// Pause the BPS connection when throttled without a provider retry deadline.
+pub(crate) const BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS: u64 = 5_000;
 
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 

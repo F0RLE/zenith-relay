@@ -66,6 +66,10 @@ pub struct ModelEndpointCapability {
     pub features: BTreeMap<ProtocolFeature, CapabilityStatus>,
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
+    /// An explicit route list may narrow reference modes. None leaves the
+    /// model reference in charge; a present empty list permits Standard only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tiers: Option<Vec<crate::DefaultServiceTier>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

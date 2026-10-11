@@ -38,10 +38,10 @@ pub(super) fn finish(protocol: WireApi, finish_reason: &str) -> AdapterResult<Fi
             Ok(Finish::Tools)
         }
         (WireApi::ChatCompletions, "length")
-        | (WireApi::Messages, "max_tokens")
+        | (WireApi::Messages, "max_tokens" | "model_context_window_exceeded" | "pause_turn")
         | (WireApi::Gemini, "MAX_TOKENS") => Ok(Finish::Length),
+        (WireApi::Messages, "refusal") => Ok(Finish::Refusal),
         (WireApi::ChatCompletions, "content_filter")
-        | (WireApi::Messages, "refusal")
         | (
             WireApi::Gemini,
             "SAFETY"
@@ -76,7 +76,13 @@ pub(super) fn usage(protocol: WireApi, response_payload: &Value) -> Usage {
             total: counter("total_tokens"),
             cached: pointer("/input_tokens_details/cached_tokens"),
             reasoning: pointer("/output_tokens_details/reasoning_tokens"),
-            ..Usage::default()
+            cache_write: pointer("/input_tokens_details/cache_write_tokens"),
+            cache_write_5m: pointer(
+                "/input_tokens_details/cache_creation/ephemeral_5m_input_tokens",
+            ),
+            cache_write_1h: pointer(
+                "/input_tokens_details/cache_creation/ephemeral_1h_input_tokens",
+            ),
         },
         WireApi::ChatCompletions => Usage {
             input: counter("prompt_tokens"),
@@ -84,7 +90,13 @@ pub(super) fn usage(protocol: WireApi, response_payload: &Value) -> Usage {
             total: counter("total_tokens"),
             cached: pointer("/prompt_tokens_details/cached_tokens"),
             reasoning: pointer("/completion_tokens_details/reasoning_tokens"),
-            ..Usage::default()
+            cache_write: pointer("/prompt_tokens_details/cache_write_tokens"),
+            cache_write_5m: pointer(
+                "/prompt_tokens_details/cache_creation/ephemeral_5m_input_tokens",
+            ),
+            cache_write_1h: pointer(
+                "/prompt_tokens_details/cache_creation/ephemeral_1h_input_tokens",
+            ),
         },
         WireApi::Messages => Usage {
             input: counter("input_tokens")
@@ -195,9 +207,28 @@ pub(super) fn usage_value(protocol: WireApi, usage: &Usage) -> Value {
             );
         }
     }
-    if protocol == WireApi::Messages {
+    if matches!(
+        protocol,
+        WireApi::Messages | WireApi::ChatCompletions | WireApi::Responses
+    ) {
+        let mut details = if protocol == WireApi::Messages {
+            Map::new()
+        } else {
+            usage_payload
+                .remove(cached)
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default()
+        };
         if let Some(count) = usage.cache_write {
-            usage_payload.insert("cache_creation_input_tokens".into(), count.into());
+            details.insert(
+                if protocol == WireApi::Messages {
+                    "cache_creation_input_tokens"
+                } else {
+                    "cache_write_tokens"
+                }
+                .into(),
+                count.into(),
+            );
         }
         let mut creation = Map::new();
         if let Some(count) = usage.cache_write_5m {
@@ -207,7 +238,12 @@ pub(super) fn usage_value(protocol: WireApi, usage: &Usage) -> Value {
             creation.insert("ephemeral_1h_input_tokens".into(), count.into());
         }
         if !creation.is_empty() {
-            usage_payload.insert("cache_creation".into(), creation.into());
+            details.insert("cache_creation".into(), creation.into());
+        }
+        if protocol == WireApi::Messages {
+            usage_payload.extend(details);
+        } else if !details.is_empty() {
+            usage_payload.insert(cached.into(), details.into());
         }
     }
     usage_payload.into()
@@ -219,6 +255,11 @@ pub(super) fn encode(
     model: &str,
     client_tools: &BTreeMap<String, ClientToolTarget>,
 ) -> AdapterResult<Value> {
+    if !response.citations.is_empty()
+        && !matches!(protocol, WireApi::ChatCompletions | WireApi::Responses)
+    {
+        return Err(AdapterError::upstream_response_invalid());
+    }
     let mut usage = usage_value(protocol, &response.usage);
     if protocol == WireApi::Responses {
         // A Responses client needs input, output and total together or none.
@@ -230,10 +271,12 @@ pub(super) fn encode(
     let mut content = Vec::new();
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut refusal = String::new();
     let mut calls = Vec::new();
     for (index, block) in response.blocks.iter().enumerate() {
         match (protocol, block) {
-            (WireApi::Responses, Block::Text(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]})),
+            (WireApi::Responses, Block::Text(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":response.citations.get(&index).map(|items| items.iter().map(citations::UrlCitation::responses_value).collect::<Vec<_>>()).unwrap_or_default()}]})),
+            (WireApi::Responses, Block::Refusal(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"refusal","refusal":text}]})),
             (WireApi::Responses, Block::ToolCall { id, name, arguments }) => {
                 let target = client_tools.get(name);
                 let client_name = target.map_or(name.as_str(), |target| target.name.as_str());
@@ -259,11 +302,16 @@ pub(super) fn encode(
             (WireApi::ChatCompletions, Block::Reasoning(reasoning_value)) => {
                 reasoning.push_str(reasoning_value)
             }
+            (WireApi::ChatCompletions, Block::Refusal(text)) => refusal.push_str(text),
             (WireApi::ChatCompletions, Block::ToolCall { id, name, arguments }) => calls.push(json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments}})),
             (WireApi::Messages, Block::Text(text)) => content.push(json!({"type":"text","text":text})),
-            (WireApi::Messages, Block::Reasoning(text)) => content.push(json!({"type":"thinking","thinking":text})),
+            (WireApi::Messages, Block::Refusal(text)) => content.push(json!({"type":"text","text":text})),
+            // A public summary from another protocol cannot become Anthropic
+            // thinking: only Anthropic can produce its required signature.
+            (WireApi::Messages, Block::Reasoning(_)) => return Err(AdapterError::upstream_response_invalid()),
             (WireApi::Messages, Block::ToolCall { id, name, arguments }) => content.push(json!({"type":"tool_use","id":id,"name":name,"input":serde_json::from_str::<Value>(arguments).map_err(|_| AdapterError::upstream_response_invalid())?})),
             (WireApi::Gemini, Block::Text(text)) => content.push(json!({"text":text})),
+            (WireApi::Gemini, Block::Refusal(text)) => content.push(json!({"text":text})),
             (WireApi::Gemini, Block::Reasoning(text)) => content.push(json!({"text":text,"thought":true})),
             (WireApi::Gemini, Block::ToolCall { id, name, arguments }) => content.push(json!({"functionCall":{"id":id,"name":name,"args":serde_json::from_str::<Value>(arguments).map_err(|_| AdapterError::upstream_response_invalid())?}})),
             _ => return Err(AdapterError::upstream_response_invalid()),
@@ -283,6 +331,13 @@ pub(super) fn encode(
             if !reasoning.is_empty() {
                 message["reasoning_content"] = reasoning.into();
             }
+            if response.finish == Finish::Refusal || !refusal.is_empty() {
+                message["refusal"] = refusal.into();
+            }
+            let annotations = citations::chat_annotations(response)?;
+            if !annotations.is_empty() {
+                message["annotations"] = annotations.into();
+            }
             json!({"id":response.id,"object":"chat.completion","created":0,"model":model,"choices":[{"index":0,"message":message,"finish_reason":finish_value(protocol,response.finish)}],"usage":usage})
         }
         WireApi::Messages => {
@@ -295,33 +350,24 @@ pub(super) fn encode(
 }
 
 fn custom_tool_input(arguments: &str) -> AdapterResult<String> {
-    if let Ok(parsed_arguments) = serde_json::from_str::<Value>(arguments) {
-        if let Some(input) = parsed_arguments.get("input").and_then(Value::as_str) {
-            return Ok(input.to_string());
-        }
-        if parsed_arguments.is_object() {
-            return Err(AdapterError::upstream_response_invalid());
-        }
-    }
-    if arguments.is_empty() {
-        return Err(AdapterError::upstream_response_invalid());
-    }
-    Ok(arguments.to_string())
+    let input: Value =
+        serde_json::from_str(arguments).map_err(|_| AdapterError::upstream_response_invalid())?;
+    super::super::messages::custom_tool_input(&input).map(str::to_owned)
 }
 
 pub(super) fn finish_value(protocol: WireApi, finish: Finish) -> &'static str {
     match (protocol, finish) {
-        (WireApi::ChatCompletions, Finish::Stop) => "stop",
+        (WireApi::ChatCompletions, Finish::Stop | Finish::Refusal) => "stop",
         (WireApi::ChatCompletions, Finish::Tools) => "tool_calls",
         (WireApi::ChatCompletions, Finish::Length) => "length",
         (WireApi::ChatCompletions, Finish::Filter) => "content_filter",
         (WireApi::Messages, Finish::Stop) => "end_turn",
         (WireApi::Messages, Finish::Tools) => "tool_use",
         (WireApi::Messages, Finish::Length) => "max_tokens",
-        (WireApi::Messages, Finish::Filter) => "refusal",
+        (WireApi::Messages, Finish::Filter | Finish::Refusal) => "refusal",
         (WireApi::Gemini, Finish::Stop | Finish::Tools) => "STOP",
         (WireApi::Gemini, Finish::Length) => "MAX_TOKENS",
-        (WireApi::Gemini, Finish::Filter) => "SAFETY",
+        (WireApi::Gemini, Finish::Filter | Finish::Refusal) => "SAFETY",
         (WireApi::Responses, _) => "completed",
     }
 }

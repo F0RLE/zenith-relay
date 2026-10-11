@@ -3,14 +3,16 @@ mod http;
 mod usage;
 
 pub(in crate::gateway) use completion::{collect_basis_points_response, stop_basis_points_event};
-pub(super) use completion::{collect_upstream_response, completed_upstream_response};
+pub(super) use completion::{
+    collect_upstream_response, completed_upstream_response, validate_upstream_response,
+};
 pub(super) use http::{
     attach_error_diagnostics, attach_stream_diagnostics, proxy_error_response, proxy_json_response,
     proxy_response, proxy_sse_response, route_error_origin, upstream_body_error_response,
     CompletionCallback,
 };
 pub(super) use usage::{
-    apply_usage, emit_callback, emit_usage, find_usage, populate_tokens, response_id,
+    apply_usage, emit_callback, emit_repair, emit_usage, find_usage, populate_tokens, response_id,
     response_id_from_bytes, response_service_tier, usage_event, UsageAttempt,
 };
 

@@ -6,6 +6,41 @@ use super::*;
 use crate::DefaultServiceTier;
 
 impl GatewayRuntime {
+    pub fn set_chatgpt_context_policy(
+        &self,
+        policy: crate::catalog::context_policy::ApplicationContextPolicy,
+    ) {
+        *crate::poison::mutex(&self.chatgpt_context_policy) = policy;
+    }
+
+    pub fn set_chatgpt_context_prices(&self, prices: BTreeMap<String, crate::pricing::TokenPrice>) {
+        *crate::poison::mutex(&self.chatgpt_context_prices) = prices;
+    }
+
+    pub(crate) fn apply_chatgpt_context_policy(
+        &self,
+        entry: &mut Value,
+        model: &str,
+        native: bool,
+    ) {
+        let policy = *crate::poison::mutex(&self.chatgpt_context_policy);
+        let capabilities = self.model_capabilities(model);
+        let quote = crate::poison::mutex(&self.chatgpt_context_prices)
+            .get(&crate::model_id_key(model))
+            .copied();
+        policy.apply(
+            entry,
+            if native {
+                None
+            } else {
+                capabilities.context_limit
+            },
+            capabilities.input_limit,
+            capabilities.output_limit,
+            quote,
+        );
+    }
+
     pub(crate) fn resolve_model(&self, key: &AuthenticatedKey, model: &str) -> Option<String> {
         let requested_model_id = model.trim();
         if requested_model_id.is_empty() {
@@ -251,13 +286,77 @@ impl GatewayRuntime {
         self.model_supported_service_tiers(model).contains(&tier)
     }
 
-    pub(crate) fn model_supported_service_tiers(
+    pub(crate) fn model_supported_service_tiers(&self, model: &str) -> Vec<DefaultServiceTier> {
+        let scope = CandidateScope::default();
+        let candidate_ids = self
+            .lock_scheduler()
+            .candidates()
+            .filter(|candidate| candidate.is_configured(model, &WireApi::ALL, &scope))
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        let routes = candidate_ids
+            .iter()
+            .filter_map(|id| self.executor_route(id, model, &scope, &WireApi::ALL, false))
+            .collect::<Vec<_>>();
+        self.service_tiers_for_routes(model, &routes)
+    }
+
+    pub(crate) fn client_service_tiers(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        client: WireApi,
+    ) -> Vec<DefaultServiceTier> {
+        self.service_tiers_for_routes(
+            model,
+            &self.configured_executor_routes(key, model, &[client], false),
+        )
+    }
+
+    pub(crate) fn account_service_tiers(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Vec<DefaultServiceTier> {
+        let routes = self
+            .configured_executor_routes(key, model, &[WireApi::Responses], false)
+            .into_iter()
+            .filter(|route| route.account_id.is_some())
+            .collect::<Vec<_>>();
+        self.service_tiers_for_routes(model, &routes)
+    }
+
+    fn service_tiers_for_routes(
         &self,
         model: &str,
-    ) -> &'static [DefaultServiceTier] {
-        self.model_metadata_catalog.as_ref().map_or_else(
-            || crate::catalog::model_service_tiers(model, None),
-            |catalog| catalog.snapshot().service_tiers_for(model),
+        routes: &[ExecutorRoute],
+    ) -> Vec<DefaultServiceTier> {
+        crate::catalog::model_service_tiers(model, &self.model_capabilities(model).service_tiers)
+            .into_iter()
+            .filter(|tier| {
+                *tier == DefaultServiceTier::Standard
+                    || routes
+                        .iter()
+                        .any(|route| Self::route_supports_service_tier(route, *tier))
+            })
+            .collect()
+    }
+
+    pub(crate) fn route_supports_service_tier(
+        route: &ExecutorRoute,
+        tier: DefaultServiceTier,
+    ) -> bool {
+        crate::catalog::transport_supports_service_tier(
+            tier,
+            route
+                .adapter
+                .upstream_protocol(route.client_wire_api)
+                .wire_api(),
+            route.account_transport == AccountTransport::ExcelBasisPoints,
+            route
+                .route_capability
+                .as_ref()
+                .and_then(|route| route.service_tiers.as_deref()),
         )
     }
 

@@ -88,7 +88,11 @@ pub(super) fn prepare_account_attempt(
     if route.account_id.is_none() {
         return AccountPrepare::Continue;
     }
-    let selected_service_tier = service_tier_policy.select_for_model(runtime, &route.source_model);
+    let selected_service_tier = service_tier_policy.selected_tier();
+    if !GatewayRuntime::route_supports_service_tier(&route, selected_service_tier) {
+        *last_adapter_error = Some(AdapterError::parameter_unsupported_for("service_tier"));
+        return AccountPrepare::Continue;
+    }
     service_tier_policy.prepare_for_candidate(
         request,
         selected_service_tier,
@@ -139,6 +143,7 @@ pub(super) fn prepare_account_attempt(
         Ok(upstream_response_body) => upstream_response_body,
         Err(step) => return step,
     };
+    runtime.apply_request_timezone(candidate_id, &mut upstream_body);
     // Saved tool optimization is not applied. Wake, compact, and alpha/search
     // all keep the catalog the client sent.
     if let Some(step) = apply_account_tool_policy(tool_policy, &mut upstream_body) {
@@ -150,8 +155,20 @@ pub(super) fn prepare_account_attempt(
             Err(step) => return step,
         }
     }
-    let reasoning_effort =
-        ReasoningEffortDiagnostics::from_bodies(request, &upstream_body, crate::WireApi::Responses);
+    let reasoning_effort = if basis_points_route {
+        ReasoningEffortDiagnostics::from_basis_points_bodies(
+            request,
+            &upstream_body,
+            crate::WireApi::Responses,
+        )
+    } else {
+        ReasoningEffortDiagnostics::from_bodies(
+            request,
+            &upstream_body,
+            crate::WireApi::Responses,
+            crate::WireApi::Responses,
+        )
+    };
     let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
         return AccountPrepare::Respond(api_error(
             StatusCode::BAD_REQUEST,

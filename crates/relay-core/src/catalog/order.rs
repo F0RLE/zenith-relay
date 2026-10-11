@@ -79,6 +79,16 @@ pub fn reasoning_policy_levels<'a>(
         .map(Vec::as_slice)
 }
 
+/// Canonical identity for catalog entries and saved policies. Display aliases
+/// for very high map to OpenAI's `xhigh`; other provider values stay intact.
+pub(crate) fn canonical_reasoning_level(level: &str) -> String {
+    let level = level.trim().to_ascii_lowercase();
+    match level.replace(['-', ' '], "_").as_str() {
+        "x_high" | "very_high" | "extra_high" | "veryhigh" | "extrahigh" => "xhigh".into(),
+        _ => level,
+    }
+}
+
 /// Normalizes effort identifiers and keeps every level in the order used by
 /// Codex and the Relay picker. Provider-specific/unknown identifiers remain
 /// available after the known levels, preserving their first-seen order.
@@ -90,7 +100,7 @@ where
     let mut seen = HashSet::new();
     let mut ordered = Vec::new();
     for (source_order, level) in levels.into_iter().enumerate() {
-        let level = level.as_ref().trim().to_ascii_lowercase();
+        let level = canonical_reasoning_level(level.as_ref());
         if !level.is_empty() && seen.insert(level.clone()) {
             ordered.push((source_order, level));
         }
@@ -104,13 +114,13 @@ where
 }
 
 pub fn reasoning_level_rank(level: &str) -> u8 {
-    match level.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+    match canonical_reasoning_level(level).as_str() {
         "none" => 0,
         "minimal" => 1,
         "low" => 2,
         "medium" => 3,
         "high" => 4,
-        "xhigh" | "very_high" | "extra_high" => 5,
+        "xhigh" => 5,
         "max" => 6,
         "ultra" => 7,
         _ => 8,
@@ -120,6 +130,20 @@ pub fn reasoning_level_rank(level: &str) -> u8 {
 /// Applies an operator's saved order while retaining discovery order for new
 /// models. Catalog-aware callers use `ModelMetadataCatalog::merge_display_order`.
 pub fn merge_model_display_order<I, S>(models: I, saved_order: &[String]) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    merge_model_display_order_with_groups(models, saved_order, &BTreeMap::new())
+}
+
+/// Keep new models beside their saved provider block without moving any
+/// saved anchors. Callers without catalog groups retain discovery ordering.
+pub(crate) fn merge_model_display_order_with_groups<I, S>(
+    models: I,
+    saved_order: &[String],
+    groups: &BTreeMap<String, String>,
+) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -155,9 +179,25 @@ where
             continue;
         }
         let model_position = catalog_positions[&key];
-        let insert_at = ordered
-            .iter()
-            .position(|existing| catalog_positions[&model_id_key(existing)] > model_position);
+        let insert_in_group = groups.get(&key).and_then(|group| {
+            let mut after_group = None;
+            for (position, existing) in ordered.iter().enumerate() {
+                let existing_key = model_id_key(existing);
+                if groups.get(&existing_key) != Some(group) {
+                    continue;
+                }
+                if catalog_positions[&existing_key] > model_position {
+                    return Some(position);
+                }
+                after_group = Some(position + 1);
+            }
+            after_group
+        });
+        let insert_at = insert_in_group.or_else(|| {
+            ordered
+                .iter()
+                .position(|existing| catalog_positions[&model_id_key(existing)] > model_position)
+        });
         if let Some(insert_at) = insert_at {
             ordered.insert(insert_at, model);
         } else {
@@ -334,14 +374,7 @@ mod tests {
                 "provider_custom",
                 "low",
             ]),
-            [
-                "low",
-                "medium",
-                "high",
-                "very_high",
-                "max",
-                "provider_custom",
-            ]
+            ["low", "medium", "high", "xhigh", "max", "provider_custom"]
         );
     }
 

@@ -13,6 +13,7 @@ use std::sync::RwLockReadGuard;
 pub(in crate::runtime) struct PreparedAuthorizationDispatchGuard<'a> {
     _token: Option<TokenDispatchRevisionGuard<'a>>,
     _agent: Option<RwLockReadGuard<'a, Option<AgentIdentityCredential>>>,
+    _plan: Option<RwLockReadGuard<'a, Option<String>>>,
 }
 
 impl GatewayRuntime {
@@ -22,6 +23,10 @@ impl GatewayRuntime {
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
+        if self.is_basis_points_account(candidate_id) {
+            self.validate_basis_points_plan(candidate_id, None)
+                .map_err(AuthorizedRequestError::ModelAccess)?;
+        }
         let budget = dispatch.budget;
         let first_request = request
             .try_clone()
@@ -57,6 +62,7 @@ impl GatewayRuntime {
                         account_token_generation: prepared.token_generation,
                     });
                 }
+                self.record_authorization_replay(dispatch, prepared.token_generation);
                 drop(unauthorized_response);
                 if let Some(budget) = budget {
                     budget.observe_rejection();
@@ -89,23 +95,53 @@ impl GatewayRuntime {
             ));
         }
 
+        if self.is_basis_points_account(candidate_id) {
+            let account =
+                self.chatgpt_accounts
+                    .get(candidate_id)
+                    .ok_or(AuthorizedRequestError::Prepare(
+                        ExecutorPrepareError::Authentication,
+                    ))?;
+            let revision =
+                prepared
+                    .token_revision
+                    .as_ref()
+                    .ok_or(AuthorizedRequestError::Prepare(
+                        ExecutorPrepareError::InvalidCredential,
+                    ))?;
+            account
+                .token_authority
+                .invalidate_access_revision_and_persist(
+                    candidate_id,
+                    revision,
+                    runtime_now_ms(),
+                    account.persistence_adapter.as_ref(),
+                )
+                .await
+                .map_err(|_| AuthorizedRequestError::Prepare(ExecutorPrepareError::Persistence))?;
+            // Keep the Excel refresh token and the original refusal. The next
+            // request prepares a fresh bearer; this response is never replayed.
+            return Ok(self.accept_authorized_response(
+                candidate_id,
+                upstream_response,
+                prepared.token_generation,
+            ));
+        }
+
         if budget.is_some_and(|budget| !budget.can_dispatch()) {
             return Ok(AuthorizedResponse {
                 response: upstream_response,
                 account_token_generation: prepared.token_generation,
             });
         }
+        self.record_authorization_replay(dispatch, prepared.token_generation);
         drop(upstream_response);
         if let Some(budget) = budget {
             budget.observe_rejection();
         }
         let fence = self.fence_execution(candidate_id);
         let refreshed = self
-            .refresh_authorization_after_unauthorized(
-                candidate_id,
-                prepared.token_generation,
-                runtime_now_ms(),
-            )
+            .refresh_authorization_after_unauthorized(candidate_id, &prepared, runtime_now_ms())
             .await
             .map_err(AuthorizedRequestError::Prepare)?;
         // The owner retains its lease for this proven 401 repair. Once the
@@ -138,6 +174,36 @@ impl GatewayRuntime {
             response,
             account_token_generation,
         }
+    }
+
+    fn record_authorization_replay(
+        &self,
+        dispatch: AuthorizationDispatch<'_>,
+        generation: Option<u64>,
+    ) {
+        let Some((template, started)) = dispatch.usage_event else {
+            return;
+        };
+        if template
+            .account_id
+            .as_deref()
+            .is_some_and(|id| !self.account_candidate_is_active(id))
+        {
+            return;
+        }
+        let mut event = template.clone();
+        event.latency_ms = started.elapsed().as_millis() as u64;
+        event.attempt = dispatch
+            .budget
+            .map_or(event.attempt, |budget| u16::from(budget.dispatches()));
+        event.account_token_generation = generation;
+        event.error_category = Some(crate::error_codes::UPSTREAM_UNAUTHORIZED.to_string());
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetryAuthorization);
+        }
+        // Audit only: the authorization owner is already repairing this 401.
+        // Do not submit a second health/auth vote or reset cache-context state.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.usage)(event)));
     }
 
     pub(crate) fn routing_cookies(
@@ -201,9 +267,14 @@ impl GatewayRuntime {
             turn_scope: scope,
             budget,
             lease,
+            usage_event: _,
         } = dispatch;
         let (client, mut authorized_request) =
             apply_prepared_authorization(request, prepared, client_version, identity_policy)?;
+        if self.is_basis_points_account(candidate_id) {
+            self.validate_basis_points_plan(candidate_id, Some(prepared))
+                .map_err(AuthorizedRequestError::ModelAccess)?;
+        }
         if budget.is_some() {
             self.verify_basis_points_request(candidate_id, prepared, &authorized_request)
                 .await?;

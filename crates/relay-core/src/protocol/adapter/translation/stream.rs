@@ -15,11 +15,23 @@ pub struct TranslationStream {
     pending: Vec<u8>,
     pending_frames: VecDeque<Vec<u8>>,
     indices: BTreeMap<String, usize>,
+    response_annotations: BTreeMap<(u64, u64, u64), citations::UrlCitation>,
+    response_items: BTreeMap<u64, responses::OutputItemState>,
+    chat_completion: crate::protocol::completion::ChatStreamCompletion,
+    chat_annotations: Vec<Value>,
+    usage_snapshot: Option<Value>,
+    messages_completion: crate::protocol::completion::MessagesStreamCompletion,
+    gemini_completion: crate::protocol::completion::GeminiStreamCompletion,
+    native_indices: BTreeMap<String, usize>,
+    native_closed: BTreeSet<usize>,
+    gemini_calls: super::super::gemini::GeminiFunctionCalls,
     closed: BTreeSet<usize>,
     emitted: Vec<Block>,
+    finished_message_blocks: usize,
     started: bool,
     finish_reason: Option<Finish>,
     saw_refusal: bool,
+    refusal_explanation: Option<String>,
     terminal: bool,
     completed: Option<MessagesBridgeResponse>,
     upstream_error: Option<Value>,
@@ -31,8 +43,10 @@ impl TranslationStream {
         let decoded_response = Response {
             id: translation_request.response_id.clone(),
             blocks: Vec::new(),
+            citations: BTreeMap::new(),
             usage: Usage::default(),
             finish: Finish::Stop,
+            native_output: Vec::new(),
         };
         Self {
             translation_request,
@@ -40,11 +54,23 @@ impl TranslationStream {
             pending: Vec::new(),
             pending_frames: VecDeque::new(),
             indices: BTreeMap::new(),
+            response_annotations: BTreeMap::new(),
+            response_items: BTreeMap::new(),
+            chat_completion: crate::protocol::completion::ChatStreamCompletion::default(),
+            chat_annotations: Vec::new(),
+            usage_snapshot: None,
+            messages_completion: crate::protocol::completion::MessagesStreamCompletion::default(),
+            gemini_completion: crate::protocol::completion::GeminiStreamCompletion::default(),
+            native_indices: BTreeMap::new(),
+            native_closed: BTreeSet::new(),
+            gemini_calls: super::super::gemini::GeminiFunctionCalls::default(),
             closed: BTreeSet::new(),
             emitted: Vec::new(),
+            finished_message_blocks: 0,
             started: false,
             finish_reason: None,
             saw_refusal: false,
+            refusal_explanation: None,
             terminal: false,
             completed: None,
             upstream_error: None,
@@ -70,6 +96,23 @@ impl TranslationStream {
     }
 
     pub fn finish(&mut self) {
+        if self.terminal {
+            return;
+        }
+        if self.awaiting_upstream_end() && self.pending.iter().all(u8::is_ascii_whitespace) {
+            if self.complete().is_err() {
+                self.fail();
+            }
+        } else {
+            self.fail();
+        }
+    }
+    pub(in crate::protocol::adapter) fn awaiting_upstream_end(&self) -> bool {
+        !self.terminal
+            && self.translation_request.upstream == WireApi::Gemini
+            && self.finish_reason.is_some()
+    }
+    pub(in crate::protocol::adapter) fn abort(&mut self) {
         if !self.terminal {
             self.fail();
         }
@@ -94,15 +137,19 @@ impl TranslationStream {
             return Ok(());
         }
         if sse_payload == b"[DONE]" {
-            if self.translation_request.upstream != WireApi::ChatCompletions
-                || self.finish_reason.is_none()
-            {
+            let completed = match self.translation_request.upstream {
+                WireApi::ChatCompletions => self.chat_completion.outcome().is_terminal(),
+                WireApi::Gemini => self.awaiting_upstream_end(),
+                _ => false,
+            };
+            if !completed || self.finish_reason.is_none() {
                 return Err(AdapterError::upstream_stream_invalid());
             }
             return self.complete();
         }
         let event_payload: Value = serde_json::from_slice(&sse_payload)
             .map_err(|_| AdapterError::upstream_stream_invalid())?;
+        self.observe_usage(&event_payload);
         if event_payload
             .get("error")
             .is_some_and(|error| !error.is_null())
@@ -111,35 +158,44 @@ impl TranslationStream {
             self.upstream_error = Some(event_payload);
             return Err(AdapterError::upstream_stream_invalid());
         }
-        self.merge_usage(response::usage(
-            self.translation_request.upstream,
-            &event_payload,
-        ));
         let terminal = match self.translation_request.upstream {
             WireApi::ChatCompletions => self.chat(&event_payload)?,
             WireApi::Responses => self.responses(&event_payload)?,
             WireApi::Messages => self.messages(&event_payload)?,
             WireApi::Gemini => self.gemini(&event_payload)?,
         };
-        self.emit_changes()?;
-        if terminal {
+        if terminal && self.translation_request.upstream != WireApi::Gemini {
             self.complete()?;
+        } else {
+            self.emit_changes(false)?;
         }
         Ok(())
     }
 
-    fn merge_usage(&mut self, usage: Usage) {
-        let accumulated_usage = &mut self.decoded_response.usage;
-        accumulated_usage.input = usage.input.or(accumulated_usage.input);
-        accumulated_usage.output = usage.output.or(accumulated_usage.output);
-        accumulated_usage.total = usage.total.or(accumulated_usage.total);
-        accumulated_usage.cached = usage.cached.or(accumulated_usage.cached);
-        accumulated_usage.reasoning = usage.reasoning.or(accumulated_usage.reasoning);
-        accumulated_usage.cache_write = usage.cache_write.or(accumulated_usage.cache_write);
-        accumulated_usage.cache_write_5m =
-            usage.cache_write_5m.or(accumulated_usage.cache_write_5m);
-        accumulated_usage.cache_write_1h =
-            usage.cache_write_1h.or(accumulated_usage.cache_write_1h);
+    fn observe_usage(&mut self, payload: &Value) {
+        let field = if self.translation_request.upstream == WireApi::Gemini {
+            "usageMetadata"
+        } else {
+            "usage"
+        };
+        let usage = payload
+            .get(field)
+            .or_else(|| payload.pointer("/message/usage"))
+            .or_else(|| payload.pointer("/response/usage"));
+        if let Some(usage) = usage {
+            crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
+            // Recompute from the merged raw counters so overflow becomes unknown,
+            // rather than retaining an older, lower derived value.
+            let mut usage_wrapper = serde_json::Map::new();
+            usage_wrapper.insert(
+                field.to_owned(),
+                self.usage_snapshot.clone().unwrap_or(Value::Null),
+            );
+            self.decoded_response.usage = response::usage(
+                self.translation_request.upstream,
+                &Value::Object(usage_wrapper),
+            );
+        }
     }
 
     fn insert(&mut self, key: String, block: Block) -> AdapterResult<usize> {
@@ -153,15 +209,32 @@ impl TranslationStream {
     }
 
     fn complete(&mut self) -> AdapterResult<()> {
+        if self.translation_request.upstream == WireApi::ChatCompletions {
+            citations::set_chat_annotations(
+                &mut self.decoded_response,
+                Some(&Value::Array(std::mem::take(&mut self.chat_annotations))),
+            )?;
+        }
+        if self.translation_request.upstream == WireApi::Gemini
+            && !self.gemini_completion.outcome().is_terminal()
+        {
+            return Err(AdapterError::upstream_stream_invalid());
+        }
         self.decoded_response.finish = self
             .finish_reason
             .ok_or_else(AdapterError::upstream_stream_invalid)?;
+        if self.translation_request.upstream == WireApi::Gemini
+            && self.decoded_response.finish == Finish::Stop
+            && self.decoded_response.blocks.is_empty()
+        {
+            return Err(AdapterError::upstream_stream_invalid());
+        }
         response::validate_calls(&self.decoded_response.blocks)?;
         let completed_response = self
             .translation_request
             .clone()
             .complete(self.decoded_response.clone())?;
-        self.emit_changes()?;
+        self.emit_changes(true)?;
         self.emit_end(&completed_response.response_body)?;
         self.completed = Some(completed_response);
         self.terminal = true;
@@ -170,6 +243,19 @@ impl TranslationStream {
 
     fn fail(&mut self) {
         self.terminal = true;
+        if self.translation_request.client == WireApi::Responses
+            && self
+                .upstream_error
+                .as_ref()
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str)
+                == Some("response.failed")
+        {
+            if let Some(event) = self.upstream_error.clone() {
+                self.event("response.failed", event);
+                return;
+            }
+        }
         let error = json!({"type":"api_error","code":crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,"message":"Upstream stream cannot be represented by the selected route"});
         match self.translation_request.client {
             WireApi::Responses => self.event("response.failed", json!({"type":"response.failed","response":{"id":self.decoded_response.id,"object":"response","status":"failed","output":[],"error":error}})),

@@ -333,6 +333,7 @@ async fn upload_image(
                 turn_scope: None,
                 budget: None,
                 lease: None,
+                usage_event: None,
             },
         )
         .await
