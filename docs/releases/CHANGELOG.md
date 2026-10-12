@@ -6,6 +6,11 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
+### Fixed
+
+- Desktop windows can be moved by dragging the existing title bar region
+  ([8c88b42](https://github.com/LeonidS74/zenith-relay/commit/8c88b4274170147efe4c738ba4c946fc39f6f4e5)).
+
 ### Changed
 
 - Protocol adapters share completion checks across JSON and streaming paths.
