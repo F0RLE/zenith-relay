@@ -75,6 +75,14 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
       return false;
     } finally {
       completingRef.current = false;
+      const activeFlow = flowRef.current;
+      if (mountedRef.current && lifecycleRef.current === lifecycle && activeFlow?.loginId === loginId) {
+        // Success clears the flow. Every failure path must release the saving
+        // surface too, including an unexpected error from the operation wrapper.
+        const failedFlow = { ...activeFlow, status: "failed" as const };
+        flowRef.current = failedFlow;
+        setFlow(failedFlow);
+      }
     }
   }, [perform]);
   finishRef.current = finish;

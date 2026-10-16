@@ -5,7 +5,7 @@ import { CacheContextDetails } from "./CacheContextDetails";
 import { RequestDisclosure } from "./RequestDisclosure";
 import { RequestSection } from "./RequestSection";
 import type { UsageRow } from "./usageData";
-import { formatEndpointKind, formatErrorOrigin, formatObservedServiceTier, formatToolChoice, formatTerminalOutput } from "./usageReportFormat";
+import { formatEndpointKind, formatErrorOrigin, formatModelId, formatObservedServiceTier, formatToolChoice, formatTerminalOutput } from "./usageReportFormat";
 
 export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; debugEnabled: boolean }) {
   const { t } = useTranslation();
@@ -20,14 +20,16 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       && toolUse.terminalOutput === "text",
   );
   const observedTier = formatObservedServiceTier(row);
+  const modelAlias = row.requestedModel && formatModelId(row.requestedModel, row.routedModel) !== row.requestedModel
+    ? row.requestedModel : null;
   const unresolvedRetry = !row.success && routing?.attemptOutcome?.startsWith("retry_");
   const separateEndpoint = routing?.endpointKind && routing.endpointKind !== row.wireApi;
   const hasErrorMetadata = !row.success && (row.httpStatus != null || row.errorOrigin || row.errorCategory
     || row.upstreamError?.httpStatus != null || row.upstreamError?.code || row.upstreamError?.errorType);
-  if (!row.requestId && !row.upstreamError?.requestId && !hasErrorMetadata && !separateEndpoint && !observedTier && !routing && !hasTools) return null;
+  if (!row.requestId && !row.upstreamError?.requestId && !modelAlias && !hasErrorMetadata && !separateEndpoint && !observedTier && !routing && !hasTools) return null;
   return <RequestDisclosure title={t("usage.technicalDetails")} icon={<Braces />} className="request-technical-details">
     <div className="request-technical-grid">
-      {row.requestId || row.upstreamError?.requestId ? <RequestSection title={t("usage.requestSections.identifiers")} className="request-identifiers-section">
+      {row.requestId || row.upstreamError?.requestId || modelAlias ? <RequestSection title={t("usage.requestSections.identifiers")} className="request-identifiers-section">
         <dl className="request-details-list request-id-list">
           {row.requestId ? <div>
             <dt>{t("usage.localRequestId")}</dt>
@@ -36,6 +38,13 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
           {row.upstreamError?.requestId ? <div>
             <dt>{t("usage.upstreamRequestId")}</dt>
             <dd className="request-details-copy-value"><code>{row.upstreamError.requestId}</code><CopyButton value={row.upstreamError.requestId} label={t("usage.copyUpstreamRequestId")} /></dd>
+          </div> : null}
+          {modelAlias ? <div>
+            <dt>{t("usage.requestedModel")}</dt>
+            <dd className="request-details-copy-value"><code>{modelAlias}</code><CopyButton value={modelAlias} label={t("usage.copyModelId")} /></dd>
+          </div> : null}
+          {modelAlias && row.routedModel ? <div>
+            <dt>{t("usage.routedModel")}</dt><dd><code>{row.routedModel}</code></dd>
           </div> : null}
         </dl>
       </RequestSection> : null}

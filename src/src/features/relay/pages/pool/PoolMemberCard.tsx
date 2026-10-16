@@ -9,6 +9,7 @@ import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
 import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
 import { AccountSubscriptionLine } from "../../components/AccountSubscriptionLine";
+import { AccountTokenExpiry } from "../../components/AccountTokenExpiry";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { activeRequestCount, upcomingModelRetries } from "../../routingOrder";
 import type { PoolMember } from "../../poolHelpers";
@@ -164,6 +165,7 @@ export function PoolMemberCard({
       {member.kind === "account" ? <AccountProviderQuotaStrip account={member} /> : null}
       {member.kind === "account" ? (
         <>
+          <AccountTokenExpiry account={member} nowMs={nowMs} />
           <AccountSubscriptionLine activeUntilMs={member.subscription.activeUntilMs} nowMs={nowMs} />
           {runtimeHint ? (
             <div className="account-runtime-line" data-warning={modelRetries.length > 0}>

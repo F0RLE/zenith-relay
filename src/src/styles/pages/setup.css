@@ -391,6 +391,22 @@
   color: var(--relay-secondary);
 }
 
+.client-options button > img {
+  width: 38px;
+  height: 38px;
+  padding: 4px;
+  object-fit: contain;
+}
+
+:root[data-theme="dark"] .setup-shell img[src="/icons/chatgpt.svg"] {
+  filter: brightness(0) invert(1);
+}
+
+.client-options button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .mode-options button > span,
 .client-options button > span,
 .setup-connect-options button > span {
@@ -1137,7 +1153,7 @@
 .setup-connect-options button:hover:not(:disabled),
 .mode-options button:not(.selected):hover,
 .api-provider-options button:not(.selected):hover,
-.client-options button:not(.selected):hover {
+.client-options button:not(.selected):not(:disabled):hover {
   border-color: transparent;
   background: var(--relay-subtle);
 }

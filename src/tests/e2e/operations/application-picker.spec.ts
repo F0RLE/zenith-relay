@@ -2,8 +2,9 @@ import { expect, test, type Page } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 
 const applications = [
-  { name: "ChatGPT", connect: "attach_codex_to_local_gateway", launch: "launch_managed_codex_profile" },
-  { name: "OpenCode", connect: "connect_opencode_to_local_gateway", launch: "restart_opencode_app" },
+  { name: "ChatGPT", connect: "attach_codex_to_local_gateway", launch: "launch_managed_codex_profile", feedback: "Client launched." },
+  { name: "Claude Desktop", connect: "connect_claude_desktop", launch: "launch_claude_desktop", feedback: "Client launched." },
+  { name: "OpenCode", connect: "connect_opencode_to_local_gateway", launch: "restart_opencode_app", feedback: "Client launched." },
 ] as const;
 
 const launchPreferenceLabel = "Launch applications after connecting";
@@ -30,7 +31,7 @@ for (const application of applications) {
     const picker = await openPoolPicker(page);
     await picker.getByRole("button", { name: application.name, exact: true }).click();
     await expect(picker).toHaveCount(0);
-    await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
+    await expect(page.locator(".global-feedback.success")).toContainText(application.feedback);
 
     const calls = await commands(page);
     expect(calls.filter((command) => command === application.connect || command === application.launch))
@@ -64,7 +65,7 @@ for (const application of applications) {
     await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.launchApplicationAfterConnect"))).toBe("1");
     await openPoolPicker(page);
     await picker.getByRole("button", { name: application.name, exact: true }).click();
-    await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
+    await expect(page.locator(".global-feedback.success")).toContainText(application.feedback);
     expect((await commands(page)).filter((command) => command === application.launch)).toHaveLength(1);
   });
 
@@ -130,7 +131,7 @@ for (const application of applications) {
     await expect(connect.locator(".spin")).toHaveCount(1);
     await expect(page.locator(".global-feedback.success")).toHaveCount(0);
     await page.evaluate(() => (window as unknown as { __RESUME_APPLICATION_LAUNCH__: () => void }).__RESUME_APPLICATION_LAUNCH__());
-    await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
+    await expect(page.locator(".global-feedback.success")).toContainText(application.feedback);
     await expect(connect).toBeEnabled();
     expect((await commands(page)).filter((command) => command === application.launch)).toHaveLength(1);
   });
@@ -143,7 +144,7 @@ for (const application of applications) {
     const picker = page.getByRole("dialog", { name: "Which application do you want to launch?" });
     await expect(picker.getByRole("checkbox")).toHaveCount(0);
     await picker.getByRole("button", { name: application.name, exact: true }).click();
-    await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
+    await expect(page.locator(".global-feedback.success")).toContainText(application.feedback);
     expect((await commands(page)).filter((command) => command === application.launch)).toHaveLength(1);
   });
 }
@@ -156,6 +157,8 @@ test("picker supports keyboard selection, cancellation, and focus return", async
   await expect(picker.getByRole("button", { name: "Close", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(picker.getByRole("button", { name: "ChatGPT", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(picker.getByRole("button", { name: "Claude Desktop", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(picker.getByRole("button", { name: "OpenCode", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
@@ -172,9 +175,11 @@ test("picker supports keyboard selection, cancellation, and focus return", async
   await expect(picker).toBeVisible();
   await page.keyboard.press("Shift+Tab");
   await expect(picker.getByRole("button", { name: "OpenCode", exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(picker.getByRole("button", { name: "Claude Desktop", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator(".global-feedback.success")).toContainText("Client launched.");
-  expect(await commands(page)).toContain("restart_opencode_app");
+  expect(await commands(page)).toContain("launch_claude_desktop");
 });
 
 test("source picker explains unavailable ChatGPT and leaves OpenCode usable", async ({ page }) => {
@@ -185,8 +190,8 @@ test("source picker explains unavailable ChatGPT and leaves OpenCode usable", as
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
-  await page.locator(".source-card").filter({ hasText: "Example compatible API" })
-    .getByRole("button", { name: "Launch", exact: true }).click();
+  const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
+  await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
   const picker = page.getByRole("dialog", { name: "Where do you want to launch this source?" });
   const chatgpt = picker.getByRole("button", { name: "ChatGPT", exact: true });
   await expect(chatgpt).toBeDisabled();

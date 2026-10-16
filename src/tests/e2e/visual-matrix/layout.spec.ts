@@ -237,7 +237,7 @@ for (const viewport of viewports) {
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Proxy: Common", "Export", "Disable", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Notes", "Account timezone", "Proxy: Common", "Export", "Disable", "Delete"]);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -504,11 +504,11 @@ for (const viewport of viewports) {
     await expect(dialog).toHaveCount(0);
 
     await page.getByRole("tab", { name: "Sources" }).click();
-    const sourceActions = page.locator(".source-card .row-actions");
-    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
-    await sourceActions.locator("summary").click();
+    const sourceActions = page.locator(".source-card .account-card-actions");
+    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual(["Remove from pool", "Refresh API data", "Edit", "Launch"]);
+    await page.locator(".source-card .account-row-menu summary").click();
     const sourceMenu = page.getByRole("menu");
-    await expect(sourceMenu.getByRole("menuitem")).toHaveCount(4);
+    await expect(sourceMenu.getByRole("menuitem")).toHaveText(["Disable", "Delete"]);
     await expect(sourceMenu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
     // The popover is placed after it is inserted, so poll the settled rect
     // instead of reading one frame that may still be unplaced.

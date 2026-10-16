@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { relayCommands } from "../../api/commands";
-import type { ProxyPoolSummary } from "../../api/types";
+import { relayCommands } from "../api/commands";
+import type { ProxyPoolSummary } from "../api/types";
 
 export function useProxyPool(enabled = true, revision = 0) {
   const [pool, setPool] = useState<ProxyPoolSummary | null>(null);

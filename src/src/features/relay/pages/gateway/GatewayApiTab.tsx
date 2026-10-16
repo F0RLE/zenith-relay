@@ -6,7 +6,6 @@ import { ActionMenu, ActionMenuItem, CopyButton, EmptyState, IconButton, copyTex
 import { sourcePort } from "../../sourceUrl";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { RouteRecoveryControl } from "./RouteRecoveryControl";
-import { RequestTimezoneControl } from "./RequestTimezoneControl";
 
 export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoint: string }) {
   const { t } = useTranslation();
@@ -108,7 +107,6 @@ export function GatewayApiTab({ running, endpoint }: { running: boolean; endpoin
           </div>
         </form> : null}
         <RouteRecoveryControl />
-        <RequestTimezoneControl />
       </div>
     </div>
   </section>;

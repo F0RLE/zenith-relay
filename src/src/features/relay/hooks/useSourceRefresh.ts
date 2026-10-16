@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { relayCommands } from "../api/commands";
 import type { PerformOptions } from "../state/relayOperationModel";
 import type { RelayMode, SourceSummary } from "../api/types";
@@ -11,17 +11,23 @@ type UseSourceRefreshInput = {
   sources: ReadonlyArray<SourceSummary>;
   resetKey: string;
   perform: Perform;
-};
-
-const sourceRefreshExecutor: SourceRefreshExecutor = {
-  testLocal: relayCommands.testSource,
-  testRemote: (sourceId) => relayCommands.remoteAction({ type: "test_source", id: sourceId }),
+  refreshStats: (sourceId: string, force?: boolean) => Promise<void>;
 };
 
 /** Bridges the source-refresh policy to the page operation/feedback model. */
-export function useSourceRefresh({ mode, sources, resetKey, perform }: UseSourceRefreshInput) {
+export function useSourceRefresh({ mode, sources, resetKey, perform, refreshStats }: UseSourceRefreshInput) {
   const [report, setReport] = useState<SourceRefreshReport | null>(null);
   const contextRevision = useRef(0);
+  const executor = useMemo<SourceRefreshExecutor>(() => ({
+    testLocal: (sourceId) => completeSourceRefresh(
+      relayCommands.testSource(sourceId),
+      refreshStats(sourceId, true),
+    ),
+    testRemote: (sourceId) => completeSourceRefresh(
+      relayCommands.remoteAction({ type: "test_source", id: sourceId }),
+      refreshStats(sourceId, true),
+    ),
+  }), [refreshStats]);
 
   useEffect(() => {
     contextRevision.current += 1;
@@ -39,21 +45,28 @@ export function useSourceRefresh({ mode, sources, resetKey, perform }: UseSource
       nextReport = await refreshSourceCatalogs({
         mode,
         sources: sourceSnapshot,
-        executor: sourceRefreshExecutor,
+        executor,
       });
     }, undefined, { backgroundRefresh: true }).then((completed) => {
       if (completed && nextReport && revision === contextRevision.current) setReport(nextReport);
     });
-  }, [mode, perform, sources]);
+  }, [mode, perform, sources, executor]);
 
   const refreshOne = useCallback((sourceId: string) => {
     void perform(
       `source-refresh-${sourceId}`,
-      () => refreshSourceCatalog(mode, sourceId, sourceRefreshExecutor),
+      () => refreshSourceCatalog(mode, sourceId, executor),
       "feedback.refreshed",
       { backgroundRefresh: true },
     );
-  }, [mode, perform]);
+  }, [mode, perform, executor]);
 
   return { report, refresh, refreshOne };
+}
+
+async function completeSourceRefresh(models: Promise<unknown>, stats: Promise<void>) {
+  const [modelResult, statsResult] = await Promise.allSettled([models, stats]);
+  if (modelResult.status === "rejected") throw modelResult.reason;
+  if (statsResult.status === "rejected") throw statsResult.reason;
+  return modelResult.value;
 }

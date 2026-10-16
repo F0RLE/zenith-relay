@@ -76,50 +76,48 @@
   color: var(--relay-text);
 }
 
-.pool-speed-control {
-  --pool-speed-color: var(--relay-text);
+.pool-model-control {
   position: relative;
-  width: 200px;
   min-width: 0;
   max-width: 100%;
   height: 34px;
-  flex: 0 0 200px;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   padding: 3px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  border: 0;
+  border-radius: 8px;
   background: var(--relay-subtle);
   color: var(--relay-muted);
   user-select: none;
 }
 
-.pool-speed-control:has(button:disabled) {
+.pool-model-control:has(button:disabled) {
   cursor: not-allowed;
   opacity: 0.65;
 }
 
-.pool-speed-control[data-speed-tier="fast"] {
-  --pool-speed-color: var(--relay-accent-hover);
+.pool-speed-control {
+  width: 200px;
+  flex: 0 0 200px;
 }
 
 .pool-speed-control[data-speed-tier="ultrafast"] {
   --pool-speed-color: var(--relay-warning);
 }
 
-.pool-speed-control button {
+.pool-model-control button {
   flex: 0 0 28px;
   width: 28px;
   min-width: 0;
-  height: 100%;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 5px;
   background: transparent;
   color: var(--relay-muted);
   font-size: 12px;
@@ -129,13 +127,13 @@
   transition: background-color 120ms ease, color 120ms ease;
 }
 
-.pool-speed-control button svg {
+.pool-model-control button svg {
   width: 14px;
   height: 14px;
   flex: 0 0 14px;
 }
 
-.pool-speed-control button:hover:not(:disabled, .active) {
+.pool-model-control button:hover:not(:disabled, .active) {
   background: color-mix(in srgb, var(--relay-surface) 70%, transparent);
   color: var(--relay-text);
 }
@@ -145,8 +143,6 @@
   width: auto;
   min-width: 0;
   padding: 0 6px;
-  background: var(--relay-surface);
-  color: var(--pool-speed-color);
   box-shadow: none;
 }
 
@@ -157,12 +153,8 @@
   white-space: nowrap;
 }
 
-.pool-speed-control button:disabled {
+.pool-model-control button:disabled {
   cursor: not-allowed;
-}
-
-.pool-speed-control[data-speed-tier="fast"] button.active {
-  background: var(--relay-accent-soft);
 }
 
 .pool-speed-control[data-speed-tier="ultrafast"] button.active {
@@ -179,6 +171,93 @@
   flex: 0 0 28px;
   width: 28px;
   padding: 0;
+}
+
+.pool-context-control {
+  width: 202px;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.pool-context-options {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  gap: 2px;
+}
+
+.pool-context-budget {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  padding-left: 6px;
+  border-left: 1px solid var(--relay-border);
+  text-align: right;
+}
+
+.pool-context-token-input,
+.pool-context-token-value {
+  grid-area: 1 / 1;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--relay-text);
+  font-family: var(--relay-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 28px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pool-context-token-input {
+  appearance: textfield;
+  outline-offset: -2px;
+  transition: background-color 120ms ease;
+}
+
+.pool-context-token-input:hover:not(:disabled):not([aria-invalid="true"]),
+.pool-context-token-input:focus:not([aria-invalid="true"]) {
+  background: var(--relay-surface);
+}
+
+.pool-context-token-input:not(:focus):not([aria-invalid="true"]) {
+  color: transparent;
+}
+
+.pool-context-token-preview {
+  pointer-events: none;
+}
+
+.pool-context-token-input:focus + .pool-context-token-preview {
+  visibility: hidden;
+}
+
+.pool-context-token-input::-webkit-inner-spin-button,
+.pool-context-token-input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+
+.pool-context-token-input[aria-invalid="true"] {
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
+}
+
+.pool-model-control button.active {
+  background: var(--relay-accent-soft);
+  color: var(--pool-speed-color, var(--relay-accent-hover));
+}
+
+.pool-model-control button:focus-visible {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: 1px;
 }
 
 .pool-runtime-strip {
@@ -301,7 +380,7 @@
 
 .pool-member-list {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 10px;
 }
@@ -328,30 +407,6 @@
 .pool-member-card[data-member-kind="account"] {
   display: flex;
   flex-direction: column;
-}
-
-@media (max-width: 900px) {
-  .pool-member-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 901px) and (max-width: 1600px) {
-  .pool-member-list {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 901px) and (max-width: 1250px) {
-  .pool-member-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 700px) {
-  .pool-member-list {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 .pool-member-card:hover {

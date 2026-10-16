@@ -2,7 +2,7 @@ import { ChevronDown, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { SourceSummary } from "../api/types";
-import { groupModels, memberModelCatalog, modelIdKey } from "../modelGroups";
+import { groupModels, memberModelCatalog, modelIdKey, orderModelIdsBySnapshot } from "../modelGroups";
 import {
   formatModelPricePlaceholder,
   parseEditableModelPrice,
@@ -41,7 +41,7 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   const { runtime } = useRelayState();
   const [selections, setSelections] = useState<Record<string, { band: PriceBand; tier: PriceSchedule }>>({});
   const compactRows = presentation === "member" || presentation === "tab";
-  const models = sourcePriceModels(source);
+  const models = orderModelIdsBySnapshot(sourcePriceModels(source), runtime?.gateway.models ?? [], runtime?.gateway.modelCatalog);
   const catalogModels = new Map(
     (runtime?.gateway.models ?? []).map((model) => [modelIdKey(model.id), model]),
   );

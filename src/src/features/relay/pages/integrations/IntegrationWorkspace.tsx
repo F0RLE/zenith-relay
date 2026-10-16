@@ -8,18 +8,20 @@ export type IntegrationOption = {
   Component: ComponentType;
 };
 
-export function IntegrationWorkspace({ items, value, onChange, label }: {
+export function IntegrationWorkspace({ items, value, onChange, label, showPickerWhenSingle = false, className = "" }: {
   items: readonly IntegrationOption[];
   value: string;
   onChange: (value: string) => void;
   label: string;
+  showPickerWhenSingle?: boolean;
+  className?: string;
 }) {
   const selected = items.find((item) => item.id === value) ?? items[0];
   if (!selected) return null;
   const Settings = selected.Component;
-  const hasChoices = items.length >= 2;
-  return <div className={`integration-workspace${hasChoices ? " has-choices" : ""}`}>
-    {hasChoices ? <div className="integration-picker">
+  const showPicker = showPickerWhenSingle || items.length >= 2;
+  return <div className={`integration-workspace${showPicker ? " has-picker" : ""} ${className}`.trim()}>
+    {showPicker ? <div className="integration-picker">
       <Tabs
         value={selected.id}
         onChange={onChange}
@@ -33,11 +35,7 @@ export function IntegrationWorkspace({ items, value, onChange, label }: {
       />
     </div> : null}
     <div className="integrations-settings">
-      {hasChoices ? <div className="integration-detail-heading">
-        <span className="integration-detail-icon"><img src={selected.icon} alt="" /></span>
-        <h3>{selected.label}</h3>
-      </div> : null}
-      <Settings />
+      <Settings key={selected.id} />
     </div>
   </div>;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, Check, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
+import { BrainCircuit, ChevronDown, ChevronRight, CircleAlert, GripVertical } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { DefaultServiceTier, ModelSummary } from "../../api/types";
@@ -15,6 +15,7 @@ import {
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
+  modelShowsContextControl,
   modelShowsReasoningControl,
   normalizeReasoningSelection,
   pendingModelEnabled,
@@ -25,6 +26,7 @@ import {
 } from "./modelRulesModel";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { PoolSpeedControl } from "./PoolSpeedControl";
+import { PoolContextControl, type ModelContextPolicy } from "./PoolContextControl";
 import { usePointerDragListeners } from "../../hooks/usePointerDragListeners";
 
 type ModelDragState = {
@@ -47,6 +49,9 @@ export function ModelRulesView() {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [pendingEnabled, setPendingEnabled] = useState<Record<string, boolean>>({});
   const [pendingSpeed, setPendingSpeed] = useState<Record<string, DefaultServiceTier>>({});
+  const [pendingContext, setPendingContext] = useState<Record<string, ModelContextPolicy>>({});
+  const [contextReset, setContextReset] = useState<Record<string, number>>({});
+  const contextMutations = useRef(new Map<string, { next: ModelContextPolicy | null }>());
   const orderMutation = useRef(false);
   const latestModelsRef = useRef(models);
   latestModelsRef.current = models;
@@ -56,6 +61,21 @@ export function ModelRulesView() {
   }, [runtime?.configurationRevision, catalogSignature]);
   useEffect(() => {
     setPendingEnabled((previousPendingEnabled) => reconcilePendingModelEnabled(previousPendingEnabled, models));
+  }, [catalogSignature]);
+  useEffect(() => {
+    setPendingContext((previous) => {
+      let changed = false;
+      const remaining = { ...previous };
+      for (const model of latestModelsRef.current) {
+        if (contextMutations.current.has(model.id)) continue;
+        const saved = model.contextPolicy ?? { mode: "short" as const };
+        if (remaining[model.id] !== undefined && JSON.stringify(remaining[model.id]) === JSON.stringify(saved)) {
+          delete remaining[model.id];
+          changed = true;
+        }
+      }
+      return changed ? remaining : previous;
+    });
   }, [catalogSignature]);
   useEffect(() => {
     setPendingSpeed((previousPendingSpeed) => {
@@ -123,6 +143,40 @@ export function ModelRulesView() {
     if (!reorderedModels) return;
     void saveModelOrder(reorderedModels);
   };
+  const setModelContext = (model: ModelSummary, nextPolicy: ModelContextPolicy) => {
+    setPendingContext((previous) => ({ ...previous, [model.id]: nextPolicy }));
+    const existing = contextMutations.current.get(model.id);
+    if (existing) { existing.next = nextPolicy; return; }
+    const mutation: { next: ModelContextPolicy | null } = { next: nextPolicy };
+    contextMutations.current.set(model.id, mutation);
+    void (async () => {
+      let lastSaved = true;
+      let submitted = nextPolicy;
+      try {
+        while (mutation.next) {
+          submitted = mutation.next;
+          mutation.next = null;
+          const policy = submitted;
+          lastSaved = await perform(`model-context-${model.id}`, () => mode === "local"
+            ? relayCommands.setModelContext(model.id, policy)
+            : relayCommands.remoteAction({ type: "set_model_context" }, { modelId: model.id, contextPolicy: policy }),
+          "feedback.saved", { backgroundRefresh: true, uiLock: false });
+        }
+      } finally {
+        contextMutations.current.delete(model.id);
+        if (!lastSaved) setContextReset((previous) => ({ ...previous, [model.id]: (previous[model.id] ?? 0) + 1 }));
+        const saved = latestModelsRef.current.find((item) => item.id === model.id)?.contextPolicy ?? { mode: "short" };
+        if (!lastSaved || JSON.stringify(saved) === JSON.stringify(submitted)) {
+          setPendingContext((previous) => {
+            if (JSON.stringify(previous[model.id]) !== JSON.stringify(submitted)) return previous;
+            const remaining = { ...previous };
+            delete remaining[model.id];
+            return remaining;
+          });
+        }
+      }
+    })();
+  };
   const {
     dragModelId,
     dragGroupId,
@@ -147,8 +201,16 @@ export function ModelRulesView() {
   if (!models.length) {
     return <div className="model-rules-empty"><EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} /></div>;
   }
+  const catalogRefreshFailed = runtime?.warnings.some((warning) => warning.startsWith("model_catalog_refresh_failed"));
+  const catalogReloadPending = runtime?.warnings.includes("model_catalog_refresh_deferred:codex_running");
+  const contextStatus = catalogRefreshFailed ? t("pool.contextPolicies.refreshFailed")
+    : catalogReloadPending ? t("pool.contextPolicies.codexRestart") : null;
   return <>
     <section className="model-rules relay-compact-content" aria-label={t("models.visible")}>
+      {contextStatus ? <span className={`model-context-status${catalogRefreshFailed ? " error-text" : ""}`}
+        role={catalogRefreshFailed ? "alert" : "status"} tabIndex={0}
+        data-relay-tooltip={contextStatus} aria-label={contextStatus}
+      ><CircleAlert aria-hidden /></span> : null}
       <div className="relay-table-wrap">
         <table className="relay-table model-rules-table">
           <colgroup><col data-column="model" /><col data-column="actions" /></colgroup>
@@ -194,6 +256,7 @@ export function ModelRulesView() {
                 const speedTiers = modelSpeedTiers(model);
                 const requestedTier = pendingSpeed[model.id] ?? model.speedTier ?? "standard";
                 const speedTier = speedTiers.includes(requestedTier) ? requestedTier : speedTiers[0] ?? "standard";
+                const canEditContext = modelShowsContextControl(model);
                 const canEditSpeed = model.speedSupported === true
                   && model.speedConfigurable === true
                   && speedTiers.length > 1;
@@ -226,7 +289,8 @@ export function ModelRulesView() {
                     </div>
                   </td>
                   <td data-column="actions"><div className="model-rule-actions">
-                    {canEditSpeed ? <PoolSpeedControl
+                    {canEditSpeed ? <div className="model-rule-setting" data-setting="speed">
+                      <PoolSpeedControl
                       className="model-speed-toggle"
                       iconsOnly
                       modelId={model.id}
@@ -250,7 +314,18 @@ export function ModelRulesView() {
                             return remainingPendingTiers;
                           });
                         });
-                      }} /> : null}
+                      }} /></div> : null}
+                    {canEditContext ? <div className="model-rule-setting" data-setting="context">
+                      <PoolContextControl
+                      className="model-context-toggle"
+                      value={pendingContext[model.id] ?? model.contextPolicy ?? { mode: "short" }}
+                      maximumTokens={(model.contextWindows ? model.contextWindows.maximumTokens : model.catalogContextLimit) ?? undefined}
+                      defaultTokens={model.contextWindows?.defaultTokens ?? undefined}
+                      resetRevision={contextReset[model.id] ?? 0}
+                      disabled={false}
+                      saving={pendingContext[model.id] !== undefined && JSON.stringify(pendingContext[model.id]) !== JSON.stringify(model.contextPolicy ?? { mode: "short" })}
+                      onChange={(nextPolicy) => setModelContext(model, nextPolicy)}
+                    /></div> : null}
                     {hasReasoningModes ? <IconButton
                       data-model-reasoning-edit={model.id}
                       label={t(canEditReasoning ? "models.editReasoning" : "models.viewReasoning", { model: model.id })}
@@ -334,7 +409,7 @@ function useModelRuleDrag({
   const startPointerDrag = (event: React.PointerEvent<HTMLElement>, kind: ModelDragState["kind"], draggedItemId: string) => {
     if (orderMutationRef.current) return;
     const targetElement = event.target as HTMLElement;
-    if (event.button !== 0 || (targetElement.closest(".pool-speed-control, button, input, textarea, a") && !targetElement.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
+    if (event.button !== 0 || (targetElement.closest(".pool-speed-control, .pool-context-control, button, input, textarea, a") && !targetElement.closest(".model-rule-drag-handle, .model-group-drag-handle"))) return;
     event.preventDefault();
     modelDragRef.current = { kind, id: draggedItemId, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
     setDragModelId(kind === "model" ? draggedItemId : null);
@@ -355,7 +430,7 @@ function useModelRuleDrag({
   const startModelDrag = (event: React.DragEvent<HTMLTableRowElement>, modelId: string) => {
     // Interactive controls inside a draggable row must keep their normal
     // click/focus behavior; the row itself is the drag surface.
-    if (orderMutationRef.current || (event.target as HTMLElement).closest(".pool-speed-control, button, input, textarea, a")) {
+    if (orderMutationRef.current || (event.target as HTMLElement).closest(".pool-speed-control, .pool-context-control, button, input, textarea, a")) {
       event.preventDefault();
       return;
     }
@@ -462,7 +537,7 @@ function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose
           className={allowedLevels.includes(level) ? "selected" : undefined}
           disabled={!editable}
           onClick={() => toggleAllowedLevel(level)}
-        ><Check aria-hidden /><span>{label(level)}</span></button>)}
+        ><span>{label(level)}</span></button>)}
       </div>
     </div>
   </Dialog>;

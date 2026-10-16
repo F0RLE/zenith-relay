@@ -5,6 +5,7 @@
 
 .settings-groups {
   width: 100%;
+  max-width: 1040px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 12px;

@@ -29,8 +29,9 @@ for (const theme of ["light", "dark"] as const) {
       expect(pageBox).not.toBeNull();
       expect(headerBox).not.toBeNull();
       expect(groupsBox).not.toBeNull();
-      expect(Math.abs(groupsBox!.x + groupsBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(2);
-      expect(groupsBox!.width).toBeGreaterThan(pageBox!.width - 80);
+      expect(Math.abs(groupsBox!.x - headerBox!.x)).toBeLessThanOrEqual(1);
+      expect(groupsBox!.width).toBeLessThanOrEqual(1040);
+      expect(Math.abs(groupsBox!.width - Math.min(1040, headerBox!.width))).toBeLessThanOrEqual(1);
       const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
       expect(topGap).toBeGreaterThanOrEqual(-1);
       expect(topGap).toBeLessThanOrEqual(4);
@@ -219,7 +220,8 @@ test("reasoning modes stay balanced with the full backend level set", async ({ p
   const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
   const options = dialog.locator(".model-reasoning-options button");
   await expect(options).toHaveCount(6);
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(1);
+  expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-1160x760.png" });
 

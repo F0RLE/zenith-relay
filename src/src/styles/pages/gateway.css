@@ -1145,15 +1145,3 @@
   .gateway-api-toggle-setting,
   .integration-account-policy { padding: 16px 18px; }
 }
-.request-timezone-form label {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(140px, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-
-@media (max-width: 640px) {
-  .request-timezone-form label {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}

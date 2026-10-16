@@ -137,7 +137,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 
   await page.locator(".relay-sidebar nav button").nth(1).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.locator(".source-card .row-actions summary").click();
+  await page.locator(".source-card .account-row-menu summary").click();
   let menu = page.getByRole("menu");
   expect(await menu.locator("span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/source-actions-ru-840x560.png" });
@@ -177,6 +177,23 @@ for (const scenario of [
   { locale: "en" as const, theme: "light" as const, width: 1160, label: "First / total", file: "usage-timing-en-light-1160x760.png" },
   { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый / всего", file: "usage-timing-ru-dark-840x560.png" },
 ]) {
+  test(`usage timing unknown first ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true,
+      accountOAuthClientKind: "excel_bps",
+      usageTiming: { latencyMs: 20_900, ttftMs: null, generationMs: null },
+    });
+    await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+    await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
+    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
+    await expect(timing).toHaveText(scenario.locale === "ru" ? "— / 20,9 с" : "— / 20.9 s");
+    expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await timing.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `output/playwright/unknown-first-${scenario.file}` });
+  });
+
   test(`usage timing ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
     await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true });
     await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });

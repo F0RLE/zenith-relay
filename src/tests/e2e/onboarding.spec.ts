@@ -98,6 +98,47 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   expect(calls.map((call) => call.command)).not.toContain("launch_managed_codex_profile");
 });
 
+test("local quick setup offers Claude Desktop second and connects it without launching", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+  await page.goto("/");
+  await expect(page.locator(".intro-flow-harnesses .intro-flow-node")).toHaveText(["ChatGPT", "Claude Desktop", "OpenCode"]);
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.locator(".client-options button")).toHaveText([
+    "ChatGPTChats and coding tasks in the ChatGPT application.",
+    "Claude DesktopUse local pool models in Claude Desktop.",
+    "OpenCodeA coding assistant in your terminal.",
+    "Configure laterChoose and connect an application after setup.",
+  ]);
+  await page.getByRole("button", { name: "Claude Desktop", exact: true }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
+  const commands = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).toContain("connect_claude_desktop");
+  expect(commands).not.toContain("launch_claude_desktop");
+  expect(commands).not.toContain("connect_opencode_to_local_gateway");
+});
+
+test("remote quick setup keeps the local Desktop integration unavailable", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", mode: "remote", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Server address").fill("https://relay.example.invalid");
+  await page.getByLabel("Management token", { exact: true }).fill("synthetic-management-token-000000");
+  await page.getByRole("button", { name: "Continue" }).click();
+  const claude = page.getByRole("button", { name: "Claude Desktop", exact: true });
+  await expect(claude).toBeDisabled();
+  await expect(claude).toHaveAccessibleDescription("Claude Desktop integration is available with the local pool only.");
+  const commands = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands.filter((command) => command.includes("claude_desktop"))).toEqual([]);
+});
+
 test("local quick setup connects OpenCode to the pool without launching a client", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");

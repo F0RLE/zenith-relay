@@ -1,5 +1,27 @@
+import type { Locator } from "@playwright/test";
 import { expect, test } from "../../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
+
+async function expectSavingStatusCentered(dialog: Locator) {
+  const content = dialog.locator(".oauth-completing-status > svg, .oauth-completing-status > span");
+  await expect(content).toHaveCount(2);
+  await expect.poll(async () => dialog.evaluate((element) => {
+    const modal = element.getBoundingClientRect();
+    const parts = Array.from(element.querySelectorAll(".oauth-completing-status > svg, .oauth-completing-status > span")).map((part) => {
+      const rect = part.getBoundingClientRect();
+      const style = getComputedStyle(part);
+      // Measure the spinner's layout box, independent of its animated rotation.
+      const width = part.tagName.toLowerCase() === "svg" ? parseFloat(style.width) : rect.width;
+      const height = part.tagName.toLowerCase() === "svg" ? parseFloat(style.height) : rect.height;
+      return { left: rect.x + (rect.width - width) / 2, top: rect.y + (rect.height - height) / 2, width, height };
+    });
+    const left = Math.min(...parts.map((part) => part.left));
+    const right = Math.max(...parts.map((part) => part.left + part.width));
+    const top = Math.min(...parts.map((part) => part.top));
+    const bottom = Math.max(...parts.map((part) => part.top + part.height));
+    return Math.max(Math.abs((left + right) / 2 - (modal.x + modal.width / 2)), Math.abs((top + bottom) / 2 - (modal.y + modal.height / 2)));
+  }), { message: "Saving text and spinner should be centered together within the dialog" }).toBeLessThanOrEqual(1);
+}
 
 test("background account updates refresh the visible runtime", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
@@ -88,7 +110,7 @@ test("an exhausted five-hour quota window does not hide the weekly window", asyn
   await expect(meters.nth(1)).toHaveText("64%");
 });
 
-test("OAuth callback offers pool and stored proxy setup for the added account", async ({ page }) => {
+test("OAuth callback saves the account without another setup dialog or implicit pool membership", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: false, proxyCount: 1 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -100,15 +122,97 @@ test("OAuth callback offers pool and stored proxy setup for the added account", 
 
   await expect(dialog).toHaveCount(0);
   await expect(page.locator(".global-feedback.success")).toHaveText("Account added.");
-  const setup = page.getByRole("dialog", { name: "Account added" });
-  await expect(setup.getByLabel("Add account to pool")).not.toBeChecked();
-  await expect(setup.getByLabel("Assign a stored proxy")).not.toBeChecked();
-  await setup.getByRole("button", { name: "Done" }).click();
-  await expect(setup).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
   expect(calls.map((call) => call.command)).toContain("complete_codex_oauth");
   expect(calls.some((call) => call.command === "set_local_pool_membership")).toBe(false);
   expect(calls.some((call) => call.command === "assign_free_local_account_proxies")).toBe(false);
+});
+
+test("BPS callback replaces sign-in controls with one saving status and dismisses on completion", async ({ page }, testInfo) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: false, oauthCompletionDeferred: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
+  const signIn = page.getByRole("dialog", { name: "Sign in" });
+  await signIn.getByText("Excel / Basis Points", { exact: true }).click();
+  await expect(signIn.getByRole("button", { name: "Open sign-in window", exact: true })).toBeEnabled();
+
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+  const saving = page.getByRole("dialog", { name: "Saving account…" });
+  await expect(saving).toBeVisible();
+  await expect(saving.getByRole("status")).toHaveText("Saving account…");
+  await expect(saving.getByRole("button")).toHaveCount(0);
+  await expect(saving.getByRole("radio")).toHaveCount(0);
+  await expect(saving.getByRole("timer")).toHaveCount(0);
+  await expectSavingStatusCentered(saving);
+  await page.screenshot({ path: testInfo.outputPath("oauth-saving-en.png") });
+  await page.keyboard.press("Escape");
+  await expect(saving).toBeVisible();
+
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+  const completions = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "complete_codex_oauth").length);
+  await expect.poll(completions).toBe(1);
+  await page.evaluate(() => window.dispatchEvent(new Event("relay-test-finish-oauth")));
+
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".global-feedback.success")).toHaveText("Account added.");
+  expect(await completions()).toBe(1);
+});
+
+test("Russian saving status fits a compact dark window and closes before a slow snapshot refresh", async ({ page }, testInfo) => {
+  await installTauriMock(page, { locale: "ru", theme: "dark", mode: "local", populated: false, oauthCompletionDeferred: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  await page.getByRole("button", { name: "Войти", exact: true }).first().click();
+  await expect(page.getByRole("dialog", { name: "Войти", exact: true })).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+  const saving = page.getByRole("dialog", { name: "Сохраняем аккаунт…" });
+  await expect(saving.getByRole("status")).toHaveText("Сохраняем аккаунт…");
+  await page.setViewportSize({ width: 540, height: 400 });
+  const bounds = await saving.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(540);
+  expect(bounds!.y).toBeGreaterThanOrEqual(0);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(400);
+  await expectSavingStatusCentered(saving);
+  await page.screenshot({ path: testInfo.outputPath("oauth-saving-ru-dark.png") });
+
+  await page.evaluate(() => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const invoke = internals.invoke.bind(internals);
+    internals.invoke = async (command, args, options) => {
+      if (command === "get_local_runtime_state") {
+        await new Promise<void>((resolve) => window.addEventListener("relay-test-finish-oauth-refresh", () => resolve(), { once: true }));
+      }
+      return invoke(command, args, options);
+    };
+  });
+  await page.evaluate(() => window.dispatchEvent(new Event("relay-test-finish-oauth")));
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".global-feedback.success")).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("relay-test-finish-oauth-refresh")));
+  await expect(page.locator(".account-card")).toBeVisible();
+});
+
+test("failed OAuth completion leaves a closable failure instead of an endless saving state", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: false, oauthCompletionDeferred: true, oauthCompletionError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
+  await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+  await expect(page.getByRole("dialog", { name: "Saving account…" })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("relay-test-finish-oauth")));
+
+  const failed = page.getByRole("dialog", { name: "Sign in" });
+  await expect(failed.getByRole("alert")).toBeVisible();
+  await expect(page.locator(".global-feedback.error")).toBeVisible();
+  await expect(page.locator(".account-card")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("reauthentication updates the account without reopening pool setup", async ({ page }) => {
@@ -126,7 +230,7 @@ test("reauthentication updates the account without reopening pool setup", async 
   await expect(page.getByRole("dialog", { name: "Account added" })).toHaveCount(0);
 });
 
-test("local proxy storage warns, detaches accounts, and deletes selected endpoints", async ({ page }) => {
+test("local proxy storage confirms assigned deletion and sends one atomic batch command", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountCount: 3, proxyCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -137,17 +241,18 @@ test("local proxy storage warns, detaches accounts, and deletes selected endpoin
   await expect(summary).toContainText("Free2");
   await expect(summary).toContainText("Assigned1");
   await expect(page.locator(".proxy-storage-list")).not.toContainText("secret");
-  await expect(page.locator(".proxy-storage-row").first()).toContainText("United States");
+  await expect(page.locator(".proxy-storage-row").first().getByRole("img", { name: "Not checked yet" })).toBeVisible();
 
   await page.getByRole("button", { name: "Manage assigned accounts" }).first().click();
   let manager = page.getByRole("dialog", { name: "Proxy accounts" });
   await expect(manager.getByText("Business Workspace", { exact: true })).toBeVisible();
   await manager.getByText("Personal Plus", { exact: true }).click();
   await manager.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator(".proxy-storage-account-count").first()).toHaveText("Business Workspace+1");
-  await page.locator(".proxy-storage-account-count").first().hover();
+  const assignedAccounts = page.locator(".proxy-storage-bindings").first().locator("span").filter({ hasText: "Accounts: 2" });
+  await expect(assignedAccounts).toHaveText("Accounts: 2");
+  await assignedAccounts.hover();
   await expect(page.getByRole("tooltip")).toHaveText("Business Workspace, Personal Plus");
-  await expect(page.locator(".proxy-storage-account-count").first()).not.toHaveAttribute("title");
+  await expect(assignedAccounts).not.toHaveAttribute("title");
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
   const importDialog = page.getByRole("dialog", { name: "Import proxies" });
@@ -163,9 +268,12 @@ test("local proxy storage warns, detaches accounts, and deletes selected endpoin
   await expect(confirmation).toContainText("1 selected proxy endpoint(s) are used by 2 account(s). Delete all 5 selected proxies and return those accounts to their inherited route?");
   await confirmation.getByRole("button", { name: "Detach and delete" }).click();
   await expect(page.getByText("Proxy storage is empty", { exact: true })).toBeVisible();
-  const detachCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { accountIds?: string[] } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_stored_proxy_accounts" && call.args.input?.accountIds?.length === 0));
-  expect(detachCalls).toHaveLength(1);
-  expect(detachCalls[0].args.input?.accountIds).toEqual([]);
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { accountIds?: string[]; proxyIds?: string[] } } }> }).__TAURI_TEST_INVOKES__);
+  const deletions = calls.filter((call) => call.command === "delete_local_stored_proxies");
+  expect(deletions).toHaveLength(1);
+  expect(deletions[0].args.input?.proxyIds).toHaveLength(5);
+  // The host detaches and deletes atomically, never via separate renderer writes.
+  expect(calls.filter((call) => call.command === "set_local_stored_proxy_accounts" && call.args.input?.accountIds?.length === 0)).toHaveLength(0);
 });
 
 test("account import can reuse an already assigned stored proxy", async ({ page }) => {
@@ -394,7 +502,8 @@ test("empty Choose API mode opens the compact source picker", async ({ page }) =
   await expect(page.getByRole("dialog", { name: "Add source" })).toBeHidden();
   await expect(page.getByText("Zenith API", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Mode: Choose API", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Launch", { exact: true })).toBeEnabled();
+  const createdSource = page.locator(".source-card").filter({ hasText: "Zenith API" });
+  await expect(createdSource.getByRole("button", { name: "Launch", exact: true })).toBeEnabled();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({
     name: "Zenith API",
@@ -520,9 +629,10 @@ test("Choose API mode manages and launches saved sources without balance control
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.getByText("Example compatible API", { exact: true })).toBeVisible();
-  await expect(page.getByText("Balance", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Balance", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Top up", exact: true })).toHaveCount(0);
-  await page.getByLabel("Launch", { exact: true }).click();
+  const source = page.locator(".source-card").filter({ hasText: "Example compatible API" });
+  await source.getByRole("button", { name: "Launch", exact: true }).click();
   await page.getByRole("dialog", { name: "Where do you want to launch this source?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);

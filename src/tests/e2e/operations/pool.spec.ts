@@ -150,10 +150,8 @@ for (const mode of ["local", "remote"] as const) {
 
     const row = page.locator(".source-card").filter({ hasText: "Example compatible API" });
     await expect(row).not.toContainText("Stabilizer");
-    await row.locator(".relay-action-menu summary").click();
-    await page.getByRole("menuitem", { name: "Remove from pool" }).click();
-    await row.locator(".relay-action-menu summary").click();
-    await page.getByRole("menuitem", { name: "Add to pool" }).click();
+    await row.getByRole("button", { name: "Remove from pool", exact: true }).click();
+    await row.getByRole("button", { name: "Add to pool", exact: true }).click();
 
     const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
     if (mode === "local") {
@@ -768,10 +766,10 @@ test("source and automation rows keep rare actions in consistent menus", async (
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   await page.getByRole("tab", { name: "Sources" }).click();
-  let actions = page.locator(".source-card .row-actions");
-  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch"]);
-  await actions.locator("summary").click();
-  expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Refresh API data", "Remove from pool", "Disable", "Delete"]);
+  let actions = page.locator(".source-card .account-card-actions");
+  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual(["Remove from pool", "Refresh API data", "Edit", "Launch"]);
+  await page.locator(".source-card .account-row-menu summary").click();
+  expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Disable", "Delete"]);
   await page.keyboard.press("Escape");
 
   await page.getByRole("tab", { name: "Automations" }).click();
@@ -787,7 +785,7 @@ test("source toolbar refresh discovers API data instead of only reloading the sn
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
 
-  await page.getByRole("button", { name: "Refresh API data", exact: true }).click();
+  await page.locator(".source-command-bar").getByRole("button", { name: "Refresh API data", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("Updated: 2 · Errors: 0 · Skipped: 0");
   await expect.poll(() => page.evaluate(() => (
     window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { sourceId?: string } }> }
@@ -817,8 +815,10 @@ test("ChatGPT client setup combines account selection, fixed reserve, and forced
   await openGatewayApplication(page);
   const setup = page.locator(".client-setup");
   const accountMenu = setup.getByRole("button", { name: /^Account:/ });
-  await expect(accountMenu).toHaveAttribute("data-value", "auto");
-  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("auto");
+  await expect(accountMenu).toHaveAttribute("data-value", "none");
+  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("none");
+  await chooseOption(page, setup, "Account", "account_synthetic");
+  await expect(accountMenu).toHaveAttribute("data-value", "account_synthetic");
   const reserve = setup.getByRole("checkbox", { name: "Keep 1% reserved" });
   await expect(reserve).toBeChecked();
   await reserve.uncheck();
@@ -835,9 +835,6 @@ test("ChatGPT client setup combines account selection, fixed reserve, and forced
     return getComputedStyle(element, "::selection").backgroundColor === expected;
   });
   expect(selectionMatchesTheme).toBe(true);
-
-  await chooseOption(page, setup, "Account", "account_synthetic");
-  await expect(accountMenu).toHaveAttribute("data-value", "account_synthetic");
 
   await chooseOption(page, setup, "Account", "none");
   await expect(setup.getByRole("checkbox", { name: "Keep 1% reserved" })).toHaveCount(0);

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, ArrowRight, Check, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, MessageSquare, Server, SkipForward, Terminal, Upload } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, Server, SkipForward, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import relayLogoUrl from "../../../../../src-tauri/icons/zenith-relay.svg?url";
 import { setI18nLanguage } from "../../../i18n";
@@ -37,6 +37,7 @@ export function QuickSetupWizard() {
 
   const selectMode = (selectedMode: RelayMode) => {
     setMode(selectedMode);
+    if (selectedMode !== "local" && client === "claudeDesktop") setClient("later");
     setConnectionReady(false);
   };
   const finishLater = () => finishOnboarding(intro ? appMode : mode);
@@ -84,10 +85,11 @@ export function QuickSetupWizard() {
       const ok = await activateCodexProfile("onboarding-client", () => relayCommands.attachCodexGateway());
       if (!ok) return;
     }
+    if (step === 3 && client === "claudeDesktop" && mode === "local") {
+      const ok = await perform("onboarding-claude-desktop", relayCommands.connectClaudeDesktop, "feedback.saved", { backgroundRefresh: true });
+      if (!ok) return;
+    }
     if (step === 3 && client === "opencode" && mode === "local") {
-      // OpenCode is the first supported "other" client. Its configuration is
-      // switched to the local pool, with an automatic one-shot recovery copy
-      // made by the native command before the first write. Do not launch it.
       const ok = await perform("onboarding-opencode", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
       if (!ok) return;
     }
@@ -120,7 +122,7 @@ export function QuickSetupWizard() {
           <span>{t("onboarding.allowInsecureRemote")}</span>
         </label> : null}
       </div> : null}
-      {step === 3 ? <ClientStep client={client} onSelect={setClient} /> : null}
+      {step === 3 ? <ClientStep mode={mode} client={client} onSelect={setClient} /> : null}
       {step === 4 ? <ReadyStep mode={mode} client={client} /> : null}
     </section>
     <footer className="setup-footer">
@@ -279,6 +281,7 @@ function SetupIntro({ onStart, onSkip }: { onStart: () => void; onSkip: () => vo
   ];
   const harnesses = [
     { id: "chatgpt", label: "ChatGPT", icon: "/icons/chatgpt.svg" },
+    { id: "claude-desktop", label: "Claude Desktop", icon: "/icons/claude-desktop.svg" },
     { id: "opencode", label: "OpenCode", icon: "/icons/opencode.svg" },
   ];
 
@@ -358,27 +361,34 @@ function ModeStep({ mode, onSelect }: { mode: RelayMode; onSelect: (mode: RelayM
   );
 }
 
-function ClientStep({ client, onSelect }: { client: string; onSelect: (client: string) => void }) {
+function ClientStep({ mode, client, onSelect }: { mode: RelayMode; client: string; onSelect: (client: string) => void }) {
   const { t } = useTranslation();
+  const options = [
+    { id: "codex", icon: "/icons/chatgpt.svg" },
+    { id: "claudeDesktop", icon: "/icons/claude-desktop.svg" },
+    { id: "opencode", icon: "/icons/opencode.svg" },
+    { id: "later", icon: null },
+  ];
   return (
     <div className="setup-step">
       <div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div>
       <div className="client-options" role="group" aria-label={t("onboarding.steps.3")}>
-        {["codex", "opencode", "later"].map((clientOption) => {
-          const Icon = clientOption === "codex" ? MessageSquare : clientOption === "opencode" ? Terminal : Clock3;
+        {options.map(({ id, icon }) => {
+          const unavailable = id === "claudeDesktop" && mode !== "local";
           return (
             <button
               type="button"
-              key={clientOption}
-              aria-label={t(`clients.${clientOption}`)}
-              aria-describedby={`setup-client-${clientOption}-hint`}
-              aria-pressed={client === clientOption}
-              className={client === clientOption ? "selected" : ""}
-              onClick={() => onSelect(clientOption)}
+              key={id}
+              disabled={unavailable}
+              aria-label={t(`clients.${id}`)}
+              aria-describedby={`setup-client-${id}-hint`}
+              aria-pressed={client === id}
+              className={client === id ? "selected" : ""}
+              onClick={() => onSelect(id)}
             >
-              <Icon aria-hidden />
-              <span><strong>{t(`clients.${clientOption}`)}</strong><small id={`setup-client-${clientOption}-hint`}>{t(`onboarding.clientDescriptions.${clientOption}`)}</small></span>
-              <i>{client === clientOption ? <Check aria-hidden /> : null}</i>
+              {icon ? <img src={icon} alt="" /> : <Clock3 aria-hidden />}
+              <span><strong>{t(`clients.${id}`)}</strong><small id={`setup-client-${id}-hint`}>{unavailable ? t("gateway.claudeDesktopLocalOnly") : t(`onboarding.clientDescriptions.${id}`)}</small></span>
+              <i>{client === id ? <Check aria-hidden /> : null}</i>
             </button>
           );
         })}

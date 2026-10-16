@@ -4,6 +4,7 @@ import {
   completeModelDisplayOrder,
   modelSignature,
   modelSpeedTiers,
+  modelShowsContextControl,
   modelShowsReasoningControl,
   normalizeReasoningSelection,
   reorderById,
@@ -34,6 +35,16 @@ describe("model rules model", () => {
     const current = [model("a", { reasoningLevels: ["low"] })];
     expect(modelSignature(current)).toBe(modelSignature(current));
     expect(modelSignature(current)).not.toBe(modelSignature([model("a", { reasoningLevels: ["high"] })]));
+    expect(modelSignature([model("a", { contextPolicy: { mode: "short" } })]))
+      .not.toBe(modelSignature([model("a", { contextPolicy: { mode: "extended" } })]));
+    expect(modelSignature([model("a", { contextPolicy: { mode: "custom", tokens: 128000 } })]))
+      .not.toBe(modelSignature([model("a", { contextPolicy: { mode: "custom", tokens: 256000 } })]));
+    expect(modelSignature([model("a", { contextConfigurable: false })]))
+      .not.toBe(modelSignature([model("a", { contextConfigurable: true })]));
+    expect(modelSignature([model("a")]))
+      .not.toBe(modelSignature([model("a", { contextWindows: {} })]));
+    expect(modelSignature([model("a", { contextWindows: { defaultTokens: 200000, maximumTokens: 900000 } })]))
+      .not.toBe(modelSignature([model("a", { contextWindows: { defaultTokens: 272000, maximumTokens: 900000 } })]));
   });
 
   test("reorders rows immutably and rejects missing or equal targets", () => {
@@ -57,6 +68,37 @@ describe("model rules model", () => {
     expect(modelShowsReasoningControl(model("gpt-reserve"))).toBe(false);
     expect(modelShowsReasoningControl(model("gpt-image-2", { reasoningSupportedLevels: ["low", "high"], catalogFamily: "gpt-image" }))).toBe(false);
     expect(modelShowsReasoningControl(model("vision", { catalogOutputModalities: ["text"], reasoningLevels: ["medium"] }))).toBe(true);
+  });
+
+  test("shows context only for text-output models", () => {
+    expect(modelShowsContextControl(model("gpt-5.4", { contextConfigurable: true }))).toBe(true);
+    expect(modelShowsContextControl(model("vision", {
+      catalogInputModalities: ["text", "image"],
+      catalogOutputModalities: ["text"],
+      contextConfigurable: true,
+    }))).toBe(true);
+    expect(modelShowsContextControl(model("gpt-image-2", {
+      catalogFamily: "gpt-image",
+      catalogOutputModalities: ["text"],
+      contextConfigurable: true,
+    }))).toBe(false);
+    expect(modelShowsContextControl(model("dall-e-4", {
+      catalogOutputModalities: ["image"],
+      contextConfigurable: true,
+    }))).toBe(false);
+    expect(modelShowsContextControl(model("gemini-video", {
+      catalogOutputModalities: ["video"],
+      contextConfigurable: true,
+    }))).toBe(false);
+    expect(modelShowsContextControl(model("text-embedding-3-large", {
+      catalogFamily: "embedding",
+      catalogOutputModalities: [],
+      contextConfigurable: true,
+    }))).toBe(false);
+    expect(modelShowsContextControl(model("unknown-audio", {
+      catalogOutputModalities: ["audio"],
+      contextConfigurable: false,
+    }))).toBe(false);
   });
 
   test("moves complete groups while preserving each group's model order", () => {

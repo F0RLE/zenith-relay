@@ -74,6 +74,11 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     if (!visible) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || dismissActiveTooltip !== hide) return;
+      // A hint must not swallow an editor's Escape-to-cancel shortcut.
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, [contenteditable='true']")) {
+        hide();
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       hide();

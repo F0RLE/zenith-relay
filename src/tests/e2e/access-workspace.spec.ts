@@ -16,9 +16,11 @@ test("Access unifies pool API and applications with keyboard navigation", async 
   const chatgpt = page.getByRole("tab", { name: "ChatGPT", exact: true });
   await expect(chatgpt).toHaveAttribute("aria-selected", "true");
   const picker = page.locator(".integration-picker");
-  await expect(picker.getByRole("tab")).toHaveText(["ChatGPT", "OpenCode"]);
+  await expect(picker.getByRole("tab")).toHaveText(["ChatGPT", "Claude Desktop", "OpenCode"]);
+  await expect(picker.getByRole("tablist")).toHaveAttribute("aria-orientation", "vertical");
   await expect(chatgpt.locator("img")).toHaveAttribute("src", "/icons/chatgpt.svg");
   await expect(picker.getByRole("tab", { name: "OpenCode", exact: true }).locator("img")).toHaveAttribute("src", "/icons/opencode.svg");
+  await expect(picker.getByRole("tab", { name: "Claude Desktop", exact: true }).locator("img")).toHaveAttribute("src", "/icons/claude-desktop.svg");
   expect(await picker.getByRole("tab").evaluateAll((elements) => elements.every((element) => {
     const style = getComputedStyle(element);
     const icon = element.querySelector("img");
@@ -28,6 +30,10 @@ test("Access unifies pool API and applications with keyboard navigation", async 
   }))).toBe(true);
   await chatgpt.focus();
   await chatgpt.press("ArrowDown");
+  const claude = picker.getByRole("tab", { name: "Claude Desktop", exact: true });
+  await expect(claude).toBeFocused();
+  await expect(page.locator('.application-launch-path[data-application="claude-desktop"]')).toBeVisible();
+  await claude.press("ArrowDown");
   await expect(page.getByRole("tab", { name: "OpenCode", exact: true })).toBeFocused();
   await expect(page.locator(".gateway-opencode-development")).toContainText("In development");
   await apiTab.click();
@@ -35,11 +41,35 @@ test("Access unifies pool API and applications with keyboard navigation", async 
   await expect(page.getByRole("button", { name: "Start API", exact: true })).toBeVisible();
 });
 
+test("application navigation stays readable with the sidebar expanded in a narrow window", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Access", exact: true }).click();
+  await page.getByRole("tab", { name: "Applications", exact: true }).click();
+  await page.getByRole("button", { name: "Expand sidebar", exact: true }).click();
+  const row = page.locator(".application-workspace .integration-picker .relay-tabs");
+  await expect(row).toHaveAttribute("aria-orientation", "vertical");
+  expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await row.getByRole("tab").evaluateAll((elements) => elements.every((element) =>
+    element.getBoundingClientRect().height >= 42 && element.scrollWidth <= element.clientWidth))).toBe(true);
+  const chatgpt = row.getByRole("tab", { name: "ChatGPT", exact: true });
+  await chatgpt.focus();
+  await chatgpt.press("End");
+  const opencode = row.getByRole("tab", { name: "OpenCode", exact: true });
+  await expect(opencode).toBeFocused();
+  expect(await opencode.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const row = element.parentElement!.getBoundingClientRect();
+    return box.left >= row.left - 1 && box.right <= row.right + 1;
+  })).toBe(true);
+});
+
 for (const client of [
   { name: "ChatGPT", kind: "codex" },
   { name: "Excel / Basis Points", kind: "excel_bps" },
 ] as const) {
-  test(`Connections signs in using ${client.name} and offers account setup`, async ({ page }) => {
+  test(`Connections signs in using ${client.name} without an extra completion dialog`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", mode: "local", populated: true });
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -52,14 +82,14 @@ for (const client of [
     }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth")?.args))
       .toEqual({ openBrowser: false, ...(client.kind === "excel_bps" ? { clientKind: client.kind } : {}) });
     await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
-    await expect(page.getByRole("dialog", { name: "Account added", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Configure later", exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Account added", exact: true })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Connections", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Accounts", exact: true })).toHaveAttribute("aria-selected", "true");
   });
 }
 
-test("Accounts contains behavior settings without a picker for one provider", async ({ page }) => {
+test("Accounts keeps behavior settings beside its compact provider navigation", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "remote", populated: true, remoteFeatures: ["block_degraded_routes"] });
   await page.goto("/");
   await page.getByRole("button", { name: "Access", exact: true }).click();
@@ -67,7 +97,8 @@ test("Accounts contains behavior settings without a picker for one provider", as
   await page.getByRole("tab", { name: "Accounts", exact: true }).click();
   const accounts = page.getByRole("tabpanel", { name: "Accounts", exact: true });
   await expect(accounts.getByRole("checkbox", { name: "Reject model substitution", exact: true })).toBeChecked();
-  await expect(accounts.getByRole("tablist")).toHaveCount(0);
+  await expect(accounts.getByRole("tablist")).toHaveAttribute("aria-orientation", "vertical");
+  await expect(accounts.getByRole("tab")).toHaveText(["ChatGPT"]);
   await expect(accounts.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(0);
   await expect(accounts.getByRole("button", { name: "My connections", exact: true })).toHaveCount(0);
   await expect(accounts.getByRole("article")).toHaveCount(0);
@@ -126,6 +157,30 @@ for (const locale of ["ru", "en"] as const) {
             return box.left >= 0 && box.right <= innerWidth + 1 && element.scrollWidth <= element.clientWidth + 1;
           }))).toBe(true);
           await page.screenshot({ path: `output/playwright/access-${id}-${locale}-${theme}-${viewport.width}.png` });
+          if (id === "applications") {
+            const applications = page.locator(".application-workspace .integration-picker");
+            await expect(applications.getByRole("tab")).toHaveText(["ChatGPT", "Claude Desktop", "OpenCode"]);
+            expect(await applications.getByRole("tab").evaluateAll((elements) => elements.every((element, index) => {
+              const box = element.getBoundingClientRect();
+              const previous = elements[index - 1]?.getBoundingClientRect();
+              const icon = element.querySelector("img")!.getBoundingClientRect();
+              const range = document.createRange();
+              range.selectNodeContents(element.lastChild!);
+              return (!previous || previous.bottom <= box.top && previous.left === box.left)
+                && box.height >= 42 && box.height < 64
+                && [...range.getClientRects()].every((label) => label.left > icon.right && label.right <= box.right - 11)
+                && Math.abs(icon.top + icon.height / 2 - box.top - box.height / 2) < 1;
+            }))).toBe(true);
+            expect(await page.locator(".application-workspace").evaluate((element) => {
+              const picker = element.querySelector(".integration-picker")!.getBoundingClientRect();
+              const settings = element.querySelector(".integrations-settings")!.getBoundingClientRect();
+              return getComputedStyle(element).gridTemplateColumns.split(" ").length === 1
+                ? settings.top >= picker.bottom : settings.left >= picker.right && Math.abs(settings.top - picker.top) < 1;
+            })).toBe(true);
+            await applications.getByRole("tab", { name: "Claude Desktop", exact: true }).click();
+            await expect(page.locator('.application-launch-path[data-application="claude-desktop"]')).toBeVisible();
+            await page.screenshot({ path: `output/playwright/access-claude-desktop-${locale}-${theme}-${viewport.width}.png` });
+          }
         }
         const expand = page.getByRole("button", { name: russian ? "Развернуть боковую панель" : "Expand sidebar", exact: true });
         if (await expand.isVisible()) await expand.click();

@@ -5,9 +5,10 @@ import { PageHeader, Tabs } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { GatewaySettings } from "../gateway/GatewayPage";
 import { IntegrationWorkspace, type IntegrationOption } from "./IntegrationWorkspace";
-import { DegradedRoutesControl } from "./DegradedRoutesControl";
 import { ChatGPTApplicationSettings } from "./ChatGPTApplicationSettings";
 import { OpenCodeApplicationSettings } from "./OpenCodeApplicationSettings";
+import { ClaudeDesktopApplicationSettings } from "./ClaudeDesktopApplicationSettings";
+import { ChatGPTAccountSettings } from "./ChatGPTAccountSettings";
 
 const applications = [
   {
@@ -15,6 +16,12 @@ const applications = [
     label: "ChatGPT",
     icon: "/icons/chatgpt.svg",
     Component: ChatGPTApplicationSettings,
+  },
+  {
+    id: "claude-desktop",
+    label: "Claude Desktop",
+    icon: "/icons/claude-desktop.svg",
+    Component: ClaudeDesktopApplicationSettings,
   },
   {
     id: "opencode",
@@ -25,7 +32,7 @@ const applications = [
 ] as const satisfies readonly IntegrationOption[];
 
 const accountProviders = [
-  { id: "openai", label: "OpenAI", icon: "/icons/chatgpt.svg", Component: DegradedRoutesControl },
+  { id: "chatgpt", label: "ChatGPT", icon: "/icons/chatgpt.svg", Component: ChatGPTAccountSettings },
 ] as const satisfies readonly IntegrationOption[];
 
 export function IntegrationsPage() {
@@ -33,7 +40,7 @@ export function IntegrationsPage() {
   const { mode } = useRelayState();
   const [section, setSection] = useState("api");
   const [applicationId, setApplicationId] = useState("chatgpt");
-  const [accountProviderId, setAccountProviderId] = useState("openai");
+  const [accountProviderId, setAccountProviderId] = useState("chatgpt");
   const apiLabel = t(mode === "remote" ? "integrations.serverApi" : "integrations.localApi");
 
   return <section className="relay-page relay-workspace-page integrations-page">
@@ -54,13 +61,11 @@ export function IntegrationsPage() {
       <GatewaySettings />
     </section> : null}
     {section === "applications" ? <section className="integrations-category" role="tabpanel" aria-label={t("integrations.applications")}>
-      <div className="integration-section-heading">
-        <h2>{t("integrations.applicationsTitle")}</h2>
-      </div>
       <IntegrationWorkspace
         value={applicationId}
         onChange={setApplicationId}
         label={t("integrations.applicationClients")}
+        className="application-workspace"
         items={applications}
       />
     </section> : null}
@@ -69,6 +74,7 @@ export function IntegrationsPage() {
         value={accountProviderId}
         onChange={setAccountProviderId}
         label={t("integrations.accountProviders")}
+        showPickerWhenSingle
         items={accountProviders}
       />
     </section> : null}

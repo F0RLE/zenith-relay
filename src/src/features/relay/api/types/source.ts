@@ -56,6 +56,8 @@ export type SourceSummary = {
   baseUrl: string;
   pricingProvider?: string | null;
   officialProviderFamily?: string | null;
+  /** Stored proxy used for every request of this source; the URL stays in the proxy pool. */
+  proxyId?: string | null;
   wireApi: SourceWireApi;
   protocolBindings?: SourceProtocolBinding[];
   protocolConfig?: SourceProtocolConfig;

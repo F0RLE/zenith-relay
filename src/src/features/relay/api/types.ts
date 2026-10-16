@@ -1,6 +1,8 @@
 export type {
   RequestTimezonePolicy,
   RequestTimezoneUpdate,
+  AccountTimezoneSource,
+  ModelCatalogIdentity,
 } from "./types/runtime";
 
 export type {
@@ -70,6 +72,7 @@ export type {
 } from "./types/account";
 
 export type {
+  ModelContextPolicy,
   ModelSummary,
   ImageRequestPrice,
 } from "./types/model";
@@ -101,6 +104,10 @@ export type {
 } from "./types/proxy";
 
 export type {
+  LaunchApplication,
+  LaunchPathSetting,
+  ClaudeDesktopStatus,
+  ClaudeDesktopConnection,
   OpenCodeConfigStatus,
   ProfileSnapshot,
   ProfileSnapshotList,

@@ -45,7 +45,7 @@ export function automationPoolModels(gateway: RuntimeSnapshot["gateway"]) {
   const rawModels = gateway.visibleModelIds.length
     ? gateway.visibleModelIds
     : (gateway.models ?? []).filter((model) => model.enabled).map((model) => model.id);
-  return orderModelIdsBySnapshot(uniqueModelIds(rawModels), gateway.models ?? []);
+  return orderModelIdsBySnapshot(uniqueModelIds(rawModels), gateway.models ?? [], gateway.modelCatalog);
 }
 
 export function automationTargetModels(

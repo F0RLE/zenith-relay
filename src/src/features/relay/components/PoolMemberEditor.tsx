@@ -4,11 +4,10 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import { SourcePriceEditor } from "./SourcePriceEditor";
-import { AccountCredentialDiagnostics } from "./AccountCredentialDiagnostics";
 import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "./sourcePriceEditorModel";
 import { Button, Dialog, OptionMenu, Tabs, ToggleSwitch } from "./Ui";
 import { toggle, type PoolMember } from "../poolHelpers";
-import { groupModels, memberModelCatalog, modelIdKey } from "../modelGroups";
+import { groupModels, memberModelCatalog, modelIdKey, orderModelIdsBySnapshot } from "../modelGroups";
 import { useRelayState } from "../state/RelayStateProvider";
 import {
   modelSelectionForMember,
@@ -33,7 +32,8 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const [purchaseCost, setPurchaseCost] = useState(member.kind === "account" && member.purchaseCostMicroUsd ? String(member.purchaseCostMicroUsd / 1_000_000) : "");
   const purchaseCostUsd = purchaseCost.trim() === "" ? 0 : Number(purchaseCost);
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
-  const filteredModels = modelIds.filter((model) => modelIdKey(model).includes(search.trim().toLowerCase()));
+  const filteredModels = orderModelIdsBySnapshot(modelIds, runtime?.gateway.models ?? [], runtime?.gateway.modelCatalog)
+    .filter((model) => modelIdKey(model).includes(search.trim().toLowerCase()));
   const catalog = memberModelCatalog(runtime?.gateway);
   const modelGroups = groupModels(filteredModels, {
     metadata: (model) => catalog.get(modelIdKey(model)),
@@ -90,7 +90,6 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
       )}
     >
       <div className="relay-form member-editor">
-        {member.kind === "account" ? <AccountCredentialDiagnostics account={member} /> : null}
         <Tabs value={tab} items={tabs} onChange={setTab} label={t("pool.editMember")} />
         <div role="tabpanel" aria-label={tabs.find((tabItem) => tabItem.id === tab)?.label}>
           {tab === "models" ? (

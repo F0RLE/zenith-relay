@@ -3,14 +3,14 @@ import type {
   ModelSummary,
   RuntimeSnapshot,
 } from "./api/types";
-import { groupModels, modelIdKey } from "./modelGroups";
+import { groupModels, modelIdKey, orderModelIdsBySnapshot } from "./modelGroups";
 import { sortReasoningEfforts } from "./poolFormatting";
 
 export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
   // `gateway.models` is a derived projection and can lag a source/account
   // refresh. Merge it with the catalogs carried by the current members even
-  // when the derived array is non-empty. Keep the gateway order (it already
-  // contains the saved presentation order), then append newly observed IDs.
+  // when the derived array is non-empty. Apply the complete backend order
+  // after merging, so temporarily unavailable members keep their position.
   const summaries = new Map<string, ModelSummary>();
   const order: string[] = [];
   const catalog = new Map(
@@ -38,8 +38,7 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
 
   for (const model of runtime.gateway.models ?? []) add(model.id, model);
   for (const modelId of runtime.gateway.visibleModelIds) add(modelId);
-  // Match the pool/runtime inventory: native accounts establish the order of
-  // shared IDs, then API sources append their remaining models.
+  // Preserve the first spelling of shared IDs while merging inventories.
   for (const account of runtime.accounts) {
     for (const modelId of account.models) add(modelId);
   }
@@ -56,7 +55,7 @@ export function modelSummaries(runtime: RuntimeSnapshot): ModelSummary[] {
     for (const modelId of memberModelIds) memberCount.set(modelId, (memberCount.get(modelId) ?? 0) + 1);
   }
 
-  return order.map((modelId) => {
+  return orderModelIdsBySnapshot(order, runtime.gateway.models ?? [], runtime.gateway.modelCatalog).map((modelId) => {
     const modelSummary = summaries.get(modelId)!;
     const count = memberCount.get(modelId);
     return count == null ? modelSummary : { ...modelSummary, memberCount: count };
@@ -173,6 +172,7 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
   merged.catalogInputModalities = unionArray(existingSummary.catalogInputModalities, incomingSummary.catalogInputModalities);
   merged.catalogOutputModalities = unionArray(existingSummary.catalogOutputModalities, incomingSummary.catalogOutputModalities);
   merged.catalogContextLimit = preferIncoming(existingSummary.catalogContextLimit, incomingSummary.catalogContextLimit) ?? null;
+  merged.contextWindows = existingSummary.contextWindows ?? incomingSummary.contextWindows ?? null;
   merged.catalogInputLimit = preferIncoming(existingSummary.catalogInputLimit, incomingSummary.catalogInputLimit) ?? null;
   merged.catalogOutputLimit = preferIncoming(existingSummary.catalogOutputLimit, incomingSummary.catalogOutputLimit) ?? null;
   merged.inputMicroUsdPerMillion = preferIncoming(existingSummary.inputMicroUsdPerMillion, incomingSummary.inputMicroUsdPerMillion) ?? null;

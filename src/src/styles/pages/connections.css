@@ -383,13 +383,9 @@
 
 .account-list {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: stretch;
   gap: 10px;
-}
-
-@media (max-width: 1600px) {
-  .account-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 @media (max-width: 1250px) {
@@ -400,18 +396,8 @@
   .account-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-.account-plan-group-heading + .account-card:has(+ .account-plan-group-heading),
-.account-plan-group-heading + .account-card:last-child {
-  grid-column: span 2;
-}
-
 @media (max-width: 620px) {
   .account-list { grid-template-columns: minmax(0, 1fr); }
-
-  .account-plan-group-heading + .account-card:has(+ .account-plan-group-heading),
-  .account-plan-group-heading + .account-card:last-child {
-    grid-column: auto;
-  }
 }
 
 .account-plan-group-heading {
@@ -1221,6 +1207,31 @@
 
 .oauth-sign-in-dialog .oauth-waiting {
   gap: 18px;
+}
+
+.relay-dialog.sign-in-dialog.oauth-completing > header {
+  display: none;
+}
+
+.relay-dialog.sign-in-dialog.oauth-completing .relay-dialog-body {
+  padding: 10px 20px;
+  scrollbar-gutter: auto;
+}
+
+.oauth-completing-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 72px;
+  color: var(--relay-text);
+}
+
+.oauth-completing-status > svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--relay-accent);
 }
 
 .oauth-progress {
@@ -2095,20 +2106,28 @@
 }
 .source-probe-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
 .source-probe-result code { overflow-wrap: anywhere; color: var(--relay-muted); }
-.account-credential-diagnostics {
-  display: grid;
-  gap: 4px;
-  padding: 8px 0;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.account-credential-diagnostics small {
+.account-token-expiry {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 10px;
   color: var(--relay-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
 }
 
-.account-credential-diagnostics[data-status="expired"],
-.account-credential-diagnostics[data-status="revoked"],
-.account-credential-diagnostics[data-status="auth_failed"] {
-  color: var(--relay-warning);
+.account-token-expiry svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+}
+
+.account-token-expiry span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

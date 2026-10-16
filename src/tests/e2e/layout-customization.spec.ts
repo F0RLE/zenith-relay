@@ -71,9 +71,8 @@ test("account grouping is explicit and saved on connections", async ({ page }) =
   await expect(grouping).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".account-list .account-plan-group-heading")).toHaveCount(4);
   expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {
-    const grid = card.parentElement!.getBoundingClientRect();
     const rect = card.getBoundingClientRect();
-    return rect.width >= grid.width * 0.64;
+    return rect.width >= 280 && rect.width <= 340 && getComputedStyle(card).gridColumnStart === "auto";
   }))).toBe(true);
   await page.setViewportSize({ width: 600, height: 760 });
   expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {

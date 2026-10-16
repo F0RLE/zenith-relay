@@ -6,6 +6,7 @@ import type { AccountSummary, SourceSummary, WakeTask } from "../../api/types";
 import { Button, IconButton, PageHeader, Tabs } from "../../components/Ui";
 import { useAccountSignIn } from "../../hooks/useAccountSignIn";
 import { useSourceRefresh } from "../../hooks/useSourceRefresh";
+import { useSourceStats } from "../../hooks/useSourceStats";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountProxyDialog, BulkProxyDialog, ProxyImportDialog, ProxyStorageView } from "./ProxyDialogs";
 import { connectionInitialView, connectionViews, reconcileRemoteConnectionView, type ConnectionView } from "./connectionViewState";
@@ -19,6 +20,7 @@ import { SourcesList } from "./SourcesList";
 import { useProxyChecks } from "./useProxyChecks";
 type DialogKind = "source" | "automation" | "remote" | "deploy" | "accountProxy" | "bulkProxies" | "proxyImport" | "accountExport" | null;
 const CONNECTIONS_VIEW_REQUEST = "relay.connections.requestedView";
+const EMPTY_SOURCES: SourceSummary[] = [];
 export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, busy, perform } = useRelayState();
@@ -46,6 +48,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const canManageProxies = supports("account_proxies");
   const canExportAccounts = supports("account_export");
   const showSourceToolbar = view === "sources" && Boolean(runtime?.sources.length);
+  const { stats: sourceStats, refresh: refreshSourceStats } = useSourceStats(mode, view === "sources" ? runtime?.sources ?? EMPTY_SOURCES : EMPTY_SOURCES);
 
   useEffect(() => {
     const requested = mode === "zenith" ? null : sessionStorage.getItem(CONNECTIONS_VIEW_REQUEST);
@@ -120,6 +123,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     sources: runtime?.sources ?? [],
     resetKey: `${mode}:${view}`,
     perform,
+    refreshStats: refreshSourceStats,
   });
 
   return (
@@ -162,7 +166,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
         <IconButton label={t("sources.refreshData")} icon={<RefreshCw aria-hidden />} busy={busy === "sources-refresh-all"} disabled={Boolean(busy)} onClick={() => refreshSourceData()} />
       </div> : null}
 
-      {view === "sources" ? <SourcesList query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} /> : null}
+      {view === "sources" ? <SourcesList query={query} sourceStats={sourceStats} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} /> : null}
       {view === "accounts" ? (
         <AccountsTable
           query={query}

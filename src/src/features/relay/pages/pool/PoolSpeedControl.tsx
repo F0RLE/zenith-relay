@@ -49,7 +49,7 @@ export function PoolSpeedControl({
 
   return <div
     ref={groupRef}
-    className={`pool-speed-control${iconsOnly ? " icons-only" : ""}${className ? ` ${className}` : ""}`}
+    className={`pool-speed-control pool-model-control${iconsOnly ? " icons-only" : ""}${className ? ` ${className}` : ""}`}
     role="radiogroup"
     aria-label={t("pool.serviceTier")}
     data-speed-tier={selected}

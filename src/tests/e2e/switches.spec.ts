@@ -25,7 +25,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.keyboard.press("Escape");
       await page.screenshot({ path: `output/playwright/switches-${mode}-${theme}.png` });
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+      await expect(page.locator(".relay-shell")).toHaveClass(/sidebar-collapsed/);
       await expect(toggle).toBeInViewport();
       await page.screenshot({ path: `output/playwright/switches-${mode}-${theme}-mobile.png` });
       const settingsPage = mode === "remote" ? await page.context().newPage() : page;

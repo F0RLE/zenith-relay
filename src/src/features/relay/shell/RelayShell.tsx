@@ -44,6 +44,12 @@ export function RelayShell() {
   const { t } = useTranslation();
   const { mode, setMode, page, setPage, feedback, clearFeedback, loading } = useRelayState();
   const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
+  useEffect(() => {
+    const compact = window.matchMedia?.("(max-width: 1023px)");
+    const collapseOnNarrowWindow = () => { if (compact?.matches) setCollapsed(true); };
+    compact?.addEventListener("change", collapseOnNarrowWindow);
+    return () => compact?.removeEventListener("change", collapseOnNarrowWindow);
+  }, []);
   const [modeOpen, setModeOpen] = useState(false);
   const [importRequest, setImportRequest] = useState<{ id: number; paths?: string[] } | null>(null);
   const [importDragActive, setImportDragActive] = useState(false);

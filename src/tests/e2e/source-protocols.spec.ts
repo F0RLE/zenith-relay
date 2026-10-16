@@ -22,7 +22,8 @@ test("native Messages source can launch OpenCode while direct ChatGPT is disable
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
-  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Launch", exact: true }).click();
+  const sourceRow = page.locator(".source-card").filter({ hasText: "Example compatible API" });
+  await sourceRow.getByRole("button", { name: "Launch", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Where do you want to launch this source?" });
   await expect(dialog.getByRole("button", { name: "ChatGPT", exact: true })).toBeDisabled();
   await dialog.getByRole("button", { name: "OpenCode", exact: true }).click();

@@ -29,6 +29,8 @@ export type QuotaSnapshot = {
   /** Fresh positive or unlimited provider credits keep an exhausted account eligible. */
   providerCreditsAvailable?: boolean;
   providerCreditsUnlimited?: boolean;
+  /** Complete ledger observation; passive quota headers never advance it. */
+  providerCreditsObservedAtMs?: number | null;
   directBalanceMicroUsd?: number | null;
   updatedAtMs: number | null;
   error: { code: string; occurredAtMs: number } | null;

@@ -64,7 +64,7 @@ test("transient menus close when the user clicks outside", async ({ page }) => {
   await modeTrigger.click();
   const modeMenu = page.getByRole("menu");
   await expect(modeMenu).toBeVisible();
-  await page.mouse.click(420, 120);
+  await page.locator(".titlebar strong").click();
   await expect(modeMenu).toBeHidden();
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -107,7 +107,7 @@ test("context menu closes outside and keeps its keyboard contract", async ({ pag
   });
   const menu = page.getByRole("menu", { name: "Context menu" });
   await expect(menu).toBeVisible();
-  await page.mouse.click(420, 120);
+  await page.locator(".titlebar strong").click();
   await expect(menu).toBeHidden();
 
   await search.evaluate((element) => {

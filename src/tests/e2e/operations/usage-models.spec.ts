@@ -332,6 +332,7 @@ for (const mode of ["local", "remote"] as const) {
       populated: true,
       mixedModels: true,
       modelSpeed: { "gpt-5.4": "standard" },
+      modelContext: { "gpt-5.4": { configurable: true } },
       modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
     });
     await page.goto("/");
@@ -345,9 +346,10 @@ for (const mode of ["local", "remote"] as const) {
     expect(await model.locator(".model-rule-actions > *").evaluateAll((controls) => controls.map((control) => {
       if (control.matches(".model-protocol-button")) return "protocol";
       if (control.matches(".model-toggle")) return "enabled";
-      if (control.matches(".model-speed-toggle")) return "speed";
+      if (control.matches(".model-speed-toggle") || control.querySelector(".model-speed-toggle")) return "speed";
+      if (control.matches(".model-context-toggle") || control.querySelector(".model-context-toggle")) return "context";
       return control.matches("[data-model-reasoning-edit]") || control.querySelector("[data-model-reasoning-edit]") ? "reasoning" : "unknown";
-    }))).toEqual(["speed", "reasoning", "enabled"]);
+    }))).toEqual(["speed", "context", "reasoning", "enabled"]);
     await expect(speed).toHaveAttribute("data-speed-tier", "standard");
     await expect(speed.getByRole("radio", { name: "Standard", exact: true })).toBeChecked();
     await speed.getByRole("radio", { name: "Fast", exact: true }).click();

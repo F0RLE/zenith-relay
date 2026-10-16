@@ -10,14 +10,25 @@ import type {
 } from "./activity";
 import type { PoolRoutingSnapshot } from "./pool";
 
+export type AccountTimezoneSource = "account" | "proxy";
+
 export type RequestTimezonePolicy = {
   enabled: boolean;
   accountTimezones: Record<string, string>;
+  /** Missing entries inherit the global setting. */
+  accountTimezoneBindings: Record<string, boolean>;
+  /** Missing entries preserve legacy account timezone behavior. */
+  accountTimezoneSources: Record<string, AccountTimezoneSource>;
 };
 
 export type RequestTimezoneUpdate = {
   policy: RequestTimezonePolicy;
   expectedPolicy: RequestTimezonePolicy;
+};
+
+export type ModelCatalogIdentity = Pick<ModelSummary, "catalogProvider" | "catalogFamily"> & {
+  /** Position across complete member inventories, including saved rules and prices. */
+  catalogOrder?: number | null;
 };
 
 export type RuntimeSnapshot = {
@@ -37,7 +48,7 @@ export type RuntimeSnapshot = {
     defaultServiceTier: DefaultServiceTier;
     models?: ModelSummary[];
     /** Display metadata for the complete inventory, independent of routing rules. */
-    modelCatalog?: Record<string, Pick<ModelSummary, "catalogProvider" | "catalogFamily">>;
+    modelCatalog?: Record<string, ModelCatalogIdentity>;
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
     commonProxyId?: string | null;
@@ -46,7 +57,6 @@ export type RuntimeSnapshot = {
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     codexBackgroundTasksEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
-    chatgptContextPolicy?: ApplicationContextPolicy;
     chatgptRetryUntilAvailable?: boolean;
     blockDegradedRoutesEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
@@ -64,14 +74,3 @@ export type RuntimeSnapshot = {
   warnings: string[];
   pricing?: PricingMetadata;
 };
-
-export type ContextWindowPolicy =
-  | { mode: "client" | "short" | "extended" }
-  | { mode: "custom"; tokens: number };
-
-export type CompactionPolicy =
-  | { mode: "client" | "early" }
-  | { mode: "custom"; tokens: number };
-
-export type ApplicationContextPolicy = ContextWindowPolicy
-  | { mode: "configured"; context: ContextWindowPolicy; compaction: CompactionPolicy };

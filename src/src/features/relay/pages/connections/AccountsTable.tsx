@@ -117,6 +117,7 @@ export function AccountsTable({
   const runtimeOrder = runtime?.gateway.routingOrder ?? EMPTY_RUNTIME_ORDER;
   const accountTimestamps = useMemo(() => allAccounts.flatMap((account) => [
     account.subscription.activeUntilMs,
+    account.oauthClientKind === "excel_bps" && !account.remoteLocation ? account.credentialDiagnostics?.expiresAtMs : null,
     account.quota.primary?.resetAtMs,
     account.quota.secondary?.resetAtMs,
     ...(account.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),

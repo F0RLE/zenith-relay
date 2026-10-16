@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { SourceSummary } from "../src/features/relay/api/types";
-import { filterAndSortSources } from "../src/features/relay/pages/connections/sourceListModel";
+import type { CandidateRuntimeSnapshot, SourceSummary } from "../src/features/relay/api/types";
+import { filterAndSortSources, sourceStatus } from "../src/features/relay/pages/connections/sourceListModel";
 
 const source = (id: string, overrides: Partial<SourceSummary> = {}): SourceSummary => ({
   id,
@@ -48,5 +48,36 @@ describe("source list model", () => {
     expect(filterAndSortSources(sources, "backup", "name", "asc", new Map()).map((item) => item.id)).toEqual(["beta"]);
     expect(filterAndSortSources(sources, "claude", "name", "asc", new Map()).map((item) => item.id)).toEqual(["alpha"]);
     expect(sources.map((item) => item.id)).toEqual(["alpha", "beta"]);
+  });
+
+  test("source readiness does not claim account rotation or depend on pool membership", () => {
+    for (const inPool of [true, false]) {
+      expect(sourceStatus(source("api", { inPool }), undefined, 100)).toEqual({ key: "ready", tone: "ready" });
+    }
+  });
+
+  test("source-owned failures and draining take precedence over readiness", () => {
+    const cases: Array<[Partial<SourceSummary>, string, string]> = [
+      [{ enabled: false, lastErrorCode: "synthetic_error" }, "disabled", "disabled"],
+      [{ secretAvailable: false }, "keyMissing", "error"],
+      [{ draining: true }, "draining", "warning"],
+      [{ lastErrorCode: "synthetic_error" }, "error", "error"],
+      [{ operationalStatus: "unavailable" }, "unavailable", "error"],
+      [{ operationalStatus: "quotaWait" }, "retryWait", "warning"],
+    ];
+    for (const [overrides, key, tone] of cases) {
+      expect(sourceStatus(source("api", overrides), undefined, 100)).toEqual({ key, tone });
+    }
+    expect(sourceStatus(source("api"), undefined, 100, false).key).toBe("disabled");
+  });
+
+  test("source status retains runtime recovery and bounded retry states", () => {
+    const candidate: CandidateRuntimeSnapshot = {
+      candidateId: "api", kind: "api_source", available: false, inFlight: 0,
+      lastUsedAtMs: null, nextRetryAtMs: 200, halfOpen: false, dispatches: 0,
+    };
+    expect(sourceStatus(source("api"), candidate, 100)).toEqual({ key: "retryWait", tone: "warning" });
+    expect(sourceStatus(source("api"), candidate, 200)).toEqual({ key: "ready", tone: "ready" });
+    expect(sourceStatus(source("api"), { ...candidate, halfOpen: true }, 100)).toEqual({ key: "recovering", tone: "info" });
   });
 });

@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, CircleAlert, ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Cloud, ListMinus, ListPlus, Pencil, Play, Power, RefreshCw, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
-import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
+import { SourceStatsPanel } from "../../components/SourceStatsPanel";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { sourceSupportsNativeResponses, sourceSupportsNativeProtocol } from "../../sourceProtocolBindings";
-import { sourceHost } from "../../sourceUrl";
 import { ActionMenu, ActionMenuItem, Button, EmptyState, ErrorDetailsDialog, IconButton, OptionMenu, StatusIcon, useConfirm } from "../../components/Ui";
 import type { FeedbackError } from "../../state/feedback";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -15,14 +14,17 @@ import { NoResults } from "./connectionHelpers";
 import { routingOrderPositions, runtimeCandidateForMember, upcomingModelRetries } from "../../routingOrder";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
-import { filterAndSortSources, type SourceSortKey, type SourceSortDirection } from "./sourceListModel";
+import type { SourceStatsState } from "../../sourceStatsModel";
+import { AccountCardLayout } from "./AccountCard";
+import { filterAndSortSources, sourceStatus, type SourceSortKey, type SourceSortDirection } from "./sourceListModel";
 import { sourceErrorDetails } from "./sourceError";
 
 const EMPTY_SOURCES: SourceSummary[] = [];
 const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
 
-export function SourcesList({ query, onEdit, onRefresh, onRefreshSelected }: {
+export function SourcesList({ query, sourceStats, onEdit, onRefresh, onRefreshSelected }: {
   query: string;
+  sourceStats: Record<string, SourceStatsState>;
   onEdit: (source: SourceSummary) => void;
   onRefresh: (sourceId: string) => void;
   onRefreshSelected: (sourceIds: readonly string[]) => void;
@@ -226,10 +228,10 @@ export function SourcesList({ query, onEdit, onRefresh, onRefreshSelected }: {
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} disabled={Boolean(busy)} onClick={() => setSelected([])} />
         </div> : null}
         {!sources.length ? <NoResults /> : null}
-        <div className="source-cards" role="list">{sources.map((source) => {
+        <div className="account-list source-cards" role="list">{sources.map((source) => {
+          const sourceState = sourceStats[source.id];
           const inPool = pendingPool[source.id] ?? source.inPool;
           const enabled = pendingEnabled[source.id] ?? source.enabled;
-          const launchBusy = busy === `launch-source-${source.id}`;
           const supportsNative = sourceSupportsNativeProtocol(source);
           const launchDisabled = !localSource || !supportsNative || !enabled || !source.secretAvailable || Boolean(busy);
           const launchTitle = !localSource
@@ -242,7 +244,7 @@ export function SourcesList({ query, onEdit, onRefresh, onRefreshSelected }: {
           const runtimeState = inPool
              ? runtimeCandidateForMember(source.id, "api_source", runtimeOrder, "all", source.wireApi)
             : undefined;
-          const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
+          const status = sourceStatus(source, runtimeState, nowMs, enabled);
           const modelRetries = upcomingModelRetries(runtimeState, nowMs);
           const firstModelRetry = modelRetries[0];
           const runtimeHint = runtimeState?.halfOpen
@@ -255,97 +257,93 @@ export function SourcesList({ query, onEdit, onRefresh, onRefreshSelected }: {
             : runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
               ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
               : null;
-          const failure = sourceErrorDetails(source.lastErrorCode);
-          const statusLabel = !enabled
-            ? t("connections.status.disabled")
-            : mode !== "zenith" && !inPool
-              ? t("sources.notInPoolLabel")
-              : source.operationalStatus === "rotation"
-                ? t("sources.inPoolLabel")
-                : t(`connections.status.${source.operationalStatus}`);
-          const indicatorLabel = [runtimeHint, statusLabel].filter(Boolean).join(" · ");
-          const indicatorTone = !enabled || (mode !== "zenith" && !inPool)
-            ? "disabled"
-            : runtimeTone ?? operationalStatusTone(source.operationalStatus);
-          return <article className="source-card" role="listitem" key={source.id} data-source-id={source.id} data-enabled={enabled} data-selected={selected.includes(source.id)}>
-            <header className="source-card-header">
-              <label className="source-card-select">
-                <input type="checkbox" checked={selected.includes(source.id)} disabled={Boolean(busy)}
-                  aria-label={t("sources.select", { name: source.name })}
-                  onChange={(event) => setSelected((previous) => event.target.checked
-                    ? [...previous, source.id]
-                    : previous.filter((id) => id !== source.id))} />
-              </label>
-              <div className="source-card-identity">
-                <strong>{source.name}</strong>
-                <span data-relay-tooltip={source.baseUrl}>{sourceHost(source.baseUrl)}</span>
-              </div>
-              <div className="row-actions">
-                <ActionMenu>
-                  <ActionMenuItem
-                    icon={busy === `source-refresh-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />}
-                    disabled={Boolean(busy)}
-                    onClick={() => onRefresh(source.id)}
-                  >
-                    {t("sources.refreshData")}
-                  </ActionMenuItem>
-                  {mode !== "zenith" ? (
-                    <ActionMenuItem
-                      icon={inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
-                      disabled={Boolean(busy)}
-                      onClick={() => void updateParticipation(source, !inPool)}
-                    >
-                      {t(inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}
-                    </ActionMenuItem>
-                  ) : null}
-                  <ActionMenuItem
-                    icon={<Power aria-hidden />}
-                    disabled={Boolean(busy)}
-                    onClick={() => void updateEnabled(source, !enabled)}
-                  >
-                    {enabled ? t("common.disable") : t("common.enable")}
-                  </ActionMenuItem>
-                  <ActionMenuItem
-                    danger
-                    icon={<Trash2 aria-hidden />}
-                    disabled={Boolean(busy)}
-                    onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(
-                      `delete-${source.id}`,
-                      () => localSource
-                        ? relayCommands.deleteSource(source.id)
-                        : relayCommands.remoteAction({ type: "delete_source", id: source.id }),
-                      "feedback.deleted",
-                      { backgroundRefresh: true },
-                    ))}
-                  >
-                    {t("common.delete")}
-                  </ActionMenuItem>
-                </ActionMenu>
-                <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} disabled={Boolean(busy)} onClick={() => onEdit(source)} />
-                <IconButton
-                  label={t("sources.launch")}
-                  icon={<Play aria-hidden />}
-                  busy={launchBusy}
-                  disabled={launchDisabled}
-                  title={launchTitle}
-                  onClick={() => setLaunchSourceId(source.id)}
-                />
-              </div>
-            </header>
-            <div className="source-card-meta">
-              <div className="source-card-status" data-tone={indicatorTone}>
-                <StatusIcon status={indicatorTone} label={indicatorLabel} />
-                <span>{statusLabel}</span>
-              </div>
-              <span className="source-card-models">{t("sources.groupModelsCount", { count: source.models.length })}</span>
-            </div>
-            {failure || runtimeHint ? <div className="source-card-diagnostics">
-              {failure ? <button type="button" className="source-card-error" aria-label={`${t("feedback.errorDetails")}: ${failure.summary}`} onClick={() => setErrorDetails(failure.error)}>
-                <CircleAlert aria-hidden /><span>{failure.summary}</span>
-              </button> : null}
-              {runtimeHint ? <small>{runtimeHint}</small> : null}
-            </div> : null}
-          </article>;
+          const failure = sourceErrorDetails(source.lastErrorCode, t);
+          const statusLabel = t(`sources.status.${status.key}`);
+          const indicatorLabel = [statusLabel, runtimeHint, failure?.summary].filter(Boolean).join(" · ");
+          const indicatorTone = status.tone;
+          return <AccountCardLayout
+            key={source.id}
+            className="source-card"
+            data-source-id={source.id}
+            data-enabled={enabled}
+            data-in-pool={inPool}
+            data-selected={selected.includes(source.id)}
+            label={source.name}
+            identityVisible
+            selected={selected.includes(source.id)}
+            selectionDisabled={Boolean(busy)}
+            onToggleSelected={() => setSelected((previous) => previous.includes(source.id)
+              ? previous.filter((id) => id !== source.id)
+              : [...previous, source.id])}
+            icon={failure
+              ? <IconButton
+                className="account-kind-icon account-status-button"
+                data-status={indicatorTone}
+                label={`${t("feedback.errorDetails")}: ${failure.summary}`}
+                title={indicatorLabel}
+                icon={<Cloud aria-hidden />}
+                onClick={() => setErrorDetails(failure.error)}
+              />
+              : <StatusIcon className="account-kind-icon" status={indicatorTone} label={indicatorLabel}><Cloud aria-hidden /></StatusIcon>}
+            details={<div className="source-card-host" data-relay-tooltip={source.baseUrl}><span>{source.wireApi} · {source.baseUrl}</span></div>}
+            menu={
+              <ActionMenu className="account-row-menu">
+                <ActionMenuItem
+                  icon={<Power aria-hidden />}
+                  disabled={Boolean(busy)}
+                  onClick={() => void updateEnabled(source, !enabled)}
+                >
+                  {enabled ? t("common.disable") : t("common.enable")}
+                </ActionMenuItem>
+                <ActionMenuItem
+                  danger
+                  icon={<Trash2 aria-hidden />}
+                  disabled={Boolean(busy)}
+                  onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(
+                    `delete-${source.id}`,
+                    () => localSource
+                      ? relayCommands.deleteSource(source.id)
+                      : relayCommands.remoteAction({ type: "delete_source", id: source.id }),
+                    "feedback.deleted",
+                    { backgroundRefresh: true },
+                  ))}
+                >
+                  {t("common.delete")}
+                </ActionMenuItem>
+              </ActionMenu>
+            }
+            actions={<>
+              {mode !== "zenith" ? <IconButton
+                className={inPool ? "danger" : ""}
+                label={t(inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}
+                icon={inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />}
+                disabled={Boolean(busy)}
+                onClick={() => void updateParticipation(source, !inPool)}
+              /> : null}
+              <IconButton
+                label={t("sources.refreshData")}
+                icon={<RefreshCw aria-hidden />}
+                busy={busy === `source-refresh-${source.id}`}
+                disabled={Boolean(busy) || !source.secretAvailable}
+                onClick={() => onRefresh(source.id)}
+              />
+              <IconButton
+                label={t("common.edit")}
+                icon={<Pencil aria-hidden />}
+                disabled={Boolean(busy)}
+                onClick={() => onEdit(source)}
+              />
+              <IconButton
+                label={t("sources.launch")}
+                title={launchTitle}
+                icon={<Play aria-hidden />}
+                disabled={launchDisabled}
+                onClick={() => setLaunchSourceId(source.id)}
+              />
+            </>}
+          >
+            <SourceStatsPanel source={source} {...(sourceState ? { state: sourceState } : {})} />
+          </AccountCardLayout>;
         })}</div>
       {errorDetails ? <ErrorDetailsDialog error={errorDetails} message={errorDetails.message} onClose={() => setErrorDetails(null)} /> : null}
       {launchSource ? <ApplicationPickerDialog

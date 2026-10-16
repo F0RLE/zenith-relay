@@ -1,9 +1,5 @@
-import type { ModelSummary, RuntimeSnapshot } from "./api/types";
-
-export type ModelCatalogIdentity = Pick<
-  ModelSummary,
-  "catalogProvider"
->;
+import type { ModelCatalogIdentity, ModelSummary, RuntimeSnapshot } from "./api/types";
+export type { ModelCatalogIdentity } from "./api/types";
 
 export type ModelGroup<T> = {
   id: string;
@@ -35,7 +31,7 @@ export function memberModelCatalog(gateway: RuntimeSnapshot["gateway"] | undefin
 /**
  * Group models by provider. The runtime snapshot already carries the
  * provider-block order from the backend; preserve it, including an explicit
- * manual order, and keep the source order inside each block.
+ * manual order. Family and version ordering belongs to the shared catalog.
  */
 export function groupModels<T>(
   models: readonly T[],
@@ -74,14 +70,20 @@ export function uniqueModelIds(models: readonly string[]) {
 /**
  * Put IDs known by the current snapshot in backend order. IDs found only in a
  * member or usage inventory follow that inventory's first-seen order.
+ * Complete catalog positions include disabled, excluded, and rule-only IDs.
  */
 export function orderModelIdsBySnapshot(
   models: readonly string[],
   summaries: readonly ModelSummary[],
+  catalog: RuntimeSnapshot["gateway"]["modelCatalog"] = undefined,
 ) {
   const unique = uniqueModelIds(models);
   const byId = new Map(unique.map((model) => [modelIdKey(model), model]));
-  const ordered = uniqueModelIds(summaries.map((model) => model.id))
+  const catalogIds = Object.entries(catalog ?? {})
+    .filter(([, identity]) => Number.isSafeInteger(identity.catalogOrder) && identity.catalogOrder! >= 0)
+    .sort(([, left], [, right]) => left.catalogOrder! - right.catalogOrder!)
+    .map(([modelId]) => modelId);
+  const ordered = uniqueModelIds([...catalogIds, ...summaries.map((model) => model.id)])
     .map((modelId) => byId.get(modelIdKey(modelId)))
     .filter((model): model is string => model !== undefined);
   const knownModelIds = new Set(ordered.map((model) => modelIdKey(model)));
@@ -108,5 +110,12 @@ function displayCatalogPart(part: string) {
   if (part === "openai") return "OpenAI";
   if (part === "xai") return "xAI";
   if (part === "zai") return "Z.ai";
+  if (part === "deepseek") return "DeepSeek";
+  if (part === "moonshotai") return "Moonshot AI";
+  if (part === "minimax") return "MiniMax";
+  if (part === "nvidia") return "NVIDIA";
+  if (part === "stepfun") return "StepFun";
+  if (part === "bytedance") return "ByteDance";
+  if (part === "nousresearch") return "Nous Research";
   return `${part[0]!.toUpperCase()}${part.slice(1)}`;
 }

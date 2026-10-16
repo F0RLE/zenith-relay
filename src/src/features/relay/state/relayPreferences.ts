@@ -53,12 +53,22 @@ export function removeRelayPreference(
 }
 
 export function readCodexPoolOauthSelection(storage: RelayStorage | undefined = browserStorage()) {
-  return readMigratedRelayPreference(
+  const selection = readMigratedRelayPreference(
     RELAY_STORAGE_KEYS.codexPoolOauthSelection,
     RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection,
-    "auto",
+    "none",
     storage,
   );
+  if (selection === "auto") {
+    writeMigratedRelayPreference(
+      RELAY_STORAGE_KEYS.codexPoolOauthSelection,
+      RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection,
+      "none",
+      storage,
+    );
+    return "none";
+  }
+  return selection;
 }
 
 export function writeCodexPoolOauthSelection(

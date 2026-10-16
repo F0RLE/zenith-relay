@@ -16,7 +16,8 @@ import {
 } from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage, RemoteUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
-import { compactRequestId, formatReasoningEffort, formatReasoningSummary, prefixErrorOrigin } from "../src/features/relay/pages/usage/usageReportFormat";
+import { compactRequestId, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, prefixErrorOrigin } from "../src/features/relay/pages/usage/usageReportFormat";
+import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 
 const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
@@ -61,6 +62,66 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("timing keeps unknown first output distinct from total duration and known zero", async () => {
+    for (const [locale, translation, unknown, zero, known] of [
+      ["ru", ru, "— / 20,9 с", "0 мс / 428 мс", "128 мс / 428 мс"],
+      ["en", en, "— / 20.9 s", "0 ms / 428 ms", "128 ms / 428 ms"],
+    ] as const) {
+      const i18n = createInstance();
+      await i18n.init({ lng: locale, resources: { [locale]: { translation } }, initImmediate: false });
+      const t = i18n.t.bind(i18n);
+      expect(formatTiming(null, 20_900, locale, t)).toBe(unknown);
+      expect(formatTiming(0, 428, locale, t)).toBe(zero);
+      expect(formatTiming(128, 428, locale, t)).toBe(known);
+    }
+  });
+
+  test("decodes Relay model aliases for display without changing unknown IDs", () => {
+    expect(formatModelId("zenith/Z2xtLTUuMw")).toBe("glm-5.3");
+    expect(formatModelId("zenith/azMtMjU2aw")).toBe("k3-256k");
+    expect(formatModelId("zenith/not-base64!")).toBe("zenith/not-base64!");
+    expect(formatModelId("vendor/model")).toBe("vendor/model");
+    expect(formatModelId("claude-fable-5")).toBe("claude-fable-5");
+    expect(formatModelId("claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(formatModelId("public-alias", "vendor/model")).toBe("public-alias");
+  });
+
+  test("Desktop aliases need a resolved model and retain raw IDs for both hosts", () => {
+    const legacySuffix = Array(32).fill("ab").join("-");
+    const aliases = [
+      "claude-sonnet-5-relay-a1b2-c3d4-e5f6-7890",
+      "claude-fable-5-relay-a1b2-c3d4-e5f6-7890",
+      `claude-zenith-${legacySuffix}`,
+      `claude-fable-5-zenith-${legacySuffix}`,
+    ];
+    const labels = {
+      backgroundConnection: "ChatGPT", unknownAccount: "Unknown", removedAccount: "Removed",
+      unknownConnection: "Unknown", accountLabels: new Map<string, string>(), sourceLabels: new Map<string, string>(),
+      accountDisplayName: (label: string) => label,
+    };
+    for (const alias of aliases) {
+      expect(formatModelId(alias)).toBe("—");
+      expect(formatModelId(alias.toUpperCase(), "vendor/model")).toBe("vendor/model");
+      expect(formatModelId(alias, "zenith/Z2xtLTUuMw")).toBe("glm-5.3");
+      expect(formatModelId(alias, aliases[0])).toBe("—");
+      for (const resolvedModel of [null, "vendor/model"]) {
+        const base = {
+          id: 1, requestId: "synthetic-request", attempt: 1,
+          requestedModel: alias, resolvedModel,
+          wireApi: "messages" as const, transport: "http" as const,
+          success: resolvedModel !== null, httpStatus: resolvedModel ? 200 : 404, errorCategory: null,
+          latencyMs: 1, inputTokens: null, cachedInputTokens: null,
+          reasoningTokens: null, outputTokens: null, totalTokens: null,
+        };
+        const local = usageRowsFromLocal([{ ...base, createdAt: "2026-10-16T00:00:00Z", sourceId: "source" }], labels);
+        const remote = usageRowsFromRemote([{ ...base, createdAtMs: 1, candidateKind: "source", candidateHint: "source" }], labels);
+        for (const rows of [local, remote]) {
+          expect(rows[0]).toMatchObject({ model: resolvedModel, requestedModel: alias, routedModel: resolvedModel });
+        }
+      }
+    }
+  });
+
   test("reasoning reports normalize historical aliases and show actual changes", async () => {
     const i18n = createInstance();
     await i18n.init({ lng: "ru", resources: { ru: { translation: ru } }, initImmediate: false });

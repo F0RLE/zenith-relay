@@ -12,7 +12,7 @@ import {
   finishAccountImportConfirmation,
 } from "../../state/relayPreferences";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
-import { useProxyPool } from "./useProxyPool";
+import { useProxyPool } from "../../hooks/useProxyPool";
 import { canAccountJoinPool } from "../../poolMembership";
 
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };

@@ -9,8 +9,7 @@ import { secondsUntil, useRelativeTimeClock } from "../../hooks/useRelativeTimeC
 import { useTransientFlag } from "../../hooks/useTransientFlag";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { isHttpProxyEndpoint, rememberedSignInProxyId } from "./signInProxyPreference";
-import { useProxyPool } from "./useProxyPool";
-import { canAccountJoinPool } from "../../poolMembership";
+import { useProxyPool } from "../../hooks/useProxyPool";
 
 const HelpTopicDialog = lazy(async () => ({ default: (await import("../../help/HelpCenter")).HelpTopicDialog }));
 
@@ -83,6 +82,16 @@ export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting 
     }
     setProxyOpen(true);
   };
+  if (callbackReceived) return <Dialog
+    className="sign-in-dialog oauth-sign-in-dialog oauth-completing"
+    title={t("accounts.completingSignIn")}
+    onClose={() => undefined}
+  >
+    <div className="oauth-completing-status" role="status">
+      <Loader2 className="spin" aria-hidden />
+      <span>{t("accounts.completingSignIn")}</span>
+    </div>
+  </Dialog>;
   return <>
   <Dialog
     className="sign-in-dialog oauth-sign-in-dialog"
@@ -192,70 +201,6 @@ export function OAuthDialog({ flow, onCancel, onUseProxy, onUseClient, starting 
   ) : null}
   {helpOpen ? <Suspense fallback={null}><HelpTopicDialog topic="sign-in" onClose={() => setHelpOpen(false)} /></Suspense> : null}
   </>;
-}
-
-export function OAuthAccountSetupDialog({ accountId, preserveProxy = false, onClose }: { accountId: string; preserveProxy?: boolean; onClose: () => void }) {
-  const { t } = useTranslation();
-  const { runtime, busy, perform } = useRelayState();
-  const { pool } = useProxyPool();
-  const applying = useRef(false);
-  const [addToPool, setAddToPool] = useState(false);
-  const [assignProxy, setAssignProxy] = useState(false);
-  const account = runtime?.accounts.find((candidateAccount) => candidateAccount.id === accountId);
-  const canAddToPool = account != null && canAccountJoinPool(account) && !account.inPool;
-  const hasAccountProxy = preserveProxy || account?.proxyMode === "account";
-  const closeLocked = busy === "oauth-setup";
-  const requestClose = () => {
-    if (closeLocked || applying.current) return;
-    onClose();
-  };
-  const apply = async () => {
-    if (applying.current) return;
-    applying.current = true;
-    const assignStoredProxy = assignProxy && !hasAccountProxy;
-    try {
-      const includeInPool = addToPool && canAddToPool;
-      if (!includeInPool && !assignStoredProxy) {
-        onClose();
-        return;
-      }
-      const ok = await perform("oauth-setup", async () => {
-        if (includeInPool) await relayCommands.setPoolMembership([accountId], [], true);
-        if (assignStoredProxy) await relayCommands.assignAutomaticProxies([accountId]);
-      }, "feedback.saved", { backgroundRefresh: true });
-      if (ok) onClose();
-    } finally {
-      applying.current = false;
-    }
-  };
-  return <Dialog
-    title={t("accounts.accountAdded")}
-    onClose={requestClose}
-    footer={<>
-      <Button variant="secondary" disabled={closeLocked} onClick={requestClose}>{t("accounts.configureLater")}</Button>
-      <Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}>{t("common.done")}</Button>
-    </>}
-  >
-    <div className="relay-form oauth-account-setup">
-      <div className="oauth-account-added">
-        <Check aria-hidden />
-        <strong>{account?.identityHint ?? t("accounts.accountReady")}</strong>
-      </div>
-      <div className="post-import-options">
-        {canAddToPool ? <label>
-          <input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} />
-          <span><strong>{t("accounts.addAccountToPool")}</strong></span>
-        </label> : null}
-        {hasAccountProxy ? null : <label>
-          <input type="checkbox" checked={assignProxy} disabled={!pool || pool.total === 0} onChange={(event) => setAssignProxy(event.target.checked)} />
-          <span>
-            <strong>{t("proxies.assignStoredAfterAdd")}</strong>
-            <small>{pool ? t(pool.total ? "proxies.storedAvailable" : "proxies.noStored", { count: pool.total }) : t("common.loading")}</small>
-          </span>
-        </label>}
-      </div>
-    </div>
-  </Dialog>;
 }
 
 export function SignInProxyDialog({

@@ -8,14 +8,16 @@ import { normalizeObservedServiceTier, totalsFromRows } from "./usageData";
 import type { CodexRequestOrigin, UsageRow } from "./usageData";
 
 export function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
-  if (ttft == null) return formatDurationMs(duration, locale, t);
-  return `${formatDurationMs(ttft, locale, t)} / ${formatDurationMs(duration, locale, t)}`;
+  const first = ttft == null ? "—" : formatDurationMs(ttft, locale, t);
+  return `${first} / ${formatDurationMs(duration, locale, t)}`;
 }
 
 export function compactRequestId(requestId: string | null): string {
   if (!requestId) return "—";
   return requestId.length > 20 ? `${requestId.slice(0, 6)}…${requestId.slice(-10)}` : requestId;
 }
+
+export { formatModelId } from "./usageModelIdentity";
 
 export type AggregateRow = {
   name: string;

@@ -129,6 +129,13 @@ describe("relay preferences", () => {
     expect(consumeInterruptedAccountImportConfirmation(storage)).toBe(false);
   });
 
+  test("migrates the removed automatic Codex selection to no account", () => {
+    const storage = fakeStorage({ [RELAY_STORAGE_KEYS.codexPoolOauthSelection]: "auto" });
+
+    expect(readCodexPoolOauthSelection(storage)).toBe("none");
+    expect(storage.values[RELAY_STORAGE_KEYS.codexPoolOauthSelection]).toBe("none");
+  });
+
   for (const migration of [
     {
       name: "Codex selection",
@@ -136,7 +143,7 @@ describe("relay preferences", () => {
       legacyKey: RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection,
       legacyValue: "account_synthetic_2",
       expectedValue: "account_synthetic_2",
-      fallbackValue: "auto",
+      fallbackValue: "none",
       read: readCodexPoolOauthSelection,
       write: (storage: RelayStorage) => writeCodexPoolOauthSelection("none", storage),
       updatedValue: "none",

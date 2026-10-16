@@ -7,6 +7,7 @@ type ApplicationPickerDialogProps = {
   onClose: () => void;
   onChatGPT: () => void;
   onOpenCode: () => void;
+  onClaudeDesktop?: () => void;
   chatGPTDisabled?: boolean;
 };
 
@@ -15,6 +16,7 @@ export function ApplicationPickerDialog({
   onClose,
   onChatGPT,
   onOpenCode,
+  onClaudeDesktop,
   chatGPTDisabled = false,
 }: ApplicationPickerDialogProps) {
   const { t } = useTranslation();
@@ -25,7 +27,7 @@ export function ApplicationPickerDialog({
     action();
   };
   return <Dialog className="application-picker" title={dialogTitle} onClose={onClose}>
-    <div className="application-picker-options">
+    <div className={`application-picker-options${onClaudeDesktop ? " with-claude-desktop" : ""}`}>
       <button
         type="button"
         className="application-picker-option"
@@ -40,6 +42,10 @@ export function ApplicationPickerDialog({
           {chatGPTDisabled ? <small id={unavailableDescriptionId}>{t("sources.launchResponsesOnly")}</small> : null}
         </span>
       </button>
+      {onClaudeDesktop ? <button type="button" className="application-picker-option" onClick={() => choose(onClaudeDesktop)}>
+        <img className="application-picker-logo" src="/icons/claude-desktop.svg" alt="" />
+        <span className="application-picker-label"><strong>{t("pool.connectClaudeDesktop")}</strong></span>
+      </button> : null}
       <button type="button" className="application-picker-option" onClick={() => choose(onOpenCode)}>
         <img className="application-picker-logo" src="/icons/opencode.svg" alt="" />
         <span className="application-picker-label"><strong>{t("pool.connectOpenCode")}</strong></span>

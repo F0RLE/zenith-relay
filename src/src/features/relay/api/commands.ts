@@ -15,11 +15,16 @@ import type {
   ConfigurationPresetPreview,
   ConsumeResetCreditResponse,
   DefaultServiceTier,
+  ModelContextPolicy,
   RequestTimezoneUpdate,
   DiagnosticSettings,
   ImportSession,
   CacheSessionRecord,
   LocalUsagePage,
+  ClaudeDesktopStatus,
+  ClaudeDesktopConnection,
+  LaunchApplication,
+  LaunchPathSetting,
   OpenCodeConfigStatus,
   ProfileSnapshot,
   ProfileSnapshotList,
@@ -48,7 +53,6 @@ import type {
   WakeTask,
 } from "./types";
 import { sanitizeFeedbackError } from "../state/feedback";
-import type { ApplicationContextPolicy } from "./types/runtime";
 
 /**
  * Keep the command surface typed while making every rejected IPC call
@@ -79,9 +83,10 @@ export type UiState = {
 };
 
 export const relayCommands = {
-  setChatgptContextPolicy: (policy: ApplicationContextPolicy) =>
-    invoke<RuntimeSnapshot>("set_local_chatgpt_context_policy", { input: policy }),
   readyState: () => invoke<UiState>("get_state"),
+  getApplicationLaunchPath: (application: LaunchApplication) => invoke<LaunchPathSetting>("get_application_launch_path", { application }),
+  setApplicationLaunchPath: (application: LaunchApplication, path: string | null) => invoke<LaunchPathSetting>("set_application_launch_path", { application, path }),
+  pickApplicationLaunchPath: (application: LaunchApplication) => invoke<string | null>("pick_application_launch_path", { application }),
   onStateChanged: (callback: () => void) => listen("zenith-state-changed", callback),
   onRuntimeActivity: (callback: (activity: RuntimeActivitySnapshot) => void) => listen<RuntimeActivitySnapshot>("zenith-runtime-activity", (event) => callback(event.payload)),
   onUsageRecorded: (callback: () => void) => listen("zenith-usage-recorded", callback),
@@ -133,6 +138,7 @@ export const relayCommands = {
   deleteStoredProxies: (proxyIds: string[]) => invoke<ProxyPoolSummary>("delete_local_stored_proxies", { input: { proxyIds } }),
   assignStoredProxy: (accountId: string, proxyId: string) => invoke<StoredProxyAssignmentResult>("assign_local_stored_proxy", { input: { accountId, proxyId } }),
   setStoredProxyAccounts: (proxyId: string, accountIds: string[]) => invoke<StoredProxyAssignmentResult>("set_local_stored_proxy_accounts", { input: { proxyId, accountIds } }),
+  setStoredProxyTimezone: (proxyId: string, timezone: string | null) => invoke<ProxyPoolSummary>("set_local_stored_proxy_timezone", { input: { proxyId, timezone } }),
   assignAutomaticProxies: (accountIds: string[]) => invoke<StoredProxyAssignmentResult>("assign_free_local_account_proxies", { input: { accountIds } }),
   exportLocalAccounts: (exportInput: AccountExportInput) => invoke<AccountExportResult>("export_local_accounts", { input: exportInput }),
   exportRemoteAccounts: (exportInput: AccountExportInput) => invoke<AccountExportResult>("export_remote_accounts", { input: exportInput }),
@@ -156,6 +162,7 @@ export const relayCommands = {
   setModelEnabled: (modelId: string, enabled: boolean) => invoke("set_local_model_enabled", { input: { modelId, enabled } }),
   setModelReasoning: (modelId: string, allowedLevels: string[]) => invoke("set_local_model_reasoning", { input: { modelId, allowedLevels } }),
   setModelServiceTier: (modelId: string, serviceTier: DefaultServiceTier) => invoke("set_local_model_service_tier", { input: { modelId, serviceTier } }),
+  setModelContext: (modelId: string, contextPolicy: ModelContextPolicy) => invoke<void>("set_local_model_context", { input: { modelId, contextPolicy } }),
   /** An empty list clears manual positions and restores provider-block order. */
   setModelDisplayOrder: (modelIds: string[]) => invoke("set_local_model_display_order", { input: { modelIds } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
@@ -198,6 +205,11 @@ export const relayCommands = {
   launchOpenCodeSource: (sourceId: string) => invoke<{ path: string; modelCount: number; backupCreated: boolean }>("launch_opencode_source", { sourceId }),
   restartOpenCode: () => invoke<void>("restart_opencode_app"),
   restoreOpenCodeConfig: () => invoke<boolean>("restore_opencode_config"),
+  getClaudeDesktopStatus: () => invoke<ClaudeDesktopStatus>("get_claude_desktop_status"),
+  createClaudeDesktopSnapshot: (snapshotName: string) => invoke<boolean>("create_claude_desktop_snapshot", { name: snapshotName }),
+  connectClaudeDesktop: () => invoke<ClaudeDesktopConnection>("connect_claude_desktop"),
+  launchClaudeDesktop: () => invoke<void>("launch_claude_desktop"),
+  restoreClaudeDesktop: () => invoke<boolean>("restore_claude_desktop"),
   profileSnapshots: () => invoke<ProfileSnapshotList>("list_codex_profile_snapshots"),
   createProfileSnapshot: (snapshotName: string) => invoke<ProfileSnapshot>("create_codex_profile_snapshot", { name: snapshotName }),
   restoreProfileSnapshot: (snapshotId: string) => invoke<void>("restore_full_codex_profile_snapshot", { snapshotId }),
@@ -217,7 +229,7 @@ export const relayCommands = {
   }) => invoke<void>("record_frontend_diagnostic", { input: diagnosticInput }),
   diagnosticSettings: () => invoke<DiagnosticSettings>("get_diagnostic_settings"),
   setDiagnosticDebugMode: (enabled: boolean) => invoke<DiagnosticSettings>("set_diagnostic_debug_mode", { enabled }),
-  openFolder: (folder: "data" | "logs" | "error_logs" | "crash_logs" | "operation_logs" | "profile_backups" | "opencode_backups") =>
+  openFolder: (folder: "data" | "logs" | "error_logs" | "crash_logs" | "operation_logs" | "profile_backups" | "claude_desktop_backups" | "opencode_backups") =>
     invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),
   exportUsage: (rows: UsageExportRow[]) => invoke<string | null>("export_usage", { rows }),

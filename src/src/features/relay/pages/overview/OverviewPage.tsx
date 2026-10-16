@@ -7,6 +7,7 @@ import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui"
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
 import { SourceStatsPanel } from "../../components/SourceStatsPanel";
 import { useSourceStats } from "../../hooks/useSourceStats";
+import { useClaudeDesktopLaunch } from "../../hooks/useClaudeDesktopLaunch";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useSavedChoice } from "../../state/usePendingFlag";
 import { useRelayUsageContext } from "../../state/relayStateContext";
@@ -21,6 +22,7 @@ export function OverviewPage() {
   const { mode, runtime, setPage, perform, busy } = useRelayState();
   const { usageRevision } = useRelayUsageContext();
   const [applicationDialog, setApplicationDialog] = useState(false);
+  const claudeDesktop = useClaudeDesktopLaunch();
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
     const stored = localStorage.getItem("relay.overviewAnalyticsScope");
@@ -62,6 +64,10 @@ export function OverviewPage() {
   const launchOpenCode = () => perform("opencode-launch", relayCommands.connectOpenCode, "feedback.launched", {
     backgroundRefresh: true,
     afterWork: relayCommands.restartOpenCode,
+  });
+  const launchClaudeDesktop = () => perform("claude-desktop-launch", relayCommands.connectClaudeDesktop, "feedback.launched", {
+    backgroundRefresh: true,
+    afterWork: claudeDesktop.launch,
   });
 
   useEffect(() => {
@@ -169,7 +175,7 @@ export function OverviewPage() {
     </Button>
     <Button
       variant={running ? "primary" : "secondary"}
-      busy={busy === "chatgpt-launch" || busy === "opencode-launch"}
+      busy={busy === "chatgpt-launch" || busy === "opencode-launch" || busy === "claude-desktop-launch"}
       icon={<Play aria-hidden />}
       disabled={!running}
       title={!running ? t("gateway.start") : undefined}
@@ -215,6 +221,7 @@ export function OverviewPage() {
         onClose={() => setApplicationDialog(false)}
         onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true }); }}
         onOpenCode={() => void launchOpenCode()}
+        onClaudeDesktop={() => void launchClaudeDesktop()}
       />
     ) : null}
   </section>;
@@ -270,7 +277,7 @@ function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummar
           options={sources.map((apiSource) => ({ value: apiSource.id, label: `${apiSource.name} · ${sourceHost(apiSource.baseUrl)}` }))}
         />
       </div>
-      <SourceStatsPanel source={selectedSource} {...(stats ? { state: stats } : {})} overview />
+      <SourceStatsPanel source={selectedSource} {...(stats ? { state: stats } : {})} variant="overview" />
       <section className="direct-api-models">
         <header>
           <h2>{t("overview.availableModels")}</h2>

@@ -8,24 +8,23 @@ import { CodexBackgroundTasksControl } from "../../components/CodexBackgroundTas
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
-import { ChatGPTContextSettings } from "./ChatGPTContextSettings";
+import { ApplicationLaunchPath } from "./ApplicationLaunchPath";
 
 export function ChatGPTApplicationSettings() {
   const { t } = useTranslation();
   const { mode, runtime } = useRelayState();
-  if (mode === "zenith") return <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />;
   const showSettings = mode === "local" || runtime?.capabilities.features.some((feature) =>
     feature === "codex_background_tasks" || feature === "codex_websockets",
   );
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.chatgpt")}>
-    <div className="integration-chatgpt-settings">
+    <ApplicationLaunchPath application="chatgpt" />
+    {mode === "zenith" ? <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} /> : <div className="integration-chatgpt-settings">
       <ChatGPTSetup />
       {showSettings ? <div className="gateway-settings-panel gateway-application-panel">
-        <ChatGPTContextSettings />
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexWebsocketsControl className="gateway-setting-row" />
       </div> : null}
-    </div>
+    </div>}
   </section>;
 }
 
@@ -68,9 +67,8 @@ function ChatGPTSetup() {
   const selectedAccount = eligibleAccounts.find((account) => account.id === codexPoolOauthSelection);
   const selection = !eligibleAccounts.length || codexPoolOauthSelection === "none"
     ? "none"
-    : selectedAccount?.id ?? "auto";
+    : selectedAccount?.id ?? "none";
   const accountOptions = [
-    ...(eligibleAccounts.length ? [{ value: "auto", label: t("gateway.oauthBindingAutomatic") }] : []),
     ...eligibleAccounts.map((account) => ({ value: account.id, label: `${account.label} · ${formatAccountPlan(account.subscription.planType, t("common.unknown"))}` })),
     { value: "none", label: t("gateway.oauthBindingNone") },
   ];

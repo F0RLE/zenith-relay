@@ -28,8 +28,8 @@ export function providerCreditsSummary(
       continue;
     }
     const previous = sharedBalances.get(key);
-    const updatedAt = account.quota.updatedAtMs ?? 0;
-    const previousUpdatedAt = previous?.quota.updatedAtMs ?? 0;
+    const updatedAt = account.quota.providerCreditsObservedAtMs ?? 0;
+    const previousUpdatedAt = previous?.quota.providerCreditsObservedAtMs ?? 0;
     if (!previous || updatedAt > previousUpdatedAt) {
       sharedBalances.set(key, account);
     }

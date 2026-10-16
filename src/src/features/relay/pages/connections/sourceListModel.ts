@@ -1,4 +1,4 @@
-import type { SourceSummary } from "../../api/types";
+import type { CandidateRuntimeSnapshot, SourceSummary } from "../../api/types";
 import { compareStableText } from "../../poolHelpers";
 import { compareRoutingOrder } from "../../routingOrder";
 import { effectiveSourceProtocolBindings } from "../../sourceProtocolBindings";
@@ -8,6 +8,25 @@ import { matchesQuery } from "./connectionHelpers";
 export type SourceSortColumn = "status" | "name" | "server" | "models";
 export type SourceSortKey = "runtime" | SourceSortColumn;
 export type SourceSortDirection = "asc" | "desc";
+
+/** Source readiness is independent of pool membership, and is not a live API probe. */
+export function sourceStatus(
+  source: SourceSummary,
+  candidate: CandidateRuntimeSnapshot | undefined,
+  nowMs: number,
+  enabled = source.enabled,
+): { key: string; tone: "ready" | "warning" | "error" | "info" | "disabled" } {
+  if (!enabled) return { key: "disabled", tone: "disabled" };
+  if (!source.secretAvailable) return { key: "keyMissing", tone: "error" };
+  if (source.draining) return { key: "draining", tone: "warning" };
+  if (source.lastErrorCode?.trim()) return { key: "error", tone: "error" };
+  if (candidate?.halfOpen) return { key: "recovering", tone: "info" };
+  if (source.operationalStatus === "quotaWait" || candidate?.nextRetryAtMs != null && candidate.nextRetryAtMs > nowMs) {
+    return { key: "retryWait", tone: "warning" };
+  }
+  if (source.operationalStatus === "unavailable") return { key: "unavailable", tone: "error" };
+  return { key: "ready", tone: "ready" };
+}
 
 const sourceStatusRank: Record<SourceSummary["operationalStatus"], number> = {
   disabled: 0,

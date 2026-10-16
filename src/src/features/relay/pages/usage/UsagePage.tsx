@@ -219,7 +219,8 @@ export function UsagePage() {
       ...(modelQuery ? [modelQuery] : []),
     ],
     runtime?.gateway.models ?? [],
-  ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.visibleModelIds]);
+    runtime?.gateway.modelCatalog,
+  ), [modelGroups, modelQuery, rows, runtime?.gateway.models, runtime?.gateway.modelCatalog, runtime?.gateway.visibleModelIds]);
   const modelOptions = useMemo(() => [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((modelId) => ({ value: modelId, label: modelId }))], [modelOptionIds, t]);
   const poolMemberOptionSource = useMemo(() => [
     ...(poolMemberGroups ?? []),

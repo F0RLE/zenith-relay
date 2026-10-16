@@ -1,100 +1,6 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
-import { chooseOption, openGatewayApplication } from "./operations/helpers";
-
-for (const theme of ["light", "dark"] as const) {
-  test(`ChatGPT context settings fit a Russian narrow ${theme} window`, async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true });
-    await page.goto("/");
-    await page.getByRole("button", { name: "Доступ", exact: true }).click();
-    await page.getByRole("tab", { name: "Приложения", exact: true }).click();
-    await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
-    await expect(page.getByRole("tab", { name: "Контекст", exact: true })).toHaveCount(0);
-    await chooseOption(page, page, "Режим контекста", "custom");
-    const budget = page.getByRole("spinbutton", { name: "Бюджет, токенов" });
-    await budget.fill("1000000");
-    await budget.press("Enter");
-    await expect(budget).toHaveValue("1000000");
-    const panels = page.locator(".chatgpt-context-settings");
-    await expect(panels).toHaveCount(2);
-    for (const panel of await panels.all()) expect(await panel.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= innerWidth + 1
-        && element.scrollWidth <= element.clientWidth;
-    })).toBe(true);
-    await page.screenshot({ path: `output/playwright/chatgpt-context-ru-${theme}-390.png` });
-  });
-}
-
-test("ChatGPT context preferences persist separately and reject an invalid custom budget", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
-  await page.goto("/");
-  await openGatewayApplication(page);
-  await expect(page.getByRole("tab", { name: "Context", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "General", exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: /^Context mode:/ }).click();
-  await expect(page.getByRole("option")).toHaveText(["Default", "Normal · 272k", "Long · 1M", "Custom"]);
-  await page.locator('[role="option"][data-value="short"]').click();
-  await expect(page.getByRole("button", { name: "Context mode: Normal · 272k", exact: true })).toBeVisible();
-  await expect(page.getByRole("spinbutton", { name: "Budget, tokens" })).toHaveCount(0);
-  await chooseOption(page, page, "Context mode", "extended");
-  await expect(page.getByRole("button", { name: "Context mode: Long · 1M", exact: true })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input: unknown } }>;
-  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_context_policy").at(-1)?.args.input))
-    .toEqual({ mode: "configured", context: { mode: "extended" }, compaction: { mode: "early" } });
-  await chooseOption(page, page, "Context mode", "custom");
-  const budget = page.getByRole("spinbutton", { name: "Budget, tokens" });
-  await budget.fill("1000000");
-  await budget.press("Enter");
-  await expect.poll(() => page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input: unknown } }>;
-  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_context_policy").at(-1)?.args.input))
-    .toEqual({ mode: "configured", context: { mode: "custom", tokens: 1000000 }, compaction: { mode: "early" } });
-  await budget.fill("10");
-  await budget.press("Tab");
-  await expect(budget).toHaveAttribute("aria-invalid", "true");
-  await page.getByRole("tab", { name: "OpenCode", exact: true }).click();
-  await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
-  await expect(page.getByRole("spinbutton", { name: "Budget, tokens" })).toHaveValue("1000000");
-  await page.screenshot({ path: "output/playwright/chatgpt-context-settings.png" });
-});
-
-test("context and auto compaction save independently and can return to defaults", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "ru", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Доступ", exact: true }).click();
-  await page.getByRole("tab", { name: "Приложения", exact: true }).click();
-  await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Режим контекста: По умолчанию", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Режим автосжатия: Автоматически", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Режим контекста: По умолчанию", exact: true }).click();
-  await expect(page.getByRole("option")).toHaveText(["По умолчанию", "Обычный · 272к", "Длинный · 1м", "Свой"]);
-  await page.locator('[role="option"][data-value="short"]').click();
-  await expect(page.getByRole("button", { name: "Режим контекста: Обычный · 272к", exact: true })).toBeVisible();
-  await chooseOption(page, page, "Режим автосжатия", "custom");
-  const compact = page.getByRole("spinbutton", { name: "Порог автосжатия, токенов", exact: true });
-  await compact.fill("150000");
-  await compact.press("Enter");
-  await expect.poll(() => page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input: unknown } }>;
-  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_context_policy").at(-1)?.args.input))
-    .toEqual({ mode: "configured", context: { mode: "short" }, compaction: { mode: "custom", tokens: 150000 } });
-  await page.screenshot({ path: "output/playwright/chatgpt-context-presets.png" });
-  await chooseOption(page, page, "Режим контекста", "client");
-  await expect(compact).toHaveValue("150000");
-  await chooseOption(page, page, "Режим автосжатия", "client");
-  await expect.poll(() => page.evaluate(() => (window as unknown as {
-    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input: unknown } }>;
-  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_chatgpt_context_policy").at(-1)?.args.input))
-    .toEqual({ mode: "configured", context: { mode: "client" }, compaction: { mode: "client" } });
-  await expect(compact).toHaveCount(0);
-  await chooseOption(page, page, "Режим контекста", "extended");
-  await chooseOption(page, page, "Режим автосжатия", "early");
-  await expect(page.getByRole("button", { name: "Режим контекста: Длинный · 1м", exact: true })).toBeVisible();
-  await page.screenshot({ path: "output/playwright/chatgpt-context-automatic.png" });
-});
+import { chooseOption } from "./operations/helpers";
 
 test("model pricing edits long Flex without changing the application context mode", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceDetectedModelPrices: {
@@ -123,6 +29,220 @@ test("model pricing edits long Flex without changing the application context mod
     __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelPriceOverrides?: Record<string, unknown> } } }>;
   }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "update_local_source")?.args.input?.modelPriceOverrides?.["gpt-5.4"]))
     .toMatchObject({ inputMicroUsdPerMillion: 1000000, outputMicroUsdPerMillion: 2000000, above272k: { flex: { input: 1500000, output: 3000000 } } });
-  expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> })
-    .__TAURI_TEST_INVOKES__.some((call) => call.command === "set_local_chatgpt_context_policy"))).toBe(false);
 });
+
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} pool model rules preserve published Short/Long windows`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode,
+      locale: "en",
+      populated: true,
+      modelSpeed: { "gpt-5.4": "standard" },
+      modelReasoning: { "gpt-5.4": ["low", "medium", "high"] },
+      modelContext: {
+        "gpt-5.4": { configurable: true, contextLimit: 900_000,
+          windows: { defaultTokens: 200_000, maximumTokens: 900_000 }, policy: { mode: "short" } },
+        "gpt-5.4-mini": { configurable: true },
+      },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+
+    const row = page.locator('[data-model-id="gpt-5.4"]');
+    await expect(row.locator(".model-context-toggle")).toBeVisible();
+    await expect(row.locator(".model-context-toggle [role=radio][aria-checked=true]")).toHaveAttribute("aria-label", "Short context");
+    await expect(row.locator(".pool-context-token-value")).toHaveText("200,000");
+    await expect(page.locator(".model-context-notice")).toHaveCount(0);
+    await expect(row.locator(".pool-context-budget small")).toHaveCount(0);
+    await expect(row.locator(".pool-context-budget")).toHaveAttribute("data-relay-tooltip", "Reference maximum: 900,000 tokens. Account-specific limits still apply.");
+    const controlWidth = (await row.locator(".model-context-toggle").boundingBox())!.width;
+
+    await row.getByRole("radio", { name: "Long context", exact: true }).click();
+    if (mode === "local") {
+      await expect.poll(() => page.evaluate(() => (window as unknown as {
+        __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelId?: string; contextPolicy?: unknown } } }>;
+      }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_context")?.args.input))
+        .toEqual({ modelId: "gpt-5.4", contextPolicy: { mode: "extended" } });
+    } else {
+      await expect.poll(() => page.evaluate(() => (window as unknown as {
+        __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }>;
+      }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "execute_remote_server_action" && call.args.input?.action?.type === "set_model_context")?.args.input?.payload))
+        .toEqual({ modelId: "gpt-5.4", contextPolicy: { mode: "extended" } });
+    }
+    await expect(row.getByRole("radio", { name: "Long context", exact: true })).toHaveAttribute("aria-checked", "true");
+    await expect(row.locator(".pool-context-token-value")).toHaveText("900,000");
+    expect((await row.locator(".model-context-toggle").boundingBox())!.width).toBe(controlWidth);
+    await expect(row.locator(".model-context-toggle")).toHaveAttribute("aria-busy", "false");
+
+    await row.getByRole("radio", { name: "Custom limit", exact: true }).click();
+    const tokens = row.getByRole("spinbutton", { name: "Context limit, tokens", exact: true });
+    expect((await row.locator(".model-context-toggle").boundingBox())!.width).toBe(controlWidth);
+    await expect(tokens).toHaveAttribute("max", "900000");
+    await tokens.fill("240000");
+    // Typing applies the policy while the field still owns focus.
+    await expect.poll(() => page.evaluate((targetMode) => {
+      const calls = (window as unknown as {
+        __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: {
+          modelId?: string; contextPolicy?: unknown;
+          action?: { type?: string }; payload?: { contextPolicy?: unknown };
+        } } }>;
+      }).__TAURI_TEST_INVOKES__;
+      return targetMode === "local"
+        ? calls.findLast((call) => call.command === "set_local_model_context")?.args.input?.contextPolicy
+        : calls.findLast((call) => call.command === "execute_remote_server_action"
+          && call.args.input?.action?.type === "set_model_context")?.args.input?.payload?.contextPolicy;
+    }, mode)).toEqual({ mode: "custom", tokens: 240000 });
+    await expect(tokens).toBeFocused();
+    await expect(row.locator(".model-context-toggle")).toHaveAttribute("aria-busy", "false");
+    await row.screenshot({ path: `output/playwright/model-rules-custom-${mode}.png` });
+    await tokens.fill("24000");
+    await tokens.press("Escape");
+    await expect(tokens).toHaveValue("240000");
+    await tokens.fill("900001");
+    await expect(tokens).toHaveAttribute("aria-invalid", "true");
+    await tokens.press("Escape");
+    await expect(tokens).toHaveValue("240000");
+    await row.getByRole("radio", { name: "Short context", exact: true }).click();
+    await expect(row.locator(".model-context-toggle")).toHaveAttribute("aria-busy", "false");
+    await expect(tokens).toHaveCount(0);
+    await expect(row.locator(".pool-context-token-value")).toHaveText("200,000");
+    await row.screenshot({ path: `output/playwright/model-rules-${mode}.png` });
+  });
+}
+
+for (const theme of ["dark", "light"] as const) {
+test(`model controls fit Russian labels and custom context at desktop and narrow widths (${theme})`, async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "ru",
+    theme,
+    populated: true,
+    modelSpeed: { "gpt-5.4": "fast" },
+    modelReasoning: { "gpt-5.4": ["low", "high"] },
+    modelContext: {
+      "gpt-5.4": { configurable: true, contextLimit: 1_050_000, policy: { mode: "custom", tokens: 240000 } },
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
+  const row = page.locator('[data-model-id="gpt-5.4"]');
+  for (const width of [1160, 760, 390, 360]) {
+    await page.setViewportSize({ width, height: 760 });
+    await page.mouse.move(0, 0);
+    const controls = row.locator(".pool-speed-control, .pool-context-control");
+    await expect(controls).toHaveCount(2);
+    for (const control of await controls.all()) {
+      const box = await control.boundingBox();
+      const rowBox = await row.boundingBox();
+      expect(box).not.toBeNull();
+      expect(rowBox).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(rowBox!.x);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(rowBox!.x + rowBox!.width);
+    }
+    const tokens = row.getByRole("spinbutton", { name: "Лимит контекста, токенов", exact: true });
+    await expect(tokens).toHaveValue("240000");
+    const preview = row.locator(".pool-context-token-preview");
+    await expect(preview).toHaveText("240\u00a0000");
+    await expect(preview).toBeVisible();
+    const controlBox = (await row.locator(".pool-context-control").boundingBox())!;
+    const inputBox = (await tokens.boundingBox())!;
+    const optionBox = (await row.getByRole("radio", { name: "Свой лимит", exact: true }).boundingBox())!;
+    expect(inputBox.y).toBeGreaterThanOrEqual(controlBox.y);
+    expect(inputBox.y + inputBox.height).toBeLessThanOrEqual(controlBox.y + controlBox.height);
+    expect(inputBox.height).toBe(optionBox.height);
+    expect(inputBox.y).toBe(optionBox.y);
+    expect(await tokens.evaluate((input) => getComputedStyle(input).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+    await page.locator(".model-rules").screenshot({ path: `output/playwright/model-rules-ru-${theme}-${width}.png` });
+    await tokens.focus();
+    await expect(preview).toBeHidden();
+    await expect(tokens).toHaveValue("240000");
+    await tokens.press("Tab");
+    await expect(preview).toBeVisible();
+  }
+});
+}
+
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} context saves serialize rapid changes and keep the final choice`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true, modelContextDelayMs: 1500,
+      modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_000_000 } } });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+    const row = page.locator('[data-model-id="gpt-5.4"]');
+    await row.getByRole("radio", { name: "Long context", exact: true }).click();
+    await row.getByRole("radio", { name: "Custom limit", exact: true }).click();
+    await row.getByRole("radio", { name: "Short context", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string } } } }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_model_context"
+      || call.args.input?.action?.type === "set_model_context").length)).toBe(2);
+    await expect(row.locator(".model-context-toggle")).toHaveAttribute("aria-busy", "false");
+    await expect(row.getByRole("radio", { name: "Short context", exact: true })).toBeChecked();
+    await expect(row.locator(".pool-context-token-value")).toHaveText("250,000");
+  });
+}
+
+test("context editor exposes deferred Codex reload and does not guess unknown windows", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, catalogRefreshWarning: "deferred",
+    modelContext: { "gpt-5.4": { configurable: true } } });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+  await expect(page.locator(".model-context-status")).toHaveAttribute("aria-label", /Restart Codex/);
+  await expect(page.locator(".model-context-notice")).toHaveCount(0);
+  const row = page.locator('[data-model-id="gpt-5.4"]');
+  await expect(row.locator(".pool-context-token-value")).toHaveText("Unknown");
+  await expect(row.locator(".pool-context-budget")).toHaveAttribute("data-relay-tooltip", "Maximum not published");
+});
+
+test("failed custom autosave restores the confirmed value without a retry loop", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, modelContextFailOnce: true,
+    modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_000_000, policy: { mode: "custom", tokens: 240000 } } } });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+  const control = page.locator('[data-model-id="gpt-5.4"] .model-context-toggle');
+  const tokens = control.getByRole("spinbutton");
+  await tokens.fill("250000");
+  await expect.poll(() => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_model_context").length)).toBe(1);
+  await expect(control).toHaveAttribute("aria-busy", "false");
+  await expect(tokens).toBeFocused();
+  await expect(tokens).toHaveValue("240000");
+  await page.waitForTimeout(800); // More than the debounce: failed drafts must not resubmit.
+  expect(await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_model_context").length)).toBe(1);
+});
+
+for (const defaultTokens of [undefined, 200_000]) {
+  test(`resolved native windows do not borrow the API maximum (${defaultTokens ?? "unknown"})`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true,
+      catalogRefreshWarning: "failed",
+      modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_050_000,
+        windows: defaultTokens === undefined ? {} : { defaultTokens } } } });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+    const status = page.locator(".model-context-status");
+    await expect(status).toHaveAttribute("role", "alert");
+    await expect(status).toHaveAttribute("aria-label", /client catalog could not be updated/);
+    await status.focus();
+    await expect(status).toBeFocused();
+    const row = page.locator('[data-model-id="gpt-5.4"]');
+    const expected = defaultTokens === undefined ? "Unknown" : "200,000";
+    await expect(row.locator(".pool-context-token-value")).toHaveText(expected);
+    await row.getByRole("radio", { name: "Long context", exact: true }).click();
+    await expect(row.locator(".pool-context-token-value")).toHaveText(expected);
+    await row.getByRole("radio", { name: "Custom limit", exact: true }).click();
+    const tokens = row.getByRole("spinbutton");
+    await expect(tokens).toHaveAttribute("max", "2000000");
+    await tokens.fill("1500000");
+    await expect(tokens).toHaveAttribute("aria-invalid", "false");
+    await page.locator(".model-rules").screenshot({ path: `output/playwright/context-status-${defaultTokens ?? "unknown"}.png` });
+  });
+}

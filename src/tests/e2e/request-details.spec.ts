@@ -2,6 +2,53 @@ import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 import { completedUsage, noOutputUsage, setUsageEventOverrides } from "./request-details-fixture";
 
+const desktopModelAliases = [
+  "claude-sonnet-5-relay-a1b2-c3d4-e5f6-7890",
+  "claude-fable-5-relay-a1b2-c3d4-e5f6-7890",
+  `claude-fable-5-zenith-${Array(32).fill("ab").join("-")}`,
+];
+
+for (const mode of ["local", "remote"] as const) {
+  for (const alias of desktopModelAliases) {
+    test(`${mode} keeps ${alias.split("-relay-")[0]} model aliases in technical details`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 900 });
+      await installTauriMock(page, {
+        mode, locale: "en", populated: true,
+        usageRequestedModel: alias, usageResolvedModel: "provider/model",
+      });
+      await page.goto("/");
+      await setUsageEventOverrides(page, { ...completedUsage, wireApi: "messages" });
+      await page.getByRole("button", { name: "Usage", exact: true }).click();
+      await page.getByRole("button", { name: `Request details: req_synthetic_${mode}`, exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Request details" });
+      await expect(dialog.getByRole("heading", { name: "provider/model", exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-details-parameters")).not.toContainText(alias);
+      await expect(dialog.getByText(alias, { exact: true })).toBeHidden();
+      await dialog.locator(".request-technical-details > summary").click();
+      await expect(dialog.getByText(alias, { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Copy model ID", exact: true }).click();
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(alias);
+      expect(await dialog.locator(".relay-dialog-body, .request-details-list dd")
+        .evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
+    });
+  }
+}
+
+test("unresolved Desktop alias does not impersonate a known model", async ({ page }) => {
+  const alias = desktopModelAliases[1];
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageRequestedModel: alias });
+  await page.goto("/");
+  await setUsageEventOverrides(page, { ...noOutputUsage, resolvedModel: null, success: false, httpStatus: 404 });
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Request details" });
+  await expect(dialog.locator(".request-details-identity h3")).toHaveText("Unknown");
+  await expect(dialog.getByText(alias, { exact: true })).toBeHidden();
+  await dialog.locator(".request-technical-details > summary").click();
+  await expect(dialog.getByText(alias, { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Sent to source", { exact: true })).toHaveCount(0);
+});
+
 async function openRequest(page: Page, theme: "dark" | "light" = "dark", failure = true) {
   await installTauriMock(page, {
     mode: "local", locale: "ru", theme, populated: true, usageFailure: failure, usageCandidateKind: "source",

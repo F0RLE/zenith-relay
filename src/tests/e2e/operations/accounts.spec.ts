@@ -216,7 +216,7 @@ test("dense status rows use accessible icons without repeated labels", async ({ 
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await expect(page.locator(".source-card").first().locator(".relay-status-icon")).toHaveAttribute("aria-label", "In pool");
+  await expect(page.locator(".source-card").first().locator(".relay-status-icon")).toHaveAttribute("aria-label", "Ready for requests");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("tab", { name: "Model Rules" }).click();
@@ -328,7 +328,7 @@ test("frequent account actions use full-width zones and secondary actions stay i
   await expect(menu.getByRole("menuitem", { name: "Proxy: Common", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Export" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Notes", exact: true })).toBeVisible();
-  await expect(menu.getByRole("menuitem")).toHaveCount(5);
+  await expect(menu.getByRole("menuitem")).toHaveCount(6);
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete", exact: true })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete permanently", exact: true })).toHaveCount(0);
@@ -423,7 +423,7 @@ test("connections and pool group availability and preserve live order within eac
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
   const sourceRows = page.locator(".source-card");
   await expect(sourceRows).toHaveCount(3);
-  const connectionSourceOrder = await sourceRows.locator(".source-card-identity strong").allTextContents();
+  const connectionSourceOrder = await sourceRows.locator(".account-identity > strong").allTextContents();
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const poolSourceOrder = await page.locator('.pool-member-card[data-member-kind="source"] .pool-member-name').allTextContents();
@@ -655,6 +655,24 @@ test("Free BPS accounts have no pool addition action while paid BPS accounts do"
   await expect(free.getByRole("button", { name: "Add to pool", exact: true })).toHaveCount(0);
   await expect(free.getByRole("button", { name: "Remove from pool", exact: true })).toHaveCount(0);
 });
+
+for (const locale of ["ru", "en"] as const) {
+  test(`BPS accounts explain why ChatGPT app sign-in is unavailable (${locale})`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode: "local", locale, populated: true, accountOAuthClientKind: "excel_bps",
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: locale === "ru" ? "Подключения" : "Connections", exact: true }).click();
+    const launch = page.locator(".account-card").first().getByRole("button", {
+      name: locale === "ru" ? "Запустить в ChatGPT" : "Launch in ChatGPT", exact: true,
+    });
+    await expect(launch).toBeDisabled();
+    await launch.locator("..").hover();
+    await expect(page.getByRole("tooltip")).toHaveText(locale === "ru"
+      ? "Вход в приложение ChatGPT через BPS недоступен"
+      : "Signing in to the ChatGPT app through BPS is unavailable");
+  });
+}
 
 test("bulk account actions stay compact and delete the selected records", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });

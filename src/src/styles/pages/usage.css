@@ -1,5 +1,5 @@
 .usage-page {
-  container: usage / inline-size;
+  container: usage relay-page / inline-size;
 }
 
 .usage-view-toolbar {

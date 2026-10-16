@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { UsageRow } from "./usageData";
 import { RequestSection } from "./RequestSection";
 import {
-  formatReasoningEffort, formatReasoningSummary, formatRequestOrigin,
+  formatModelId, formatReasoningEffort, formatReasoningSummary, formatRequestOrigin,
   formatServiceTier, formatTransport, formatWireApi,
 } from "./usageReportFormat";
 
@@ -11,13 +11,15 @@ export function RequestParameters({ row }: { row: UsageRow }) {
   const requestedEffort = row.requestedReasoningEffort;
   const effectiveEffort = row.effectiveReasoningEffort;
   const reasoningChanged = requestedEffort && effectiveEffort && requestedEffort !== effectiveEffort;
-  const modelChanged = row.requestedModel && row.routedModel && row.requestedModel !== row.routedModel;
+  const requestedModel = formatModelId(row.requestedModel, row.routedModel);
+  const routedModel = formatModelId(row.routedModel);
+  const modelChanged = requestedModel !== "—" && routedModel !== "—" && requestedModel !== routedModel;
   if (!row.wireApi && !row.transport && !row.serviceTier && !requestedEffort && !effectiveEffort && !modelChanged && !row.requestOrigin) return null;
   return <RequestSection title={t("usage.requestSections.parameters")} className="request-parameters-section">
     <dl className="request-details-parameters">
     {modelChanged ? <>
-      <div><dt>{t("usage.requestedModel")}</dt><dd><code>{row.requestedModel}</code></dd></div>
-      <div><dt>{t("usage.routedModel")}</dt><dd><code>{row.routedModel}</code></dd></div>
+      <div><dt>{t("usage.requestedModel")}</dt><dd><code>{requestedModel}</code></dd></div>
+      <div><dt>{t("usage.routedModel")}</dt><dd><code>{routedModel}</code></dd></div>
     </> : null}
     {row.wireApi ? <div><dt>{t("usage.protocol")}</dt><dd>{formatWireApi(row.wireApi, t)}</dd></div> : null}
     {row.transport ? <div><dt>{t("usage.transport")}</dt><dd>{formatTransport(row.transport, t)}</dd></div> : null}

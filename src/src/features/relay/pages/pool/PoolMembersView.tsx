@@ -80,6 +80,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const memberTimestamps = useMemo(() => members.flatMap((member) => [
     ...(member.kind === "account" ? [
       member.subscription.activeUntilMs,
+      member.oauthClientKind === "excel_bps" && !member.remoteLocation ? member.credentialDiagnostics?.expiresAtMs : null,
       member.quota.primary?.resetAtMs,
       member.quota.secondary?.resetAtMs,
       ...(member.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),

@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 import {
   Check,
   Clock3,
   Download,
+  Globe2,
   ListMinus,
   ListPlus,
   Loader2,
@@ -45,7 +46,9 @@ import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
 import { accountParticipates } from "./accountTableModel";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
-import { AccountCredentialDiagnostics } from "../../components/AccountCredentialDiagnostics";
+import { AccountTokenExpiry } from "../../components/AccountTokenExpiry";
+import { AccountTimezoneDialog } from "../../components/AccountTimezoneDialog";
+import { useRequestTimezone } from "../../hooks/useRequestTimezone";
 import { useConnectionAccountRemoval } from "./accountRemoval";
 
 type AccountCardProps = {
@@ -79,15 +82,18 @@ export function AccountCard({
 }: AccountCardProps) {
   const { t } = useTranslation();
   const [notesOpen, setNotesOpen] = useState(false);
+  const [timezoneOpen, setTimezoneOpen] = useState(false);
+  const { supported: timezoneSupported } = useRequestTimezone();
   const confirm = useConfirm();
   const membershipPending = useRef(false);
-  const { mode, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
+  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
   const { canTrash, remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const participation = usePendingFlag(accountParticipates(account));
   const enabledFlag = usePendingFlag(account.enabled);
   const participates = participation.checked;
   const accountEnabled = enabledFlag.checked;
   const onServer = mode === "local" && Boolean(account.remoteLocation);
+  useEffect(() => setTimezoneOpen(false), [mode, account.id, onServer, runtime?.runtimeTarget.serverId, runtime?.runtimeTarget.origin]);
   const showNotes = mode === "local" && !onServer && account.secretAvailable;
   const errorCode = onServer
     ? account.lastErrorCode === "remote_missing" ? "remote_missing" : null
@@ -205,6 +211,11 @@ export function AccountCard({
                 {t("accounts.loginDetails")}
               </ActionMenuItem>
             ) : null}
+            {timezoneSupported && !onServer ? (
+              <ActionMenuItem icon={<Globe2 aria-hidden />} disabled={Boolean(busy)} onClick={() => setTimezoneOpen(true)}>
+                {t("gateway.timezone.accountTitle")}
+              </ActionMenuItem>
+            ) : null}
             {onServer ? (
               <ActionMenuItem icon={<Download aria-hidden />} disabled={busy === `return-account-${account.id}`} onClick={() => void returnToComputer()}>
                 {t("accounts.returnToComputer")}
@@ -277,6 +288,8 @@ export function AccountCard({
               disabled={!canLaunch || busy === `launch-account-${account.id}`}
               title={onServer
                 ? t("accounts.onServerHint")
+                : account.oauthClientKind === "excel_bps"
+                  ? t("accounts.bpsChatgptSignInUnavailable")
                 : !account.secretAvailable
                   ? t("accounts.credentialsUnavailable")
                   : !account.enabled
@@ -298,7 +311,7 @@ export function AccountCard({
           {mode === "local" ? <ResetCreditsControl account={account} onCompleted={() => refresh()} /> : null}
         </div>
         <AccountProviderQuotaStrip account={account} />
-        <AccountCredentialDiagnostics account={account} />
+        <AccountTokenExpiry account={account} nowMs={nowMs} />
         <AccountSubscriptionLine activeUntilMs={account.subscription.activeUntilMs} nowMs={nowMs} />
         {runtimeHint ? (
           <div className="account-runtime-line" data-warning={modelRetries.length > 0}>
@@ -309,6 +322,7 @@ export function AccountCard({
         {accountValueVisible ? <AccountValueStrip account={account} /> : null}
       </AccountCardLayout>
       {permanentDeleteMenu}
+      {timezoneOpen ? <AccountTimezoneDialog account={account} onClose={() => setTimezoneOpen(false)} /> : null}
       {showNotes && notesOpen ? (
         <Dialog
           className="account-login-dialog"
@@ -334,6 +348,8 @@ export function AccountCardLayout({
   children,
   identityVisible = false,
   selectionDisabled = false,
+  className = "",
+  ...articleProps
 }: {
   label: string;
   selected: boolean;
@@ -345,9 +361,9 @@ export function AccountCardLayout({
   children?: ReactNode;
   identityVisible?: boolean;
   selectionDisabled?: boolean;
-}) {
+} & HTMLAttributes<HTMLElement>) {
   const { t } = useTranslation();
-  return <article className={`account-card${selected ? " selected" : ""}`} role="listitem">
+  return <article {...articleProps} className={`account-card${selected ? " selected" : ""} ${className}`.trim()} role="listitem">
     <div className="account-card-main">
       {icon}
       <div className="account-identity">

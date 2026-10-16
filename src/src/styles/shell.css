@@ -515,7 +515,9 @@
 }
 
 .relay-page {
+  container: relay-page / inline-size;
   min-width: 0;
+  width: 100%;
   padding: 0 24px 32px;
 }
 
@@ -850,16 +852,11 @@ textarea:focus-visible {
   color: var(--relay-secondary);
 }
 
-.help-page {
-  max-width: 1240px;
-  margin-inline: auto;
-}
-
 .help-layout {
   display: grid;
   grid-template-columns: minmax(0, 760px) 176px;
   align-items: start;
-  justify-content: center;
+  justify-content: start;
   gap: 40px;
   padding: 32px 0 24px;
 }
@@ -1464,7 +1461,9 @@ textarea:focus-visible {
   gap: 2px;
 }
 
+/* Success notices stay below modal backdrops; errors stay above so their details remain reachable. */
 .global-feedback.success {
+  z-index: 50;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }

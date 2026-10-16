@@ -5,12 +5,13 @@ import { EmptyState, PageHeader, Tabs } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { ChatGptRecoveryHeaderAction, ChatGptRecoveryTab } from "./recovery/ChatGptRecoveryTab";
 import { OpenCodeRecoveryHeaderAction, OpenCodeRecoveryTab } from "./recovery/OpenCodeRecoveryTab";
+import { ClaudeDesktopRecoveryHeaderAction, ClaudeDesktopRecoveryTab } from "./recovery/ClaudeDesktopRecoveryTab";
 
-type RecoveryTab = "chatgpt" | "opencode";
+type RecoveryTab = "chatgpt" | "claude-desktop" | "opencode";
 
 type RecoveryApplication = {
   id: RecoveryTab;
-  labelKey: "profiles.tabs.chatgpt" | "profiles.tabs.opencode";
+  labelKey: "profiles.tabs.chatgpt" | "profiles.tabs.claudeDesktop" | "profiles.tabs.opencode";
   Content: ComponentType;
   HeaderAction?: ComponentType;
 };
@@ -18,6 +19,7 @@ type RecoveryApplication = {
 // A new integration adds one application adapter and one entry here.
 const RECOVERY_APPLICATIONS: readonly [RecoveryApplication, ...RecoveryApplication[]] = [
   { id: "chatgpt", labelKey: "profiles.tabs.chatgpt", Content: ChatGptRecoveryTab, HeaderAction: ChatGptRecoveryHeaderAction },
+  { id: "claude-desktop", labelKey: "profiles.tabs.claudeDesktop", Content: ClaudeDesktopRecoveryTab, HeaderAction: ClaudeDesktopRecoveryHeaderAction },
   { id: "opencode", labelKey: "profiles.tabs.opencode", Content: OpenCodeRecoveryTab, HeaderAction: OpenCodeRecoveryHeaderAction },
 ];
 

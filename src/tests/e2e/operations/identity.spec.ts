@@ -192,7 +192,8 @@ test("stale local usage and proxy references never expose internal account IDs",
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Proxies" }).click();
-  await expect(page.locator(".proxy-storage-row").first()).toContainText("Unknown account");
+  await page.locator(".proxy-storage-bindings").first().getByText("Accounts: 1", { exact: true }).hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Unknown account");
   await expect(page.getByText("account_deleted_internal", { exact: true })).toHaveCount(0);
 });
 
@@ -371,7 +372,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["attach_codex_to_local_gateway", "launch_managed_codex_profile"]);
-  expect(workflow[0].args).toEqual({ boundOauthAccountId: null });
+  expect(workflow[0].args).toEqual({ boundOauthAccountId: null, disableOauthBinding: true });
   await expect(page.getByRole("dialog", { name: "Confirm action" })).toHaveCount(0);
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });

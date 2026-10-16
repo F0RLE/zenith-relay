@@ -28,6 +28,14 @@ export function modelSignature(models: ModelSummary[]) {
     model.catalogReasoningMethod,
     model.catalogReasoning,
     model.catalogReasoningEffortLevels?.join(","),
+    model.contextPolicy?.mode,
+    model.contextPolicy?.mode === "custom" ? model.contextPolicy.tokens : undefined,
+    model.catalogContextLimit,
+    model.contextWindows != null,
+    model.contextWindows?.defaultTokens,
+    model.contextWindows?.maximumTokens,
+    model.catalogOutputModalities?.join(","),
+    model.contextConfigurable,
     model.inputMicroUsdPerMillion,
     model.cachedInputMicroUsdPerMillion,
     model.cacheWrite5mMicroUsdPerMillion,
@@ -104,7 +112,29 @@ export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "cat
     || model.reasoningManualFallback === true;
 }
 
-function isImageGenerationModel(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities">) {
+/** Context windows apply only to models that produce text output. */
+export function modelShowsContextControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "contextConfigurable">) {
+  if (model.contextConfigurable === false) return false;
+  const family = model.catalogFamily?.toLowerCase() ?? "";
+  const familyTokens = family.split(/[^a-z0-9]+/).filter(Boolean);
+  if (familyTokens.some((token) => ["audio", "dalle", "embed", "embedding", "image", "moderation", "speech", "tts", "video"].includes(token))) {
+    return false;
+  }
+  const modelId = model.id.toLowerCase();
+  if (["audio", "dall-e", "dalle", "embed", "embedding", "gpt-image", "moderation", "tts", "video", "whisper"]
+    .some((token) => modelId.startsWith(token) || modelId.includes(`-${token}`))) {
+    return false;
+  }
+  const outputs = (model.catalogOutputModalities ?? [])
+    .map((modality) => modality.trim().toLowerCase())
+    .filter(Boolean);
+  if (outputs.length > 0) {
+    return outputs.some((modality) => modality === "text" || modality.includes("text"));
+  }
+  return true;
+}
+
+export function isImageGenerationModel(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities">) {
   const outputs = (model.catalogOutputModalities ?? []).map((modality) => modality.toLowerCase());
   if (outputs.includes("image") && !outputs.includes("text")) return true;
   const family = model.catalogFamily?.toLowerCase() ?? "";

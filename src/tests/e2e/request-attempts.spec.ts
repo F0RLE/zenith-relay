@@ -70,7 +70,7 @@ for (const mode of ["local", "remote"] as const) {
     });
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     const timing = page.locator('.usage-request-table tbody td[data-column="timing"]');
-    await expect(timing).toHaveText(mode === "local" ? "428 ms" : "512 ms");
+    await expect(timing).toHaveText(mode === "local" ? "— / 428 ms" : "— / 512 ms");
     await page.getByRole("button", { name: `Request details: req_synthetic_${mode}` }).click();
     const details = page.getByRole("dialog", { name: "Request details" });
     await expect(details.locator(".request-token-details")).toHaveCount(0);

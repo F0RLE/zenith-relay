@@ -6,6 +6,11 @@ import type {
   SourceWireApi,
 } from "./source";
 
+export type ModelContextPolicy =
+  | { mode: "short" }
+  | { mode: "extended" }
+  | { mode: "custom"; tokens: number };
+
 export type ModelSummary = {
   id: string;
   protocolRoutes?: {
@@ -40,6 +45,10 @@ export type ModelSummary = {
   catalogInputModalities?: string[];
   catalogOutputModalities?: string[];
   catalogContextLimit?: number | null;
+  /** Original, unprojected windows; an empty object means no window evidence. */
+  contextWindows?: { defaultTokens?: number | null; maximumTokens?: number | null } | null;
+  contextPolicy?: ModelContextPolicy;
+  contextConfigurable?: boolean;
   catalogInputLimit?: number | null;
   catalogOutputLimit?: number | null;
   catalogCapabilities?: ModelCapabilities | null;

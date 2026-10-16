@@ -15,6 +15,7 @@ import type {
 import type { TokenSpeedSample } from "../../usageSpeed";
 import { totalsFromUsageSamples, type UsageTotalsSample } from "../../usageTotals";
 import { documentedCacheRetentionMinimum } from "./cacheLifetime";
+import { modelIdForDisplay } from "./usageModelIdentity";
 
 export type CodexRequestOrigin =
   | "activity_summary"
@@ -111,7 +112,7 @@ function usageRowFromEvent(
     attempt: event.attempt,
     time,
     success: event.success,
-    model: event.resolvedModel ?? event.requestedModel,
+    model: modelIdForDisplay(event.resolvedModel ?? event.requestedModel),
     requestedModel: event.requestedModel,
     routedModel: event.resolvedModel,
     requestedReasoningEffort: event.requestedReasoningEffort ?? null,
