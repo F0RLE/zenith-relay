@@ -14,8 +14,15 @@ define Relay.
 
 When sources conflict, inspect the owning code and correct each affected
 document in scope. Avoid copying architecture details into multiple files.
-For API integrations and protocol adapters, follow the New API reference
+For API integrations and protocol adapters, follow the official provider contract
 workflow in [CONTRIBUTING.md](CONTRIBUTING.md#api-and-protocol-references).
+For Relay protocol conversions, use the
+[relay-protocol-adapters skill](.agents/skills/relay-protocol-adapters/SKILL.md)
+for implementation references and conversation acceptance.
+For account sign-in, reauthentication, or imports, use
+[relay-account-connectors](.agents/skills/relay-account-connectors/SKILL.md).
+For account admission, renewal, observations, and removal in the pool, use
+[relay-account-pool-lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md).
 
 ## Ownership
 

@@ -96,17 +96,42 @@ planned scope or acceptance gates; routine edits do not need both documents.
 
 ## API and protocol references
 
-Use [New API](https://github.com/QuantumNous/new-api) as the implementation
-reference for API integrations and protocol adapters: request and response
-formats, tool calls, streaming events, cache fields, usage, and errors. Start
-with its API documentation, `relay/` provider adapters, and `relaykit/`
-conversions. Record the referenced commit and file paths in the pull request.
+Use the official documentation and SDK types for the selected provider,
+endpoint, and API version as the primary contract for requests, responses,
+tools, reasoning, streaming, usage, cache fields, and errors. The
+[protocol contract references](.agents/skills/relay-protocol-adapters/references/contracts.md)
+identify the public APIs. A compatible endpoint does not necessarily support
+all features of the original API; verify the owning provider's documentation.
 
-Check the referenced behavior against the provider's official API contract and
-Relay's contracts. Resolve differences explicitly; New API does not establish
-a source's model access, capabilities, prices, or quota. Adapt only the relevant
-behavior to Relay and preserve source attribution and license terms for any
-reused code.
+Relay's account transports, including Excel / Basis Points, are not public
+provider APIs. Keep observed behavior and synthetic regression evidence
+separate from documented guarantees. Do not claim an official BPS contract or
+infer model access, capabilities, prices, or quota from another proxy.
+
+Third-party implementations are optional comparisons, not the specification.
+When using one, record the inspected commit and paths, resolve differences
+against the official contract, and retain attribution and license terms for
+any reused code. Do not import another proxy runtime or its fallback policy.
+
+The [Relay protocol adapter skill](.agents/skills/relay-protocol-adapters/SKILL.md)
+adds references for reasoning replay, tool roundtrips, and stream lifecycle,
+with an acceptance matrix for each affected protocol pair. A reference
+implementation or a passing first response is not proof of compatibility.
+
+## Account connector references
+
+Use the
+[account connector skill](.agents/skills/relay-account-connectors/SKILL.md)
+for OAuth, device authorization, reauthentication, and account imports.
+Its references identify provider credential implementations in CLIProxyAPI,
+OpenCodex, and New API, with inspected commits and deliberate differences.
+
+Use the
+[account pool lifecycle skill](.agents/skills/relay-account-pool-lifecycle/SKILL.md)
+for admission, renewal, quota observations, request ownership, and removal.
+Adapt reference behavior to Relay's existing credential authority and scheduler.
+Check supported login methods against the provider's official contract;
+a working login alone does not establish pool compatibility.
 
 ## Development setup
 
@@ -175,7 +200,9 @@ README.md
 CONTRIBUTING.md
 docs/project/PLANNING.md
 docs/project/ROADMAP.md
+docs/project/HOSTED_RELAY_ARCHITECTURE.md
 docs/releases/CHANGELOG.md
+catalog/README.md
 docs/help/<locale>/README.md
 docs/screenshots/*.png
 ~~~
@@ -183,10 +210,19 @@ docs/screenshots/*.png
 <code>AGENTS.md</code> is repository guidance. <code>LICENSE</code> and
 <code>CONTRIBUTOR_LICENSE_AGREEMENT.md</code> are legal documents, and
 <code>relay-server/openapi.yaml</code> is the machine-readable server contract.
-Do not add parallel architecture, design, handoff, or historical planning
-documents. Put implemented contracts in
+The existing Hosted Relay architecture proposal owns the detailed future hosted
+design; it is not an implemented local/server contract or a release claim.
+Keep its delivery stages and open gates in `ROADMAP.md`. Do not add additional
+parallel architecture, design, handoff, or historical planning documents.
+Put implemented contracts in
 <code>docs/project/PLANNING.md</code>, accepted unfinished work in
 <code>docs/project/ROADMAP.md</code>, and user steps in localized Help files.
+
+Model display rules and their consumer format live in
+[catalog/README.md](catalog/README.md). Edit the versioned JSON policy rather
+than adding per-model ranks to Rust or frontend code. The documented exporter
+refreshes public references and generates the ordered catalog with the shared
+Rust comparator; publishing those artifacts is a separate action.
 
 ### Changelog and release notes
 
@@ -293,6 +329,10 @@ bun run screenshots
 The visual matrix is the responsive/appearance gate. The operations folder is
 the interaction and state-transition gate. The screenshots command regenerates
 only the committed `docs/screenshots` assets.
+The browser scripts invoke the installed Playwright CLI through `bunx --no-install`
+so it keeps its Node interpreter instead of inheriting Bun's Windows browser
+transport and temporary-profile limitations. No package is downloaded by these
+scripts.
 
 <code>bun run verify</code> runs the unit tests, frontend build (including the
 TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
@@ -319,6 +359,46 @@ bun scripts/build/cargo.mjs fmt --manifest-path crates/relay-core/Cargo.toml --a
 bun scripts/build/cargo.mjs check --manifest-path crates/relay-core/Cargo.toml --all-targets --locked
 bun scripts/build/cargo.mjs clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked
+~~~
+
+### Manual quality observations
+
+`quality_probe` is a development example, not a startup/background monitor.
+Use it only when live generation is explicitly authorized; it consumes quota
+and may cost money. Start with one model and two samples. Compare models with
+the same batch and explicit supported effort, using an isolated pool preset or
+a request key scoped to the intended members. A model ID alone does not select
+an account or prove the upstream protocol.
+
+With an already running local Relay and an existing scoped **pool request key**
+in `ZENITH_RELAY_PROBE_KEY` (not a management token or provider credential):
+
+~~~powershell
+bun scripts/build/cargo.mjs run --manifest-path crates/relay-core/Cargo.toml --locked --example quality_probe -- --allow-requests http://127.0.0.1:PORT/v1 model-a,model-b 2 high
+~~~
+
+Replace `PORT` and the model IDs with the intended local endpoint and exact
+catalog IDs. Supply the environment variable securely; do not put credentials
+in commands, source, fixtures, or reports. The probe rejects external hosts,
+URLs containing credentials/query/fragment, proxies, and redirects. The request
+limit is 1–4 models × 1–8 samples (maximum 32), sequential, with no retry or
+external judge. This is **not a token or monetary budget**: BPS ignores
+`max_output_tokens`, so use conservative batches and account-side limits.
+
+JSON-lines reports contain local-reference correctness, inconclusive counts,
+latency and numeric usage; they omit raw prompts, answers, and credentials.
+Wrong well-formed answers count as incorrect. Transport errors, refusals,
+unfinished output and invalid answer shapes count as inconclusive. The probe
+does not quarantine, disable, or reconfigure anything; normal gateway requests
+still affect usage/quota and ordinary route health. This is not an isolated
+provider observation channel, and a mixed pool cannot yield account-specific
+quality conclusions. A small sample is not proof of degradation or its absence.
+
+Local, synthetic checks do not send provider requests:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib quality::tests
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --example quality_probe
 ~~~
 
 ### User-managed server

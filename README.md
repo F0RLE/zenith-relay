@@ -96,6 +96,9 @@ is in the [roadmap](docs/project/ROADMAP.md). The project uses
 [AGPL-3.0-only](LICENSE). Before submitting a pull request, read the
 [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md).
 
+The [model catalog](catalog/README.md) documents the shared display-order
+policy and the JSON export for other applications.
+
 ```sh
 bun scripts/setup/start-dev.mjs
 ```

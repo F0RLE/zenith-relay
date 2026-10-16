@@ -8,12 +8,193 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Converted requests reject conflicting Gemini schemas, unrepresentable
+  tool-caller policies, and client-owned Responses discovery history before
+  sending instead of silently dropping constraints or conversation turns.
+  Matching native protocols retain their original provider payloads.
+  ([1f64175](https://github.com/F0RLE/zenith-relay/commit/1f64175))
+- Gemini OpenAPI-style tool and output schemas keep their nullable values and
+  bounds when converted to Responses, Chat Completions, or Messages. Schema
+  traversal leaves literal defaults, enums, and property names unchanged.
+
+- Protocol bridges preserve nested tool namespaces through calls, results and
+  continuation. Explicitly disabled thinking does not require a reasoning-capable
+  model, and exact route restrictions also constrain native model-picker efforts.
+  Excel/BPS tool instructions use the original JSON Schema instead of shorthand;
+  invalid generated arguments remain blocked rather than executed or retried,
+  with a specific schema-mismatch message and no argument contents in diagnostics.
+
+- Messages bridges accept the empty thinking signature initialized by Claude's
+  stream assembler, so a tool result can resume the saved native provider turn.
+  Real foreign signatures and malformed values remain explicit errors; native
+  Messages requests, scoped reasoning state and continuation ownership are kept.
+
+- Claude Desktop connections enable on-demand MCP tool loading instead of an
+  eagerly expanded catalog. Messages bridges validate client-owned deferred
+  definitions and discovery references, forwarding only loaded function schemas
+  while keeping call/result IDs, exact constraints and native passthrough.
+  Hosted search is not emulated. Reconnect through the updated Relay and start
+  a new Claude session; existing integrations and recovery snapshots are kept.
+
+- Automatic quota rotation no longer pins self-contained tool conversations
+  to their earlier account when another eligible member has more fresh quota.
+  HTTP, account endpoints, Excel/BPS and WebSocket retain complete call/result
+  history; opaque continuations and unpaired results keep their owner unless
+  validated local history can be replayed. Both quota windows still constrain
+  selection; rotation does not promise identical remaining percentages.
+
+- Excel/BPS stream normalization uses the same validated terminal forms as the
+  shared Responses reader instead of rejecting a supported completion envelope.
+  Incomplete JSON replies retain partial text and usage without releasing tools.
+  Terminal processing avoids redundant JSON/SSE conversions, and request errors
+  show the failed validation field without exposing tool inputs or provider bodies.
+
+- Native ChatGPT model discovery tolerates slow catalog reads and retries one
+  transient transport failure automatically. Shared HTTP limits, account
+  revision checks and provider retry delays remain in force; failed reads keep
+  the last model list, and successful refreshes clear the stale discovery error.
+
+- Desktop pages use the available workspace beside the sidebar. Pool and
+  connection grids keep compact card tracks as the workspace grows, while
+  forms and dialogs retain readable width limits.
+  ([4cb1d2d](https://github.com/F0RLE/zenith-relay/commit/4cb1d2d))
+
+- Claude Code and other Messages clients receive available public reasoning
+  summaries without aborting JSON or SSE tool responses. Tool results retain
+  their call IDs and resume the original provider state; foreign signatures
+  are never fabricated. BPS-generated streams preserve reasoning-summary events
+  before tools, including when upstream returns JSON instead of SSE.
+- Claude Desktop lists each pool model once instead of multiplying it by
+  reasoning level. Effort remains a separate Messages request parameter; the
+  effort-suffixed model workaround is removed. Compatible models use Claude's
+  built-in Effort selector through a unique client-only Claude role route,
+  capped by executable Messages routes and pool policy. Real upstream identity,
+  context and prices stay unchanged; custom levels are not invented. Oversized
+  catalogs count real models and are rejected before changing the profile.
+
+- Model Rules preserves published Short/Long windows; the 25% Short fallback
+  applies only without a published default. Management and OpenCode share the
+  original window evidence. Compact, aligned context controls keep Custom on
+  one line without percentage captions or explanatory banners. Context saves
+  serialize rapid edits; an accessible status icon retains Codex reload and
+  catalog-refresh warnings without restarting applications.
+
+- Quota refresh and rotation track provider credits separately from response
+  headers. Busy traffic no longer keeps an old balance artificially fresh or
+  postpones its full refresh indefinitely. Late credit reads preserve newer
+  quota windows, expired credits stop granting credit-only admission, and
+  shared-account totals use the latest ledger rather than header activity.
+  Queued usage cannot roll back credits, and older headers cannot clear a
+  newer provider limit.
+
+- Excel/BPS preserves tool-result images and collaboration attribution, streams
+  text before completion, and withholds all tools until the terminal response
+  validates. Truncated or invalid streams cannot release a valid tool subset.
+  Responses callers may explicitly request buffered local JSON/schema validation;
+  this does not claim native strict decoding. Developers can run capped manual
+  quality observations with local reference solvers and no automatic disabling.
+- Native protocol forwarding preserves JSON object order and arbitrary-precision
+  numbers, repeated permitted headers, and original successful SSE/WebSocket
+  payloads. Tool-schema normalization keeps annotated choices intact. Root
+  session affinity is distinct from child-thread context; explicit cache keys
+  and strict continuation/credential ownership keep their existing priorities.
+- Claude Desktop Messages requests can include standard user metadata and cache
+  hints on converted OpenAI routes without a spurious native-endpoint error.
+  Metadata is preserved; foreign caching uses the selected provider's policy,
+  not Anthropic TTLs or pricing. Unsupported required controls remain rejected.
+- Basis Points expands compact Responses messages into explicit typed input,
+  including converted Claude Desktop histories. Client metadata stays local and
+  is restored in translated responses instead of violating the strict BPS body
+  schema with fields such as Claude's `user_id`. Invalid-body HTTP 422 responses
+  no longer retry across accounts or mark healthy accounts as temporarily failed.
+- Account sign-in replaces completed authorization controls with one saving
+  status and dismisses automatically, without a second setup dialog. Failed
+  saves return to an explicit, closable error state. Initial quota and model
+  checks run concurrently; pool membership remains an explicit choice.
+- Claude Desktop uses stable Relay-owned route IDs accepted by its model-name
+  validation, while retaining real picker labels and upstream model identities.
+  Alias resolution preserves key scope, visibility and normal route admission.
+- Access uses matching compact navigation for applications and accounts. Stored
+  proxies use the connection-card layout with explicit checks, timezone and
+  assignment actions; check status lives in the upper-left icon without repeated
+  status lines or unset/unused placeholders. API sources show source readiness
+  instead of account rotation status; Launch follows Edit in the card footer,
+  not the overflow menu.
+- Excel/BPS usage measures first output and total time from the real upstream
+  stream, retaining known timings after partial failures. The first/total column
+  explicitly marks unknown first-output time instead of showing total time alone.
+- Cross-protocol requests now share one conversion pipeline across Responses,
+  Chat Completions, Anthropic Messages, and Gemini. Native routes preserve
+  provider extensions; converted routes retain tool identity and opaque
+  continuation state and reject unavailable hosted tools instead of dropping them.
+- API source cards in Connections use the compact pool-card layout and show
+  balance, spend or Relay estimate, request totals, and model count without
+  pool rotation mode or active-request data.
+- Access starts ChatGPT, Claude Desktop and OpenCode settings with only an
+  application path, folder picker button and Save. Native launches use the
+  selected executable; saving it does not start a client or
+  change pool/server configuration. The duplicate Claude connection panel was
+  removed from Access, and its protected disconnect/restore action moved to
+  Recovery. Pool connection and explicit Overview launch remain available.
+- Application choices consistently place Claude Desktop after ChatGPT and before
+  OpenCode, including local Quick Setup. Pool/Overview modal pickers show
+  horizontal application cards with each logo above its name.
+- Claude Desktop can connect to the local pool through its third-party inference
+  profile. Relay preserves foreign Desktop profiles, exports the exact ordered
+  Messages-compatible pool catalog without synthetic model aliases, keeps the
+  request key in the local configuration only, validates before closing Desktop
+  and applying the profile, and launches only when requested. Launch success
+  requires a running Desktop process. Lost recovery is recreated only for a
+  matching local gateway configuration; recovery never points back to Relay
+  itself or deletes foreign configuration based on a display name. Restore
+  preserves newer manual selections and does not automatically relaunch Desktop.
+- Native ChatGPT requests check turn-state ownership in HTTP headers, JSON bodies,
+  and WebSocket metadata against the exact endpoint and authorization incarnation.
+  Complete client identity profiles stay together; incomplete profiles use the
+  Relay fallback. WebSocket capability observations follow the same authorization
+  boundary, and upgrade retries share the request's wire budget.
+- Conversation turn limits return `turn_rate_limit_exceeded` with known retry
+  delays, without cooling down the account, rotating the pool, or repairing history.
+- Access now keeps account-wide ChatGPT request settings in
+  **Access → Accounts**, with a visible ChatGPT selector beside the settings.
+  Per-account timezone choices and enable/disable overrides remain in each
+  account's Connections menu; accounts without an override inherit the shared
+  setting.
+- API connections select each known model's native upstream independently of
+  the client: OpenAI uses Responses, Claude uses Messages, Google uses Gemini,
+  and Grok and GLM use Chat Completions. Incompatible endpoints are excluded.
+  Route selection retains the exact client projection without duplicate
+  candidates or changing the binding used for streaming and continuation.
+- Native account model cards keep their provider-owned default window and
+  effective-window percentage even when the card advertises a smaller maximum.
+  API defaults and automatic compaction still respect their known hard limits.
+- Account re-import preserves the saved direct or common-proxy route, and
+  preview, quota checks, and commit now use the same resolved route.
+- Direct API refresh resolves each model's native protocol from the validated
+  reference catalog before grouping OpenCode providers, so stale legacy
+  bindings no longer pin a model to the wrong SDK.
+  Switching models preserves completed conversation history; active tool
+  continuations retain their original provider state.
+- Accounts, API sources, pool editors, and managed client catalogs share one
+  default model order by developer, family, class, and descending version.
+  Manual sorting remains available. A versioned JSON policy and public
+  reference exporter let other applications use the same order. The policy
+  covers OpenAI, Anthropic, Google, xAI, DeepSeek, Z.ai, Alibaba / Qwen,
+  Moonshot / Kimi, MiniMax, Xiaomi / MiMo, Mistral, Tencent / Hunyuan, NVIDIA,
+  StepFun, Meta, ByteDance, Perplexity, Cohere, Amazon, Nous Research, and
+  Inception, distinguishing generations from release dates and parameter sizes.
 - Protocol adapters share completion checks across JSON and streaming paths.
   Incomplete answers retain reported usage without recovering route health or
   creating reusable continuation state. Gemini drains late usage after its
   finish reason and keeps provider call IDs separate from client IDs.
   Converted histories retain native reasoning only for the original source,
   model, and protocol; signed Gemini parts are not merged with ordinary text.
+  Gemini tool continuations omit bare empty text parts that can cause upstream
+  rejection, while retaining empty signed parts, metadata, and whitespace.
+  Gemini tool schemas remove the harness-only `encrypted` annotation while
+  retaining validation constraints, property names, and literal default values.
+  Chat Completions-to-Responses calls normalize exact integral JSON numbers so typed
+  tools accept decimal and exponent notation without changing their values.
   Unsupported meaningful output extensions fail conversion explicitly.
   Failures before the first output retain reported tokens and cache usage;
   partial usage updates replace stale totals without erasing known counters.
@@ -42,6 +223,10 @@ release entries are kept concise and link to the corresponding tag.
   rejects reading or writing during an upgrade.
 - Responses-to-Chat conversion preserves web-search URL citations in JSON and
   streaming responses, including character offsets across joined text parts.
+- Gemini bridges accept requests with parallel tool calls disabled and enforce
+  that limit in JSON and streaming replies. Empty tool catalogs no longer send
+  unnecessary tool-choice or parallel-call controls to converted endpoints.
+  Allowing parallel calls also admits models that produce calls sequentially.
 - Protocol adapters keep parallel tool calls paired with their results across
   turns, including after the tool catalog changes. Gemini continuations retain
   call IDs and thought signatures; streamed arguments and custom-tool input
