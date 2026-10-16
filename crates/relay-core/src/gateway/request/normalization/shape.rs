@@ -190,10 +190,9 @@ pub(super) fn normalize_codex_schema_nodes(schema_value: &mut Value) {
         let Some(const_value) = branch_object.get("const") else {
             return;
         };
-        if branch_object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "const" | "description" | "title"))
-        {
+        // An enum cannot represent branch-local annotations. Keep the union
+        // whenever folding would discard descriptions, titles, or constraints.
+        if branch_object.len() != 1 {
             return;
         }
         let Some(key) = canonical_codex_scalar_key(const_value) else {
@@ -228,20 +227,19 @@ pub(super) fn normalize_codex_schema_nodes(schema_value: &mut Value) {
 pub(super) fn canonical_codex_scalar_key(scalar_value: &Value) -> Option<String> {
     match scalar_value {
         Value::String(text_value) => Some(format!("s:{text_value}")),
-        Value::Number(number_value) => Some(format!("n:{}", canonical_codex_number(number_value))),
+        Value::Number(number_value) => Some(format!("n:{}", canonical_codex_number(number_value)?)),
         Value::Bool(boolean_value) => Some(format!("b:{boolean_value}")),
         Value::Null => Some("null".to_string()),
         Value::Array(_) | Value::Object(_) => None,
     }
 }
 
-pub(super) fn canonical_codex_number(number_value: &Number) -> String {
+pub(super) fn canonical_codex_number(number_value: &Number) -> Option<String> {
     let number_text = number_value.to_string();
-    let (mantissa, exponent) = number_text
-        .split_once(['e', 'E'])
-        .map_or((number_text.as_str(), 0_i64), |(mantissa, exponent)| {
-            (mantissa, exponent.parse::<i64>().unwrap_or(0))
-        });
+    let (mantissa, exponent) = match number_text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (number_text.as_str(), 0_i64),
+    };
     let (sign, unsigned) = mantissa
         .strip_prefix('-')
         .map_or(("", mantissa), |unsigned| ("-", unsigned));
@@ -249,15 +247,15 @@ pub(super) fn canonical_codex_number(number_value: &Number) -> String {
     let mut digits = format!("{whole}{fraction}");
     let first_non_zero = digits.find(|digit| digit != '0');
     let Some(first_non_zero) = first_non_zero else {
-        return "0".to_string();
+        return Some("0".to_string());
     };
     digits.drain(..first_non_zero);
-    let mut scale = exponent - i64::try_from(fraction.len()).unwrap_or(i64::MAX);
+    let mut scale = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
     while digits.ends_with('0') {
         digits.pop();
-        scale = scale.saturating_add(1);
+        scale = scale.checked_add(1)?;
     }
-    format!("{sign}{digits}e{scale}")
+    Some(format!("{sign}{digits}e{scale}"))
 }
 
 pub(super) fn same_codex_scalar_set(left: &[String], right: &[String]) -> bool {

@@ -132,9 +132,15 @@ fn validate_store_secrets(store: &Store, vault: &Vault) -> Result<(), String> {
         .map(|proxy_record| proxy_record.id.clone())
         .collect::<std::collections::HashSet<_>>();
     let accounts = store.accounts()?;
+    let sources = store.sources()?;
     if accounts
         .iter()
         .filter_map(|account_record| account_record.proxy_id.as_deref())
+        .chain(
+            sources
+                .iter()
+                .filter_map(|source_record| source_record.proxy_id.as_deref()),
+        )
         .any(|proxy_id| !proxy_ids.contains(proxy_id))
         || store
             .common_proxy_id()?
@@ -142,8 +148,7 @@ fn validate_store_secrets(store: &Store, vault: &Vault) -> Result<(), String> {
     {
         return Err("backup references a missing proxy object".to_string());
     }
-    let secret_refs = store
-        .sources()?
+    let secret_refs = sources
         .into_iter()
         .map(|source_record| source_record.secret_ref)
         .chain(

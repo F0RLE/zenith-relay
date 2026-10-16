@@ -5,9 +5,14 @@ mod history;
 mod matrix;
 mod responses_usage;
 mod terminal;
+mod tool_arguments;
 mod tools;
 
+mod architecture;
 mod citations;
+mod messages_options;
+mod messages_reasoning;
+mod messages_tool_search;
 mod reasoning;
 
 fn input(protocol: WireApi) -> Value {

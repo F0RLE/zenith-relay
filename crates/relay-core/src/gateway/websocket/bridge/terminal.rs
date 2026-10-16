@@ -99,6 +99,9 @@ pub(super) fn repairable_terminal_request(
     if terminal.outcome != Some(EventTerminalOutcome::Failure) {
         return None;
     }
+    if terminal.error_category == Some(error_codes::UPSTREAM_TURN_RATE_LIMITED) {
+        return None;
+    }
     if terminal.previous_response_not_found {
         let in_flight = state.in_flight.as_ref()?;
         if in_flight.client_visible_output {
@@ -196,7 +199,9 @@ pub(super) fn finish_terminal(
     }
     if let Some(lease) = state.lease.take() {
         if terminal_success {
-            lease.settle_rotation_success(now_ms());
+            let recovered =
+                lease.settle_rotation_success_with_latency(now_ms(), in_flight.event.ttft_ms);
+            in_flight.event.consecutive_failures = recovered.then_some(0);
         } else if outcome != EventTerminalOutcome::Failure {
             lease.settle_rotation_terminal(now_ms());
         } else {
@@ -233,19 +238,9 @@ pub(super) fn finish_terminal(
                 now_ms(),
             );
         }
-        let recovered = runtime.record_success_with_metrics(
-            &in_flight.route.candidate_id,
-            &in_flight.route.source_model,
-            now_ms(),
-            in_flight.event.output_tokens,
-            in_flight
-                .event
-                .generation_ms
-                .unwrap_or(in_flight.event.latency_ms),
-        );
-        runtime.bind_response_affinity(
+        runtime.bind_response_route_affinity(
             in_flight.response_id.as_deref(),
-            &in_flight.route.candidate_id,
+            &in_flight.route,
             now_ms(),
         );
         runtime.bind_prompt_affinity(
@@ -253,7 +248,6 @@ pub(super) fn finish_terminal(
             &in_flight.route.candidate_id,
             now_ms(),
         );
-        in_flight.event.consecutive_failures = recovered.then_some(0);
     } else if matches!(outcome, EventTerminalOutcome::Failure) {
         let (status, category) = resolved_terminal_failure(&terminal);
         let status = super::super::super::errors::canonical_upstream_status(status, category);

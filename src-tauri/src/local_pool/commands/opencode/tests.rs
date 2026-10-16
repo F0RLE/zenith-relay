@@ -17,6 +17,7 @@ pub(super) fn source(bindings: Vec<SourceProtocolBinding>) -> ProviderSourceReco
         base_url: "https://provider.example/v1".into(),
         secret_ref: "source:test".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -77,6 +78,9 @@ pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         catalog_input_modalities: Vec::new(),
         catalog_output_modalities: Vec::new(),
         catalog_context_limit: None,
+        context_windows: None,
+        context_policy: zenith_relay_core::ModelContextPolicy::Short,
+        context_configurable: false,
         catalog_input_limit: None,
         catalog_output_limit: None,
         input_micro_usd_per_million: None,
@@ -170,6 +174,58 @@ fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
     assert_eq!(pooled["text-only"]["modalities"]["input"], json!(["text"]));
     assert_eq!(pooled["text-only"]["tool_call"], true);
     assert_eq!(pooled["text-only"]["limit"]["context"], 32000);
+    models[0].context_configurable = true;
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Custom { tokens: 16000 };
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        16000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        16000
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Short;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        8000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        8000
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Extended;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        32000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        24000
+    );
+    models[0].context_windows = Some(
+        zenith_relay_core::catalog::context_policy::ModelContextWindows {
+            default_tokens: Some(12000),
+            maximum_tokens: Some(32000),
+        },
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Short;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        12000
+    );
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["input"],
+        12000
+    );
+    models[0].context_policy = zenith_relay_core::ModelContextPolicy::Extended;
+    assert_eq!(
+        super::model_config(&models)["text-only"]["limit"]["context"],
+        32000
+    );
+    models[0].context_windows = Some(Default::default());
+    assert!(super::model_config(&models)["text-only"]["limit"]
+        .get("context")
+        .is_none());
     assert_eq!(pooled["unknown"]["modalities"]["input"], json!(["text"]));
     assert_eq!(pooled["unknown"]["attachment"], false);
     assert_eq!(pooled["unknown"]["reasoning"], false);

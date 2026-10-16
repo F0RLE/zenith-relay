@@ -33,10 +33,10 @@ use assemble::{managed_chatgpt_account_id_for_reserve, timestamp_ms};
 
 pub(in crate::local_pool) use assemble::runtime_from_store;
 pub(in crate::local_pool) use sync::{
-    core_error, fail_closed, refresh_active_codex_catalog_in_background,
-    restart_after_secret_change, restart_or_rollback, sync_account_or_rollback,
-    sync_gateway_or_rollback, sync_records_or_rollback, sync_refreshed_account_or_rollback,
-    sync_running_account_states, sync_runtime_account_state,
+    core_error, fail_closed, queue_active_client_catalog_refresh,
+    refresh_active_codex_catalog_in_background, restart_after_secret_change, restart_or_rollback,
+    sync_account_or_rollback, sync_gateway_or_rollback, sync_records_or_rollback,
+    sync_refreshed_account_or_rollback, sync_running_account_states, sync_runtime_account_state,
 };
 
 pub(in crate::local_pool) fn record_catalog_refresh_result(

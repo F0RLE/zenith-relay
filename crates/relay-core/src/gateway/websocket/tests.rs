@@ -26,6 +26,7 @@ fn runtime() -> GatewayRuntime {
             api_key: "upstream-secret".into(),
             wire_api: WireApi::Responses,
             models: vec!["upstream-model".into()],
+            proxy_url: None,
         })],
         vec![RuntimeLocalKey {
             key: LocalGatewayKey {

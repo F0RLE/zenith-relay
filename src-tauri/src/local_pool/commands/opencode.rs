@@ -128,7 +128,11 @@ pub async fn connect_opencode_to_local_gateway(
         &gateway_secret,
         &model_ids,
     )?;
-    write_config(&config_path, &config_document)?;
+    let model_order = model_ids
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    write_config_with_model_order(&config_path, &config_document, &model_order)?;
     Ok(OpenCodeConnectionResult {
         path: config_path.display().to_string(),
         model_count: model_ids.len(),
@@ -158,7 +162,8 @@ pub async fn launch_opencode_source(
         )
         .into());
     }
-    let models = source_opencode_models(&source_record)?;
+    let metadata = state.model_metadata_catalog();
+    let models = metadata.order_model_ids(source_opencode_models(&source_record)?);
     let secret = secret_store::load(&source_record.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     let config_path = default_opencode_config_path();
@@ -168,10 +173,10 @@ pub async fn launch_opencode_source(
         &mut config_document,
         &source_record,
         &secret,
-        &state.model_metadata_catalog(),
+        &metadata,
         true,
     )?;
-    write_config(&config_path, &config_document)?;
+    write_config_with_model_order(&config_path, &config_document, &models)?;
     restart_opencode().map_err(|error| {
         LocalPoolError::new(
             ErrorCode::Io,

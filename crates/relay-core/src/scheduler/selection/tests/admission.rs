@@ -456,6 +456,20 @@ fn protected_account_keeps_its_quota_reserve() {
         100
     );
 }
+
+#[test]
+fn protected_reserve_requires_a_dated_nonfuture_quota_observation() {
+    for observed_at_ms in [None, Some(101), Some(1)] {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_quota_stale_after_ms(10);
+        let mut account = oauth_candidate("protected");
+        account.quota = CandidateQuota::Available(5_000);
+        account.quota_updated_at_ms = observed_at_ms;
+        scheduler.upsert(account);
+        assert!(scheduler.set_protected_candidate(Some("protected"), 100));
+        assert!(!scheduler.quota_reserve_allows(scheduler.candidate("protected").unwrap(), 100));
+    }
+}
 #[test]
 fn protected_account_with_provider_credits_and_remaining_window_is_routable() {
     use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};

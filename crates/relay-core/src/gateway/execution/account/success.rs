@@ -120,7 +120,11 @@ pub(super) fn complete_account_response(
             Err(error) => {
                 emit_usage(runtime, mark_adapter_failure(event, &error));
                 lease.settle_rotation_terminal(now_ms());
-                return adapter_error_response_for_origin(error, selected_error_origin);
+                return adapter_error_response_for_origin(
+                    error,
+                    selected_error_origin,
+                    Some(request_id),
+                );
             }
         }
     } else {
@@ -132,20 +136,18 @@ pub(super) fn complete_account_response(
             Err(error) => {
                 emit_usage(runtime, mark_adapter_failure(event, &error));
                 lease.settle_rotation_terminal(now_ms());
-                return adapter_error_response_for_origin(error, selected_error_origin);
+                return adapter_error_response_for_origin(
+                    error,
+                    selected_error_origin,
+                    Some(request_id),
+                );
             }
         }
     } else {
         None
     };
     if completed {
-        let recovered = runtime.record_success_with_metrics(
-            &route.candidate_id,
-            &route.source_model,
-            now_ms(),
-            event.output_tokens,
-            event.generation_ms.unwrap_or(event.latency_ms),
-        );
+        let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
         event.consecutive_failures = recovered.then_some(0);
         runtime.bind_prompt_affinity(
             prompt_affinity_key.as_deref(),
@@ -155,13 +157,12 @@ pub(super) fn complete_account_response(
         bind_responses_turn(
             runtime,
             &key.id,
-            &route.candidate_id,
+            route,
             request,
             &route.source_model,
             &client_bytes,
             true,
         );
-        lease.settle_rotation_success(now_ms());
     } else {
         lease.settle_rotation_terminal(now_ms());
     }

@@ -54,11 +54,17 @@ pub async fn probe_source_generation_with_scope(
     let endpoint = connector
         .endpoint(binding.key(), model_id, false)
         .ok_or_else(|| Error::Validation("probe endpoint is invalid".into()))?;
-    let client = reqwest::Client::builder()
+    let client_builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(PROBE_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+        .redirect(reqwest::redirect::Policy::none());
+    let client_builder = match source.proxy_url.as_deref() {
+        Some(proxy_url) if !proxy_url.trim().is_empty() => crate::ProxyConfig::parse(proxy_url)
+            .map_err(|message| Error::Validation(message.to_string()))?
+            .apply(client_builder),
+        _ => client_builder,
+    };
+    let client = client_builder.build()?;
     let (header, authorization) = connector.authorization_for_binding(&binding);
     let probe_request = client
         .post(endpoint)
@@ -232,6 +238,7 @@ mod tests {
                 api_key: "synthetic-test-key".into(),
                 wire_api: WireApi::ChatCompletions,
                 models: vec!["test-model".into()],
+                proxy_url: None,
             };
             let input = SourceProbeInput {
                 model_id: "test-model".into(),

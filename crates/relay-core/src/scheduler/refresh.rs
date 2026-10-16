@@ -169,7 +169,8 @@ pub fn quota_reset_delay(
 /// window from an older read is not new evidence for the whole quota scope.
 pub fn passive_quota_age_ms(quota: &crate::quota::QuotaSnapshot, now_ms: u64) -> Option<u64> {
     let updated_at_ms = quota.updated_at_ms?;
-    if quota.error.is_some() || updated_at_ms > now_ms {
+    let ledger_at_ms = quota.provider_credits_observed_at_ms?;
+    if quota.error.is_some() || updated_at_ms > now_ms || ledger_at_ms > now_ms {
         return None;
     }
     let mut windows = quota
@@ -187,7 +188,7 @@ pub fn passive_quota_age_ms(quota: &crate::quota::QuotaSnapshot, now_ms: u64) ->
     if oldest > now_ms || newest < updated_at_ms {
         return None;
     }
-    Some(now_ms.saturating_sub(oldest.min(updated_at_ms)))
+    Some(now_ms.saturating_sub(oldest.min(updated_at_ms).min(ledger_at_ms)))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

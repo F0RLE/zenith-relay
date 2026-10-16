@@ -61,9 +61,6 @@ pub struct GatewaySummary {
     pub codex_background_tasks_enabled: bool,
     #[serde(default = "default_codex_websockets_enabled")]
     pub codex_websockets_enabled: bool,
-    #[serde(default)]
-    pub chatgpt_context_policy: crate::catalog::context_policy::ApplicationContextPolicy,
-    #[serde(default)]
     /// Legacy snapshot key retained for older desktop/server clients.
     pub chatgpt_retry_until_available: bool,
     #[serde(default = "default_block_degraded_routes_enabled")]
@@ -145,6 +142,12 @@ pub struct ModelSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_context_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_windows: Option<crate::catalog::context_policy::ModelContextWindows>,
+    #[serde(default)]
+    pub context_policy: crate::ModelContextPolicy,
+    #[serde(default)]
+    pub context_configurable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_input_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_output_limit: Option<u64>,
@@ -216,6 +219,44 @@ pub fn apply_pool_model_configuration(
     model_service_tier_overrides: &BTreeMap<String, DefaultServiceTier>,
     runtime: Option<&GatewayRuntime>,
 ) {
+    apply_pool_model_configuration_with_context(
+        models,
+        PoolModelConfigurationInput {
+            sources,
+            accounts,
+            model_price_overrides,
+            model_reasoning_allowed_levels,
+            model_context_policies: &BTreeMap::new(),
+            model_service_tier_overrides,
+            runtime,
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+pub struct PoolModelConfigurationInput<'a> {
+    pub sources: &'a [SourceSummary],
+    pub accounts: &'a [AccountSummary],
+    pub model_price_overrides: &'a BTreeMap<String, ApiModelPriceOverride>,
+    pub model_reasoning_allowed_levels: &'a BTreeMap<String, Vec<String>>,
+    pub model_context_policies: &'a BTreeMap<String, crate::ModelContextPolicy>,
+    pub model_service_tier_overrides: &'a BTreeMap<String, DefaultServiceTier>,
+    pub runtime: Option<&'a GatewayRuntime>,
+}
+
+pub fn apply_pool_model_configuration_with_context(
+    models: &mut [ModelSummary],
+    input: PoolModelConfigurationInput<'_>,
+) {
+    let PoolModelConfigurationInput {
+        sources,
+        accounts,
+        model_price_overrides,
+        model_reasoning_allowed_levels,
+        model_context_policies,
+        model_service_tier_overrides,
+        runtime,
+    } = input;
     let routes = super::model_protocols::ModelProtocolIndex::new(sources, accounts);
     let block_degraded_routes = runtime.is_none_or(GatewayRuntime::block_degraded_routes_enabled);
     for model in models {
@@ -310,6 +351,42 @@ pub fn apply_pool_model_configuration(
                 .unwrap_or(DefaultServiceTier::Standard),
             speed_tiers,
         );
+        // Context is a conversational setting. Image-only generation models
+        // must not expose Short, Extended, or Custom context policies.
+        model.context_configurable = crate::catalog::context_policy::model_supports_text_context(
+            &model.id,
+            model.catalog_family.as_deref(),
+            &model.catalog_output_modalities,
+        );
+        model.context_policy = model_context_policies
+            .get(&crate::model_id_key(&model_id))
+            .copied()
+            .unwrap_or_default();
+        let native_accounts = accounts
+            .iter()
+            .filter(|account| {
+                account.in_pool
+                    && account.oauth_client_kind
+                        == crate::providers::chatgpt::OAuthClientKind::Codex
+                    && account
+                        .models
+                        .iter()
+                        .any(|id| crate::model_id_key(id) == crate::model_id_key(&model_id))
+            })
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>();
+        model.context_windows = Some(runtime.map_or_else(
+            || {
+                crate::catalog::context_policy::ModelContextWindows {
+                    default_tokens: None,
+                    maximum_tokens: native_accounts
+                        .is_empty()
+                        .then_some(model.catalog_context_limit)
+                        .flatten(),
+                }
+            },
+            |runtime| runtime.model_context_windows(&model_id, native_accounts.iter().copied()),
+        ));
     }
 }
 
@@ -382,6 +459,13 @@ pub struct SetModelReasoningInput {
 pub struct SetModelServiceTierInput {
     pub model_id: String,
     pub service_tier: DefaultServiceTier,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelContextInput {
+    pub model_id: String,
+    pub context_policy: crate::ModelContextPolicy,
 }
 
 #[derive(Debug, Deserialize)]

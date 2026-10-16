@@ -5,8 +5,12 @@ use super::super::{
 use crate::WireApi;
 use serde_json::Value;
 
+mod tool_search;
+
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
-    checked(
+    let discovery = tool_search::prepare(request_body)?;
+    let request_body = discovery.as_ref();
+    super::super::options::messages_fields(
         request_body,
         &[
             "model",
@@ -16,14 +20,20 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             "max_tokens",
             "temperature",
             "top_p",
+            "top_k",
             "stop_sequences",
             "tools",
             "tool_choice",
             "thinking",
             "output_config",
+            "metadata",
         ],
     )?;
-    let mut decoded_request = Request::default();
+    let mut decoded_request = Request {
+        metadata: super::super::options::metadata(request_body, WireApi::Messages)?,
+        ..Default::default()
+    };
+    super::content::sampling_extensions(&mut decoded_request, request_body, false)?;
     if let Some(system) = request_body
         .get("system")
         .filter(|system| !system.is_null())

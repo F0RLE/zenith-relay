@@ -2,6 +2,71 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn nested_namespace_tools_roundtrip_across_all_responses_bridges() {
+    let request = json!({"input":"Find the file", "max_output_tokens":64,"tools":[{
+        "type":"namespace","name":"workspace","description":"Outer scope","tools":[{
+            "type":"namespace","name":"files","description":"Inner scope","tools":[
+                {"type":"function","name":"lookup","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+                {"type":"custom","name":"patch","format":{"type":"grammar","syntax":"regex","definition":"[a-z]+"}}
+            ]
+        }]
+    }]});
+    for upstream in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        let prepared = prepare(WireApi::Responses, upstream, &request, false);
+        let body = prepared.upstream_body();
+        let name = match upstream {
+            WireApi::ChatCompletions => &body["tools"][0]["function"]["name"],
+            WireApi::Messages => &body["tools"][0]["name"],
+            WireApi::Gemini => &body["tools"][0]["functionDeclarations"][0]["name"],
+            _ => unreachable!(),
+        }
+        .as_str()
+        .unwrap();
+        assert!(body.to_string().contains("Outer scope Inner scope"));
+        assert!(body.to_string().contains("[a-z]+"));
+        let response = match upstream {
+            WireApi::ChatCompletions => {
+                json!({"id":"chat_nested","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_nested","type":"function","function":{"name":name,"arguments":"{\"path\":\"file.txt\"}"}}]},"finish_reason":"tool_calls"}]})
+            }
+            WireApi::Messages => {
+                json!({"id":"msg_nested","content":[{"type":"tool_use","id":"call_nested","name":name,"input":{"path":"file.txt"}}],"stop_reason":"tool_use"})
+            }
+            WireApi::Gemini => {
+                json!({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_nested","name":name,"args":{"path":"file.txt"}}}]},"finishReason":"STOP"}]})
+            }
+            _ => unreachable!(),
+        };
+        let translated = prepared
+            .translate_response_bytes(&serde_json::to_vec(&response).unwrap())
+            .unwrap()
+            .unwrap();
+        let call = &translated.response_body()["output"][0];
+        assert_eq!(call["name"], "lookup");
+        assert_eq!(call["namespace"], "workspace.files");
+        let next = json!({"previous_response_id":translated.response_id(),"input":[{"type":"function_call_output","call_id":call["call_id"],"output":"found"}],"tools":request["tools"],"max_output_tokens":64});
+        let continuation = SourceAdapter::between(WireApi::Responses, upstream)
+            .unwrap()
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Responses,
+                request: &next,
+                model: "test",
+                stream: false,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: Some(translated.continuation().unwrap().1.clone()),
+                response_scope: "source-test",
+                response_id_seed: "next",
+            })
+            .unwrap();
+        assert!(continuation.upstream_body().to_string().contains("found"));
+        continuation
+            .translate_response_bytes(&serde_json::to_vec(&output(upstream)).unwrap())
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[test]
 fn responses_bridges_reject_malformed_controls_and_unknown_tool_fields() {
     for upstream in [WireApi::Messages, WireApi::Gemini, WireApi::ChatCompletions] {
         for request in [
@@ -222,7 +287,6 @@ fn chat_bridge_flattens_selected_codex_namespace_and_restores_it_on_output() {
             {"type": "message", "role": "user", "content": "go"}
         ],
         "tools": [
-            {"type": "web_search"},
             {
                 "type": "function",
                 "name": "shell",

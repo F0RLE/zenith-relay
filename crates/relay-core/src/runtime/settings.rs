@@ -16,8 +16,12 @@ impl GatewayRuntime {
             return;
         }
         let policy = crate::poison::read(&self.request_timezone);
-        if let Some(timezone) = policy.timezone_for(candidate_id) {
-            crate::request_timezone::rewrite_request_timezone(body, timezone);
+        let proxy_timezone = self
+            .chatgpt_accounts
+            .get(candidate_id)
+            .and_then(|account| account.proxy_timezone.as_deref());
+        if let Some(timezone) = policy.timezone_for(candidate_id, proxy_timezone) {
+            crate::request_timezone::rewrite_request_timezone(body, &timezone);
         }
     }
 

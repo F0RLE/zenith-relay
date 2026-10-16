@@ -19,6 +19,7 @@ pub(super) fn source_record(
             input.official_provider_family,
             "official provider family",
         )?,
+        proxy_id: input.proxy_id,
         wire_api: input.wire_api,
         protocol_bindings: input.protocol_bindings,
         protocol_config,
@@ -57,9 +58,39 @@ pub(super) fn validate_source_record(
         api_key: api_key.to_string(),
         wire_api: source_record.wire_api,
         models: source_record.models.clone(),
+        proxy_url: None,
     }
     .validate()
     .map_err(|error| validation_error(error.to_string()))
+}
+
+pub(super) fn source_proxy_url(
+    state: &AppState,
+    source_record: &SourceRecord,
+) -> Result<Option<String>, ManagementError> {
+    let Some(proxy_id) = source_record.proxy_id.as_deref() else {
+        return Ok(None);
+    };
+    let proxy_record = state
+        .store
+        .proxy(proxy_id)
+        .map_err(store_error)?
+        .ok_or_else(|| {
+            ManagementError::validation(
+                error_codes::PROXY_INVALID,
+                "source proxy reference is missing",
+            )
+        })?;
+    let proxy_url = state
+        .vault
+        .load(&proxy_record.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::validation(error_codes::PROXY_INVALID, "source proxy is unavailable")
+        })?;
+    zenith_relay_core::normalize_proxy_url(&proxy_url)
+        .map(Some)
+        .map_err(|message| ManagementError::validation(error_codes::PROXY_INVALID, message))
 }
 
 pub(super) fn normalize_pricing_identity(

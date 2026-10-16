@@ -13,6 +13,7 @@ fn pool_snapshot_configuration_keeps_model_speed_without_a_running_listener() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),
@@ -89,6 +90,7 @@ fn pool_snapshot_applies_reference_speed_with_a_configured_transport() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),
@@ -115,6 +117,7 @@ fn pool_snapshot_applies_reference_speed_with_a_configured_transport() {
             api_key: "synthetic-upstream-secret".into(),
             wire_api: source.wire_api,
             models: source.models.clone(),
+            proxy_url: None,
         })],
         vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
             id: "key_1".into(),
@@ -162,6 +165,7 @@ fn pool_model_summaries_include_the_runtime_messages_bridge() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_config: crate::SourceProtocolConfig::default(),
         protocol_bindings: vec![

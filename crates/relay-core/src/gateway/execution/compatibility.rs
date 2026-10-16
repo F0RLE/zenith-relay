@@ -1,26 +1,30 @@
 use crate::gateway::request::{candidate_protocols, requested_reasoning_effort, ServiceTierPolicy};
-use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier};
+use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier, ExecutorRoute};
 use crate::{
     AdapterError, AdapterRequestContext, CapabilityStatus, GatewayRuntime, ProtocolFeature, WireApi,
 };
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Admission happens before a member consumes rotation credit or capacity.
-pub(super) struct RouteCompatibility<'a> {
-    pub(super) runtime: &'a GatewayRuntime,
-    pub(super) key: &'a AuthenticatedKey,
-    pub(super) model: &'a str,
-    pub(super) client: WireApi,
-    pub(super) request: &'a Value,
-    pub(super) stream: bool,
-    pub(super) tier_policy: &'a ServiceTierPolicy,
-    pub(super) now_ms: u64,
+pub(in crate::gateway) struct RouteCompatibility<'a> {
+    pub(in crate::gateway) runtime: &'a GatewayRuntime,
+    pub(in crate::gateway) key: &'a AuthenticatedKey,
+    pub(in crate::gateway) model: &'a str,
+    pub(in crate::gateway) client: WireApi,
+    pub(in crate::gateway) request: &'a Value,
+    pub(in crate::gateway) stream: bool,
+    pub(in crate::gateway) tier_policy: &'a ServiceTierPolicy,
+    pub(in crate::gateway) now_ms: u64,
 }
 
-pub(super) fn incompatible_routes(
+pub(in crate::gateway) fn incompatible_routes(
     input: RouteCompatibility<'_>,
-) -> (HashSet<String>, Option<AdapterError>) {
+) -> (
+    HashSet<String>,
+    BTreeMap<String, ExecutorRoute>,
+    Option<AdapterError>,
+) {
     let RouteCompatibility {
         runtime,
         key,
@@ -32,12 +36,31 @@ pub(super) fn incompatible_routes(
         now_ms,
     } = input;
     let mut excluded = HashSet::new();
+    let mut admitted = BTreeMap::new();
     let mut last_error = None;
     let features = requested_features(request, stream);
     let effort = requested_reasoning_effort(request, client);
+    // A picker is not an enforcement boundary. Check the same model policy
+    // for every client, including Desktop's single opaque model entry.
+    let effort_denied_by_pool = effort.as_ref().is_some_and(|effort| {
+        runtime
+            .model_reasoning_policy_levels(model)
+            .is_some_and(|levels| {
+                !levels
+                    .iter()
+                    .any(|level| level.eq_ignore_ascii_case(effort))
+            })
+    });
     for route in runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
     {
+        if admitted.contains_key(&route.candidate_id) {
+            continue;
+        }
         let validate = || {
+            if effort_denied_by_pool {
+                return Err(AdapterError::reasoning_unsupported());
+            }
+            runtime.validate_continuation_route(&route, &key.id, request, now_ms)?;
             let capability = runtime
                 .model_capabilities(&route.source_model)
                 .for_route(route.route_capability.as_ref());
@@ -56,7 +79,7 @@ pub(super) fn incompatible_routes(
             // Reference model capabilities and exact source-route evidence
             // constrain conversions. A raw /models listing alone is not
             // capability evidence. Native payloads still pass through.
-            if !route.adapter.is_passthrough() {
+            {
                 if capability.temperature == Some(false)
                     && request
                         .get("temperature")
@@ -64,13 +87,9 @@ pub(super) fn incompatible_routes(
                 {
                     return Err(AdapterError::parameter_unsupported_for("temperature"));
                 }
-                if capability.parallel_tool_call == Some(false)
-                    && request.get("parallel_tool_calls").and_then(Value::as_bool) == Some(true)
-                {
-                    return Err(AdapterError::parameter_unsupported_for(
-                        "parallel_tool_calls",
-                    ));
-                }
+                // Allowing parallel calls does not require the model to
+                // produce them. The adapter owns representation of this
+                // permission and enforcement of an explicit single-call limit.
                 let supported =
                     capability.protocol_features_for_route(route.route_capability.as_ref());
                 if let Some(feature) = features
@@ -89,7 +108,8 @@ pub(super) fn incompatible_routes(
                 }
                 if effort.as_ref().is_some_and(|effort| {
                     let levels = &capability.reasoning_effort_levels;
-                    !levels.is_empty()
+                    !(effort == "none" && capability.reasoning == Some(false))
+                        && !levels.is_empty()
                         && !levels
                             .iter()
                             .any(|level| level.eq_ignore_ascii_case(effort))
@@ -135,12 +155,18 @@ pub(super) fn incompatible_routes(
                 )
                 .map(drop)
         };
-        if let Err(error) = validate() {
-            excluded.insert(route.candidate_id);
-            last_error = Some(error);
+        match validate() {
+            Err(error) => {
+                excluded.insert(route.candidate_id);
+                last_error = Some(error);
+            }
+            Ok(()) => {
+                excluded.remove(&route.candidate_id);
+                admitted.insert(route.candidate_id.clone(), route);
+            }
         }
     }
-    (excluded, last_error)
+    (excluded, admitted, last_error)
 }
 
 pub(super) fn basis_points_route_error(
@@ -159,22 +185,20 @@ pub(super) fn basis_points_route_error(
 
 /// Shared pre-dispatch rejection for a Basis Points account.
 ///
-/// An unsupported account endpoint wins over Responses Lite. Both win over a
-/// request the transport cannot carry. Callers still decide whether to skip
+/// An unsupported account endpoint wins over a request the transport cannot
+/// carry. The Basis Points adapter translates the Responses Lite item-level
+/// tool catalog locally; callers keep that body normalization but do not
+/// forward the Lite transport header. Callers still decide whether to skip
 /// the candidate or stop the request.
 pub(super) fn basis_points_admission_error(
     request: &Value,
     stream: bool,
     tier_policy: &ServiceTierPolicy,
     selected_tier: DefaultServiceTier,
-    responses_lite: bool,
     rejected_endpoint: bool,
 ) -> Option<AdapterError> {
     if rejected_endpoint {
         return Some(AdapterError::parameter_unsupported_for("endpoint"));
-    }
-    if responses_lite {
-        return Some(AdapterError::parameter_unsupported_for("responses_lite"));
     }
     basis_points_route_error(request, stream, tier_policy, selected_tier)
 }
@@ -216,10 +240,25 @@ fn requested_features(request: &Value, stream: bool) -> Vec<ProtocolFeature> {
     {
         requested_features.push(ProtocolFeature::StructuredOutput);
     }
-    if present(request.pointer("/reasoning/effort"))
-        || present(request.get("reasoning_effort"))
-        || present(request.get("thinking"))
-        || present(request.pointer("/generationConfig/thinkingConfig"))
+    let active_effort = |value: Option<&Value>| {
+        value.is_some_and(|value| {
+            !value.is_null()
+                && !value.as_str().is_some_and(|effort| {
+                    crate::catalog::canonical_reasoning_level(effort) == "none"
+                })
+        })
+    };
+    if active_effort(request.pointer("/reasoning/effort"))
+        || active_effort(request.get("reasoning_effort"))
+        || request.get("thinking").is_some_and(|thinking| {
+            !thinking.is_null() && thinking.get("type").and_then(Value::as_str) != Some("disabled")
+        })
+        || request
+            .pointer("/generationConfig/thinkingConfig")
+            .is_some_and(|thinking| {
+                !thinking.is_null()
+                    && thinking.get("thinkingBudget").and_then(Value::as_u64) != Some(0)
+            })
     {
         requested_features.push(ProtocolFeature::Reasoning);
     }
@@ -284,6 +323,10 @@ mod tests {
             json!({"reasoning":null,"tool_choice":null,"text":{"format":{"type":"text"}}}),
             json!({"reasoning":{},"response_format":{"type":"text"}}),
             json!({"generationConfig":{"responseMimeType":"text/plain","thinkingConfig":null}}),
+            json!({"reasoning":{"effort":"none"}}),
+            json!({"reasoning_effort":"NONE"}),
+            json!({"thinking":{"type":"disabled"}}),
+            json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}),
         ] {
             assert_eq!(requested_features(&request, false), [ProtocolFeature::Text]);
         }

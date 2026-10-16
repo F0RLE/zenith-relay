@@ -9,6 +9,9 @@ pub async fn create_local_source(
     let _mutation = state.setup_guard().await;
     let source_id = format!("source_{}", Uuid::new_v4().simple());
     let secret_ref = format!("source:{source_id}");
+    let proxy_id = validated_source_proxy_id(input.proxy_id)?;
+    let proxy_url =
+        crate::local_pool::accounts::proxy::ProxyPool::load()?.source_url(proxy_id.as_deref())?;
     let mut runtime_source = ProviderSource {
         id: source_id.clone(),
         name: input.name.trim().to_string(),
@@ -16,6 +19,7 @@ pub async fn create_local_source(
         api_key: input.api_key.trim().to_string(),
         wire_api: input.wire_api,
         models: input.models,
+        proxy_url,
     };
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
@@ -89,6 +93,7 @@ pub async fn create_local_source(
         protocol_bindings,
         protocol_config,
         models: runtime_source.models,
+        proxy_id,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
         priority: input.priority,
@@ -136,6 +141,10 @@ pub async fn update_local_source(
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     let detected_model_prices =
         detected_prices_for_upstream(&existing_source, &input.base_url, &input.wire_api);
+    let proxy_id = match input.proxy_id {
+        Some(proxy_id) => validated_source_proxy_id(proxy_id)?,
+        None => existing_source.proxy_id.clone(),
+    };
     let mut protocol_config = existing_source.protocol_config.clone();
     if input.base_url.trim() != existing_source.base_url {
         protocol_config.invalidate(&input.base_url);
@@ -164,6 +173,7 @@ pub async fn update_local_source(
             .unwrap_or(existing_source.protocol_bindings),
         protocol_config,
         models: input.models,
+        proxy_id,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
         priority: input.priority,
@@ -349,6 +359,7 @@ pub async fn rotate_local_source_key(
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     let api_key = api_key.trim().to_string();
+    let proxy_url = source_proxy_url(&source_record)?;
     ProviderSource {
         id: source_record.id.clone(),
         name: source_record.name.clone(),
@@ -356,6 +367,7 @@ pub async fn rotate_local_source_key(
         api_key: api_key.clone(),
         wire_api: source_record.wire_api,
         models: source_record.models.clone(),
+        proxy_url,
     }
     .validate()
     .map_err(core_error)?;

@@ -19,10 +19,12 @@ pub struct SourceConnector {
     pub(crate) responses_url: Url,
     pub(crate) chat_completions_url: Url,
     pub(crate) messages_url: Url,
-    pub(crate) models_url: Url,
+    models_url: Url,
+    gemini_models_url: Url,
     bearer_authorization: HeaderValue,
     messages_api_key: HeaderValue,
     protocol_bindings: Vec<SourceProtocolBinding>,
+    pub(crate) proxy: Option<crate::ProxyConfig>,
 }
 
 impl SourceConnector {
@@ -37,6 +39,14 @@ impl SourceConnector {
             Error::Validation("source API key contains invalid header characters".to_string())
         })?;
         messages_api_key.set_sensitive(true);
+        let proxy = source
+            .proxy_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|proxy_url| !proxy_url.is_empty())
+            .map(crate::ProxyConfig::parse)
+            .transpose()
+            .map_err(|message| Error::Validation(message.to_string()))?;
         Ok(Self {
             id: source.id.clone(),
             base_url: base_url.clone(),
@@ -52,9 +62,13 @@ impl SourceConnector {
             models_url: base_url
                 .join("models")
                 .map_err(|_| Error::Validation("source models URL is invalid".to_string()))?,
+            gemini_models_url: gemini_models_endpoint(&base_url).ok_or_else(|| {
+                Error::Validation("source Gemini models URL is invalid".to_string())
+            })?,
             bearer_authorization,
             messages_api_key,
             protocol_bindings: bindings.to_vec(),
+            proxy,
         })
     }
 
@@ -73,10 +87,12 @@ impl SourceConnector {
             chat_completions_url: base_url.join("chat/completions").ok()?,
             messages_url: base_url.join("messages").ok()?,
             models_url: base_url.join("models").ok()?,
+            gemini_models_url: gemini_models_endpoint(&base_url)?,
             base_url,
             bearer_authorization: self.bearer_authorization.clone(),
             messages_api_key: self.messages_api_key.clone(),
             protocol_bindings: bindings.to_vec(),
+            proxy: self.proxy.clone(),
         })
     }
 
@@ -137,10 +153,10 @@ impl SourceConnector {
         {
             return None;
         }
-        let mut url = self.base_url.clone();
+        let mut url = self.gemini_models_url.clone();
         {
             let mut segments = url.path_segments_mut().ok()?;
-            segments.pop_if_empty().push("models").push(model_id);
+            segments.pop_if_empty().push(model_id);
         }
         let path = format!(
             "{}:{}",
@@ -156,6 +172,13 @@ impl SourceConnector {
             url.query_pairs_mut().append_pair("alt", "sse");
         }
         Some(url)
+    }
+
+    pub(crate) fn models_endpoint_for_binding(&self, binding: &SourceProtocolBinding) -> &Url {
+        match binding.adapter.upstream_protocol(binding.wire_api) {
+            UpstreamProtocol::GeminiGenerateContent => &self.gemini_models_url,
+            _ => &self.models_url,
+        }
     }
 
     pub fn canonical_model_for(
@@ -217,6 +240,17 @@ impl SourceConnector {
     }
 }
 
+fn gemini_models_endpoint(base_url: &Url) -> Option<Url> {
+    let mut root = base_url.clone();
+    if let Some(service) = root
+        .host_str()
+        .and_then(super::services::Service::from_host)
+    {
+        service.normalize_gemini_api_root(&mut root);
+    }
+    root.join("models").ok()
+}
+
 impl fmt::Debug for SourceConnector {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -243,6 +277,7 @@ mod tests {
             name: "Synthetic source".to_string(),
             base_url: "https://api.example.test/v1".to_string(),
             api_key: "source-secret".to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec!["responses-model".to_string(), "messages-model".to_string()],
         }

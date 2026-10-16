@@ -5,7 +5,31 @@ use zenith_relay_core::{
     RuntimeSource,
 };
 
-pub(super) fn runtime_source(source_record: SourceRecord, api_key: String) -> RuntimeSource {
+pub(crate) fn source_proxy_url(
+    state: &crate::state::AppState,
+    source_record: &SourceRecord,
+) -> Result<Option<String>, String> {
+    let Some(proxy_id) = source_record.proxy_id.as_deref() else {
+        return Ok(None);
+    };
+    let proxy_record = state
+        .store
+        .proxy(proxy_id)?
+        .ok_or_else(|| "stored source proxy reference is missing".to_string())?;
+    let proxy_url = state
+        .vault
+        .load(&proxy_record.secret_ref)?
+        .ok_or_else(|| "stored source proxy secret is missing".to_string())?;
+    zenith_relay_core::normalize_proxy_url(&proxy_url)
+        .map(Some)
+        .map_err(|message| message.to_string())
+}
+
+pub(super) fn runtime_source(
+    source_record: SourceRecord,
+    api_key: String,
+    proxy_url: Option<String>,
+) -> RuntimeSource {
     RuntimeSource {
         source: ProviderSource {
             id: source_record.id,
@@ -14,6 +38,7 @@ pub(super) fn runtime_source(source_record: SourceRecord, api_key: String) -> Ru
             api_key,
             wire_api: source_record.wire_api,
             models: source_record.models,
+            proxy_url,
         },
         protocol_bindings: source_record.protocol_bindings,
         protocol_config: source_record.protocol_config,
@@ -32,6 +57,7 @@ pub(super) fn runtime_account(
     account_record: ServerAccountRecord,
     credential: &crate::state::AccountCredential,
     proxy: Option<ProxyConfig>,
+    proxy_timezone: Option<String>,
     quota_stale_after_ms: u64,
 ) -> RuntimeChatGptAccount {
     let operational = account_operational_state(AccountOperationalInput::from_source(
@@ -74,6 +100,7 @@ pub(super) fn runtime_account(
         cooldowns: account_record.cooldowns,
         consecutive_failures: account_record.consecutive_failures,
         proxy,
+        proxy_timezone,
     }
 }
 

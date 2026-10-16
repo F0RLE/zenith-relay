@@ -61,11 +61,26 @@ fn windows_opencode_desktop_path_excludes_cli_installation() {
     assert!(is_windows_opencode_desktop_path(Path::new(
         r"C:\Users\test\AppData\Local\Programs\@opencode-aidesktop\opencode.exe"
     )));
+    assert!(is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\OpenCode\OpenCode.exe"
+    )));
+    assert!(is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\OpenCode Beta\OpenCode Beta.exe"
+    )));
+    assert!(!is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\OpenCode\resources\opencode.exe"
+    )));
+    assert!(!is_windows_opencode_desktop_path(Path::new(
+        r"D:\Apps\Other\opencode.exe"
+    )));
     assert!(!is_windows_opencode_desktop_path(Path::new(
         r"C:\Users\test\AppData\Local\Programs\OpenCode\bin\opencode.exe"
     )));
     assert!(!is_windows_opencode_desktop_path(Path::new(
         r"C:\Users\test\.opencode\bin\opencode.exe"
+    )));
+    assert!(!is_windows_opencode_desktop_path(Path::new(
+        r"C:\Users\test\scoop\apps\opencode\current\opencode.exe"
     )));
 }
 

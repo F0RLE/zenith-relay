@@ -1,9 +1,8 @@
 use super::catalog::{client_tools, requires_tool_call, selected_tools, ClientTool};
 use super::codec::{
-    as_input_items, basis_points_metadata, basis_points_reasoning_effort, sanitized_metadata,
-    text_message,
+    as_input_items, basis_points_metadata, basis_points_reasoning_effort, text_message,
 };
-use super::history::translate_input_items;
+use super::history::{separate_tool_images, translate_input_items};
 use super::response::has_encrypted_agent_message;
 use super::schema::{matches as schema_matches, parameter_schema, prompt_schema, validator};
 use super::{is_transport_tool, FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS};
@@ -48,7 +47,7 @@ pub(super) fn tool_instructions(tools: &[ClientTool], request: &Value) -> String
                 }
             }
         } else if let Some(schema) = parameter_schema(tool) {
-            line.push_str(". Arguments (names followed by ? are optional): ");
+            line.push_str(". Arguments must be one JSON object matching this JSON Schema: ");
             line.push_str(&prompt_schema(schema));
         }
         lines.push(line);
@@ -176,7 +175,10 @@ pub(in crate::gateway::execution) fn prepare_request(
             "input.agent_message.encrypted_content",
         ));
     }
-    validate_text_format(request_object.get("text"))?;
+    let structured = super::structured_output::prepare(request)?;
+    if structured.is_none() {
+        validate_text_format(request_object.get("text"))?;
+    }
     let all_tools = client_tools(request)?;
     if all_tools.iter().any(|tool| is_transport_tool(&tool.key())) {
         return Err(AdapterError::invalid_request().with_parameter("tools"));
@@ -209,9 +211,8 @@ pub(in crate::gateway::execution) fn prepare_request(
     );
     upstream_request.insert("store".to_string(), Value::Bool(false));
     // Keep the upstream transport mode aligned with the client request. The
-    // runtime still buffers a Basis Points response before translating it, but
-    // the provider contract itself accepts the same stream flag as the
-    // official adapter.
+    // runtime streams ordinary text and withholds tools until validation. The
+    // opt-in local JSON validator withholds the whole answer instead.
     upstream_request.insert(
         "stream".to_string(),
         Value::Bool(
@@ -235,9 +236,11 @@ pub(in crate::gateway::execution) fn prepare_request(
         upstream_request.insert("context_management".to_string(), context_management.clone());
     }
 
-    let mut input_items =
-        translate_input_items(as_input_items(request_object.get("input")), &all_tools)?;
+    let input_items = as_input_items(request_object.get("input"));
+    // Transport-generated user messages (agent context and tool images) must
+    // not create a new logical user turn or reset agent_iteration.
     let metadata = basis_points_metadata(request_object, &input_items);
+    let mut input_items = separate_tool_images(translate_input_items(input_items, &all_tools)?);
     let mut prologue = Vec::new();
     if let Some(instructions) = request_object.get("instructions").and_then(Value::as_str) {
         if !instructions.trim().is_empty() {
@@ -253,6 +256,13 @@ pub(in crate::gateway::execution) fn prepare_request(
         "input_text",
         tool_instructions(&callable, request),
     ));
+    if let Some(structured) = structured {
+        prologue.push(text_message(
+            "developer",
+            "input_text",
+            structured.instructions(),
+        ));
+    }
     input_items.splice(0..0, prologue);
     upstream_request.insert("input".to_string(), Value::Array(input_items));
 
@@ -267,13 +277,11 @@ pub(in crate::gateway::execution) fn prepare_request(
             Value::String(prompt_cache_key.to_string()),
         );
     }
-    let mut metadata_object = metadata.as_object().cloned().unwrap_or_default();
-    if let Some(Value::Object(custom)) = sanitized_metadata(request_object.get("metadata")) {
-        for (metadata_key, metadata_value) in custom {
-            metadata_object.insert(metadata_key, metadata_value);
-        }
-    }
-    upstream_request.insert("metadata".to_string(), Value::Object(metadata_object));
+    // This is BPS transport state, not arbitrary Responses metadata. Even a
+    // standard Anthropic `user_id` makes BPS reject the entire body with 422.
+    // Keep client metadata on the original request and restore it in the
+    // translated response; only Relay-owned task/turn/iteration fields go out.
+    upstream_request.insert("metadata".to_string(), metadata);
 
     // Basis Points does not accept a server-side `tools`/`tool_choice` body.
     // The official adapter supplies the client tool catalog in developer

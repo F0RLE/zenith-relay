@@ -112,11 +112,8 @@ fn apply_queued_account_usage(
     for queued in events {
         let event = &queued.event;
         let previous_quota = account.quota.clone();
-        if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
-            snapshot.updated_at_ms.unwrap_or_default()
-                >= account.quota.updated_at_ms.unwrap_or_default()
-        }) {
-            account.quota = snapshot.clone();
+        if let Some(snapshot) = event.quota_snapshot.as_ref() {
+            account.quota.merge_observation(snapshot);
         }
         new_passive |= event.success
             && event.quota_snapshot.as_ref().is_some_and(|snapshot| {

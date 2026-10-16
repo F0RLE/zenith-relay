@@ -121,7 +121,7 @@ pub(in crate::local_pool::profiles::codex) fn read_catalog_values(
     if content.len() > MAX_MODEL_CATALOG_BYTES {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "ChatGPT model catalog exceeds 512 KiB",
+            "ChatGPT model catalog exceeds 4 MiB",
         ));
     }
     let catalog_document: Value = serde_json::from_slice(content).map_err(|_| {
@@ -208,17 +208,16 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
     let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
     let policy_document: Value =
         serde_json::from_str(relay_catalog_json).map_err(LocalPoolError::invalid_state)?;
-    let context_policy: zenith_relay_core::catalog::context_policy::ApplicationContextPolicy =
-        policy_document
-            .get("relay_context_policy")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(LocalPoolError::invalid_state)?
-            .unwrap_or_default();
-    context_policy
-        .validate()
-        .map_err(LocalPoolError::invalid_state)?;
+    let model_policies: std::collections::BTreeMap<
+        String,
+        zenith_relay_core::catalog::context_policy::ModelContextPolicy,
+    > = policy_document
+        .get("relay_model_context_policies")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(LocalPoolError::invalid_state)?
+        .unwrap_or_default();
     // The managed provider is the Relay endpoint, so the catalog must contain
     // only models that its live pool exposes. Native/user catalog rows remain
     // untouched in their original profile and only supply a compatible template.
@@ -328,8 +327,15 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
             .get("relay_context_limits")
             .and_then(|limits| limits.get(zenith_relay_core::model_id_key(&model_id)))
         {
-            context_policy.apply(
+            // The per-model Short/Long choice applies only when the provider
+            // published a long window for this exact row.
+            let selected = model_policies
+                .get(&zenith_relay_core::model_id_key(&model_id))
+                .copied()
+                .unwrap_or_default();
+            zenith_relay_core::catalog::context_policy::apply_model_context(
                 &mut catalog_entry,
+                selected,
                 limits.get("context").and_then(Value::as_u64),
                 limits.get("input").and_then(Value::as_u64),
                 limits.get("output").and_then(Value::as_u64),

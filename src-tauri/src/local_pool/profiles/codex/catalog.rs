@@ -11,7 +11,10 @@ use zenith_relay_core::{
     CODEX_RELAY_CATALOG_HASH,
 };
 
-const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+// Keep the desktop catalog bound aligned with the shared model-discovery
+// transport limit. Native ChatGPT catalogs can legitimately exceed 512 KiB
+// once capability metadata for the full visible inventory is included.
+const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
 mod installed;
@@ -52,7 +55,9 @@ mod ultra_tests {
             {"slug": "gpt-future", "supported_reasoning_levels": [
                 {"effort": "max"}, {"effort": "ultra"}
             ], "multi_agent_version": "v2", "multi_agent_reasoning_effort": "xhigh",
-               "base_instructions": "not a Relay instruction"},
+               "base_instructions": "not a Relay instruction",
+               "context_window": 272000, "max_context_window": 872000,
+               "auto_compact_token_limit": 244800, "effective_context_window_percent": 95},
             {"slug": "gpt-short", "context_window": 272000, "max_context_window": 872000,
                "auto_compact_token_limit": 244800, "effective_context_window_percent": 95,
                "supported_reasoning_levels": [{"effort": "max"}]},
@@ -61,21 +66,26 @@ mod ultra_tests {
         let official = official_codex_ultra_rows(&catalog);
         assert!(official.contains_key("gpt-future"));
         assert!(!official.contains_key("gpt-other"));
-        assert_eq!(official["gpt-short"]["context_window"], 272_000);
-        assert_eq!(
-            official["gpt-short"]["supported_reasoning_levels"],
-            json!([])
-        );
-        assert!(official["gpt-short"].get("max_context_window").is_none());
-        assert!(official["gpt-short"]
-            .get("auto_compact_token_limit")
-            .is_none());
-        assert!(official["gpt-short"]
-            .get("effective_context_window_percent")
-            .is_none());
+        assert!(!official.contains_key("gpt-short"));
+        for field in [
+            "context_window",
+            "max_context_window",
+            "auto_compact_token_limit",
+            "effective_context_window_percent",
+        ] {
+            assert!(official["gpt-future"].get(field).is_none(), "{field}");
+        }
         let mut relay = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
         relay["slug"] = json!("gpt-future");
-        relay["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
+        relay["context_window"] = json!(500_000);
+        relay["max_context_window"] = json!(1_050_000);
+        relay["auto_compact_token_limit"] = json!(450_000);
+        relay["effective_context_window_percent"] = json!(100);
+        relay["supported_reasoning_levels"] = json!([
+            {"effort": "xhigh", "description": "Extra high"},
+            {"effort": "max", "description": "Maximum"}
+        ]);
+        assert!(codex_catalog_entry_is_compatible(&relay));
         let mut qualified = routed_codex_catalog_entry(None, "vendor/gpt-future", 1_001, None);
         qualified["supported_reasoning_levels"] = json!([{"effort": "xhigh"}, {"effort": "max"}]);
         let relay_catalog = json!({"models": [relay, qualified]});
@@ -94,6 +104,13 @@ mod ultra_tests {
             "ultra"
         );
         assert_eq!(managed["models"][0]["multi_agent_version"], "v2");
+        assert_eq!(managed["models"][0]["context_window"], 500_000);
+        assert_eq!(managed["models"][0]["max_context_window"], 1_050_000);
+        assert_eq!(managed["models"][0]["auto_compact_token_limit"], 450_000);
+        assert_eq!(
+            managed["models"][0]["effective_context_window_percent"],
+            100
+        );
         assert_eq!(
             managed["models"][0]["multi_agent_reasoning_effort"],
             "xhigh"
@@ -202,5 +219,18 @@ mod ultra_tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepts_chatgpt_catalogs_larger_than_legacy_512_kib_limit() {
+        let catalog = json!({
+            "models": [{
+                "slug": "gpt-large-catalog",
+                "description": "x".repeat(600 * 1024)
+            }]
+        });
+        let content = serde_json::to_vec(&catalog).unwrap();
+        assert!(content.len() > 512 * 1024);
+        assert_eq!(read_catalog_values(&content, false).unwrap().len(), 1);
     }
 }

@@ -8,7 +8,9 @@ use crate::{
 use serde_json::{Map, Value};
 
 mod order;
+#[cfg(test)]
 pub(super) use order::serialize_config;
+pub(super) use order::serialize_config_with_model_order;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -91,12 +93,20 @@ pub(super) fn read_config(path: &Path) -> Result<Map<String, Value>, LocalPoolEr
 }
 
 pub(super) fn write_config(path: &Path, config: &Map<String, Value>) -> Result<(), LocalPoolError> {
+    write_config_with_model_order(path, config, &[])
+}
+
+pub(super) fn write_config_with_model_order(
+    path: &Path,
+    config: &Map<String, Value>,
+    models: &[String],
+) -> Result<(), LocalPoolError> {
     let parent = path.parent().ok_or_else(|| {
         LocalPoolError::new(ErrorCode::Io, "OpenCode config has no parent directory")
     })?;
     fs::create_dir_all(parent)
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
-    let content = serialize_config(config)
+    let content = serialize_config_with_model_order(config, models)
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
     atomic_write(path, &format!("{content}\n"))
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error))

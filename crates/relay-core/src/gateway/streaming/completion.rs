@@ -15,12 +15,14 @@ pub(super) struct StreamCompletionSettlement {
     pub(super) lease: CandidateLease,
     pub(super) runtime: std::sync::Arc<crate::GatewayRuntime>,
     pub(super) candidate_id: String,
+    pub(super) route: crate::runtime::ExecutorRoute,
     pub(super) model: String,
     pub(super) headers: HeaderMap,
     pub(super) prompt_affinity: Option<String>,
     pub(super) uses_response_affinity: bool,
     pub(super) bridge_state: Option<Arc<Mutex<Option<MessagesBridgeResponse>>>>,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
+    pub(super) tool_call_capture: Arc<Mutex<crate::gateway::request::ToolCallCapture>>,
     pub(super) native_template: Value,
     pub(super) local_key: String,
 }
@@ -36,7 +38,10 @@ impl StreamCompletionSettlement {
             crate::poison::mutex(capture).apply_to(event);
         }
         if event.success {
-            self.lease.settle_rotation_success(now_ms());
+            let recovered = self
+                .lease
+                .settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
+            event.consecutive_failures = recovered.then_some(0);
         } else {
             // This callback belongs to an already returned response body.
             // A terminal failure may affect health, but can never replay it.
@@ -83,14 +88,12 @@ impl StreamCompletionSettlement {
         // delivered bytes to the client, but it must not warm affinity or
         // reset the selected slot's failure state.
         if event.success {
-            let recovered = self.runtime.record_success_with_metrics(
-                &self.candidate_id,
-                &self.model,
+            crate::poison::mutex(&self.tool_call_capture).bind(
+                &self.runtime,
+                &self.local_key,
+                &self.route,
                 now_ms(),
-                event.output_tokens,
-                event.generation_ms.unwrap_or(event.latency_ms),
             );
-            event.consecutive_failures = recovered.then_some(0);
             self.runtime.bind_prompt_affinity(
                 self.prompt_affinity.as_deref(),
                 &self.candidate_id,
@@ -98,13 +101,13 @@ impl StreamCompletionSettlement {
             );
             if self.uses_response_affinity {
                 self.runtime
-                    .bind_response_affinity(response_id, &self.candidate_id, now_ms());
+                    .bind_response_route_affinity(response_id, &self.route, now_ms());
             }
             if let Some(shared) = self.bridge_state.as_ref() {
                 if let Some(messages_bridge_response) = crate::poison::mutex(shared).take() {
-                    self.runtime.save_messages_bridge_response(
+                    self.runtime.save_messages_bridge_response_for_route(
                         &self.local_key,
-                        &self.candidate_id,
+                        &self.route,
                         &messages_bridge_response,
                         now_ms(),
                     );
@@ -113,10 +116,10 @@ impl StreamCompletionSettlement {
             if let Some(shared) = self.native_response.as_ref() {
                 if let Some(native_response_payload) = crate::poison::mutex(shared).take() {
                     for call_id in response_tool_call_ids(&native_response_payload) {
-                        self.runtime.bind_tool_call_affinity(
+                        self.runtime.bind_tool_call_route_affinity(
                             &self.local_key,
                             &call_id,
-                            &self.candidate_id,
+                            &self.route,
                             now_ms(),
                         );
                     }

@@ -10,6 +10,7 @@ async fn native_catalogs_details_and_generation_share_key_model_permissions() {
                 name: "Synthetic catalog".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key: SOURCE_KEY.into(),
+                proxy_url: None,
                 wire_api,
                 models: vec!["shown".into(), "hidden".into()],
             })

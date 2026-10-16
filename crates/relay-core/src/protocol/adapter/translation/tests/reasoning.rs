@@ -1,5 +1,64 @@
 use super::*;
 
+#[test]
+fn explicit_disabled_reasoning_does_not_require_model_reasoning_support() {
+    let capabilities = crate::model_metadata::ModelCapabilities {
+        reasoning: Some(false),
+        reasoning_effort_levels: vec!["high".into()],
+        ..Default::default()
+    };
+    let native = SourceAdapter::between(WireApi::Responses, WireApi::Responses).unwrap();
+    assert!(!native.supports_reasoning_effort_for_model(
+        MessagesReasoningMode::Disabled,
+        "high",
+        &capabilities
+    ));
+    assert!(native.supports_reasoning_effort_for_model(
+        MessagesReasoningMode::Disabled,
+        "none",
+        &capabilities
+    ));
+    for upstream in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        let adapter = SourceAdapter::between(WireApi::Responses, upstream).unwrap();
+        for effort in ["none", "high"] {
+            let request =
+                json!({"input":"Hello", "max_output_tokens":64,"reasoning":{"effort":effort}});
+            let prepared = adapter.prepare_request_with_capabilities(
+                AdapterRequestContext {
+                    client_wire_api: WireApi::Responses,
+                    request: &request,
+                    model: "test",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Adaptive,
+                    cache_write_ttl: CacheWriteTtl::Provider,
+                    previous: None,
+                    response_scope: "disabled-test",
+                    response_id_seed: "request-test",
+                },
+                &capabilities,
+            );
+            if effort == "high" {
+                assert_eq!(
+                    prepared.unwrap_err().code(),
+                    "adapter_reasoning_unsupported"
+                );
+            } else {
+                let prepared = prepared.unwrap();
+                for field in ["reasoning", "reasoning_effort", "thinking", "output_config"] {
+                    assert!(
+                        prepared.upstream_body().get(field).is_none(),
+                        "{upstream:?}: {field}"
+                    );
+                }
+                assert!(prepared
+                    .upstream_body()
+                    .pointer("/generationConfig/thinkingConfig")
+                    .is_none());
+            }
+        }
+    }
+}
+
 fn prepare_reasoning(
     client: WireApi,
     upstream: WireApi,

@@ -155,5 +155,5 @@ pub(in crate::gateway::websocket) fn initial_payloads_are_empty_incomplete(
                 && !is_compaction_payload(upstream_payload, event_type)
         })
         .count();
-    is_empty_responses_incomplete(terminal, saw_output, completed_output_items)
+    is_empty_responses_terminal(terminal, saw_output, completed_output_items)
 }

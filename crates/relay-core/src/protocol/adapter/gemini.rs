@@ -1,9 +1,11 @@
-use super::contracts::{
-    bridged_namespace_tool_name, custom_tool_item_id, prepare_bridge_state, request_tool_catalog,
-    AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeState, MessagesReasoningMode,
-    ResponsesToolKind,
-};
+use super::contracts::{AdapterError, AdapterResult};
 use serde_json::{json, Map, Value};
+
+/// A bare empty text part has no replay state and can make Gemini reject a
+/// tool continuation. Empty parts with signatures or metadata remain opaque.
+pub(in crate::protocol::adapter) fn is_noop_text_part(part: &Map<String, Value>) -> bool {
+    part.len() == 1 && part.get("text").and_then(Value::as_str) == Some("")
+}
 
 /// Validate the Gemini parts this adapter can preserve. Native routes do not
 /// use this restriction and retain provider extensions without conversion.
@@ -55,37 +57,9 @@ pub(in crate::protocol::adapter) fn validate_response_part(
     Ok(fields)
 }
 
-/// Complete Responses-to-Gemini request plus the local state needed by the
-/// next `previous_response_id` turn.
-#[derive(Clone, Debug)]
-pub struct GeminiBridgeRequest {
-    pub(super) upstream_body: Value,
-    pub(super) model: String,
-    pub(super) response_id: String,
-    pub(super) bridge_state: MessagesBridgeState,
-}
-
-impl GeminiBridgeRequest {
-    pub fn upstream_body(&self) -> &Value {
-        &self.upstream_body
-    }
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-    pub fn response_id(&self) -> &str {
-        &self.response_id
-    }
-    pub(super) fn bridge_state(&self) -> &MessagesBridgeState {
-        &self.bridge_state
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct GeminiBridgeResponse {
-    pub response_body: Value,
-    pub response_id: String,
-    pub continuation: MessagesBridgeState,
-}
+/// Compatibility names share the same protocol-independent implementation.
+pub type GeminiBridgeRequest = super::translation::TranslationRequest;
+pub type GeminiBridgeResponse = super::contracts::MessagesBridgeResponse;
 
 /// Shared assembly for Gemini's complete calls and Vertex's argument fragments.
 /// Client IDs belong to the output adapter; this state retains provider IDs.
@@ -246,18 +220,20 @@ pub(in crate::protocol::adapter) fn restore_provider_call_ids(
 }
 
 mod json_path;
+#[cfg(test)]
 mod request;
 mod response;
 
 pub(in crate::protocol::adapter) use json_path::function_call_args;
 #[cfg(test)]
 pub use request::prepare_responses_to_gemini;
-pub(crate) use request::prepare_responses_to_gemini_with_capabilities;
 #[cfg(test)]
 pub(crate) use request::prepare_responses_to_gemini_with_reasoning;
 pub(crate) use response::gemini_incomplete;
+#[cfg(test)]
 pub use response::translate_gemini_response;
-pub(in crate::protocol::adapter) use response::translate_gemini_response_with_call_ids;
 pub(crate) use response::{candidate_incomplete_reason, prompt_blocked};
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+use super::contracts::{MessagesBridgeState, MessagesReasoningMode};

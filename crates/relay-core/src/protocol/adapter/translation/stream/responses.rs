@@ -1,5 +1,40 @@
 use super::*;
 
+// Only fixed protocol labels may enter diagnostics, never an upstream-supplied
+// event type, item identity, tool arguments or response content.
+pub(super) fn diagnostic_parameter(event: &Value) -> &'static str {
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.output_item.added") => "response.output_item.added",
+        Some("response.output_item.done") => "response.output_item.done",
+        Some("response.content_part.added" | "response.reasoning_summary_part.added") => {
+            "response.content_part.added"
+        }
+        Some("response.content_part.done" | "response.reasoning_summary_part.done") => {
+            "response.content_part.done"
+        }
+        Some(
+            "response.output_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.refusal.delta",
+        ) => "response.text.delta",
+        Some(
+            "response.output_text.done"
+            | "response.reasoning_summary_text.done"
+            | "response.refusal.done",
+        ) => "response.text.done",
+        Some(
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta",
+        ) => "response.tool_input.delta",
+        Some("response.function_call_arguments.done" | "response.custom_tool_call_input.done") => {
+            "response.tool_input.done"
+        }
+        Some("response.output_text.annotation.added") => "response.output_text.annotation.added",
+        Some("response.completed" | "response.done" | "response.incomplete") => "response.terminal",
+        Some("response.failed") => "response.failed",
+        _ => "stream.responses.event",
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct OutputItemState {
     item: Value,

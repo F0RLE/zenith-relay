@@ -53,7 +53,7 @@ pub(super) async fn discover_protocol_bindings_with_client(
     for binding in bindings {
         let (authorization_name, authorization) = source.authorization_for_binding(binding);
         let model_catalog_request = client
-            .get(connector.models_url.clone())
+            .get(connector.models_endpoint_for_binding(binding).clone())
             .headers(connector.protocol_headers_for_binding(binding))
             .header(authorization_name.clone(), authorization.clone());
         let (mut model_catalog_response, first_permit) = match scope
@@ -77,7 +77,7 @@ pub(super) async fn discover_protocol_bindings_with_client(
             drop(permit.take());
             if let Some(v1_connector) = connector.with_appended_v1(bindings) {
                 let retry_request = client
-                    .get(v1_connector.models_url.clone())
+                    .get(v1_connector.models_endpoint_for_binding(binding).clone())
                     .headers(v1_connector.protocol_headers_for_binding(binding))
                     .header(authorization_name, authorization);
                 if let Ok((candidate_response, candidate_permit)) =

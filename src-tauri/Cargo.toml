@@ -50,6 +50,7 @@ tauri-plugin-process = "2.4.0"
 tauri-plugin-updater = "2.13.1"
 tokio = { version = "1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
+tower = { version = "0.5.3", features = ["util"] }
 toml_edit = "0.25.15"
 url = "2.5.8"
 uuid = { version = "1.27.0", features = ["v4"] }

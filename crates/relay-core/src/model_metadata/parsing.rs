@@ -104,6 +104,26 @@ pub(super) fn parse_metadata(
         source_model_id: source_model_id.to_string(),
         provider: provider.to_string(),
         canonical_model_id: string("canonical_model_id").or_else(|| string("canonicalModelId")),
+        aliases: crate::normalize_model_ids(
+            string_array(metadata_object.get("aliases"))
+                .into_iter()
+                .filter(|alias| crate::is_valid_model_token(alias))
+                .collect::<Vec<_>>(),
+        ),
+        protocol_preferences: metadata_object
+            .get("protocol_preferences")
+            .or_else(|| metadata_object.get("protocolPreferences"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| serde_json::from_value::<crate::WireApi>(value.clone()).ok())
+            .fold(Vec::new(), |mut protocols, protocol| {
+                if !protocols.contains(&protocol) {
+                    protocols.push(protocol);
+                }
+                protocols
+            }),
+        field_provenance: super::provenance::normalized(metadata_value),
         family: string("family").or_else(|| string("model_family")),
         name: model_name,
         release_date: string("release_date").filter(|date| order::date_key(date).is_some()),
@@ -198,23 +218,32 @@ pub(super) fn validate_metadata_payload(
             let records_array = catalog_data
                 .as_array()
                 .ok_or(ModelMetadataError::InvalidCatalog)?;
+            if records_array.len() > MAX_RECORDS {
+                return Err(ModelMetadataError::InvalidCatalog);
+            }
             for record_value in records_array {
-                push_catalog_record(&mut metadata_records, record_value)?;
+                let _ = push_catalog_record(&mut metadata_records, record_value);
             }
         } else {
+            if metadata_object.len() > MAX_RECORDS {
+                return Err(ModelMetadataError::InvalidCatalog);
+            }
             for (id, record_value) in metadata_object {
-                if id.trim().is_empty() || id.len() > MAX_STRING_LENGTH {
-                    return Err(ModelMetadataError::InvalidCatalog);
-                }
-                if record_value.as_object().is_none() {
-                    return Err(ModelMetadataError::InvalidCatalog);
+                if id.trim().is_empty()
+                    || id.len() > MAX_STRING_LENGTH
+                    || record_value.as_object().is_none()
+                {
+                    continue;
                 }
                 metadata_records.push((id.clone(), record_value));
             }
         }
     } else if let Some(records_array) = metadata_payload.as_array() {
+        if records_array.len() > MAX_RECORDS {
+            return Err(ModelMetadataError::InvalidCatalog);
+        }
         for record_value in records_array {
-            push_catalog_record(&mut metadata_records, record_value)?;
+            let _ = push_catalog_record(&mut metadata_records, record_value);
         }
     } else {
         return Err(ModelMetadataError::InvalidCatalog);

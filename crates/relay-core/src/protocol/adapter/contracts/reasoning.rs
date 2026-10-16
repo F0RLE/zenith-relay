@@ -92,8 +92,18 @@ impl<'a> ReasoningPolicy<'a> {
         effort: &str,
         explicit_max_tokens: bool,
     ) -> AdapterResult<()> {
-        self.validate()?;
         let effort = crate::catalog::canonical_reasoning_level(effort);
+        // A model without reasoning already satisfies an explicit disable.
+        // Do not emit an unsupported upstream control for this no-op.
+        if effort == "none"
+            && self
+                .capabilities
+                .is_some_and(|capabilities| capabilities.reasoning == Some(false))
+        {
+            return self.apply_disabled(fields);
+        }
+        self.validate()
+            .map_err(|error| error.with_parameter("reasoning.effort"))?;
         if self.capabilities.is_some_and(|capabilities| {
             !capabilities.reasoning_effort_levels.is_empty()
                 && !capabilities.reasoning_effort_levels.contains(&effort)
@@ -159,6 +169,13 @@ impl<'a> ReasoningPolicy<'a> {
         budget: u64,
         explicit_max_tokens: bool,
     ) -> AdapterResult<()> {
+        if budget == 0
+            && self
+                .capabilities
+                .is_some_and(|capabilities| capabilities.reasoning == Some(false))
+        {
+            return self.apply_disabled(fields);
+        }
         self.validate()?;
         if matches!(
             self.method(),
@@ -192,6 +209,12 @@ impl<'a> ReasoningPolicy<'a> {
     }
 
     fn apply_disabled(&self, fields: &mut Map<String, Value>) -> AdapterResult<()> {
+        if self
+            .capabilities
+            .is_some_and(|capabilities| capabilities.reasoning == Some(false))
+        {
+            return Ok(());
+        }
         match self.protocol {
             WireApi::Messages => {
                 fields.insert("thinking".into(), json!({"type": "disabled"}));
@@ -290,26 +313,4 @@ impl<'a> ReasoningPolicy<'a> {
         }
         Ok(())
     }
-}
-
-pub(in crate::protocol::adapter) fn responses_reasoning_effort(
-    reasoning: Option<&Value>,
-) -> AdapterResult<Option<String>> {
-    let Some(reasoning) = reasoning.filter(|value| !value.is_null()) else {
-        return Ok(None);
-    };
-    let reasoning = reasoning
-        .as_object()
-        .ok_or_else(AdapterError::invalid_request)?;
-    reasoning
-        .get("effort")
-        .filter(|effort| !effort.is_null())
-        .map(|effort| {
-            effort
-                .as_str()
-                .filter(|effort| !effort.trim().is_empty())
-                .map(crate::catalog::canonical_reasoning_level)
-                .ok_or_else(|| AdapterError::invalid_request().with_parameter("reasoning.effort"))
-        })
-        .transpose()
 }

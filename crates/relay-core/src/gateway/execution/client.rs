@@ -6,7 +6,7 @@ use super::super::continuation::{
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
-    candidate_protocols, chat_request_is_text_or_image_only, client_context_fingerprint,
+    candidate_protocols, chat_request_is_text_or_image_only, client_request_identity,
     codex_background_request_kind, forwarded_codex_headers, forwarded_messages_headers,
     is_managed_codex_client, request_id, ServiceTierPolicy, CODEX_RESPONSES_LITE_HEADER,
 };
@@ -179,7 +179,8 @@ async fn execute_client_request_inner(
             return blocked_background_response(client_wire_api, stream, &request_id, kind);
         }
     }
-    let client_context_id = client_context_fingerprint(&headers);
+    let client_identity = client_request_identity(&headers, &request_json);
+    let client_context_id = client_identity.context_id;
     if client_wire_api == WireApi::Responses
         && background_kind.is_none()
         && parts.extensions.get::<RoutedCompactionRequest>().is_none()
@@ -264,6 +265,7 @@ async fn execute_client_request_inner(
         request_id,
         forwarded_headers,
         client_context_id,
+        client_affinity_id: client_identity.affinity_id,
         response_affinity_key: continuation
             .as_ref()
             .and_then(|continuation| continuation.response_affinity_key.clone()),

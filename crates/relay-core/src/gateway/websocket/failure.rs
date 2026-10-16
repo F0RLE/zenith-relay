@@ -91,6 +91,15 @@ impl GatewayFailure {
         self
     }
 
+    pub(super) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_at = crate::transport::retry_after_ms(headers, std::time::SystemTime::now())
+                .map(|delay| now_ms().saturating_add(delay));
+            self.retry_at_ms = self.retry_at_ms.into_iter().chain(retry_at).max();
+        }
+        self
+    }
+
     pub(super) fn apply_degraded_route_policy(mut self, runtime: &GatewayRuntime) -> Self {
         let category = runtime.effective_upstream_category(self.category);
         if category != self.category {
@@ -116,6 +125,21 @@ impl GatewayFailure {
         Self {
             category: error_codes::ADAPTER_PARAMETER_UNSUPPORTED,
             ..Self::invalid_request("service_tier is not supported by the configured routes")
+        }
+    }
+
+    pub(super) fn adapter(error: crate::AdapterError) -> Self {
+        Self {
+            status: if error.is_upstream_failure() {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            category: error.code(),
+            message: error.message(),
+            retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
         }
     }
 
@@ -238,14 +262,20 @@ impl GatewayFailure {
     ) -> Self {
         let classification =
             super::super::errors::classify_upstream_error(status, upstream_error_body);
-        Self::classified(status, classification.category, origin).with_upstream_error(
-            upstream_error_body.map(|error_body| {
+        let mut failure = Self::classified(status, classification.category, origin)
+            .with_upstream_error(upstream_error_body.map(|error_body| {
                 crate::usage::UpstreamErrorDetails::from_response_body(
                     Some(status.as_u16()),
                     error_body,
                 )
-            }),
-        )
+            }));
+        if failure.status == StatusCode::TOO_MANY_REQUESTS {
+            failure.retry_at_ms = upstream_error_body
+                .map(rate_limit_body_hint)
+                .and_then(|hint| hint.retry_after_ms)
+                .map(|delay| now_ms().saturating_add(delay));
+        }
+        failure
     }
 
     pub(super) fn classified(

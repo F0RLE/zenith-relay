@@ -23,8 +23,8 @@ impl GatewayRuntime {
             .collect::<Vec<_>>();
         candidate_ids
             .iter()
-            .filter_map(|candidate_id| {
-                self.executor_route(candidate_id, model, &scope, protocols, stream)
+            .flat_map(|candidate_id| {
+                self.executor_routes(candidate_id, model, &scope, protocols, stream)
             })
             .collect()
     }

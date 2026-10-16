@@ -17,7 +17,9 @@ fn request_timezone_rejects_invalid_zones_and_persists_disabled_choices() {
     );
     let mut policy = zenith_relay_core::RequestTimezonePolicy {
         enabled: false,
-        account_timezones: BTreeMap::from([("synthetic".into(), "Europe/Minsk".into())]),
+        account_timezones: BTreeMap::from([("synthetic".into(), "Etc/GMT-3".into())]),
+        account_timezone_bindings: BTreeMap::new(),
+        account_timezone_sources: BTreeMap::new(),
     };
     store.set_request_timezone(&policy).unwrap();
     policy
@@ -28,7 +30,7 @@ fn request_timezone_rejects_invalid_zones_and_persists_disabled_choices() {
     let reopened = Store::open(path).unwrap();
     let saved = reopened.request_timezone().unwrap();
     assert!(!saved.enabled);
-    assert_eq!(saved.account_timezones["synthetic"], "Europe/Minsk");
+    assert_eq!(saved.account_timezones["synthetic"], "Etc/GMT-3");
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
@@ -186,6 +188,7 @@ fn detected_source_prices_fall_back_from_manual_overrides_and_refresh_cleanly() 
         secret_ref: "source:detected".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: zenith_relay_core::WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: Vec::new(),

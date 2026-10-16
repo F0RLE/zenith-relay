@@ -230,7 +230,7 @@ fn push_macos_app_bundles(candidates: &mut Vec<PathBuf>, directory: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn push_macos_app_bundles(_candidates: &mut Vec<PathBuf>, _directory: &Path) {}
 
-fn is_opencode_desktop_path(path: &Path) -> bool {
+pub(super) fn is_opencode_desktop_path(path: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
         is_windows_opencode_desktop_path(path)
@@ -259,10 +259,20 @@ pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
     ]
     .iter()
     .any(|executable_name| normalized_path.ends_with(&format!("\\{executable_name}")));
+    let desktop_directory = normalized_path.rsplit('\\').nth(1);
     desktop_name
         && !normalized_path.contains("\\bin\\")
         && !normalized_path.contains("\\resources\\")
-        && [
+        && (matches!(
+            desktop_directory,
+            Some(
+                "@opencode-aidesktop"
+                    | "opencode"
+                    | "opencode desktop"
+                    | "opencode dev"
+                    | "opencode beta"
+            )
+        ) || [
             "\\programs\\@opencode-aidesktop\\",
             "\\programs\\opencode\\",
             "\\programs\\opencode desktop\\",
@@ -275,7 +285,7 @@ pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
             "\\scoop\\apps\\opencode-desktop\\",
         ]
         .iter()
-        .any(|root| normalized_path.contains(root))
+        .any(|root| normalized_path.contains(root)))
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
@@ -306,7 +316,8 @@ pub(super) fn is_linux_opencode_desktop_path(path: &Path) -> bool {
 /// desktop sidecar snapshots the provider catalog at startup, and launching
 /// a second instance only focuses the existing single-instance process.
 pub(super) fn restart_opencode() -> Result<(), String> {
-    let executable = resolve_opencode_desktop_command().ok_or_else(|| {
+    let executable = super::settings::configured_path(super::settings::Application::Opencode)?
+        .or_else(resolve_opencode_desktop_command).ok_or_else(|| {
         "OpenCode desktop was not found. Install the desktop app or open it manually; Relay does not launch the terminal CLI without a terminal".to_string()
     })?;
 

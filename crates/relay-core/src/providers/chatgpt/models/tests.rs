@@ -5,6 +5,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 
+mod recovery;
+
 #[test]
 fn discovery_failure_codes_keep_the_management_contract_stable() {
     let cases = [

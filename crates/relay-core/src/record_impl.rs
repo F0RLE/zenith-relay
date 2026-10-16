@@ -102,6 +102,7 @@ macro_rules! impl_stored_source_record {
                     id: &self.id,
                     base_url: &self.base_url,
                     secret_ref: &self.secret_ref,
+                    proxy_id: self.proxy_id.as_deref(),
                     wire_api: self.wire_api,
                     protocol_bindings: &self.protocol_bindings,
                     protocol_config: &self.protocol_config,
@@ -160,6 +161,9 @@ macro_rules! impl_stored_source_record {
             }
             fn summary_official_provider_family(&self) -> Option<&str> {
                 self.official_provider_family.as_deref()
+            }
+            fn summary_proxy_id(&self) -> Option<&str> {
+                self.proxy_id.as_deref()
             }
             fn summary_priority(&self) -> i32 {
                 self.priority

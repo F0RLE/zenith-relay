@@ -13,8 +13,14 @@ pub enum AuthState {
 pub enum QuotaState {
     Unknown,
     Available,
+    /// Admission depends on the separate, still-fresh provider ledger.
+    CreditFallback {
+        reset_at_ms: Option<u64>,
+    },
     Stale,
-    Exhausted { reset_at_ms: Option<u64> },
+    Exhausted {
+        reset_at_ms: Option<u64>,
+    },
 }
 
 /// Minimum lead required before a cached session affinity moves to another

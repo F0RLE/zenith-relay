@@ -1,6 +1,7 @@
 use super::*;
 use crate::error_codes;
 use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
+use reqwest::header::HeaderMap;
 
 mod response;
 
@@ -207,6 +208,15 @@ impl AttemptFailure {
         }
     }
 
+    pub(crate) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
+        let header_delay = super::cooldown::retry_after_ms(headers, std::time::SystemTime::now());
+        self.cooldown_hint.retry_after_ms = header_delay
+            .into_iter()
+            .chain(self.cooldown_hint.retry_after_ms)
+            .max();
+        self
+    }
+
     pub(crate) fn stream(category: &'static str) -> Self {
         Self {
             execution: ExecutionObservation::unknown(),
@@ -289,6 +299,9 @@ fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservati
             | error_codes::UPSTREAM_REQUEST_TIMEOUT
             | error_codes::UPSTREAM_CONFLICT
             | error_codes::UPSTREAM_TRANSPORT
+            | error_codes::UPSTREAM_TRANSPORT_TIMEOUT
+            | error_codes::UPSTREAM_TRANSPORT_BODY
+            | error_codes::UPSTREAM_TRANSPORT_REQUEST
             | error_codes::UPSTREAM_GATEWAY_TIMEOUT
     ) {
         return ExecutionObservation::unknown();
@@ -297,8 +310,20 @@ fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservati
         || matches!(
             category,
             error_codes::UPSTREAM_OVERLOADED
+                | error_codes::UPSTREAM_TRANSPORT_CONNECT
+                | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
+                | error_codes::UPSTREAM_MODEL_UNAVAILABLE
+                | error_codes::UPSTREAM_MODEL_UNSUPPORTED
+                | error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_UNAUTHORIZED
+                | error_codes::UPSTREAM_FORBIDDEN
+                | error_codes::UPSTREAM_ACCOUNT_DISABLED
+                | error_codes::UPSTREAM_ACCOUNT_VERIFICATION_REQUIRED
+                | error_codes::UPSTREAM_REGION_UNSUPPORTED
+                | error_codes::UPSTREAM_REFRESH_TOKEN_REUSED
                 | error_codes::UPSTREAM_MODEL_CAPACITY
                 | error_codes::UPSTREAM_RATE_LIMITED
+                | error_codes::UPSTREAM_TURN_RATE_LIMITED
                 | error_codes::UPSTREAM_QUOTA_EXHAUSTED
                 | error_codes::UPSTREAM_WEBSOCKET_CONNECTION_LIMIT
                 | error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
@@ -315,5 +340,8 @@ mod policy;
 
 pub(crate) use policy::{
     failure_category_affects_account_state, failure_category_is_request_terminal,
-    failure_category_requires_cooldown, retryable_failure, retryable_status,
+    failure_category_requires_cooldown, retryable_failure,
 };
+
+#[cfg(test)]
+pub(super) use policy::retryable_status;

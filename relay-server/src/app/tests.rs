@@ -76,6 +76,10 @@ fn snapshot_preserves_persisted_model_policy_and_missing_secret_warning() {
         .unwrap();
     state
         .store
+        .set_model_display_order(vec!["gpt-account-test".into(), "gpt-5.4".into()])
+        .unwrap();
+    state
+        .store
         .set_model_price_overrides(BTreeMap::from([(
             "gpt-5.4".into(),
             ApiModelPriceOverride {
@@ -139,16 +143,10 @@ async fn snapshot_reports_the_active_runtime_candidate_order() {
     assert!(snapshot.gateway.running);
     assert_eq!(snapshot.gateway.candidate_count, 1);
     assert_eq!(snapshot.gateway.visible_model_ids, ["gpt-runtime-test"]);
-    assert_eq!(snapshot.gateway.routing_order.len(), 4);
+    // Protocol bindings share one physical rotation member and quota.
+    assert_eq!(snapshot.gateway.routing_order.len(), 1);
     assert_eq!(snapshot.gateway.routing_order[0].candidate_id, source.id);
-    assert!(snapshot.gateway.routing_order.iter().all(|candidate| {
-        candidate.available
-            && (candidate.candidate_id == source.id
-                || candidate
-                    .candidate_id
-                    .strip_prefix(&source.id)
-                    .is_some_and(|suffix| suffix.starts_with("::")))
-    }));
+    assert!(snapshot.gateway.routing_order[0].available);
     assert_eq!(
         snapshot.sources[0].operational_status,
         OperationalStatus::Rotation
@@ -528,6 +526,7 @@ fn free_accounts_route_like_other_pool_accounts() {
             record.clone(),
             &credential,
             None,
+            None,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         )
         .enabled
@@ -553,6 +552,7 @@ fn free_accounts_route_like_other_pool_accounts() {
         runtime_account(
             exhausted,
             &credential,
+            None,
             None,
             zenith_relay_core::QUOTA_STALE_AFTER_MS,
         )

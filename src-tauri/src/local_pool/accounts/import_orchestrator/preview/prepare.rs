@@ -30,7 +30,6 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
     let mut credentials_changed = false;
     let now_ms = current_time_ms();
     let settings = state.store()?.gateway().clone();
-    let common_proxy = common_proxy_config(&settings)?;
     let session_hash = crate::diagnostics::hash_identifier(&session.session_id);
     crate::diagnostics::breadcrumb(
         "account-import",
@@ -90,7 +89,6 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
             state,
             credentials,
             settings: &settings,
-            common_proxy: &common_proxy,
             probe_quota,
             now_ms,
             session_hash: &session_hash,

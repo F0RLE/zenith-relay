@@ -1,5 +1,6 @@
 pub(super) use super::super::super::continuation::{
-    clear_materialized_continuation, drop_materialized_previous_response_id, previous_response_id,
+    clear_materialized_continuation, drop_materialized_previous_response_id,
+    prepare_response_owner_change, previous_response_id,
     recover_stale_tool_history as replay_and_prune_stale_tool_history,
     retain_materialized_continuation_owner, RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
     RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,

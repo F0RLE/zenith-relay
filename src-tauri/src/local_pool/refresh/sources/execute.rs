@@ -2,8 +2,7 @@ use super::{DesktopState, RefreshRead, RefreshReadResult};
 use crate::local_pool::{
     commands::{
         connections::ensure_not_gateway_self_source, core_error, fence_runtime_candidates,
-        profiles::refresh_active_client_catalogs, record_catalog_refresh_result,
-        sync_records_or_rollback,
+        queue_active_client_catalog_refresh, sync_records_or_rollback,
     },
     error::{ErrorCode, LocalPoolError, Result},
     store::{secret_store, SourceRefreshFence},
@@ -49,6 +48,7 @@ pub(super) async fn execute(
             api_key,
             wire_api: before.wire_api,
             models: before.models.clone(),
+            proxy_url: crate::local_pool::commands::connections::source_proxy_url(&before)?,
         };
         (before, provider_source)
     };
@@ -128,15 +128,15 @@ pub(super) async fn execute(
             }
             drop(_dispatch_fences);
             if changed || manual {
-                let catalog_result = refresh_active_client_catalogs(state).await;
-                record_catalog_refresh_result(state, &catalog_result);
+                queue_active_client_catalog_refresh(state);
             }
             Ok(RefreshRead::SourceModels(Box::new(updated)))
         }
         RefreshKind::Balance => {
-            let stats_read = zenith_relay_core::read_source_provider_stats_with_scope(
+            let stats_read = zenith_relay_core::read_source_provider_stats_with_scope_and_proxy(
                 &provider_source.base_url,
                 &provider_source.api_key,
+                provider_source.proxy_url.as_deref(),
                 source_http_scope(state, fence),
             )
             .await;

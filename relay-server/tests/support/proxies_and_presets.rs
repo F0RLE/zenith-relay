@@ -140,6 +140,20 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
     assert_eq!(replacement["proxyMode"], "account");
     assert!(!replacement.to_string().contains("account-pass"));
 
+    let direct: Value = client
+        .post(format!("{}/accounts/{account_id}/proxy", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": null, "bypassCommonProxy": true}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(direct["proxyMode"], "direct");
+
     let bulk: Value = client
         .post(format!("{}/accounts/proxies/assign", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -154,6 +168,19 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
         .await
         .unwrap();
     assert_eq!(bulk, json!({"assigned": 1, "unused": 1}));
+    let assigned = server.state.store.account(&account_id).unwrap().unwrap();
+    assert!(!assigned.bypass_common_proxy);
+    assert!(assigned.proxy_id.is_some());
+    let reassigned = client
+        .post(format!("{}/v1/responses", server.origin))
+        .bearer_auth(pool_key)
+        .json(&json!({"model":"gpt-proxy-test","input":"assigned after direct"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reassigned.status(), StatusCode::OK);
+    assert!(reassigned.text().await.unwrap().contains("account-proxy"));
+    assert_eq!(account_hits.load(Ordering::SeqCst), 2);
 
     let inherited: Value = client
         .post(format!("{}/accounts/{account_id}/proxy", server.origin))

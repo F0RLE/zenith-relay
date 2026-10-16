@@ -26,7 +26,9 @@ pub use discovery::{
     SourceCatalogRecord, SourceDiscovery,
 };
 pub use stats::{
-    fetch_source_provider_stats, read_source_provider_stats, read_source_provider_stats_with_scope,
+    fetch_source_provider_stats, fetch_source_provider_stats_with_proxy,
+    read_source_provider_stats, read_source_provider_stats_with_proxy,
+    read_source_provider_stats_with_scope, read_source_provider_stats_with_scope_and_proxy,
     SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
     SourceStatsProvider, SourceStatsStatus,
 };
@@ -67,6 +69,7 @@ pub struct SourceTransportIdentity<'a> {
     pub id: &'a str,
     pub base_url: &'a str,
     pub secret_ref: &'a str,
+    pub proxy_id: Option<&'a str>,
     pub wire_api: WireApi,
     pub protocol_bindings: &'a [SourceProtocolBinding],
     pub protocol_config: &'a SourceProtocolConfig,

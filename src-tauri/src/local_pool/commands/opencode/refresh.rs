@@ -57,6 +57,7 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
         )
     };
     let mut updated = false;
+    let mut model_order = Vec::new();
     if let Some(key) = key {
         if let Some(secret) = secret_store::load(&key.secret_ref)? {
             if owns_connection(&config, &snapshot.gateway.base_url, &secret) {
@@ -66,6 +67,12 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
                     &secret,
                     &snapshot.gateway.models,
                 )?;
+                model_order = snapshot
+                    .gateway
+                    .models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect();
                 updated = true;
             }
         }
@@ -76,24 +83,21 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
                 continue;
             };
             if owns_connection(&config, &source.base_url, &secret) {
-                protocols::apply_source(
-                    &mut config,
-                    source,
-                    &secret,
-                    &state.model_metadata_catalog(),
-                    false,
-                )?;
+                let metadata = state.model_metadata_catalog();
+                protocols::apply_source(&mut config, source, &secret, &metadata, false)?;
+                model_order = metadata.order_model_ids(&source.models);
                 updated = true;
                 break;
             }
         }
     }
     // A newer login or external edit owns the file once its endpoint or key changes.
-    if updated
-        && fs::read(&path).ok().as_deref() == Some(original.as_slice())
-        && read_config(&path)? != config
-    {
-        write_config(&path, &config)?;
+    if updated && fs::read(&path).ok().as_deref() == Some(original.as_slice()) {
+        let serialized = serialize_config_with_model_order(&config, &model_order)
+            .map_err(LocalPoolError::invalid_state)?;
+        if format!("{serialized}\n").as_bytes() != original {
+            write_config_with_model_order(&path, &config, &model_order)?;
+        }
     }
     Ok(())
 }

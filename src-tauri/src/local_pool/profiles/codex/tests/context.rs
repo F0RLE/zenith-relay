@@ -1,48 +1,18 @@
 use super::*;
 
 #[test]
-fn context_and_compaction_overrides_are_managed_and_restored_independently() {
-    use zenith_relay_core::catalog::context_policy::{
-        ApplicationContextPolicy, CompactionPolicy, ContextWindowPolicy,
-    };
+fn context_policy_always_removes_both_keys() {
     let (root, home, backups) = profile_dirs("independent-context-policy");
     fs::write(
         home.join(CONFIG_FILE),
         "model_context_window = 200000\nmodel_auto_compact_token_limit = 190000\n",
     )
     .unwrap();
-    let compact_only = ApplicationContextPolicy::Configured {
-        context: ContextWindowPolicy::Client,
-        compaction: CompactionPolicy::Custom { tokens: 150000 },
-    };
-    context::sync_context_policy(&home, &backups, compact_only).unwrap();
-    let current = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(current["model_context_window"].as_integer(), Some(200000));
-    assert!(current.get("model_auto_compact_token_limit").is_none());
-    let window_only = ApplicationContextPolicy::Configured {
-        context: ContextWindowPolicy::Extended,
-        compaction: CompactionPolicy::Client,
-    };
-    let change = context::sync_context_policy(&home, &backups, window_only).unwrap();
+    context::sync_context_policy(&home, &backups).unwrap();
     let current = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert!(current.get("model_context_window").is_none());
-    assert_eq!(
-        current["model_auto_compact_token_limit"].as_integer(),
-        Some(190000)
-    );
-    change.rollback().unwrap();
-    let current = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(current["model_context_window"].as_integer(), Some(200000));
     assert!(current.get("model_auto_compact_token_limit").is_none());
-    context::sync_context_policy(&home, &backups, window_only).unwrap();
-    context::sync_context_policy(&home, &backups, ApplicationContextPolicy::Client).unwrap();
-    let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
-    assert_eq!(restored["model_context_window"].as_integer(), Some(200000));
-    assert_eq!(
-        restored["model_auto_compact_token_limit"].as_integer(),
-        Some(190000)
-    );
-    assert!(!backups.join("codex-context-overrides.json").exists());
+    assert!(backups.join("codex-context-overrides.json").exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -159,14 +129,16 @@ fn managed_catalog_policy_applies_after_native_normalization_and_can_return_to_c
     native["max_context_window"] = json!(128000);
     let document = json!({
         "models": [native],
-        "relay_context_policy": {"mode": "custom", "tokens": 1000000},
+        "relay_model_context_policies": {
+            "gpt-native": {"mode": "custom", "tokens": 1000000}
+        },
         "relay_context_limits": { "gpt-native": {"context": 128000, "input": 100000, "output": 32000} }
     });
     let managed =
         catalog::build_managed_model_catalog(&home, None, None, &document.to_string()).unwrap();
     let managed: Value = serde_json::from_str(&managed).unwrap();
     assert_eq!(managed["models"][0]["context_window"], 128000);
-    assert_eq!(managed["models"][0]["auto_compact_token_limit"], 91200);
+    assert_eq!(managed["models"][0]["auto_compact_token_limit"], 96000);
     assert!(managed.get("relay_context_policy").is_none());
     let original = "model_context_window = 200000\nmodel_auto_compact_token_limit = 190000\n";
     fs::write(home.join(CONFIG_FILE), original).unwrap();

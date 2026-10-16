@@ -16,7 +16,9 @@ use zenith_relay_core::{
 };
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
-const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+// Keep this bound aligned with the shared model-discovery transport limit and
+// the profile catalog parser. Full ChatGPT inventories may exceed 512 KiB.
+const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) async fn fetch_codex_model_catalog(
     base_url: &str,
@@ -68,7 +70,7 @@ pub(super) async fn fetch_codex_model_catalog(
             LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
                 match error {
-                    LimitedBodyError::TooLarge => "pool model catalog is too large",
+                    LimitedBodyError::TooLarge => "pool model catalog exceeds 4 MiB",
                     LimitedBodyError::Transport => "pool model catalog could not be read",
                 },
             )
@@ -144,9 +146,7 @@ pub(super) fn active_catalog_refresh_target(
 pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     state: &DesktopState,
 ) -> LocalResult<CodexCatalogRefreshStatus> {
-    if is_codex_running() {
-        return Ok(CodexCatalogRefreshStatus::Deferred);
-    }
+    let client_running = is_codex_running();
     let profile_dir = default_codex_home();
     let backup_root = state.profile_backup_root();
     let Some(binding) = codex::profile_bindings(&profile_dir, &backup_root)?
@@ -206,7 +206,15 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
         }
     };
     let catalog = context_catalog(state, &catalog)?;
-    let policy = state.store()?.gateway().chatgpt_context_policy;
+    // The managed catalog has its own ownership checks and atomic replacement.
+    // Updating it does not require stopping the client or changing its profile.
+    if client_running {
+        codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog, Some(&binding))?;
+        // The managed catalog is updated, but context policy and websocket
+        // transport changes are deferred until the client is restarted.
+        // Recording Deferred persists a warning so the UI can prompt for a restart.
+        return Ok(CodexCatalogRefreshStatus::Deferred);
+    }
     let previous_transport = supports_websockets
         .map(|enabled| {
             codex::set_local_gateway_websockets_with_previous(
@@ -218,7 +226,7 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
         })
         .transpose()?
         .flatten();
-    let context_change = match codex::sync_context_policy(&profile_dir, &backup_root, policy) {
+    let context_change = match codex::sync_context_policy(&profile_dir, &backup_root) {
         Ok(change) => change,
         Err(error) => {
             if let Some(previous_transport_config) = previous_transport {
@@ -251,8 +259,7 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
 
 pub(super) fn context_catalog(state: &DesktopState, catalog: &str) -> LocalResult<String> {
     use serde_json::{json, Value};
-    let policy = state.store()?.gateway().chatgpt_context_policy;
-    policy.validate().map_err(LocalPoolError::invalid_state)?;
+    let model_policies = state.store()?.gateway().model_context_policies.clone();
     let mut document: Value =
         serde_json::from_str(catalog).map_err(LocalPoolError::invalid_state)?;
     let metadata = state.model_metadata_catalog();
@@ -275,7 +282,7 @@ pub(super) fn context_catalog(state: &DesktopState, catalog: &str) -> LocalResul
             );
         }
     }
-    document["relay_context_policy"] = json!(policy);
+    document["relay_model_context_policies"] = json!(model_policies);
     document["relay_context_limits"] = Value::Object(limits);
     serde_json::to_string(&document).map_err(LocalPoolError::invalid_state)
 }

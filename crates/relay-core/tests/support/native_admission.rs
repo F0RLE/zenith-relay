@@ -3,7 +3,7 @@ use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatal
 use zenith_relay_core::ProtocolFeature;
 
 #[tokio::test]
-async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_extensions() {
+async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_extensions() {
     for (client, upstream_wire_api) in WireApi::ALL
         .map(|protocol| (protocol, protocol))
         .into_iter()
@@ -57,6 +57,7 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                     name: "Synthetic source".into(),
                     base_url: format!("{}/v1", upstream.base_url),
                     api_key: SOURCE_KEY.into(),
+                    proxy_url: None,
                     wire_api: upstream_wire_api,
                     models: vec!["synthetic-model".into()],
                 });
@@ -97,16 +98,19 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                     .send()
                     .await
                     .unwrap();
-                if client == upstream_wire_api {
+                let supports_request = reference_support
+                    && reasoning_status != CapabilityStatus::Unsupported
+                    && (client == WireApi::Messages || declared_effort == Some("high"));
+                if !supports_request {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{client:?}");
+                    assert!(observed.lock().unwrap().is_empty());
+                } else if client == upstream_wire_api {
                     assert_eq!(response.status(), StatusCode::OK, "{client:?}");
                     assert_eq!(
                         observed.lock().unwrap()[0][field],
                         body[field],
                         "{client:?}"
                     );
-                } else if !reference_support || declared_effort != Some("high") {
-                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-                    assert!(observed.lock().unwrap().is_empty());
                 } else {
                     assert_eq!(response.status(), StatusCode::OK);
                     assert_eq!(observed.lock().unwrap().len(), 1);

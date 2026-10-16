@@ -23,6 +23,8 @@ const MODEL: &str = "gpt-p2";
 #[path = "support/rotation_recovery.rs"]
 mod rotation_recovery;
 
+#[path = "support/claude_desktop_routes.rs"]
+mod claude_desktop_routes;
 #[path = "support/cooldown_budget.rs"]
 mod cooldown_budget;
 #[path = "support/model_visibility.rs"]
@@ -93,6 +95,7 @@ fn source(
             name: id.to_string(),
             base_url: format!("{}/v1", server.base_url),
             api_key: key.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: models.iter().map(|model| (*model).to_string()).collect(),
         },
@@ -161,6 +164,7 @@ async fn spawn_gateway(
             image_base_model: None,
             image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
+            model_context_policies: Default::default(),
             response_affinity_store: None,
         },
     )

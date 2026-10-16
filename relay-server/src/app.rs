@@ -17,6 +17,7 @@ mod runtime_records;
 mod snapshot;
 
 pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};
+pub(crate) use runtime_records::source_proxy_url;
 
 /// Hold across a durable configuration edit and its hot apply, replacement or
 /// rollback. Acquire configuration_lock first when both are needed. Builds

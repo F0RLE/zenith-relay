@@ -31,6 +31,7 @@ use record::find_source;
 use record::normalize_pricing_identity;
 use record::normalize_record_protocol_bindings;
 use record::normalize_source_prices;
+use record::source_proxy_url;
 use record::source_record;
 use record::source_summary;
 use record::valid_recovery_delay;
@@ -45,6 +46,14 @@ mod record;
 mod write;
 
 use policy::{source_dispatch_permission_changed, source_runtime_policy_compatible};
+
+/// Distinguishes an absent field from an explicit `null`.
+fn nullable_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -65,6 +74,8 @@ pub struct SourceInput {
     pricing_provider: Option<String>,
     #[serde(default)]
     official_provider_family: Option<String>,
+    #[serde(default)]
+    proxy_id: Option<String>,
     wire_api: WireApi,
     #[serde(default)]
     protocol_bindings: Vec<SourceProtocolBinding>,
@@ -94,6 +105,8 @@ pub struct SourcePatch {
     pricing_provider: Option<String>,
     #[serde(default)]
     official_provider_family: Option<String>,
+    #[serde(default, deserialize_with = "nullable_field")]
+    proxy_id: Option<Option<String>>,
     wire_api: Option<WireApi>,
     protocol_bindings: Option<Vec<SourceProtocolBinding>>,
     models: Option<Vec<String>>,

@@ -14,8 +14,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
-    normalize_image_base_model, normalize_model_ids, normalize_model_price_overrides,
-    normalize_model_service_tier_overrides,
+    normalize_image_base_model, normalize_model_context_policies, normalize_model_ids,
+    normalize_model_price_overrides, normalize_model_service_tier_overrides,
     protocol::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
@@ -152,6 +152,7 @@ pub(super) fn configuration_settings_from_connection(
             base_url: source_record.base_url,
             pricing_provider: source_record.pricing_provider,
             official_provider_family: source_record.official_provider_family,
+            proxy_id: source_record.proxy_id,
             wire_api: source_record.wire_api,
             protocol_bindings: source_record.protocol_bindings,
             enabled: source_record.enabled,
@@ -227,6 +228,16 @@ pub(super) fn configuration_settings_from_connection(
         model_price_overrides,
         model_reasoning_allowed_levels,
         model_reasoning_allowed_levels_present: true,
+        model_context_policies: normalize_model_context_policies(
+            persist::metadata_from(connection, "model_context_policies")?.map_or(
+                Ok(BTreeMap::new()),
+                |context_policies_json| {
+                    serde_json::from_str(&context_policies_json)
+                        .map_err(|_| "model context policies are invalid".to_string())
+                },
+            )?,
+        )
+        .map_err(str::to_string)?,
         model_service_tier_overrides: normalize_model_service_tier_overrides(
             persist::metadata_from(connection, "model_service_tier_overrides")?.map_or(
                 Ok(BTreeMap::new()),
@@ -237,6 +248,7 @@ pub(super) fn configuration_settings_from_connection(
             )?,
         )
         .map_err(str::to_string)?,
+        model_context_policies_present: true,
         model_display_order: normalize_model_ids(
             persist::metadata_from(connection, "model_display_order")?.map_or(
                 Ok(Vec::<String>::new()),

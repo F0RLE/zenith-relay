@@ -33,6 +33,9 @@ impl LocalPoolStore {
                 gateway.model_service_tier_overrides,
             )
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        gateway.model_context_policies =
+            zenith_relay_core::normalize_model_context_policies(gateway.model_context_policies)
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.model_display_order =
             zenith_relay_core::normalize_model_ids(gateway.model_display_order);
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)

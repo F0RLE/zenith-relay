@@ -1,17 +1,19 @@
-use super::{ExecutorRoute, GatewayFailure};
+use super::{request_scope, ExecutorRoute, GatewayFailure};
+use crate::error_codes;
 use crate::gateway::request::{RequestToolPolicy, ServiceTierPolicy};
-use crate::runtime::AccountTransport;
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::usage::ReasoningEffortDiagnostics;
 use crate::{DefaultServiceTier, GatewayRuntime, ToolUseDiagnostics, WireApi};
+use axum::http::HeaderMap;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 mod continuation;
 mod parse;
 
 #[derive(Clone)]
 pub(super) struct ClientRequest {
+    local_key_id: String,
     pub(super) tool_policy: RequestToolPolicy,
     pub(super) request_id: String,
     pub(super) budget: SharedRequestBudget,
@@ -26,6 +28,7 @@ pub(super) struct ClientRequest {
     pub(super) requires_affinity_owner: bool,
     pub(super) has_unpaired_tool_output: bool,
     pub(super) prompt_affinity_key: Option<String>,
+    pub(super) client_context_id: Option<String>,
     pub(super) background_kind: Option<&'static str>,
 }
 
@@ -58,27 +61,40 @@ impl ClientRequest {
         runtime: &GatewayRuntime,
         key: &crate::runtime::AuthenticatedKey,
     ) -> Result<HashSet<String>, GatewayFailure> {
-        let routes = runtime.configured_executor_routes(
-            key,
-            &self.resolved_model,
-            &[WireApi::Responses],
-            false,
-        );
-        let excluded = routes
-            .iter()
-            .filter(|route| {
-                !GatewayRuntime::route_supports_service_tier(
-                    route,
-                    self.service_tier_policy.selected_tier(),
-                ) || (route.account_transport == AccountTransport::ExcelBasisPoints
-                    && self.service_tier_policy.rejects_basis_points_client_speed())
-            })
-            .map(|route| route.candidate_id.clone())
-            .collect::<HashSet<_>>();
-        if !routes.is_empty() && excluded.len() == routes.len() {
-            return Err(GatewayFailure::unsupported_service_tier());
+        self.compatible_routes(runtime, key)
+            .map(|(excluded, _)| excluded)
+    }
+
+    pub(super) fn compatible_routes(
+        &self,
+        runtime: &GatewayRuntime,
+        key: &crate::runtime::AuthenticatedKey,
+    ) -> Result<(HashSet<String>, BTreeMap<String, ExecutorRoute>), GatewayFailure> {
+        use crate::gateway::execution::compatibility::{incompatible_routes, RouteCompatibility};
+        let mut request = self.request_body.clone();
+        if let Some(object) = request.as_object_mut() {
+            object.remove("type");
+            object.remove("stream_id");
         }
-        Ok(excluded)
+        let (excluded, admitted, error) = incompatible_routes(RouteCompatibility {
+            runtime,
+            key,
+            model: &self.resolved_model,
+            client: WireApi::Responses,
+            request: &request,
+            stream: true,
+            tier_policy: &self.service_tier_policy,
+            now_ms: crate::unix_time_ms(),
+        });
+        if admitted.is_empty() {
+            if let Some(error) = error.filter(|error| {
+                !(self.has_previous_response_id()
+                    && error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH)
+            }) {
+                return Err(GatewayFailure::adapter(error));
+            }
+        }
+        Ok((excluded, admitted))
     }
 
     #[cfg(test)]
@@ -92,12 +108,30 @@ impl ClientRequest {
         &self,
         runtime: &GatewayRuntime,
         route: &mut ExecutorRoute,
+        client_headers: &HeaderMap,
+        prepared: &crate::runtime::PreparedAuthorization,
     ) -> Result<String, GatewayFailure> {
+        runtime
+            .validate_continuation_route(
+                route,
+                &self.local_key_id,
+                &self.request_body,
+                crate::unix_time_ms(),
+            )
+            .map_err(GatewayFailure::adapter)?;
         if !GatewayRuntime::route_supports_service_tier(route, self.service_tier()) {
             return Err(GatewayFailure::unsupported_service_tier());
         }
         let (mut filtered_request, _) = self.filtered_value_for(route)?;
         runtime.apply_request_timezone(&route.candidate_id, &mut filtered_request);
+        let turn_scope = request_scope(
+            &self.local_key_id,
+            client_headers,
+            route.account_id.as_deref(),
+            &route.source_model,
+            route.upstream_url.as_str(),
+        );
+        runtime.guard_codex_payload(&mut filtered_request, turn_scope.as_ref(), prepared);
         let payload = serde_json::to_string(&filtered_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
         self.tool_policy

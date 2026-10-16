@@ -27,6 +27,7 @@ pub(super) struct AttemptCarry {
 }
 
 pub(super) struct DriveAttemptInput<'a> {
+    pub(super) route: crate::runtime::ExecutorRoute,
     pub(super) selected: crate::Selection,
     pub(super) lease: CandidateLease,
     pub(super) request: Value,
@@ -51,6 +52,7 @@ pub(super) struct DriveAttemptInput<'a> {
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_failure_origin: &'a mut ErrorOrigin,
     pub(super) tried: &'a mut HashSet<String>,
+    pub(super) preparation_exclusions: &'a mut HashSet<String>,
     pub(super) has_previous_response_id: bool,
     pub(super) has_unpaired_tool_output: &'a mut bool,
     pub(super) requires_affinity_owner: &'a mut bool,
@@ -79,6 +81,7 @@ fn carry(
 /// Continue and break return the same request identity the loop still owns.
 pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -> DrivenAttempt {
     let DriveAttemptInput {
+        route,
         selected,
         lease,
         mut request,
@@ -103,6 +106,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         last_failure,
         last_failure_origin,
         tried,
+        preparation_exclusions,
         has_previous_response_id,
         has_unpaired_tool_output,
         requires_affinity_owner,
@@ -115,6 +119,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
     let prepared = match prepare_request_attempt(RequestPrepareInput {
+        route,
         runtime,
         key,
         request: &mut request,
@@ -134,6 +139,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         last_adapter_error,
     }) {
         RequestPrepare::Continue => {
+            preparation_exclusions.insert(selected.candidate_id.clone());
             return DrivenAttempt::Continue(carry(
                 request,
                 request_id,
@@ -161,6 +167,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         request_body,
         tool_use,
     } = prepared;
+    let dispatches_before = budget.dispatches();
     let dispatched = match dispatch_request_attempt(RequestDispatchInput {
         runtime,
         key,
@@ -187,6 +194,11 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     .await
     {
         RequestDispatch::Continue => {
+            // Uploads and rejected dispatch fences can fail without spending a
+            // generation. They must not reopen a ready member on every pass.
+            if budget.dispatches() == dispatches_before {
+                preparation_exclusions.insert(selected.candidate_id.clone());
+            }
             return DrivenAttempt::Continue(carry(
                 request,
                 request_id,
@@ -271,7 +283,24 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     // for a buffered client request.  Buffer based on the client contract,
     // then normalize either a JSON response or the completed SSE stream
     // into the same response path.
-    if !stream || basis_points_route {
+    let upstream_sse = response_headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+        });
+    // Explicit local JSON validation withholds the whole answer. It must never
+    // expose invalid text through incremental deltas before terminal validation.
+    let validate_output = basis_points_request.as_ref().is_some_and(|request| {
+        request
+            .get("relay_bps_output_validation")
+            .and_then(Value::as_bool)
+            == Some(true)
+    });
+    if !stream || (basis_points_route && (!upstream_sse || validate_output)) {
         match complete_buffered_response(BufferedCompletionInput {
             upstream,
             runtime,
@@ -331,6 +360,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         route,
         lease,
         adapter_request,
+        basis_points_request,
         request,
         request_id,
         key,

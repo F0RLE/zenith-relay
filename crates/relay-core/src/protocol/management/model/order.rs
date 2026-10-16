@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 
 /// Applies the operator's explicit presentation order without dropping a
 /// newly discovered upstream model. Unknown or stale saved IDs are ignored;
-/// models absent from the saved list keep their upstream-relative order.
+/// models absent from the saved list follow the shared catalog policy.
 pub fn apply_model_display_order(models: &mut [ModelSummary], saved_order: &[String]) {
     apply_model_display_order_with_catalog(models, saved_order, &ModelMetadataCatalog::empty());
 }
 
 /// Applies saved presentation order while placing new models through the
-/// catalog's provider-block/source ordering. This changes presentation only;
+/// catalog's provider/family/version ordering. This changes presentation only;
 /// routing and eligibility continue to use the live pool evidence.
 pub fn apply_model_display_order_with_catalog(
     models: &mut [ModelSummary],
@@ -38,13 +38,17 @@ pub struct ModelCatalogIdentity {
     pub catalog_provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_order: Option<usize>,
 }
 
-/// Resolve only IDs present in member inventory or saved rules/prices. Keep
-/// this independent from the pool's filtered operational model summaries.
+/// Resolve IDs present in member inventory or exact saved rules/prices.
+/// Wildcard rules are not models. Keep this independent from the pool's
+/// filtered operational model summaries.
 pub fn member_model_catalog(
     sources: &[SourceSummary],
     accounts: &[AccountSummary],
+    saved_order: &[String],
     catalog: &ModelMetadataCatalog,
 ) -> BTreeMap<String, ModelCatalogIdentity> {
     let source_models = sources.iter().flat_map(|source| {
@@ -57,30 +61,39 @@ pub fn member_model_catalog(
                     .iter()
                     .flat_map(|binding| &binding.model_ids),
             )
-            .chain(&source.allowed_models)
-            .chain(&source.excluded_models)
+            .chain(
+                source
+                    .allowed_models
+                    .iter()
+                    .chain(&source.excluded_models)
+                    .filter(|model| !model.contains('*')),
+            )
             .chain(source.model_price_overrides.keys())
             .chain(source.detected_model_prices.keys())
     });
     let account_models = accounts.iter().flat_map(|account| {
-        account
-            .models
-            .iter()
-            .chain(&account.allowed_models)
-            .chain(&account.excluded_models)
+        account.models.iter().chain(
+            account
+                .allowed_models
+                .iter()
+                .chain(&account.excluded_models)
+                .filter(|model| !model.contains('*')),
+        )
     });
-    source_models
-        .chain(account_models)
-        .filter_map(|model_id| {
-            Some((
-                crate::model_id_key(model_id),
+    catalog
+        .merge_display_order(source_models.chain(account_models), saved_order)
+        .into_iter()
+        .enumerate()
+        .map(|(position, model_id)| {
+            let identity = catalog.display_identity_for(&model_id);
+            (
+                crate::model_id_key(&model_id),
                 ModelCatalogIdentity {
-                    catalog_provider: catalog.display_provider_for(model_id)?,
-                    catalog_family: catalog
-                        .resolve(model_id)
-                        .and_then(|metadata| metadata.family.clone()),
+                    catalog_provider: identity.provider.unwrap_or_else(|| "other".into()),
+                    catalog_family: (!identity.family.is_empty()).then_some(identity.family),
+                    catalog_order: Some(position),
                 },
-            ))
+            )
         })
         .collect()
 }

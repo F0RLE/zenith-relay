@@ -161,6 +161,7 @@ pub(super) async fn dispatch_account_attempt(
     }
     let turn_account = route.account_id.clone();
     let turn_model = route.source_model.clone();
+    let turn_endpoint = upstream_url.as_str().to_owned();
     let turn_scope = if basis_points_route {
         None
     } else {
@@ -169,6 +170,7 @@ pub(super) async fn dispatch_account_attempt(
             client_headers,
             turn_account.as_deref(),
             &turn_model,
+            &turn_endpoint,
         )
     };
     let compaction_headers = request_headers.clone();

@@ -164,6 +164,7 @@ fn persisted_passive_quota_is_fresh_for_the_registered_account_only() {
     drop(enter);
     let mut event = usage_event("request_passive", &account.id);
     event.quota_snapshot = Some(QuotaSnapshot {
+        provider_credits_observed_at_ms: Some(now),
         primary: Some(QuotaWindow {
             kind: QuotaWindowKind::Primary,
             provider_cycle_id: None,
@@ -197,4 +198,40 @@ fn persisted_passive_quota_is_fresh_for_the_registered_account_only() {
         RefreshFreshness::Unknown
     );
     runtime.block_on(state.refresh.shutdown());
+}
+
+#[test]
+fn queued_usage_preserves_a_newer_persisted_credit_ledger() {
+    let root = TempDir::new().unwrap();
+    let state = test_app_state(root.path());
+    let mut account = test_account("account_a");
+    account.quota.available_credits_micro_units = Some(20);
+    account.quota.provider_credits_available = true;
+    account.quota.provider_credits_observed_at_ms = Some(200);
+    account.quota.updated_at_ms = Some(200);
+    state.store.save_account(&account).unwrap();
+    let mut event = usage_event("request_queued_ledger", &account.id);
+    event.quota_snapshot = Some(QuotaSnapshot {
+        available_credits_micro_units: Some(100),
+        provider_credits_available: true,
+        provider_credits_observed_at_ms: Some(100),
+        updated_at_ms: Some(300),
+        ..Default::default()
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    persist_usage_batch(
+        &state,
+        &[QueuedUsage {
+            event,
+            observed_at_ms: 300,
+        }],
+        runtime.handle(),
+    );
+    let actual = state.store.account(&account.id).unwrap().unwrap().quota;
+    assert_eq!(actual.updated_at_ms, Some(300));
+    assert_eq!(actual.provider_credits_observed_at_ms, Some(200));
+    assert_eq!(actual.available_credits_micro_units, Some(20));
 }

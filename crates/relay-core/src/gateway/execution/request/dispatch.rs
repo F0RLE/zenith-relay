@@ -119,6 +119,7 @@ pub(super) async fn dispatch_request_attempt(
             forwarded_headers,
             route.account_id.as_deref(),
             &route.source_model,
+            route.upstream_url.as_str(),
         )
     })
     .flatten();
@@ -165,8 +166,8 @@ pub(super) async fn dispatch_request_attempt(
         started.elapsed().as_millis() as u64,
     );
     let upstream = runtime
-        .send_authorized_request(
-            &route.candidate_id,
+        .send_authorized_request_for_route(
+            &route,
             upstream_request.body(request_body),
             crate::runtime::AuthorizationDispatch {
                 client_version: (!basis_points_route)
@@ -322,6 +323,33 @@ mod tests {
         );
         headers.insert("openai-beta", HeaderValue::from_static("responses=v1"));
         headers
+    }
+
+    #[test]
+    fn native_protocol_header_values_survive_outgoing_request_preparation() {
+        for (protocol, name) in [
+            (UpstreamProtocol::Responses, "openai-beta"),
+            (UpstreamProtocol::Messages, "anthropic-beta"),
+        ] {
+            let mut client = HeaderMap::new();
+            client.append(name, HeaderValue::from_static("feature-a"));
+            client.append(name, HeaderValue::from_static("feature-b"));
+            client.insert(
+                "authorization",
+                HeaderValue::from_static("Bearer synthetic-local-key"),
+            );
+            let filtered = upstream_headers_for_route(false, false, false, protocol, &client);
+            let outgoing = reqwest::Client::new()
+                .post("http://127.0.0.1/v1/synthetic")
+                .headers(filtered)
+                .build()
+                .unwrap();
+            assert_eq!(
+                outgoing.headers().get_all(name).iter().collect::<Vec<_>>(),
+                client.get_all(name).iter().collect::<Vec<_>>()
+            );
+            assert!(!outgoing.headers().contains_key("authorization"));
+        }
     }
 
     #[test]

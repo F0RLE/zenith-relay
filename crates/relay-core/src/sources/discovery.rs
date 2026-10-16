@@ -208,11 +208,17 @@ async fn read_bindings(
     // remaining Responses models are explicitly assigned to a bridge.
     let automatic_catalog_routes =
         automatic_catalog_routes(protocol_bindings, &bindings, &source.models);
-    let client = reqwest::Client::builder()
+    let client_builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+        .redirect(reqwest::redirect::Policy::none());
+    let client_builder = match source.proxy_url.as_deref() {
+        Some(proxy_url) if !proxy_url.trim().is_empty() => crate::ProxyConfig::parse(proxy_url)
+            .map_err(|message| crate::Error::Validation(message.to_string()))?
+            .apply(client_builder),
+        _ => client_builder,
+    };
+    let client = client_builder.build()?;
     let mut discovery = fetch::discover_protocol_bindings_with_client(
         &client,
         &SourceConnector::new(source, &bindings)?,

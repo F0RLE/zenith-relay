@@ -45,11 +45,11 @@ pub(super) async fn connect_upstream(
                     &tried,
                     now_ms(),
                 ) {
-                    let _ = request.drop_previous_response_id(runtime, &key.id);
+                    request.yield_response_owner(runtime, &key.id);
                 }
             }
         }
-        let incompatible = request.service_tier_exclusions(runtime, key)?;
+        let (incompatible, mut admitted) = request.compatible_routes(runtime, key)?;
         let mut selection_exclusions = tried.clone();
         selection_exclusions.extend(incompatible.iter().cloned());
         let selected = runtime
@@ -86,8 +86,12 @@ pub(super) async fn connect_upstream(
                 GapAction::Fail(failure) => return Err(failure),
             }
         };
+        let route = admitted
+            .remove(&selected.candidate_id)
+            .ok_or_else(GatewayFailure::unavailable)?;
         match drive_selected_candidate(DriveCandidateInput {
             selected,
+            route,
             lease,
             request,
             runtime,
@@ -167,7 +171,7 @@ pub(super) fn upstream_headers(
     request_id: &str,
 ) -> HeaderMap {
     let mut headers = forwarded_codex_headers(client_headers, request_id);
-    headers.insert(AUTHORIZATION, prepared.authorization.clone());
+    headers.insert(prepared.header_name.clone(), prepared.authorization.clone());
     if let Some(identity) = prepared.identity.as_ref() {
         let identity = codex_client_version(client_headers)
             .and_then(|version| identity.with_client_version(version).ok())

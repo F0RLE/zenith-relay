@@ -38,6 +38,7 @@ pub async fn probe_local_source(
         api_key: api_key.clone(),
         wire_api: source_snapshot.wire_api,
         models: source_snapshot.models.clone(),
+        proxy_url: super::support::source_proxy_url(&source_snapshot)?,
     };
     let (_, refresh_fence) = state.store()?.source_refresh_scope(&source_id)?;
     let refresh_state = state.inner().clone();

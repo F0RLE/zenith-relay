@@ -16,10 +16,9 @@ async fn request_timezone_management_is_authenticated_atomic_and_restart_safe() 
     let update = RequestTimezoneUpdate {
         policy: RequestTimezonePolicy {
             enabled: true,
-            account_timezones: BTreeMap::from([(
-                "synthetic-account".into(),
-                "Europe/Minsk".into(),
-            )]),
+            account_timezones: BTreeMap::from([("synthetic-account".into(), "Etc/GMT-3".into())]),
+            account_timezone_bindings: BTreeMap::new(),
+            account_timezone_sources: BTreeMap::new(),
         },
         expected_policy: RequestTimezonePolicy::default(),
     };
@@ -49,7 +48,7 @@ async fn request_timezone_management_is_authenticated_atomic_and_restart_safe() 
         .json()
         .await
         .unwrap();
-    assert!(catalog.contains(&"Europe/Minsk".into()));
+    assert!(catalog.contains(&"Etc/GMT-3".into()));
     let save = client
         .post(&url)
         .bearer_auth("synthetic-management-token-value")

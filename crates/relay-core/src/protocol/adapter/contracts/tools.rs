@@ -259,19 +259,6 @@ impl ResponsesToolKind {
             _ => Err(AdapterError::invalid_request()),
         }
     }
-
-    pub(in crate::protocol::adapter) const fn response_item_type(self) -> &'static str {
-        match self {
-            Self::Function => "function_call",
-            Self::Custom => "custom_tool_call",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(in crate::protocol::adapter) struct TranslatedTools {
-    pub(in crate::protocol::adapter) upstream: Vec<Value>,
-    pub(in crate::protocol::adapter) client_tools: BTreeMap<String, ClientToolTarget>,
 }
 
 #[derive(Clone, Debug)]

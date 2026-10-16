@@ -3,7 +3,7 @@ use super::super::{
 };
 use crate::gateway::continuation;
 use crate::gateway::request::{
-    client_context_fingerprint, codex_background_request_kind, is_managed_codex_client,
+    client_request_identity, codex_background_request_kind, is_managed_codex_client,
     RequestToolPolicy, ServiceTierPolicy,
 };
 use crate::scheduler::rotation::SharedRequestBudget;
@@ -84,7 +84,8 @@ impl super::ClientRequest {
         if let Some(kind) = background_kind {
             runtime.mark_request_origin(&request_id, kind);
         }
-        let client_context_id = client_context_fingerprint(headers);
+        let client_identity = client_request_identity(headers, &request_body);
+        let client_context_id = client_identity.context_id;
         if background_kind.is_none() {
             tool_policy.capture_cache_context(
                 runtime,
@@ -157,9 +158,10 @@ impl super::ClientRequest {
             &key.id,
             &resolved_model,
             request_body.get("prompt_cache_key").and_then(Value::as_str),
-            client_context_id.as_deref(),
+            client_identity.affinity_id.as_deref(),
         );
         Ok(Self {
+            local_key_id: key.id.clone(),
             tool_policy,
             request_id,
             budget: SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),
@@ -174,6 +176,7 @@ impl super::ClientRequest {
             requires_affinity_owner: continuation.requires_affinity_owner,
             has_unpaired_tool_output: continuation.has_unpaired_tool_output,
             prompt_affinity_key,
+            client_context_id,
             background_kind,
         })
     }

@@ -65,6 +65,7 @@ fn quota_reset_delay_uses_the_earliest_future_window_and_stable_jitter() {
 #[test]
 fn passive_quota_requires_a_recent_window_not_only_an_updated_timestamp() {
     let mut quota = QuotaSnapshot {
+        provider_credits_observed_at_ms: Some(99_000),
         updated_at_ms: Some(99_000),
         primary: Some(QuotaWindow {
             kind: QuotaWindowKind::Primary,
@@ -81,6 +82,13 @@ fn passive_quota_requires_a_recent_window_not_only_an_updated_timestamp() {
         ..QuotaSnapshot::default()
     };
     assert_eq!(passive_quota_age_ms(&quota, 100_000), Some(1_000));
+    quota.provider_credits_observed_at_ms = Some(5_000);
+    assert_eq!(passive_quota_age_ms(&quota, 100_000), Some(95_000));
+    quota.provider_credits_observed_at_ms = None;
+    assert_eq!(passive_quota_age_ms(&quota, 100_000), None);
+    quota.provider_credits_observed_at_ms = Some(100_001);
+    assert_eq!(passive_quota_age_ms(&quota, 100_000), None);
+    quota.provider_credits_observed_at_ms = Some(99_000);
     quota.secondary = Some(QuotaWindow {
         kind: QuotaWindowKind::Secondary,
         provider_cycle_id: None,

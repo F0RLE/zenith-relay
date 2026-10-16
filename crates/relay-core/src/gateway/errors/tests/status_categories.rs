@@ -177,6 +177,11 @@ fn upstream_errors_use_stable_status_and_body_categories() {
                 "upstream_invalid_request",
             ),
             (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                br#"{"error":{"type":"server_error","message":"422: Invalid request body."}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
                 StatusCode::BAD_REQUEST,
                 br#"{"error":{"code":"websocket_not_supported"}}"#.as_slice(),
                 "upstream_websocket_unsupported",

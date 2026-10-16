@@ -185,6 +185,7 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                     }
                 ),
                 api_key: SOURCE_KEY.into(),
+                proxy_url: None,
                 wire_api: output,
                 models: vec!["matrix-model".into()],
             });

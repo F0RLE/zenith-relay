@@ -15,8 +15,8 @@ pub(in crate::local_pool::profiles::codex) fn bundled_codex_ultra_models() -> Ha
 {
     // A desktop session often cannot see `codex` on PATH. Try that command,
     // then the newest installed CLI. Relay only consumes bundled metadata
-    // published by Codex itself for orchestration and its default context
-    // window; another app's catalog must not influence these values.
+    // published by Codex itself for Ultra orchestration, never context
+    // windows; another app's catalog must not influence these values.
     codex_cli_candidates()
         .into_iter()
         .find_map(|executable| read_bundled_codex_catalog(&executable))
@@ -111,28 +111,16 @@ pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Valu
                 .into_iter()
                 .flatten()
                 .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"));
-            let default_context_window = catalog_entry
-                .get("context_window")
-                .and_then(Value::as_u64)
-                .filter(|window| *window > 0);
-            if (!has_ultra && default_context_window.is_none())
-                || !zenith_relay_core::is_valid_model_id(slug)
-            {
+            if !has_ultra || !zenith_relay_core::is_valid_model_id(slug) {
                 return None;
             }
             let mut ultra = json!({
                 "slug": slug,
-                "supported_reasoning_levels": []
+                "supported_reasoning_levels": [{"effort": "ultra"}]
             });
-            if let Some(window) = default_context_window {
-                ultra["context_window"] = json!(window);
-            }
-            if has_ultra {
-                ultra["supported_reasoning_levels"] = json!([{"effort": "ultra"}]);
-                for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
-                    if let Some(value) = catalog_entry.get(field).and_then(Value::as_str) {
-                        ultra[field] = json!(value);
-                    }
+            for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
+                if let Some(value) = catalog_entry.get(field).and_then(Value::as_str) {
+                    ultra[field] = json!(value);
                 }
             }
             Some((zenith_relay_core::model_id_key(slug), ultra))

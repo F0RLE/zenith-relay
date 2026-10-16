@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn invalid_body_422_does_not_retry_or_penalize_accounts_even_with_server_error_type() {
+    let body = br#"{"error":{"type":"server_error","message":"422: Invalid request body."}}"#;
+    let failure = AttemptFailure::status_with_body(StatusCode::UNPROCESSABLE_ENTITY, Some(body));
+    assert_eq!(failure.category, error_codes::UPSTREAM_INVALID_REQUEST);
+    assert!(!failure_category_requires_cooldown(failure.category));
+    assert!(!failure_category_affects_account_state(failure.category));
+    for has_previous_response_id in [false, true] {
+        assert!(!retryable_failure(
+            failure.status,
+            failure.category,
+            has_previous_response_id
+        ));
+    }
+}
+
+#[test]
 fn quota_rate_and_validation_failures_keep_distinct_effects() {
     for (code, category, cooldown) in [
         ("slow_down", "upstream_rate_limited", true),
@@ -78,6 +94,17 @@ fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         false
     ));
     assert!(!retryable_failure(
+        StatusCode::TOO_MANY_REQUESTS,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED,
+        false
+    ));
+    assert!(!failure_category_requires_cooldown(
+        error_codes::UPSTREAM_TURN_RATE_LIMITED
+    ));
+    assert!(!failure_category_affects_account_state(
+        error_codes::UPSTREAM_TURN_RATE_LIMITED
+    ));
+    assert!(!retryable_failure(
         StatusCode::FORBIDDEN,
         "upstream_content_policy",
         false
@@ -149,6 +176,84 @@ fn local_errors_use_openai_compatible_error_types() {
         "model_at_capacity"
     );
     assert_eq!(api_error_code("local_internal_code"), "local_internal_code");
+}
+
+#[test]
+fn retry_policy_requires_proven_rejection_and_preserves_connection_failover() {
+    for (status, category, expected) in [
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error_codes::UPSTREAM_SERVER_ERROR,
+            false,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_BAD_GATEWAY,
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_UNAVAILABLE,
+            false,
+        ),
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            error_codes::UPSTREAM_GATEWAY_TIMEOUT,
+            false,
+        ),
+        (
+            StatusCode::REQUEST_TIMEOUT,
+            error_codes::UPSTREAM_REQUEST_TIMEOUT,
+            false,
+        ),
+        (StatusCode::CONFLICT, error_codes::UPSTREAM_CONFLICT, false),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_CONNECT,
+            true,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_TIMEOUT,
+            false,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_BODY,
+            false,
+        ),
+        (
+            StatusCode::BAD_GATEWAY,
+            error_codes::UPSTREAM_TRANSPORT_REQUEST,
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_OVERLOADED,
+            true,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_MODEL_CAPACITY,
+            true,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_RATE_LIMITED,
+            true,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_TURN_RATE_LIMITED,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            retryable_failure(status, category, false),
+            expected,
+            "{category}"
+        );
+    }
 }
 
 #[tokio::test]

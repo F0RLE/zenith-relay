@@ -13,8 +13,9 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use zenith_relay_core::ApiModelPriceSources;
 use zenith_relay_core::{
-    normalize_model_ids, normalize_model_price_overrides, normalize_model_reasoning_allowed_levels,
-    normalize_model_service_tier_overrides, ApiModelPriceOverride, DefaultServiceTier,
+    normalize_model_context_policies, normalize_model_ids, normalize_model_price_overrides,
+    normalize_model_reasoning_allowed_levels, normalize_model_service_tier_overrides,
+    ApiModelPriceOverride, DefaultServiceTier, ModelContextPolicy,
 };
 
 impl Store {
@@ -195,6 +196,29 @@ impl Store {
             "model_service_tier_overrides",
             &serde_json::to_string(&overrides)
                 .map_err(|_| "model service tier overrides could not be serialized".to_string())?,
+        )
+    }
+
+    pub fn model_context_policies(&self) -> Result<BTreeMap<String, ModelContextPolicy>, String> {
+        let json = self
+            .metadata("model_context_policies")?
+            .unwrap_or_else(|| "{}".to_string());
+        normalize_model_context_policies(
+            serde_json::from_str(&json)
+                .map_err(|_| "model context policies are invalid".to_string())?,
+        )
+        .map_err(str::to_string)
+    }
+
+    pub fn set_model_context_policies(
+        &self,
+        policies: BTreeMap<String, ModelContextPolicy>,
+    ) -> Result<(), String> {
+        let policies = normalize_model_context_policies(policies).map_err(str::to_string)?;
+        self.set_metadata(
+            "model_context_policies",
+            &serde_json::to_string(&policies)
+                .map_err(|_| "model context policies could not be serialized".to_string())?,
         )
     }
 

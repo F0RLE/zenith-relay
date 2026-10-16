@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::local_pool::accounts::proxy::ProxyPool;
 use crate::local_pool::error::LocalPoolError;
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::{DesktopState, SnapshotInputs};
@@ -107,15 +108,30 @@ pub(super) fn project_source_summaries(
         .collect()
 }
 
+pub(super) struct AccountProjectionContext<'a> {
+    pub(super) state: &'a DesktopState,
+    pub(super) inputs: &'a SnapshotInputs,
+    pub(super) routing_order: &'a [CandidateRuntimeSnapshot],
+    pub(super) equivalents: &'a UsageEquivalents,
+    pub(super) quota_window_usages: &'a BTreeMap<String, QuotaWindowUsage>,
+    pub(super) proxy_pool: &'a ProxyPool,
+    pub(super) common_proxy_available: bool,
+    pub(super) snapshot_at_ms: u64,
+}
+
 pub(super) fn project_account_summaries(
-    state: &DesktopState,
-    inputs: &SnapshotInputs,
-    routing_order: &[CandidateRuntimeSnapshot],
-    equivalents: &UsageEquivalents,
-    quota_window_usages: &BTreeMap<String, QuotaWindowUsage>,
-    common_proxy_available: bool,
-    snapshot_at_ms: u64,
+    context: AccountProjectionContext<'_>,
 ) -> Result<Vec<AccountSummary>, LocalPoolError> {
+    let AccountProjectionContext {
+        state,
+        inputs,
+        routing_order,
+        equivalents,
+        quota_window_usages,
+        proxy_pool,
+        common_proxy_available,
+        snapshot_at_ms,
+    } = context;
     inputs
         .accounts
         .iter()
@@ -124,6 +140,7 @@ pub(super) fn project_account_summaries(
                 account_record,
                 LocalAccountSummaryContext {
                     settings: &inputs.gateway,
+                    proxy_id: proxy_pool.proxy_id_for_account(&account_record.account.id),
                     credentials: inputs
                         .account_facts
                         .get(&account_record.account.id)

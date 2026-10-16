@@ -251,6 +251,13 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
         .account
         .id
         .clone();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let direct_credentials = credential_store
+        .require(&account_id)
+        .unwrap()
+        .with_proxy_route(None, true)
+        .unwrap();
+    credential_store.save(&direct_credentials).unwrap();
 
     let second = sessions
         .start(
@@ -276,10 +283,10 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
     .unwrap();
 
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
-    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let credentials = credential_store.require(&account_id).unwrap();
     assert_eq!(credentials.access_token(), "access-replacement");
     assert_eq!(credentials.refresh_token(), Some("refresh-original"));
+    assert!(credentials.bypass_common_proxy());
     assert_eq!(
         state
             .store()
@@ -423,6 +430,7 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
         api_key: item.secrets().api_key().unwrap().to_string(),
         wire_api,
         models: vec!["gpt-test".into()],
+        proxy_url: None,
     };
     runtime.validate().unwrap();
     let source = imported_source_record(
@@ -465,6 +473,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: "source:source_existing".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::ChatCompletions,
         protocol_config: Default::default(),
@@ -494,6 +503,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         api_key: "sk-private".into(),
         wire_api,
         models: vec!["new-model".into()],
+        proxy_url: None,
     };
     let discovered_bindings = vec![SourceProtocolBinding {
         wire_api: WireApi::ChatCompletions,
@@ -542,6 +552,7 @@ async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: secret_ref.clone(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),

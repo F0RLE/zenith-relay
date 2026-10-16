@@ -15,14 +15,21 @@ pub(super) fn validate_calls(blocks: &[Block]) -> AdapterResult<()> {
             arguments,
         } = block
         {
-            if id.is_empty()
-                || name.is_empty()
-                || !call_ids.insert(id)
-                || serde_json::from_str::<Value>(arguments)
-                    .ok()
-                    .is_none_or(|args| !args.is_object())
+            if id.is_empty() || !call_ids.insert(id) {
+                return Err(
+                    AdapterError::upstream_response_invalid().with_parameter("tool_calls.id")
+                );
+            }
+            if name.is_empty() {
+                return Err(AdapterError::upstream_response_invalid()
+                    .with_parameter("tool_calls.function.name"));
+            }
+            if serde_json::from_str::<Value>(arguments)
+                .ok()
+                .is_none_or(|args| !args.is_object())
             {
-                return Err(AdapterError::upstream_response_invalid());
+                return Err(AdapterError::upstream_response_invalid()
+                    .with_parameter("tool_calls.function.arguments"));
             }
         }
     }
@@ -306,9 +313,9 @@ pub(super) fn encode(
             (WireApi::ChatCompletions, Block::ToolCall { id, name, arguments }) => calls.push(json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments}})),
             (WireApi::Messages, Block::Text(text)) => content.push(json!({"type":"text","text":text})),
             (WireApi::Messages, Block::Refusal(text)) => content.push(json!({"type":"text","text":text})),
-            // A public summary from another protocol cannot become Anthropic
-            // thinking: only Anthropic can produce its required signature.
-            (WireApi::Messages, Block::Reasoning(_)) => return Err(AdapterError::upstream_response_invalid()),
+            // This is a public summary for the client, not signed Anthropic
+            // state. Original upstream blocks stay in the scoped continuation.
+            (WireApi::Messages, Block::Reasoning(text)) => content.push(json!({"type":"thinking","thinking":text})),
             (WireApi::Messages, Block::ToolCall { id, name, arguments }) => content.push(json!({"type":"tool_use","id":id,"name":name,"input":serde_json::from_str::<Value>(arguments).map_err(|_| AdapterError::upstream_response_invalid())?})),
             (WireApi::Gemini, Block::Text(text)) => content.push(json!({"text":text})),
             (WireApi::Gemini, Block::Refusal(text)) => content.push(json!({"text":text})),

@@ -13,6 +13,7 @@ impl GatewayRuntime {
         request: &Value,
         now_ms: u64,
     ) -> crate::AdapterResult<Option<crate::MessagesBridgeState>> {
+        self.validate_continuation_route(route, local_key_id, request, now_ms)?;
         let Some(key) =
             route
                 .adapter
@@ -21,9 +22,23 @@ impl GatewayRuntime {
             return Ok(None);
         };
         match self.load_messages_bridge_state(local_key_id, &key, &route.candidate_id, now_ms) {
-            Ok(state) => Ok(Some(state)),
+            Ok(state)
+                if state.upstream_wire_api()
+                    == route
+                        .adapter
+                        .upstream_protocol(route.client_wire_api)
+                        .wire_api() =>
+            {
+                self.validate_adapter_history_route(route, &key, now_ms)?;
+                Ok(Some(state))
+            }
+            Ok(_) => Err(crate::AdapterError::continuation_mismatch()),
             Err(error)
-                if route.client_wire_api != crate::WireApi::Responses
+                if (route.client_wire_api != crate::WireApi::Responses
+                    || request
+                        .get("previous_response_id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| id.trim().is_empty()))
                     && error == crate::AdapterError::continuation_missing() =>
             {
                 Ok(None)
@@ -324,8 +339,11 @@ impl GatewayRuntime {
         key.is_some_and(|key| {
             let invalidated = self.lock_scheduler().invalidate_response_affinity(key);
             if invalidated {
+                let route_key = format!("route:{key}");
+                crate::poison::mutex(&self.response_route_affinity).invalidate(&route_key);
                 if let Some(store) = self.response_affinity_store.as_ref() {
                     let _ = store.delete(key);
+                    let _ = store.delete(&route_key);
                 }
             }
             invalidated

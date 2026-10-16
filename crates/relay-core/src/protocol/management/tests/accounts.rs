@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn context_windows_keep_native_account_evidence_separate_from_bps_and_api() {
+    let mut account = account_summary(true, &["gpt-test"]);
+    let mut models = pool_model_summaries(&[], std::slice::from_ref(&account), &[]);
+    models[0].catalog_context_limit = Some(1_000_000);
+    for kind in [
+        crate::providers::chatgpt::OAuthClientKind::Codex,
+        crate::providers::chatgpt::OAuthClientKind::ExcelBps,
+    ] {
+        account.oauth_client_kind = kind;
+        apply_pool_model_configuration(
+            &mut models,
+            &[],
+            std::slice::from_ref(&account),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        let windows = models[0].context_windows.unwrap();
+        assert_eq!(windows.default_tokens, None);
+        assert_eq!(
+            windows.maximum_tokens,
+            (kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps).then_some(1_000_000)
+        );
+        let serialized = serde_json::to_value(&models[0]).unwrap();
+        assert!(serialized.get("contextWindows").is_some());
+    }
+}
+
+#[test]
 fn source_revision_is_optional_in_old_snapshots_and_non_secret_in_new_ones() {
     let mut source = source_summary("synthetic", &["test"]);
     let mut legacy = serde_json::to_value(&source).unwrap();
@@ -188,6 +218,7 @@ fn account_operational_state_is_shared_and_does_not_invent_fresh_exhaustion() {
     assert_eq!(state.routing_block_reason, None);
 
     quota.updated_at_ms = Some(1_000);
+    quota.primary.as_mut().unwrap().observed_at_ms = 1_000;
     quota.primary.as_mut().unwrap().available_basis_points = Some(5_000);
     let state = account_operational_state(AccountOperationalInput {
         enabled: true,

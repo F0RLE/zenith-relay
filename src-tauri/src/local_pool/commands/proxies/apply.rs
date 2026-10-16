@@ -8,11 +8,12 @@ use crate::local_pool::{
             credential_invalid_state_error as credential_error, CredentialStore,
             StoredCodexCredentials,
         },
-        proxy::ProxyPool,
+        proxy::{ProxyPool, ProxyPoolSummary, COMMON_PROXY_SECRET_REF},
         NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
     state::DesktopState,
+    store::secret_store,
 };
 use std::collections::HashSet;
 
@@ -47,6 +48,83 @@ pub(super) async fn apply_choices(
 ) -> Result<StoredProxyAssignmentResult> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let old_pool = load_reconciled_pool(state, &credentials)?;
+    apply_changes(state, credentials, old_pool, choices, &[]).await
+}
+
+pub(super) async fn set_proxy_accounts(
+    state: &DesktopState,
+    proxy_id: &str,
+    account_ids: Vec<String>,
+) -> Result<StoredProxyAssignmentResult> {
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let old_pool = load_reconciled_pool(state, &credentials)?;
+    let selected = account_ids.iter().cloned().collect::<HashSet<_>>();
+    let mut choices = old_pool
+        .assigned_account_ids(proxy_id)?
+        .into_iter()
+        .filter(|account_id| !selected.contains(account_id))
+        .map(|account_id| (account_id, ProxyChoice::Inherited))
+        .collect::<Vec<_>>();
+    choices.extend(
+        account_ids
+            .into_iter()
+            .map(|account_id| (account_id, ProxyChoice::Stored(proxy_id.to_string()))),
+    );
+    apply_changes(state, credentials, old_pool, choices, &[]).await
+}
+
+pub(super) async fn delete_proxies(
+    state: &DesktopState,
+    proxy_ids: &[String],
+) -> Result<ProxyPoolSummary> {
+    // Validate every shared consumer before changing any account credentials.
+    let source_uses_proxy = state.store()?.sources().iter().any(|source| {
+        source
+            .proxy_id
+            .as_ref()
+            .is_some_and(|proxy_id| proxy_ids.contains(proxy_id))
+    });
+    if source_uses_proxy {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "release the proxy from its API sources before deleting it",
+        ));
+    }
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let old_pool = load_reconciled_pool(state, &credentials)?;
+    if state.store()?.gateway().common_proxy_configured {
+        let common_url = secret_store::load(COMMON_PROXY_SECRET_REF)?;
+        if common_url
+            .as_deref()
+            .and_then(|url| old_pool.id_for_url(url))
+            .is_some_and(|id| proxy_ids.contains(&id))
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "change the common proxy before deleting it",
+            ));
+        }
+    }
+    let mut choices = Vec::new();
+    for proxy_id in proxy_ids {
+        choices.extend(
+            old_pool
+                .assigned_account_ids(proxy_id)?
+                .into_iter()
+                .map(|account_id| (account_id, ProxyChoice::Inherited)),
+        );
+    }
+    let result = apply_changes(state, credentials, old_pool, choices, proxy_ids).await?;
+    Ok(result.pool)
+}
+
+async fn apply_changes(
+    state: &DesktopState,
+    credentials: CredentialStore<NativeSecretBackend>,
+    old_pool: ProxyPool,
+    choices: Vec<(String, ProxyChoice)>,
+    deleted_proxy_ids: &[String],
+) -> Result<StoredProxyAssignmentResult> {
     let mut pool = old_pool.clone();
     let account_ids = state
         .store()?
@@ -100,7 +178,13 @@ pub(super) async fn apply_choices(
             updates.push((previous_credentials, updated_credentials));
         }
     }
-    if updates.is_empty() && pool == old_pool {
+    if !deleted_proxy_ids.is_empty() {
+        pool.delete_many(deleted_proxy_ids)?;
+    }
+    if updates.is_empty() {
+        if pool != old_pool {
+            pool.save()?;
+        }
         return Ok(StoredProxyAssignmentResult {
             assigned: 0,
             unchanged,

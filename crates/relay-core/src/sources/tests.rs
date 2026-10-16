@@ -3,6 +3,29 @@ use std::collections::BTreeMap;
 use url::Url;
 
 #[test]
+fn changing_the_source_proxy_changes_the_transport_identity() {
+    let config = SourceProtocolConfig::default();
+    let identity = |proxy_id| SourceTransportIdentity {
+        id: "source",
+        base_url: "https://api.example/v1",
+        secret_ref: "source:secret",
+        proxy_id,
+        wire_api: WireApi::Responses,
+        protocol_bindings: &[],
+        protocol_config: &config,
+        models: &[],
+    };
+
+    assert_eq!(identity(Some("proxy_a")), identity(Some("proxy_a")));
+    assert_ne!(identity(Some("proxy_a")), identity(Some("proxy_b")));
+    assert_ne!(identity(None), identity(Some("proxy_a")));
+    assert!(!source_runtime_policy_compatible(
+        &[identity(Some("proxy_a"))],
+        &[identity(Some("proxy_b"))]
+    ));
+}
+
+#[test]
 fn url_userinfo_includes_a_username_or_a_password() {
     assert!(!url_has_userinfo(
         &Url::parse("https://api.example/v1").unwrap()
@@ -356,6 +379,7 @@ fn source_validation_rejects_unsafe_urls_and_redacts_secrets() {
         api_key: "upstream-secret".to_string(),
         wire_api: WireApi::Responses,
         models: vec!["model-1".to_string()],
+        proxy_url: None,
     };
     assert!(source.validate().is_err());
 
@@ -578,6 +602,7 @@ fn source_runtime_keeps_policy_edits_and_rebuilds_catalog_evidence() {
         id: "source",
         base_url: "https://example.test/v1",
         secret_ref: "source:source",
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: &[],
         protocol_config: &config,

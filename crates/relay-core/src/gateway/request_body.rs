@@ -28,6 +28,8 @@ pub(super) fn retained_object_bytes(request_fields: &Map<String, Value>) -> usiz
 fn retained_value_bytes(json_value: &Value) -> usize {
     let allocation = match json_value {
         Value::String(text) => text.capacity(),
+        // Arbitrary-precision numbers retain their decimal text as well.
+        Value::Number(number) => number.as_str().len(),
         Value::Array(items) => items.iter().fold(
             items
                 .capacity()
@@ -128,6 +130,53 @@ fn invalid_encoding() -> Response<Body> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn native_json_roundtrip_preserves_order_and_exact_numbers() {
+        use crate::{AdapterRequestContext, MessagesReasoningMode, SourceAdapter, WireApi};
+
+        let body = r#"{"model":"alias","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"zeta":{"type":"number"},"alpha":{"type":"integer"}}}}],"extension":{"z":123456789012345678901234567890123456789,"a":0.12345678901234567890123456789,"exponent":1e+30}}"#;
+        let fields = read_json_object(&HeaderMap::new(), Body::from(body))
+            .await
+            .unwrap();
+        let request = Value::Object(fields);
+        for client_wire_api in [
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Messages,
+            WireApi::Gemini,
+        ] {
+            let prepared = SourceAdapter::Native
+                .prepare_request(AdapterRequestContext {
+                    client_wire_api,
+                    request: &request,
+                    model: "resolved-model",
+                    stream: false,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    cache_write_ttl: Default::default(),
+                    previous: None,
+                    response_scope: "synthetic-native-route",
+                    response_id_seed: "synthetic-request",
+                })
+                .unwrap();
+            let expected = if client_wire_api == WireApi::Gemini {
+                body.replacen("\"model\":\"alias\",", "", 1)
+            } else {
+                body.replacen("\"alias\"", "\"resolved-model\"", 1)
+            };
+            assert_eq!(
+                serde_json::to_string(prepared.upstream_body()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn retained_bytes_include_arbitrary_precision_number_storage() {
+        let digits = "7".repeat(4096);
+        let number: Value = serde_json::from_str(&digits).unwrap();
+        assert!(retained_request_bytes(&number) >= 3 * digits.len() + 16 * 1024);
+    }
 
     #[test]
     fn truncated_compressed_streams_are_rejected() {

@@ -152,7 +152,7 @@ impl PoolScheduler {
         self.candidates.get(candidate_id).map(|candidate| {
             candidate.supports_model(model)
                 && candidate.model_rules.allows(model)
-                && allowed_protocols.contains(&candidate.protocol)
+                && candidate.supports_protocol(model, allowed_protocols)
         })
     }
 

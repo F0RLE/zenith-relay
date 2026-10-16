@@ -4,14 +4,14 @@ use crate::local_pool::{
     error::{ErrorCode, LocalPoolError},
     state::DesktopState,
 };
-use tauri::State;
+use tauri::{AppHandle, State};
 use zenith_relay_core::{
     protocol::complete_model_display_order, ApiModelPriceOverride, DefaultServiceTier,
 };
 
 pub(super) use zenith_relay_core::protocol::{
-    SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput, SetModelPriceInput,
-    SetModelServiceTierInput,
+    SetModelContextInput, SetModelEnabledInput, SetModelOrderInput as SetModelDisplayOrderInput,
+    SetModelPriceInput, SetModelServiceTierInput,
 };
 
 pub(super) async fn set_local_model_enabled(
@@ -114,6 +114,42 @@ pub(super) async fn set_local_model_service_tier(
             return Err(LocalPoolError::invalid_state(error).into());
         }
     }
+    Ok(())
+}
+
+pub(super) async fn set_local_model_context(
+    input: SetModelContextInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<()> {
+    input
+        .context_policy
+        .validate()
+        .map_err(LocalPoolError::invalid_state)?;
+    let _mutation = state.setup_guard().await;
+    let canonical = super::canonical_pool_model(&state, &input.model_id)?;
+    let key = zenith_relay_core::model_id_key(&canonical);
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    gateway
+        .model_context_policies
+        .insert(key, input.context_policy);
+    if gateway != old_gateway {
+        state.store()?.replace_gateway(gateway.clone())?;
+        if let Some(runtime) = state.gateway.runtime().await {
+            if let Err(error) =
+                runtime.set_model_context_policies(gateway.model_context_policies.clone())
+            {
+                state.store()?.replace_gateway(old_gateway)?;
+                return Err(LocalPoolError::invalid_state(error).into());
+            }
+        }
+    }
+    drop(_mutation);
+
+    // Catalog-backed clients read context fields from their managed model list.
+    // Refresh that projection after the runtime accepts the new policy.
+    super::super::runtime::refresh_active_codex_catalog_in_background(app);
     Ok(())
 }
 

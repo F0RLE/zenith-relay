@@ -3,13 +3,27 @@ use serde::{
     Serialize,
 };
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 /// OpenCode keeps its generated effort keys, then appends config keys in file
 /// order. A normal `serde_json` object is a `BTreeMap`, so `max` is written
 /// before `xhigh` and the OpenCode menu follows that order.
+#[cfg(test)]
 pub(in crate::local_pool::commands::opencode) fn serialize_config(
     config: &Map<String, Value>,
 ) -> Result<String, serde_json::Error> {
+    serialize_config_with_model_order(config, &[])
+}
+
+pub(in crate::local_pool::commands::opencode) fn serialize_config_with_model_order(
+    config: &Map<String, Value>,
+    models: &[String],
+) -> Result<String, serde_json::Error> {
+    let model_positions = models
+        .iter()
+        .enumerate()
+        .map(|(position, model)| (zenith_relay_core::model_id_key(model), position))
+        .collect();
     let mut buffer = Vec::new();
     let mut serializer = serde_json::Serializer::with_formatter(
         &mut buffer,
@@ -18,6 +32,8 @@ pub(in crate::local_pool::commands::opencode) fn serialize_config(
     OrderedJsonObject {
         object_fields: config,
         parent_key: None,
+        managed_provider: false,
+        model_positions: &model_positions,
     }
     .serialize(&mut serializer)?;
     String::from_utf8(buffer).map_err(|error| {
@@ -28,6 +44,8 @@ pub(in crate::local_pool::commands::opencode) fn serialize_config(
 struct OrderedJson<'a> {
     json_value: &'a Value,
     parent_key: Option<&'a str>,
+    managed_provider: bool,
+    model_positions: &'a BTreeMap<String, usize>,
 }
 
 impl Serialize for OrderedJson<'_> {
@@ -46,6 +64,8 @@ impl Serialize for OrderedJson<'_> {
                     array.serialize_element(&Self {
                         json_value: array_value,
                         parent_key: None,
+                        managed_provider: self.managed_provider,
+                        model_positions: self.model_positions,
                     })?;
                 }
                 array.end()
@@ -53,6 +73,8 @@ impl Serialize for OrderedJson<'_> {
             Value::Object(object_fields) => OrderedJsonObject {
                 object_fields,
                 parent_key: self.parent_key,
+                managed_provider: self.managed_provider,
+                model_positions: self.model_positions,
             }
             .serialize(serializer),
         }
@@ -62,6 +84,8 @@ impl Serialize for OrderedJson<'_> {
 struct OrderedJsonObject<'a> {
     object_fields: &'a Map<String, Value>,
     parent_key: Option<&'a str>,
+    managed_provider: bool,
+    model_positions: &'a BTreeMap<String, usize>,
 }
 
 impl Serialize for OrderedJsonObject<'_> {
@@ -69,11 +93,19 @@ impl Serialize for OrderedJsonObject<'_> {
     where
         S: Serializer,
     {
-        let keys = if self.parent_key == Some("variants") {
+        let mut keys: Vec<_> = if self.parent_key == Some("variants") {
             ordered_variant_keys(self.object_fields)
         } else {
             self.object_fields.keys().collect()
         };
+        if self.parent_key == Some("models") && self.managed_provider {
+            keys.sort_by_key(|key| {
+                self.model_positions
+                    .get(&zenith_relay_core::model_id_key(key))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
         let mut map = serializer.serialize_map(Some(keys.len()))?;
         for key in keys {
             map.serialize_entry(
@@ -81,6 +113,12 @@ impl Serialize for OrderedJsonObject<'_> {
                 &OrderedJson {
                     json_value: &self.object_fields[key],
                     parent_key: Some(key.as_str()),
+                    managed_provider: if self.parent_key == Some("provider") {
+                        super::super::protocols::managed_id(key)
+                    } else {
+                        self.managed_provider
+                    },
+                    model_positions: self.model_positions,
                 },
             )?;
         }

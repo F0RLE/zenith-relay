@@ -284,6 +284,7 @@ pub(super) fn catalog_from_payload(
     )
     .unwrap_or_else(|_| ModelMetadataCatalog::empty());
     catalog.sources = statuses;
+    catalog.bind_field_revisions();
     catalog.stale = stale;
     catalog
 }
@@ -295,14 +296,14 @@ pub(super) fn valid_source_payload(index: usize, source_payload: &Value) -> bool
         1 => source_payload.as_object().is_some_and(|providers| {
             !providers.is_empty()
                 && providers.len() <= super::super::MAX_RECORDS
-                && providers.values().all(|provider| {
+                && providers.values().any(|provider| {
                     provider
                         .get("models")
                         .and_then(Value::as_object)
                         .is_some_and(|models_by_id| {
                             !models_by_id.is_empty()
                                 && models_by_id.len() <= super::super::MAX_RECORDS
-                                && models_by_id.iter().all(|(model_id, model_metadata)| {
+                                && models_by_id.iter().any(|(model_id, model_metadata)| {
                                     valid_id(model_id) && model_metadata.is_object()
                                 })
                         })
@@ -314,7 +315,7 @@ pub(super) fn valid_source_payload(index: usize, source_payload: &Value) -> bool
             .is_some_and(|model_records| {
                 !model_records.is_empty()
                     && model_records.len() <= super::super::MAX_RECORDS
-                    && model_records.iter().all(|model_record| {
+                    && model_records.iter().any(|model_record| {
                         model_record
                             .get("id")
                             .and_then(Value::as_str)
@@ -324,12 +325,9 @@ pub(super) fn valid_source_payload(index: usize, source_payload: &Value) -> bool
         3 => source_payload.as_object().is_some_and(|model_entries| {
             !model_entries.is_empty()
                 && model_entries.len() <= super::super::MAX_RECORDS
-                && model_entries.iter().all(|(model_id, model_metadata)| {
-                    valid_id(model_id) && model_metadata.is_object()
+                && model_entries.iter().any(|(model_id, model_metadata)| {
+                    model_id != "sample_spec" && valid_id(model_id) && model_metadata.is_object()
                 })
-                && model_entries
-                    .keys()
-                    .any(|model_id| model_id != "sample_spec")
         }),
         _ => false,
     }

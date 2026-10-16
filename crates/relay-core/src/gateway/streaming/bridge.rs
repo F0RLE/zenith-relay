@@ -1,7 +1,8 @@
 use super::{
-    preserved_stream_error, rewrite_bridge_failure, AdapterStreamBridge, MessagesBridgeResponse,
-    MessagesStreamBridge, PreservedUpstreamError, UpstreamStream,
+    preserved_stream_error, rewrite_bridge_failure, MessagesBridgeResponse, PreservedUpstreamError,
+    UpstreamStream,
 };
+use crate::AdapterStreamBridge;
 use axum::body::Bytes;
 use futures_util::{stream, Stream, StreamExt};
 use std::collections::VecDeque;
@@ -18,24 +19,6 @@ struct AdapterBridgeStreamState {
     finished: bool,
     end_deadline: Option<Instant>,
     completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
-}
-
-/// Translates a native Messages SSE stream into the client-facing Responses
-/// SSE contract. The completed bridge response is published before the
-/// `response.completed` frame is yielded so the usage callback can persist the
-/// continuation without exposing native content outside the local bridge.
-pub(super) fn bridge_messages_stream(
-    first: Bytes,
-    remaining: UpstreamStream,
-    bridge: MessagesStreamBridge,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
-) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
-    bridge_adapter_stream(
-        first,
-        remaining,
-        AdapterStreamBridge::Messages(Box::new(bridge)),
-        completed,
-    )
 }
 
 pub(super) fn bridge_adapter_stream(
@@ -107,20 +90,6 @@ pub(super) fn bridge_adapter_stream(
                 }
             }
         },
-    )
-}
-
-pub(super) fn bridge_gemini_stream(
-    first: Bytes,
-    remaining: UpstreamStream,
-    bridge: crate::GeminiStreamBridge,
-    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
-) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
-    bridge_adapter_stream(
-        first,
-        remaining,
-        AdapterStreamBridge::Gemini(Box::new(bridge)),
-        completed,
     )
 }
 

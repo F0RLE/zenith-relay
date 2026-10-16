@@ -13,6 +13,7 @@ fn automatic_uses_the_largest_known_quota_before_credits_or_recency() {
         member.quota = CandidateQuota::Available(quota);
         member.quota_updated_at_ms = Some(100);
         member.provider_credits_micro_units = Some(credits);
+        member.provider_credits_observed_at_ms = Some(100);
         member.quota_reset_at_ms = Some(reset);
         member.last_used_at = Some(reset);
         member.priority = priority;
@@ -33,6 +34,7 @@ fn automatic_uses_fresh_provider_credits_only_when_no_quota_ranks() {
         let member = scheduler.candidates.get_mut(id).unwrap();
         member.quota = CandidateQuota::CreditFallback;
         member.provider_credits_micro_units = Some(credits);
+        member.provider_credits_observed_at_ms = Some(100);
         member.quota_updated_at_ms = Some(100);
     }
     assert_eq!(
@@ -62,6 +64,7 @@ fn session_affinity_switches_only_when_another_balance_leads_by_fifteen_credits(
         let member = scheduler.candidates.get_mut(id).unwrap();
         member.quota = CandidateQuota::CreditFallback;
         member.provider_credits_micro_units = Some(credits);
+        member.provider_credits_observed_at_ms = Some(100);
         member.quota_updated_at_ms = Some(100);
     }
     scheduler.bind_prompt_affinity("session:chat", "account", 100);
@@ -106,10 +109,12 @@ fn stale_provider_credits_do_not_rank_automatic_candidates() {
     let stale = scheduler.candidates.get_mut("account").unwrap();
     stale.quota = CandidateQuota::CreditFallback;
     stale.provider_credits_micro_units = Some(1_000_000_000);
+    stale.provider_credits_observed_at_ms = Some(1);
     stale.quota_updated_at_ms = Some(1);
     let fresh = scheduler.candidates.get_mut("api-a").unwrap();
     fresh.quota = CandidateQuota::CreditFallback;
     fresh.provider_credits_micro_units = Some(500_000_000);
+    fresh.provider_credits_observed_at_ms = Some(100);
     fresh.quota_updated_at_ms = Some(100);
 
     assert_eq!(
@@ -118,6 +123,41 @@ fn stale_provider_credits_do_not_rank_automatic_candidates() {
             .candidate_id,
         "api-a"
     );
+}
+
+#[test]
+fn undated_or_future_observations_do_not_win_automatic_ranking() {
+    for observed_at_ms in [None, Some(101)] {
+        let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
+        let account = scheduler.candidates.get_mut("account").unwrap();
+        account.quota = CandidateQuota::Available(10_000);
+        account.quota_updated_at_ms = observed_at_ms;
+        account.provider_credits_micro_units = Some(1_000_000_000);
+        account.provider_credits_observed_at_ms = observed_at_ms;
+        let fresh = scheduler.candidates.get_mut("api-a").unwrap();
+        fresh.provider_credits_micro_units = Some(500_000_000);
+        fresh.provider_credits_observed_at_ms = Some(100);
+        assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+    }
+}
+
+#[test]
+fn credit_only_admission_expires_without_another_snapshot() {
+    for mode in [PoolRoutingMode::Automatic, PoolRoutingMode::InOrder] {
+        for unlimited in [false, true] {
+            let mut scheduler = policy::mixed(mode);
+            scheduler.set_quota_stale_after_ms(10);
+            let account = scheduler.candidates.get_mut("account").unwrap();
+            account.quota = CandidateQuota::CreditFallback;
+            account.provider_credits_micro_units = (!unlimited).then_some(1_000_000_000);
+            account.provider_credits_unlimited = unlimited;
+            account.provider_credits_observed_at_ms = Some(100);
+            assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "account");
+            for _ in 0..6 {
+                assert_ne!(rotation::dispatch(&mut scheduler, 111, None), "account");
+            }
+        }
+    }
 }
 
 #[test]
@@ -172,11 +212,12 @@ fn quota_refresh_changes_admission_without_rebuilding_or_reweighting() {
         CandidateQuota::Unknown,
         CandidateQuota::Stale,
     ] {
-        assert!(scheduler.update_candidate_availability(
+        assert!(scheduler.update_candidate_availability_at(
             "account",
             true,
             CandidateHealth::Healthy,
             quota,
+            Some(100),
         ));
         let selected: BTreeSet<_> = (0..12)
             .map(|_| rotation::dispatch(&mut scheduler, 100, None))
@@ -327,6 +368,7 @@ fn automatic_response_owner_yields_when_another_credit_balance_leads_by_fifteen(
         let member = scheduler.candidates.get_mut(id).unwrap();
         member.quota = CandidateQuota::CreditFallback;
         member.provider_credits_micro_units = Some(credits);
+        member.provider_credits_observed_at_ms = Some(100);
         member.quota_updated_at_ms = Some(100);
     }
     assert!(scheduler.bind_response_affinity("response", "account", 100));

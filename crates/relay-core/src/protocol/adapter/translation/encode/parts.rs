@@ -9,7 +9,11 @@ pub(super) fn function(tool: &Function, protocol: WireApi) -> AdapterResult<Valu
         WireApi::Messages => "input_schema",
         WireApi::Gemini => "parametersJsonSchema",
         _ => "parameters",
-    }] = tool.parameters.clone();
+    }] = if protocol == WireApi::Gemini {
+        super::super::schema::to_gemini(&tool.parameters)?
+    } else {
+        tool.parameters.clone()
+    };
     if let Some(strict) = tool.strict {
         if protocol == WireApi::Gemini && strict {
             return Err(AdapterError::parameter_unsupported());
@@ -62,10 +66,14 @@ pub(super) fn output_format(
         OutputFormat::JsonObject => json!({"type":"json_object"}),
         OutputFormat::JsonSchema {
             name,
+            description,
             schema,
             strict,
         } => {
             let mut schema_value = json!({"type":"json_schema","name":name,"schema":schema});
+            if let Some(description) = description {
+                schema_value["description"] = description.clone().into();
+            }
             if let Some(strict) = strict {
                 schema_value["strict"] = (*strict).into();
             }
@@ -84,9 +92,15 @@ pub(super) fn output_format(
             request_fields.insert("response_format".into(), format_value);
         }
         WireApi::Messages => {
-            let OutputFormat::JsonSchema { schema, .. } = format else {
+            let OutputFormat::JsonSchema {
+                schema,
+                description,
+                ..
+            } = format
+            else {
                 return Err(AdapterError::parameter_unsupported());
             };
+            let schema = described_schema(schema, description.as_deref());
             request_fields.insert(
                 "output_config".into(),
                 json!({"format":{"type":"json_schema","schema":schema}}),
@@ -103,12 +117,39 @@ pub(super) fn output_format(
                 return Err(AdapterError::parameter_unsupported());
             }
             generation.insert("responseMimeType".into(), "application/json".into());
-            if let OutputFormat::JsonSchema { schema, .. } = format {
-                generation.insert("responseJsonSchema".into(), schema.clone());
+            if let OutputFormat::JsonSchema {
+                schema,
+                description,
+                ..
+            } = format
+            {
+                generation.insert(
+                    "responseJsonSchema".into(),
+                    super::super::schema::to_gemini(&described_schema(
+                        schema,
+                        description.as_deref(),
+                    ))?,
+                );
             }
         }
     }
     Ok(())
+}
+
+fn described_schema(schema: &Value, description: Option<&str>) -> Value {
+    let mut schema = schema.clone();
+    if let Some(description) = description {
+        // Preserve both envelope and schema descriptions without changing validation.
+        let text = schema
+            .get("description")
+            .and_then(Value::as_str)
+            .map_or_else(
+                || description.to_owned(),
+                |existing| format!("{description}\n{existing}"),
+            );
+        schema["description"] = text.into();
+    }
+    schema
 }
 
 pub(super) fn thinking(
@@ -333,13 +374,14 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
             name,
             content,
             is_error,
+            raw_text,
         } => match protocol {
             WireApi::Messages => {
-                let content = content
-                    .iter()
-                    .map(|block| content_block(block, protocol, Role::User))
-                    .collect::<AdapterResult<Vec<_>>>()?;
-                json!({"type":"tool_result","tool_use_id":id,"content":content,"is_error":is_error})
+                let mut result = json!({"type":"tool_result","tool_use_id":id,"content":tool_output(content, false, protocol)?});
+                if *is_error {
+                    result["is_error"] = true.into();
+                }
+                result
             }
             WireApi::Gemini => {
                 let text = content
@@ -352,8 +394,9 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                         }
                     })
                     .collect::<String>();
-                let parsed = serde_json::from_str::<Value>(&text)
-                    .ok()
+                let parsed = (!raw_text)
+                    .then(|| serde_json::from_str::<Value>(&text).ok())
+                    .flatten()
                     .filter(Value::is_object);
                 let response = if *is_error {
                     match parsed {
@@ -362,7 +405,7 @@ pub(super) fn content_block(block: &Block, protocol: WireApi, role: Role) -> Ada
                         None => json!({"error":text}),
                     }
                 } else {
-                    parsed.unwrap_or_else(|| json!({"result":text}))
+                    parsed.unwrap_or_else(|| json!({"output":text}))
                 };
                 let mut result = json!({"id":id,"name":name,"response":response});
                 let mut media = Vec::new();

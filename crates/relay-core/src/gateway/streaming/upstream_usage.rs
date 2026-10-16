@@ -8,6 +8,7 @@ pub(super) struct UpstreamUsage {
     expected_model: Option<String>,
     rejection: Option<&'static str>,
     forward_pending: Vec<u8>,
+    timing: Option<(Instant, super::super::response::BufferedResponseTiming)>,
 }
 
 impl UpstreamUsage {
@@ -19,7 +20,16 @@ impl UpstreamUsage {
             expected_model,
             rejection: None,
             forward_pending: Vec::new(),
+            timing: None,
         }
+    }
+
+    pub(super) fn with_timing(mut self, started: Instant) -> Self {
+        self.timing = Some((
+            started,
+            super::super::response::BufferedResponseTiming::default(),
+        ));
+        self
     }
 
     pub(super) fn forward(&mut self, bytes: Bytes) -> Bytes {
@@ -55,7 +65,7 @@ impl UpstreamUsage {
         if self.rejection.is_some() {
             return false;
         }
-        let bytes = if self.pending.is_empty() {
+        let bytes = if self.pending.is_empty() && self.timing.is_none() {
             skip_aligned_response_deltas(bytes)
         } else {
             bytes
@@ -65,10 +75,17 @@ impl UpstreamUsage {
         }
         self.pending.extend_from_slice(bytes);
         while let Some(frame) = crate::protocol::take_sse_event(&mut self.pending) {
-            if super::fast_delta::fast_response_delta(&frame).is_some() {
+            if self.timing.is_none() && super::fast_delta::fast_response_delta(&frame).is_some() {
                 continue;
             }
             let parsed = parse_sse_event(&frame);
+            if let Some((started, timing)) = self.timing.as_mut() {
+                let elapsed = started.elapsed().as_millis() as u64;
+                timing.observe(&parsed, elapsed);
+                if parsed.outcome.is_some() {
+                    timing.finish(elapsed);
+                }
+            }
             if let Some(usage) = &parsed.usage {
                 crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
                 if let Some(snapshot) = &self.usage_snapshot {
@@ -93,6 +110,9 @@ impl UpstreamUsage {
     }
 
     pub(super) fn apply_to(&self, event: &mut UsageEvent) {
+        if let Some((_, timing)) = &self.timing {
+            timing.apply(event);
+        }
         event.input_tokens = self.event.input_tokens;
         event.output_tokens = self.event.output_tokens;
         event.total_tokens = self.event.total_tokens;
@@ -125,6 +145,25 @@ fn skip_aligned_response_deltas(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_tool_timing_and_partial_usage_survive_without_a_terminal() {
+        let started = Instant::now() - Duration::from_millis(100);
+        let mut capture =
+            UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None)
+                .with_timing(started);
+        capture.observe(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\",\"usage\":{\"input_tokens\":7}}\n\n");
+        let mut event = crate::gateway::test_support::test_usage_event();
+        event.latency_ms = 500;
+        capture.apply_to(&mut event);
+        assert!(event.ttft_ms.is_some_and(|first| first >= 100));
+        assert_eq!(
+            event.generation_ms,
+            event.ttft_ms.map(|first| 500_u64.saturating_sub(first))
+        );
+        assert_eq!(event.input_tokens, Some(7));
+        assert_eq!(event.output_tokens, None);
+    }
 
     #[test]
     fn mismatched_terminal_retains_reported_usage() {

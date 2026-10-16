@@ -1,6 +1,6 @@
 use super::*;
 
-async fn gateway(runtime: Arc<GatewayRuntime>) -> (String, tokio::task::JoinHandle<()>) {
+pub(super) async fn gateway(runtime: Arc<GatewayRuntime>) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -19,6 +19,270 @@ async fn request(base: &str, model: &str) -> reqwest::Response {
         .send()
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn invalid_bps_body_422_is_returned_once_without_cooling_the_account() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    *crate::poison::mutex(&server.state.generation_status) = StatusCode::UNPROCESSABLE_ENTITY;
+    *crate::poison::mutex(&server.state.generation_body) =
+        json!({"error":{"type":"server_error","message":"422: Invalid request body."}});
+    let runtime = Arc::new(runtime(&server).await);
+    let (base, task) = gateway(runtime.clone()).await;
+    let response = request(&base, "gpt-test").await;
+    assert!(response.status().is_client_error());
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+    let scheduler = runtime.lock_scheduler();
+    let account = scheduler.candidate("account-1").unwrap();
+    assert!(account.cooldowns.is_empty());
+    assert!(account.enabled);
+    drop(scheduler);
+    task.abort();
+}
+
+#[tokio::test]
+async fn claude_messages_satisfy_strict_bps_schema_through_json_and_streaming_tool_cycles() {
+    for stream in [false, true] {
+        claude_tool_cycle(stream).await;
+    }
+}
+
+#[tokio::test]
+async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let server = AccessServer::start(
+        json!([{"id":"gpt-test","efforts":[
+            {"value":"low"},{"value":"medium"},{"value":"high"},
+            {"value":"xhigh"},{"value":"max"}
+        ]}]),
+        false,
+    )
+    .await;
+    *crate::poison::mutex(&server.state.generation_body) = json!({
+        "id":"resp_synthetic_effort","object":"response","status":"completed",
+        "model":"gpt-test","output":[{
+            "type":"message","id":"msg_synthetic","role":"assistant","status":"completed",
+            "content":[{"type":"output_text","text":"Ready","annotations":[]}]
+        }],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}
+    });
+    let mut runtime = runtime(&server).await;
+    runtime.model_metadata_catalog = Some(ModelMetadataCatalogHandle::new(
+        ModelMetadataCatalog::from_models_dev_json(
+            r#"{"test/gpt-test":{"reasoning":true,"reasoning_effort_levels":["low","medium","high","xhigh","max"]}}"#,
+        )
+        .unwrap(),
+    ));
+    let runtime = Arc::new(runtime);
+    let alias = crate::claude_desktop_reasoning_model_alias("gpt-test");
+    let (base, task) = gateway(runtime.clone()).await;
+    let client = reqwest::Client::new();
+    for stream in [false, true] {
+        for effort in [
+            None,
+            Some("low"),
+            Some("medium"),
+            Some("high"),
+            Some("xhigh"),
+            Some("max"),
+        ] {
+            let mut request = json!({
+                "model":alias,"max_tokens":128,"stream":stream,
+                "messages":[{"role":"user","content":"Synthetic request"}]
+            });
+            if let Some(effort) = effort {
+                request["output_config"] = json!({"effort":effort});
+                request["thinking"] = json!({"type":"adaptive"});
+            }
+            let response = client
+                .post(format!("{base}/v1/messages"))
+                .bearer_auth("local-secret")
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{stream} {effort:?}");
+            claude_response_body(response, stream).await;
+            let bodies = crate::poison::mutex(&server.state.generation_bodies);
+            let upstream = bodies.last().unwrap();
+            assert_eq!(upstream["model"], "gpt-test");
+            // BPS's existing wire codec spells its advertised `max` as
+            // `xhigh`. This transport alias is independent of Desktop's UI ID.
+            let wire_effort = if effort == Some("max") {
+                Some("xhigh")
+            } else {
+                effort
+            };
+            assert_eq!(upstream["reasoning_effort"].as_str(), wire_effort);
+            assert!(upstream.get("output_config").is_none());
+        }
+    }
+    runtime
+        .set_model_reasoning_allowed_levels(BTreeMap::from([(
+            "gpt-test".into(),
+            vec!["low".into()],
+        )]))
+        .unwrap();
+    for (model, expected) in [
+        (alias.clone(), StatusCode::BAD_REQUEST),
+        (format!("{alias}-effort-high"), StatusCode::NOT_FOUND),
+    ] {
+        let response = client
+            .post(format!("{base}/v1/messages"))
+            .bearer_auth("local-secret")
+            .json(&json!({
+                "model":model,"max_tokens":128,"output_config":{"effort":"high"},
+                "messages":[{"role":"user","content":"Synthetic request"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 12);
+    task.abort();
+}
+
+async fn claude_tool_cycle(stream: bool) {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    server
+        .state
+        .strict_request_schema
+        .store(true, Ordering::SeqCst);
+    let runtime = Arc::new(runtime(&server).await);
+    let (base, task) = gateway(runtime).await;
+    let mut history = vec![json!({"role":"user","content":"Hello"})];
+    for turn in 0..3 {
+        let output = if turn == 1 {
+            json!([{"type":"function_call","id":"fc_lookup","call_id":"call_lookup","name":"run_officejs","arguments":json!({"references":["lookup"],"code":"{\"path\":\"synthetic\"}"}).to_string(),"status":"completed"}])
+        } else {
+            json!([{"type":"message","id":"msg_synthetic","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Ready","annotations":[]}]}])
+        };
+        *crate::poison::mutex(&server.state.generation_body) = json!({
+            "id":format!("resp_synthetic_{turn}"),"object":"response","status":"completed","model":"gpt-test","output":output,
+            "usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}
+        });
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/messages"))
+            .bearer_auth("local-secret")
+            .json(&json!({
+                "model":crate::claude_desktop_model_alias("gpt-test"),"max_tokens":128,"stream":stream,
+                "metadata":{"user_id":"synthetic-user"},
+                "system":[{"type":"text","text":"Use the supplied tool","cache_control":{"type":"ephemeral"}}],
+                "messages":history,
+                "tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]
+            }))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "turn {turn}");
+        let body = claude_response_body(response, stream).await;
+        assert_eq!(
+            body["content"][0]["type"],
+            if turn == 1 { "tool_use" } else { "text" }
+        );
+        if turn == 1 {
+            assert_eq!(body["content"][0]["name"], "lookup");
+            assert_eq!(body["content"][0]["input"], json!({"path":"synthetic"}));
+            assert_eq!(body["stop_reason"], "tool_use");
+        } else {
+            assert_eq!(body["content"][0]["text"], "Ready");
+            assert_eq!(body["stop_reason"], "end_turn");
+        }
+        history.push(json!({"role":"assistant","content":body["content"]}));
+        if turn == 0 {
+            history.push(json!({"role":"user","content":"Look up the path"}));
+        } else if turn == 1 {
+            history.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":body["content"][0]["id"],"content":"Synthetic result"}]}));
+        }
+    }
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 3);
+    let bodies = crate::poison::mutex(&server.state.generation_bodies);
+    assert!(bodies
+        .iter()
+        .all(|body| body["metadata"].get("user_id").is_none()
+            && body["metadata"].as_object().unwrap().len() == 3));
+    let final_input = bodies[2]["input"].as_array().unwrap();
+    assert!(
+        final_input
+            .iter()
+            .any(|item| item["type"] == "function_call_output"
+                && item["output"] == "Synthetic result")
+    );
+    drop(bodies);
+    task.abort();
+}
+
+async fn claude_response_body(response: reqwest::Response, stream: bool) -> Value {
+    if !stream {
+        return response.json().await.unwrap();
+    }
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = response.text().await.unwrap();
+    let events: Vec<Value> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "message_stop")
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|event| event["type"] != "error"));
+    let mut content: Vec<Value> = Vec::new();
+    let mut arguments = String::new();
+    let mut stop_reason = Value::Null;
+    for event in &events {
+        match event["type"].as_str().unwrap() {
+            "content_block_start" => content.push(event["content_block"].clone()),
+            "content_block_delta" => match event["delta"]["type"].as_str().unwrap() {
+                "text_delta" => {
+                    let text = content[0]["text"].as_str().unwrap().to_string();
+                    content[0]["text"] = json!(text + event["delta"]["text"].as_str().unwrap());
+                }
+                "input_json_delta" => {
+                    arguments.push_str(event["delta"]["partial_json"].as_str().unwrap());
+                }
+                kind => panic!("unexpected synthetic delta: {kind}"),
+            },
+            "message_delta" => stop_reason = event["delta"]["stop_reason"].clone(),
+            _ => {}
+        }
+    }
+    assert_eq!(content.len(), 1);
+    if !arguments.is_empty() {
+        content[0]["input"] = serde_json::from_str(&arguments).unwrap();
+    }
+    json!({"content":content,"stop_reason":stop_reason})
+}
+
+#[tokio::test]
+async fn claude_streaming_uses_explicit_bps_messages_and_completes() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    server
+        .state
+        .strict_request_schema
+        .store(true, Ordering::SeqCst);
+    *crate::poison::mutex(&server.state.generation_body) = json!({
+        "id":"resp_stream","object":"response","status":"completed","model":"gpt-test",
+        "output":[{"type":"message","id":"msg_stream","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Synthetic reply","annotations":[]}]}],
+        "usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}
+    });
+    let (base, task) = gateway(Arc::new(runtime(&server).await)).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .bearer_auth("local-secret")
+        .json(&json!({"model":crate::claude_desktop_model_alias("gpt-test"),"max_tokens":128,"stream":true,"metadata":{"user_id":"synthetic-user"},"messages":[{"role":"user","content":"Hello"}]}))
+        .send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Synthetic reply"));
+    assert!(body.contains("event: message_stop"));
+    assert!(!body.contains("event: error"));
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+    task.abort();
 }
 
 #[tokio::test]
@@ -205,8 +469,10 @@ async fn request_timezone_rewrites_bps_body_and_hot_disable_preserves_configurat
         enabled: true,
         account_timezones: std::collections::BTreeMap::from([(
             "account-1".into(),
-            "Europe/Minsk".into(),
+            "Etc/GMT-3".into(),
         )]),
+        account_timezone_bindings: std::collections::BTreeMap::new(),
+        account_timezone_sources: std::collections::BTreeMap::new(),
     };
     runtime.set_request_timezone(policy.clone()).unwrap();
     let (base, task) = gateway(runtime.clone()).await;
@@ -242,7 +508,7 @@ async fn request_timezone_rewrites_bps_body_and_hot_disable_preserves_configurat
     };
     assert_eq!(
         user_text(&bodies[0]),
-        environment.replace("UTC", "Europe/Minsk")
+        environment.replace("UTC", "Etc/GMT-3")
     );
     assert_eq!(user_text(&bodies[1]), environment);
     task.abort();

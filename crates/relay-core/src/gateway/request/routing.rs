@@ -20,11 +20,35 @@ pub(in crate::gateway) fn requested_reasoning_effort(
 }
 
 pub(in crate::gateway) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
+    // The client's native protocol is first so that Native (passthrough)
+    // routes are preferred over bridged routes when both are available.
+    // All other protocols follow so a model with only a non-native route
+    // is still reachable through the appropriate SourceAdapter bridge.
     match wire_api {
-        WireApi::Responses => &[WireApi::Responses],
-        WireApi::ChatCompletions => &[WireApi::ChatCompletions],
-        WireApi::Messages => &[WireApi::Messages],
-        WireApi::Gemini => &[WireApi::Gemini],
+        WireApi::Responses => &[
+            WireApi::Responses,
+            WireApi::Messages,
+            WireApi::ChatCompletions,
+            WireApi::Gemini,
+        ],
+        WireApi::ChatCompletions => &[
+            WireApi::ChatCompletions,
+            WireApi::Responses,
+            WireApi::Messages,
+            WireApi::Gemini,
+        ],
+        WireApi::Messages => &[
+            WireApi::Messages,
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Gemini,
+        ],
+        WireApi::Gemini => &[
+            WireApi::Gemini,
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Messages,
+        ],
     }
 }
 

@@ -13,7 +13,11 @@ use serde_json::{json, Map, Value};
 pub(super) const ROUTED_CODEX_BASE_INSTRUCTIONS: &str = concat!(
     "You are a coding agent. Follow the user's instructions and use the available tools. ",
     "Edit files with apply_patch, not the shell or Python. ",
-    "Run commands in PowerShell on Windows, and in the user's shell on macOS and Linux."
+    "Run commands in PowerShell on Windows, and in the user's shell on macOS and Linux. ",
+    "When a user asks to use a model for a subagent, inspect the current Relay model catalog ",
+    "before saying that the model is unavailable. Do not assume that only GPT models are ",
+    "available. Relay model aliases beginning with `zenith/` are routable model IDs; use ",
+    "the exact catalog ID for the request and show the decoded model name to the user."
 );
 
 pub fn routed_codex_catalog_entry(

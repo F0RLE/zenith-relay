@@ -6,6 +6,9 @@ use crate::protocol::AdapterError;
 use serde_json::{json, Map, Value};
 
 mod identifiers;
+mod messages;
+
+pub(super) use messages::separate_tool_images;
 
 pub(in crate::gateway::execution::basis_points) use identifiers::fit_responses_id as fit_item_id;
 use identifiers::fit_responses_id;
@@ -80,6 +83,7 @@ pub(super) fn translate_input_items(
     let mut translated_items = Vec::with_capacity(input_items.len());
     let mut transport_call_ids = std::collections::HashSet::new();
     for input_item in input_items {
+        let input_item = messages::normalize_message(input_item)?;
         let Some(input_object) = input_item.as_object() else {
             translated_items.push(input_item);
             continue;

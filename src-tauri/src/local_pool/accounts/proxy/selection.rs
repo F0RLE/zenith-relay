@@ -1,5 +1,5 @@
 use super::super::credentials::StoredCodexCredentials;
-use super::COMMON_PROXY_SECRET_REF;
+use super::{ProxyPool, COMMON_PROXY_SECRET_REF};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::GatewaySettings,
@@ -54,6 +54,29 @@ pub fn common_proxy_url(settings: &GatewaySettings) -> Result<Option<String>> {
         )
     })?;
     Ok(Some(proxy_url))
+}
+
+/// Stored-proxy id behind the common proxy, when the pool holds the same URL.
+pub(crate) fn common_proxy_pool_id(settings: &GatewaySettings, pool: &ProxyPool) -> Option<String> {
+    common_proxy_url(settings)
+        .ok()
+        .flatten()
+        .and_then(|proxy_url| pool.id_for_url(&proxy_url))
+}
+
+/// Resolve the actual credential route; the pool's assignment index may be
+/// waiting for reconciliation after an import or credential replacement.
+pub(crate) fn account_proxy_pool_id(
+    pool: &ProxyPool,
+    credentials: &StoredCodexCredentials,
+    common_proxy_id: Option<&str>,
+) -> Option<String> {
+    if let Some(proxy_url) = credentials.proxy_url() {
+        return pool.id_for_url(proxy_url);
+    }
+    (!credentials.bypass_common_proxy())
+        .then(|| common_proxy_id.map(str::to_owned))
+        .flatten()
 }
 
 pub fn common_proxy_config(settings: &GatewaySettings) -> Result<Option<ProxyConfig>> {

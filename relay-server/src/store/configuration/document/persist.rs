@@ -143,6 +143,10 @@ pub(super) fn write_configuration(
                 .map_err(ConfigurationReplaceError::Store)?,
         ),
         (
+            "model_context_policies",
+            to_json(&settings.model_context_policies).map_err(ConfigurationReplaceError::Store)?,
+        ),
+        (
             "model_display_order",
             to_json(&settings.model_display_order).map_err(ConfigurationReplaceError::Store)?,
         ),

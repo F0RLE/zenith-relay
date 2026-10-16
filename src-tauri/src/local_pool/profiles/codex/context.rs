@@ -65,14 +65,9 @@ pub(crate) fn sync_context_overrides(
 pub(crate) fn sync_context_policy(
     codex_home: &Path,
     backup_root: &Path,
-    policy: zenith_relay_core::catalog::context_policy::ApplicationContextPolicy,
 ) -> Result<ContextConfigChange> {
     let _guard = lock_codex_profile();
-    sync_context_keys_locked(
-        codex_home,
-        backup_root,
-        [policy.manages_window(), policy.manages_compaction()],
-    )
+    sync_context_keys_locked(codex_home, backup_root, [true, true])
 }
 
 pub(super) fn sync_context_overrides_locked(

@@ -102,6 +102,34 @@ fn image_url_object_and_supported_signatures_decode() {
 }
 
 #[test]
+fn tool_result_images_use_the_existing_attachment_validation() {
+    use super::super::history::separate_tool_images;
+    for output_kind in ["function_call_output", "custom_tool_call_output"] {
+        let items = separate_tool_images(vec![
+            json!({"type":output_kind,"call_id":"call_test","output":[
+                {"type":"input_image","image_url":data_url(&png_bytes())},
+                {"type":"input_image","file_id":"file-synthetic"}
+            ]}),
+        ]);
+        let mut body = json!({"input":items});
+        let jobs = expect_jobs(stage_input_images(&body));
+        assert_eq!(jobs.len(), 2);
+        assert!(matches!(jobs[0].job, ImageJob::Upload(_)));
+        assert!(matches!(&jobs[1].job, ImageJob::File(id) if id == "file-synthetic"));
+        body["input"][1]["content"][2]["image_url"] = json!("https://example.invalid/tool.png");
+        assert!(matches!(
+            stage_input_images(&body),
+            Err(AttachmentFailure::Reject(_))
+        ));
+        body["input"][1]["content"][2]["image_url"] = json!("data:image/png;base64,not-an-image");
+        assert!(matches!(
+            stage_input_images(&body),
+            Err(AttachmentFailure::Reject(_))
+        ));
+    }
+}
+
+#[test]
 fn conflicting_remote_and_unknown_images_are_rejected() {
     let both = json!({
         "input": [{"role": "user", "content": [{

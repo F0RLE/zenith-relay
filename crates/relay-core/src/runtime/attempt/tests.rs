@@ -23,6 +23,7 @@ fn runtime() -> Arc<GatewayRuntime> {
                         api_key: "synthetic-source-key".into(),
                         wire_api: WireApi::Responses,
                         models: vec!["model-a".into(), "model-b".into()],
+                        proxy_url: None,
                     })
                 })
                 .collect(),

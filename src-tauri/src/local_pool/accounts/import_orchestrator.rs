@@ -27,7 +27,9 @@ mod refresh_state;
 mod sources;
 
 pub(crate) use account_import::stage_returned_remote_account;
-use account_import::{hinted_import_proxy, import_account_item, AccountImportOptions};
+use account_import::{
+    account_import_proxy, import_account_item, import_proxy, AccountImportOptions,
+};
 pub(in crate::local_pool::accounts) use account_lookup::{
     existing_identity_index, find_existing_account,
 };

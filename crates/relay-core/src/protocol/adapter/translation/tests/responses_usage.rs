@@ -141,7 +141,7 @@ fn messages_cache_writes_and_lifetimes_survive_generic_openai_conversion() {
         "usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":10,
             "cache_creation_input_tokens":5,"cache_creation":creation}});
     for client in [WireApi::Responses, WireApi::ChatCompletions] {
-        // Exercise the shared converter as well as the dedicated Responses bridge.
+        // Exercise usage projection for both Responses and Chat Completions clients.
         let decoded = response::decode(WireApi::Messages, &body, "seed").unwrap();
         let encoded = response::encode(client, &decoded, "test", &Default::default()).unwrap();
         let field = if client == WireApi::Responses {

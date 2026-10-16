@@ -41,6 +41,14 @@ struct CandidateRuntime {
     in_flight: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct HealthRuntime {
+    failure_score_milli: u32,
+    first_output_latency_ms: Option<u64>,
+    latency_observed_at_ms: Option<u64>,
+    observed_at_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug)]
 struct LeaseRuntime {
     lease_id: LeaseId,
@@ -69,6 +77,7 @@ pub struct RotationEngine {
     candidate_generations: BTreeMap<String, u64>,
     quota_revisions: BTreeMap<String, u64>,
     circuits: BTreeMap<(String, String), CircuitRuntime>,
+    health: BTreeMap<(String, String), HealthRuntime>,
     rotation_credit: BTreeMap<(String, String), i64>,
     capacity_in_flight: BTreeMap<String, u32>,
     capacity_limits: BTreeMap<String, u32>,
@@ -95,6 +104,7 @@ impl Default for RotationEngine {
             candidate_generations: BTreeMap::new(),
             quota_revisions: BTreeMap::new(),
             circuits: BTreeMap::new(),
+            health: BTreeMap::new(),
             rotation_credit: BTreeMap::new(),
             capacity_in_flight: BTreeMap::new(),
             capacity_limits: BTreeMap::new(),
@@ -121,6 +131,8 @@ struct ReadyCandidate {
     weight: u32,
     recovery: bool,
     due_at_ms: Option<u64>,
+    failure_score_milli: u32,
+    first_output_latency_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

@@ -231,7 +231,19 @@ impl PoolScheduler {
                             && models.allows(model)
                             && candidate.is_configured(model, protocols, scope)
                     })
-                    .map(|model| (crate::model_id_key(model), candidate.protocol))
+                    .flat_map(|model| {
+                        protocols
+                            .iter()
+                            .copied()
+                            .filter(|protocol| {
+                                if candidate.model_protocols.is_empty() {
+                                    *protocol == candidate.protocol
+                                } else {
+                                    candidate.supports_protocol(model, &[*protocol])
+                                }
+                            })
+                            .map(|protocol| (crate::model_id_key(model), protocol))
+                    })
             })
             .collect::<BTreeSet<_>>();
         let mut selected_candidate_id: Option<String> = None;

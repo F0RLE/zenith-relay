@@ -2,13 +2,17 @@ use crate::error_codes;
 mod account;
 mod codex_models;
 mod headers;
+mod identity;
 mod normalization;
 
 mod background;
 mod dispatch;
 mod responses_items;
 mod routing;
+mod tool_calls;
 mod tool_policy;
+
+pub(in crate::gateway) use tool_calls::ToolCallCapture;
 
 pub(super) use background::codex_background_request_kind;
 pub(super) use dispatch::{chat_completions, gemini, messages, responses};
@@ -34,10 +38,11 @@ pub(super) use account::{account_endpoint_url, alpha_search, responses_compact, 
 use codex_models::build_codex_models_response;
 pub(super) use codex_models::models;
 pub(super) use headers::{
-    apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
-    forwarded_bridge_gemini_headers, forwarded_bridge_messages_headers, forwarded_codex_headers,
-    forwarded_messages_headers, forwarded_responses_headers, is_managed_codex_client,
+    apply_codex_routing_hint, codex_client_version, forwarded_bridge_gemini_headers,
+    forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
+    forwarded_responses_headers, is_managed_codex_client,
 };
+pub(super) use identity::{client_context_fingerprint, client_request_identity};
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
 #[cfg(test)]
 pub(super) use normalization::{apply_default_service_tier_if_missing, request_service_tier};

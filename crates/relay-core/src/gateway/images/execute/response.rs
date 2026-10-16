@@ -93,13 +93,7 @@ pub(super) fn handle_collected_image(
     if !account_route {
         let mut event = observed.event(true, status, None);
         populate_tokens(&mut event, &bytes);
-        finish_image_success(
-            runtime,
-            lease,
-            &route.candidate_id,
-            &prepared.resolved_model,
-            event,
-        );
+        finish_image_success(runtime, lease, event);
         return ImageAttemptStep::Respond(if prepared.stream {
             proxy_sse_response(status, &response_headers, Body::from(bytes))
         } else {
@@ -177,13 +171,7 @@ pub(super) fn handle_collected_image(
     if let Some(usage) = translated.usage.as_ref() {
         apply_usage(&mut event, usage);
     }
-    finish_image_success(
-        runtime,
-        lease,
-        &route.candidate_id,
-        &prepared.resolved_model,
-        event,
-    );
+    finish_image_success(runtime, lease, event);
     ImageAttemptStep::Respond(if prepared.stream {
         proxy_sse_response(status, &response_headers, Body::from(translated.stream))
     } else {
@@ -191,16 +179,8 @@ pub(super) fn handle_collected_image(
     })
 }
 
-fn finish_image_success(
-    runtime: &GatewayRuntime,
-    lease: &CandidateLease,
-    candidate_id: &str,
-    model: &str,
-    mut event: UsageEvent,
-) {
-    let recovered =
-        runtime.record_success_with_metrics(candidate_id, model, now_ms(), None, event.latency_ms);
+fn finish_image_success(runtime: &GatewayRuntime, lease: &CandidateLease, mut event: UsageEvent) {
+    let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
     event.consecutive_failures = recovered.then_some(0);
     emit_usage(runtime, event);
-    lease.settle_rotation_success(now_ms());
 }

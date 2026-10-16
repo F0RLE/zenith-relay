@@ -79,6 +79,9 @@ pub fn normalize_configuration_preset(
     preset.settings.model_reasoning_allowed_levels =
         normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
             .map_err(|message| format!("configuration preset {message}"))?;
+    preset.settings.model_context_policies =
+        crate::normalize_model_context_policies(preset.settings.model_context_policies)
+            .map_err(|message| format!("configuration preset {message}"))?;
     preset.settings.model_service_tier_overrides =
         normalize_model_service_tier_overrides(preset.settings.model_service_tier_overrides)
             .map_err(|message| format!("configuration preset {message}"))?;
@@ -134,6 +137,11 @@ pub fn merge_configuration_preset_settings(
             .model_reasoning_allowed_levels
             .clone_from(&requested.model_reasoning_allowed_levels);
     }
+    if requested.model_context_policies_present {
+        merged
+            .model_context_policies
+            .clone_from(&requested.model_context_policies);
+    }
     if requested.model_service_tier_overrides_present {
         merged
             .model_service_tier_overrides
@@ -145,6 +153,7 @@ pub fn merge_configuration_preset_settings(
             .clone_from(&requested.model_display_order);
     }
     merged.model_reasoning_allowed_levels_present = true;
+    merged.model_context_policies_present = true;
     merged.model_service_tier_overrides_present = true;
     merged.model_display_order_present = true;
     Ok(merged)

@@ -55,6 +55,11 @@ pub(super) async fn read_one(
             .updated_at_ms
             .is_some_and(|at| at > observed_at_ms)
         {
+            if let Ok(result) = &quota_refresh_result {
+                if let Ok((snapshot, _)) = result.quota.clone().normalize(&account.quota) {
+                    account.quota.merge_provider_credits(&snapshot);
+                }
+            }
             return Ok(super::refresh::AccountRead {
                 account: account.clone(),
                 transitions: Vec::new(),

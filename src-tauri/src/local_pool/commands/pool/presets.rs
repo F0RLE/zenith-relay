@@ -53,6 +53,7 @@ pub(super) fn local_configuration_preset(
             base_url: source_record.base_url.trim_end_matches('/').to_string(),
             pricing_provider: source_record.pricing_provider,
             official_provider_family: source_record.official_provider_family,
+            proxy_id: source_record.proxy_id,
             wire_api: source_record.wire_api,
             protocol_bindings: source_record.protocol_bindings,
             enabled: source_record.enabled,
@@ -129,6 +130,8 @@ pub(super) fn local_configuration_preset(
             model_price_overrides: gateway.model_price_overrides,
             model_reasoning_allowed_levels: gateway.model_reasoning_allowed_levels,
             model_reasoning_allowed_levels_present: true,
+            model_context_policies: gateway.model_context_policies,
+            model_context_policies_present: true,
             model_service_tier_overrides: gateway.model_service_tier_overrides,
             model_display_order: gateway.model_display_order,
             model_service_tier_overrides_present: true,
@@ -295,6 +298,7 @@ pub async fn apply_local_configuration_preset(
     gateway.hidden_models = settings.hidden_models.clone();
     gateway.model_price_overrides = settings.model_price_overrides.clone();
     gateway.model_reasoning_allowed_levels = settings.model_reasoning_allowed_levels.clone();
+    gateway.model_context_policies = settings.model_context_policies.clone();
     gateway.model_service_tier_overrides = settings.model_service_tier_overrides.clone();
     gateway.model_display_order = settings.model_display_order.clone();
     // Presets may change several scopes (including source routes and the

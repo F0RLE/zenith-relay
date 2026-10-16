@@ -166,17 +166,17 @@ fn source_host_fence_covers_every_protocol_candidate() {
         .into_iter()
         .filter(|candidate| candidate.candidate_id.starts_with("source-a"))
         .collect::<Vec<_>>();
-    assert!(candidates_before_fence.len() > 1);
+    assert_eq!(candidates_before_fence.len(), 1);
     assert!(candidates_before_fence
         .iter()
         .all(|candidate| candidate.available));
 
     let fences = runtime.fence_source_dispatch("source-a");
-    assert_eq!(fences.len(), candidates_before_fence.len());
+    assert_eq!(fences.len(), 1);
     let during = runtime.candidate_runtime_order();
     assert!(during
         .iter()
-        .filter(|candidate| candidate.candidate_id.starts_with("source-a"))
+        .filter(|candidate| candidate.candidate_id == "source-a")
         .all(|candidate| !candidate.available));
     assert!(during
         .iter()
@@ -185,7 +185,7 @@ fn source_host_fence_covers_every_protocol_candidate() {
     assert!(runtime
         .candidate_runtime_order()
         .iter()
-        .filter(|candidate| candidate.candidate_id.starts_with("source-a"))
+        .filter(|candidate| candidate.candidate_id == "source-a")
         .all(|candidate| candidate.available));
 }
 

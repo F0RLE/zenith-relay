@@ -250,6 +250,8 @@ pub fn normalize_model_service_tier_overrides(
     Ok(normalized)
 }
 
+pub use crate::catalog::context_policy::ModelContextPolicy;
+
 impl DefaultServiceTier {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -349,6 +351,7 @@ pub struct GatewayRuntimeOptions {
     /// Manually enabled source-model reasoning efforts. An absent model
     /// exposes no reasoning selector for API sources.
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+    pub model_context_policies: BTreeMap<String, ModelContextPolicy>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
 }
 
@@ -396,6 +399,7 @@ impl Default for GatewayRuntimeOptions {
             image_pricing_catalog: None,
             model_metadata_catalog: None,
             model_reasoning_allowed_levels: BTreeMap::new(),
+            model_context_policies: BTreeMap::new(),
             response_affinity_store: None,
         }
     }

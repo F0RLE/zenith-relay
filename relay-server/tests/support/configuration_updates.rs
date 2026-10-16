@@ -1,6 +1,64 @@
 use super::*;
 
 #[tokio::test]
+async fn model_context_updates_preserve_other_models_without_rebuilding_runtime() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    add_rebuild_failing_source(&server.state);
+    let mut source = server.state.store.sources().unwrap().remove(0);
+    source.weight = 1;
+    source.models = vec!["alpha-model".into(), "beta-model".into()];
+    server.state.store.save_source(&source).unwrap();
+    server.state.rebuild_runtime().await.unwrap();
+    let runtime = server.state.runtime().unwrap().unwrap();
+    let client = reqwest::Client::new();
+    let update = |model: &str, tokens: u64| {
+        client
+            .post(format!("{}/models/context", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({
+                "modelId": model,
+                "contextPolicy": { "mode": "custom", "tokens": tokens }
+            }))
+            .send()
+    };
+    let (alpha, beta) = tokio::join!(update("alpha-model", 64_000), update("beta-model", 96_000));
+    assert_eq!(alpha.unwrap().status(), StatusCode::OK);
+    assert_eq!(beta.unwrap().status(), StatusCode::OK);
+    let saved = server.state.store.model_context_policies().unwrap();
+    assert_eq!(
+        saved,
+        BTreeMap::from([
+            (
+                "alpha-model".into(),
+                zenith_relay_core::ModelContextPolicy::Custom { tokens: 64_000 }
+            ),
+            (
+                "beta-model".into(),
+                zenith_relay_core::ModelContextPolicy::Custom { tokens: 96_000 }
+            ),
+        ])
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    assert_eq!(
+        update("alpha-model", 100).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(server.state.store.model_context_policies().unwrap(), saved);
+    server.task.abort();
+    drop(server);
+    let reopened = spawn_server(root.path()).await;
+    assert_eq!(
+        reopened.state.store.model_context_policies().unwrap(),
+        saved
+    );
+    reopened.task.abort();
+}
+
+#[tokio::test]
 async fn model_order_reset_clears_persisted_override_and_survives_restart() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;

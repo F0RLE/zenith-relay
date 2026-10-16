@@ -76,6 +76,7 @@ fn add_rebuild_failing_source(state: &AppState) {
             secret_ref: "source:broken".into(),
             pricing_provider: None,
             official_provider_family: None,
+            proxy_id: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
             protocol_bindings: Vec::new(),

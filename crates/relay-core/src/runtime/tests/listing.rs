@@ -11,6 +11,38 @@ fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
     assert!(capabilities.reasoning_effort_levels.is_empty());
     assert_eq!(capabilities.tool_call, None);
 }
+
+#[test]
+fn cached_native_card_confirms_extended_context_only_for_the_exact_model() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    runtime.remember_codex_model_manifest(
+        "account-1",
+        serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-test",
+                    "context_window": 272_000,
+                    "max_context_window": 872_000
+                },
+                {
+                    "slug": "gpt-medium",
+                    "context_window": 128_000,
+                    "max_context_window": 256_000
+                },
+                {
+                    "slug": "gpt-short",
+                    "context_window": 272_000
+                }
+            ]
+        }),
+        current_time_ms(),
+    );
+
+    assert!(runtime.cached_codex_model_supports_extended_context("GPT-TEST", ["account-1"]));
+    assert!(runtime.cached_codex_model_supports_extended_context("gpt-medium", ["account-1"]));
+    assert!(!runtime.cached_codex_model_supports_extended_context("gpt-short", ["account-1"]));
+    assert!(!runtime.cached_codex_model_supports_extended_context("gpt-test", ["missing-account"]));
+}
 #[test]
 fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
     let sources = [
@@ -89,16 +121,18 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    runtime.mark_websocket_http_only("source", "model-a", 1_000);
-    assert!(runtime.websocket_is_http_only("source", "model-a", 1_001));
-    assert!(!runtime.websocket_is_http_only("source", "model-b", 1_001));
+    let authorization = AuthorizationIncarnation::Source;
+    runtime.mark_websocket_http_only("source", "model-a", &authorization, 1_000);
+    assert!(runtime.websocket_is_http_only("source", "model-a", &authorization, 1_001));
+    assert!(!runtime.websocket_is_http_only("source", "model-b", &authorization, 1_001));
     assert!(!runtime.websocket_is_http_only(
         "source",
         "model-a",
+        &authorization,
         1_000 + WEBSOCKET_CAPABILITY_TTL_MS
     ));
-    runtime.mark_websocket_supported("source", "model-a");
-    assert!(!runtime.websocket_is_http_only("source", "model-a", 1_001));
+    runtime.mark_websocket_supported("source", "model-a", &authorization);
+    assert!(!runtime.websocket_is_http_only("source", "model-a", &authorization, 1_001));
 }
 #[test]
 fn messages_source_models_are_automatically_available_to_responses_clients() {
@@ -127,10 +161,20 @@ fn messages_source_models_are_automatically_available_to_responses_clients() {
         .into_iter()
         .map(|route| route.candidate_id)
         .collect::<Vec<_>>();
-    assert!(route_ids.iter().any(|id| id == "anthropic-source"));
-    assert!(route_ids
-        .iter()
-        .any(|id| id == "anthropic-source::responses_to_messages"));
+    assert_eq!(route_ids, vec!["anthropic-source"]);
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler
+        .candidate("anthropic-source")
+        .expect("source candidate");
+    assert_eq!(
+        candidate.model_protocols["claude-test"],
+        BTreeSet::from([
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Messages,
+            WireApi::Gemini,
+        ])
+    );
 }
 #[test]
 fn automatic_responses_lite_requires_every_configured_route_to_confirm_support() {

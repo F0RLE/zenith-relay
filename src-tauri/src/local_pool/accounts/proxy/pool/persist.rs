@@ -34,15 +34,23 @@ impl ProxyPool {
                     if let Some(account_id) = stored_proxy.assigned_account_id {
                         assigned_account_ids.push(account_id);
                     }
-                    StoredProxy {
+                    let timezone = zenith_relay_core::normalize_timezone(stored_proxy.timezone)
+                        .map_err(|_| {
+                            LocalPoolError::new(
+                                ErrorCode::RecoveryRequired,
+                                "stored proxy timezone is invalid",
+                            )
+                        })?;
+                    Ok(StoredProxy {
                         id: stored_proxy.id,
                         url: stored_proxy.url,
                         assigned_account_ids,
                         created_at_ms: stored_proxy.created_at_ms,
+                        timezone,
                         last_check: stored_proxy.last_check,
-                    }
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         };
         pool.validate()?;
         Ok(pool)

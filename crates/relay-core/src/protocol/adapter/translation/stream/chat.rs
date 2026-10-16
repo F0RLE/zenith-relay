@@ -8,7 +8,7 @@ impl TranslationStream {
         let invalid = AdapterError::upstream_stream_invalid;
         self.chat_completion
             .observe(upstream_event)
-            .map_err(|_| invalid())?;
+            .map_err(|_| invalid().with_parameter("choices"))?;
         let choices = upstream_event
             .get("choices")
             .and_then(Value::as_array)
@@ -36,10 +36,12 @@ impl TranslationStream {
                 "content",
                 "tool_calls",
                 "reasoning_content",
+                "reasoning",
                 "refusal",
                 "annotations",
             ],
-        )?;
+        )
+        .map_err(|_| invalid().with_parameter("choices[].delta"))?;
         if let Some(annotations) = delta.get("annotations").filter(|value| !value.is_null()) {
             for annotation in annotations.as_array().ok_or_else(invalid)? {
                 if !self.chat_annotations.contains(annotation) {
@@ -68,15 +70,19 @@ impl TranslationStream {
             };
             text.push_str(refusal);
         }
-        for (field, key, reasoning) in [
-            ("reasoning_content", "reasoning", true),
-            ("content", "text", false),
-        ] {
-            if let Some(text_value) = delta
-                .get(field)
-                .filter(|field_value| !field_value.is_null())
-            {
-                let text = text_value.as_str().ok_or_else(invalid)?;
+        let reasoning =
+            chat_reasoning_text(delta, invalid().with_parameter("choices[].delta.reasoning"))?;
+        let content = delta
+            .get("content")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid().with_parameter("choices[].delta.content"))
+            })
+            .transpose()?;
+        for (text, key, reasoning) in [(reasoning, "reasoning", true), (content, "text", false)] {
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
                 let index = match self.indices.get(key) {
                     Some(index) => *index,
                     None => self.insert(
@@ -101,7 +107,8 @@ impl TranslationStream {
             .filter(|tool_calls_value| !tool_calls_value.is_null())
         {
             for call in calls.as_array().ok_or_else(invalid)? {
-                checked(call, &["index", "id", "type", "function"])?;
+                checked(call, &["index", "id", "type", "function"])
+                    .map_err(|_| invalid().with_parameter("choices[].delta.tool_calls"))?;
                 if call
                     .get("type")
                     .is_some_and(|kind| !kind.is_null() && kind.as_str() != Some("function"))
@@ -133,13 +140,19 @@ impl TranslationStream {
                 else {
                     return Err(invalid());
                 };
-                if let Some(fragment) = call.get("id").filter(|value| !value.is_null()) {
-                    id.push_str(fragment.as_str().ok_or_else(invalid)?);
+                if let Some(value) = call.get("id").filter(|value| !value.is_null()) {
+                    set_tool_identity(id, value, "choices[].delta.tool_calls[].id")?;
                 }
                 if let Some(function) = call.get("function").filter(|value| !value.is_null()) {
-                    checked(function, &["name", "arguments"])?;
-                    if let Some(fragment) = function.get("name").filter(|value| !value.is_null()) {
-                        name.push_str(fragment.as_str().ok_or_else(invalid)?);
+                    checked(function, &["name", "arguments"]).map_err(|_| {
+                        invalid().with_parameter("choices[].delta.tool_calls[].function")
+                    })?;
+                    if let Some(value) = function.get("name").filter(|value| !value.is_null()) {
+                        set_tool_identity(
+                            name,
+                            value,
+                            "choices[].delta.tool_calls[].function.name",
+                        )?;
                     }
                     if let Some(fragment) =
                         function.get("arguments").filter(|value| !value.is_null())
@@ -154,4 +167,24 @@ impl TranslationStream {
         }
         Ok(false)
     }
+}
+
+/// Identity is repeated by some providers; only arguments are text fragments.
+fn set_tool_identity(
+    current: &mut String,
+    incoming: &Value,
+    parameter: &'static str,
+) -> AdapterResult<()> {
+    let incoming = incoming
+        .as_str()
+        .ok_or_else(|| AdapterError::upstream_stream_invalid().with_parameter(parameter))?;
+    if incoming.is_empty() {
+        return Ok(());
+    }
+    if current.is_empty() {
+        current.push_str(incoming);
+    } else if current != incoming {
+        return Err(AdapterError::upstream_stream_invalid().with_parameter(parameter));
+    }
+    Ok(())
 }

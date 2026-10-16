@@ -3,9 +3,12 @@ use super::codec::{json_text, parse_json_object};
 use super::history::fit_item_id;
 use super::is_transport_tool;
 use crate::protocol::AdapterError;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 pub(super) fn invalid_tool_output(parameter: &'static str) -> AdapterError {
+    if parameter == "output.run_officejs.args.schema" {
+        return AdapterError::upstream_tool_arguments_invalid();
+    }
     AdapterError::upstream_response_invalid().with_parameter(parameter)
 }
 
@@ -130,24 +133,45 @@ pub(super) fn parse_transport_envelope(
 
 /// Convert a completed Basis Points response back to the client Responses
 /// tool-call shape. The returned body is still ordinary Responses JSON.
-pub(in crate::gateway::execution) fn translate_response(
+pub(in crate::gateway) fn translate_response(
     upstream_response_body: &[u8],
     request_body: &Value,
 ) -> Result<Vec<u8>, AdapterError> {
-    let mut upstream_response: Value = serde_json::from_slice(upstream_response_body)
+    let upstream_response: Value = serde_json::from_slice(upstream_response_body)
         .map_err(|_| AdapterError::upstream_response_invalid())?;
+    let translated = translate_response_value(upstream_response, request_body)?;
+    serde_json::to_vec(&translated).map_err(|_| AdapterError::upstream_response_invalid())
+}
+
+/// Streaming already owns the parsed terminal response. Do not serialize and
+/// parse its complete output a second time just to validate client tools.
+pub(in crate::gateway) fn translate_response_value(
+    mut upstream_response: Value,
+    request_body: &Value,
+) -> Result<Value, AdapterError> {
     if !matches!(
         upstream_response.get("status").and_then(Value::as_str),
         Some("completed" | "incomplete")
     ) {
         return Err(AdapterError::upstream_response_invalid().with_parameter("response.status"));
     }
+    let completed = upstream_response["status"] == "completed";
     let Some(output_items) = upstream_response
         .get_mut("output")
         .and_then(Value::as_array_mut)
     else {
         return Err(AdapterError::upstream_response_invalid().with_parameter("response.output"));
     };
+    // An incomplete JSON response has the same safety boundary as incomplete
+    // SSE: retain text/reasoning and reported usage, but never execute tools.
+    if !completed {
+        output_items.retain(|item| {
+            !matches!(
+                item["type"].as_str(),
+                Some("function_call" | "custom_tool_call")
+            )
+        });
+    }
     let all_tools = client_tools(request_body)?;
     let tools = selected_tools(request_body, &all_tools);
     let mut call_ids = std::collections::HashSet::new();
@@ -215,22 +239,21 @@ pub(in crate::gateway::execution) fn translate_response(
                 Value::String(custom_tool_input.to_string()),
             );
         } else {
-            let function_arguments = tool_arguments
-                .and_then(|argument_value| {
-                    if direct_call {
-                        argument_value.is_object().then(|| argument_value.clone())
-                    } else if argument_value.is_object() {
-                        Some(argument_value.clone())
-                    } else {
-                        parse_json_object(Some(argument_value))
-                    }
-                })
-                .filter(|argument_value| argument_value.is_object())
-                .ok_or_else(|| invalid_tool_output("output.run_officejs.args"))?;
+            let function_arguments = match tool_arguments {
+                Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
+                Some(Value::String(arguments)) if !direct_call => {
+                    serde_json::from_str::<Value>(arguments)
+                        .map_err(|_| invalid_tool_output("output.run_officejs.args.json"))?
+                }
+                _ => return Err(invalid_tool_output("output.run_officejs.args.object")),
+            };
+            if !function_arguments.is_object() {
+                return Err(invalid_tool_output("output.run_officejs.args.object"));
+            }
             if super::schema::parameter_schema(tool)
                 .is_some_and(|schema| !super::schema::matches(&function_arguments, schema))
             {
-                return Err(invalid_tool_output("output.run_officejs.args"));
+                return Err(invalid_tool_output("output.run_officejs.args.schema"));
             }
             translated.insert(
                 "arguments".to_string(),
@@ -240,7 +263,7 @@ pub(in crate::gateway::execution) fn translate_response(
         }
         *output_item = Value::Object(translated);
     }
-    if requires_tool_call(request_body.get("tool_choice")) && call_ids.is_empty() {
+    if completed && requires_tool_call(request_body.get("tool_choice")) && call_ids.is_empty() {
         return Err(invalid_tool_output("output.tool_call"));
     }
     if request_body.get("parallel_tool_calls") == Some(&Value::Bool(false)) && call_ids.len() > 1 {
@@ -250,7 +273,17 @@ pub(in crate::gateway::execution) fn translate_response(
             "output.run_officejs.parallel_tool_calls",
         ));
     }
-    serde_json::to_vec(&upstream_response).map_err(|_| AdapterError::upstream_response_invalid())
+    if let Some(structured) = super::structured_output::prepare(request_body)? {
+        structured.validate(&upstream_response)?;
+    }
+    // Do not expose BPS task/turn bookkeeping as the client's metadata. The
+    // strict upstream schema cannot carry that client map, so echo the exact
+    // original map here before JSON or synthetic SSE is returned.
+    upstream_response["metadata"] = request_body
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok(upstream_response)
 }
 
 pub(super) fn has_encrypted_agent_message(request_input: Option<&Value>) -> bool {
@@ -275,6 +308,6 @@ pub(super) fn has_encrypted_agent_message(request_input: Option<&Value>) -> bool
     }
 }
 
-mod stream;
+pub(in crate::gateway) mod stream;
 
-pub(in crate::gateway::execution) use stream::synthetic_stream;
+pub(in crate::gateway) use stream::synthetic_stream;

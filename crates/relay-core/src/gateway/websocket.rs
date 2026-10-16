@@ -7,12 +7,12 @@ use super::execution::{execute_client_request, wait_for_recovery, CandidateRetry
 use super::execution::{repair_responses_item_prefixes, ResponsesItemPrefixRepairs};
 use super::now_ms;
 use super::request::{
-    apply_codex_routing_hint, client_context_fingerprint, codex_client_version,
-    forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER,
+    apply_codex_routing_hint, codex_client_version, forwarded_codex_headers,
+    CODEX_RESPONSES_LITE_HEADER,
 };
 use super::response::{apply_usage, emit_usage, route_error_origin, usage_event, UsageAttempt};
 use super::streaming::{
-    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_terminal,
     is_known_non_output_event, parse_sse_event, NativeReplayCapture,
 };
 use super::turn_state::request_scope;

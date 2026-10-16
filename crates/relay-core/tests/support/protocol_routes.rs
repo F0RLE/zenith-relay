@@ -207,7 +207,7 @@ async fn chat_completions_preserves_native_tools_and_bridges_responses() {
 }
 
 #[tokio::test]
-async fn chat_completions_forwards_reasoning_without_admission_gate() {
+async fn native_chat_enforces_pool_reasoning_without_rewriting_allowed_effort() {
     let (chat_server, state) = spawn_upstream("chat-key", Vec::new()).await;
     let mut chat_source = source("chat", &chat_server, "chat-key", &["chat-model"], 0);
     chat_source.source.wire_api = WireApi::ChatCompletions;
@@ -236,7 +236,12 @@ async fn chat_completions_forwards_reasoning_without_admission_gate() {
         .unwrap();
     let low_status = low.status();
     let low_body = low.text().await.unwrap();
-    assert_eq!(low_status, StatusCode::OK, "{low_body}");
+    assert_eq!(low_status, StatusCode::BAD_REQUEST, "{low_body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&low_body).unwrap()["error"]["code"],
+        "adapter_reasoning_unsupported"
+    );
+    assert!(state.requests.lock().unwrap().is_empty());
 
     let high = client
         .post(format!("{}/v1/chat/completions", gateway.base_url))
@@ -252,9 +257,8 @@ async fn chat_completions_forwards_reasoning_without_admission_gate() {
     assert_eq!(high.status(), StatusCode::OK);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].body["reasoning_effort"], "low");
-    assert_eq!(requests[1].body["reasoning_effort"], "high");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["reasoning_effort"], "high");
 }
 
 #[tokio::test]
@@ -453,7 +457,7 @@ async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
 }
 
 #[tokio::test]
-async fn automatic_routes_keep_one_upstream_contract_per_model() {
+async fn automatic_routes_prefer_matching_native_upstream_contract_per_model() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let mut mixed = source(
         "mixed",
@@ -569,7 +573,7 @@ async fn automatic_routes_keep_one_upstream_contract_per_model() {
         paths,
         [
             "/v1/responses",
-            "/v1/responses",
+            "/v1/messages",
             "/v1/messages",
             "/v1/responses"
         ]
@@ -578,27 +582,19 @@ async fn automatic_routes_keep_one_upstream_contract_per_model() {
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 4);
-    assert!(events.iter().any(|event| {
-        event.wire_api == WireApi::Responses && event.candidate_id.as_deref() == Some("mixed")
-    }));
-    assert!(events.iter().any(|event| {
-        event.wire_api == WireApi::Messages
-            && event.candidate_id.as_deref() == Some("mixed::messages_to_responses")
-    }));
+    assert!(events
+        .iter()
+        .all(|event| event.candidate_id.as_deref() == Some("mixed")));
     assert_eq!(
         events
             .iter()
-            .filter(|event| {
-                event.wire_api == WireApi::Messages
-                    && event.candidate_id.as_deref() == Some("mixed::messages_to_responses")
-            })
-            .count(),
-        2
+            .filter_map(|event| event
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.endpoint_kind.as_deref()))
+            .collect::<Vec<_>>(),
+        ["responses", "messages", "messages", "messages_to_responses"]
     );
-    assert!(events.iter().any(|event| {
-        event.wire_api == WireApi::Messages
-            && event.candidate_id.as_deref() == Some("mixed::messages")
-    }));
 }
 
 #[tokio::test]
@@ -717,6 +713,7 @@ async fn round_robin_ignores_session_affinity_between_independent_requests() {
             image_base_model: None,
             image_pricing_catalog: None,
             model_reasoning_allowed_levels: Default::default(),
+            model_context_policies: Default::default(),
             response_affinity_store: None,
         },
     )

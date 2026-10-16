@@ -16,41 +16,66 @@ use zenith_relay_core::{
 
 pub(super) use super::runtime_records::{runtime_account, runtime_key, runtime_source};
 
-pub(crate) fn account_proxy_config(
+pub(crate) struct AccountProxyRuntime {
+    pub(crate) config: Option<ProxyConfig>,
+    pub(crate) timezone: Option<String>,
+}
+
+pub(crate) fn account_proxy_runtime(
     state: &AppState,
     account_record: &ServerAccountRecord,
     credential: &AccountCredential,
-) -> Result<Option<ProxyConfig>, String> {
+) -> Result<AccountProxyRuntime, String> {
     if let Some(proxy_id) = account_record.proxy_id.as_deref() {
-        return proxy_config_by_id(state, proxy_id).map(Some);
+        return proxy_runtime_by_id(state, proxy_id);
     }
     if account_record.bypass_common_proxy {
         if state.store.account_proxy_required()? {
             return Err("an account proxy is required; direct account traffic is blocked".into());
         }
-        return Ok(None);
+        return Ok(AccountProxyRuntime {
+            config: None,
+            timezone: None,
+        });
     }
     if let Some(proxy_url) = credential.proxy_url.as_deref() {
         return ProxyConfig::parse(proxy_url)
-            .map(Some)
+            .map(|config| AccountProxyRuntime {
+                config: Some(config),
+                timezone: None,
+            })
             .map_err(|_| "stored account proxy URL is invalid".to_string());
     }
     if !state.store.common_proxy_configured()? {
         if state.store.account_proxy_required()? {
             return Err("an account proxy is required; direct account traffic is blocked".into());
         }
-        return Ok(None);
+        return Ok(AccountProxyRuntime {
+            config: None,
+            timezone: None,
+        });
     }
     if let Some(proxy_id) = state.store.common_proxy_id()? {
-        return proxy_config_by_id(state, &proxy_id).map(Some);
+        return proxy_runtime_by_id(state, &proxy_id);
     }
     let common_proxy_secret = state
         .vault
         .load(COMMON_PROXY_SECRET_REF)?
         .ok_or_else(|| "common account proxy is configured but unavailable".to_string())?;
     ProxyConfig::parse(&common_proxy_secret)
-        .map(Some)
+        .map(|config| AccountProxyRuntime {
+            config: Some(config),
+            timezone: None,
+        })
         .map_err(|_| "stored common proxy URL is invalid".to_string())
+}
+
+pub(crate) fn account_proxy_config(
+    state: &AppState,
+    account_record: &ServerAccountRecord,
+    credential: &AccountCredential,
+) -> Result<Option<ProxyConfig>, String> {
+    Ok(account_proxy_runtime(state, account_record, credential)?.config)
 }
 
 pub(crate) async fn ensure_server_agent_identity_task(
@@ -135,7 +160,7 @@ pub(crate) async fn prepare_server_account_authorization(
     Ok((credential, authorization, Some(tokens)))
 }
 
-fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
+fn proxy_runtime_by_id(state: &AppState, proxy_id: &str) -> Result<AccountProxyRuntime, String> {
     let proxy_record = state
         .store
         .proxy(proxy_id)?
@@ -144,7 +169,18 @@ fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, S
         .vault
         .load(&proxy_record.secret_ref)?
         .ok_or_else(|| "stored proxy secret is missing".to_string())?;
-    ProxyConfig::parse(&proxy_secret).map_err(|_| "stored proxy URL is invalid".to_string())
+    ProxyConfig::parse(&proxy_secret)
+        .map(|config| AccountProxyRuntime {
+            config: Some(config),
+            timezone: proxy_record.timezone,
+        })
+        .map_err(|_| "stored proxy URL is invalid".to_string())
+}
+
+fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
+    proxy_runtime_by_id(state, proxy_id)?
+        .config
+        .ok_or_else(|| "stored proxy is unavailable".to_string())
 }
 
 pub(super) fn common_proxy_available(state: &AppState, configured: bool) -> bool {

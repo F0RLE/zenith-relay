@@ -171,14 +171,7 @@ pub(super) fn build_codex_models_response_from_manifests(
             } else {
                 capabilities.context_limit
             };
-            let default_context_window = runtime
-                .official_codex_ultra_model(&upstream_id)
-                .and_then(|official| official.get("context_window").and_then(Value::as_u64));
-            crate::publish_routed_codex_context(
-                &mut catalog_model,
-                context_limit,
-                default_context_window,
-            );
+            crate::publish_routed_codex_context(&mut catalog_model, context_limit);
         }
         let mut supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
         let native_ultra = native_catalog_model.as_ref().is_some_and(|(_, official)| {
@@ -240,10 +233,11 @@ pub(super) fn build_codex_models_response_from_manifests(
             &runtime.client_service_tiers(key, &upstream_id, WireApi::Responses),
         );
         sort_supported_reasoning_levels(&mut catalog_model);
-        runtime.apply_chatgpt_context_policy(
+        runtime.apply_model_context(
             &mut catalog_model,
             &upstream_id,
             has_native_account_route,
+            native_catalog_model.is_some(),
         );
         models.push(catalog_model);
     }

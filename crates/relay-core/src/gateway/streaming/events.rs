@@ -4,7 +4,7 @@ mod output;
 
 use output::is_opaque_compaction_event;
 pub(in crate::gateway) use output::{
-    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_incomplete,
+    has_output_delta, has_semantic_output, is_compaction_payload, is_empty_responses_terminal,
     is_known_non_output_event, is_responses_output_delta_type,
 };
 

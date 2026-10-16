@@ -16,7 +16,6 @@ pub(super) struct AccountPreviewInput<'a> {
     pub(super) state: &'a DesktopState,
     pub(super) credentials: &'a CredentialStore<NativeSecretBackend>,
     pub(super) settings: &'a crate::local_pool::models::GatewaySettings,
-    pub(super) common_proxy: &'a Option<zenith_relay_core::ProxyConfig>,
     pub(super) probe_quota: bool,
     pub(super) now_ms: u64,
     pub(super) session_hash: &'a str,
@@ -35,7 +34,6 @@ pub(super) async fn prepare_account_preview_item(
         state,
         credentials,
         settings,
-        common_proxy,
         probe_quota,
         now_ms,
         session_hash,
@@ -48,9 +46,9 @@ pub(super) async fn prepare_account_preview_item(
     } = input;
     let mut credentials_changed = false;
     let plan_hint = row.plan.clone();
-    let hinted_proxy = hinted_import_proxy(state, credentials, settings, &import_item)
+    let proxy = import_proxy(state, credentials, settings, &import_item)
         .map_err(import_item_command_error)?;
-    let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
+    let import_proxy = proxy.as_ref();
     if let Err(error) = ensure_account_proxy(settings, import_proxy) {
         reject_preview_item(
             row,
@@ -194,7 +192,6 @@ pub(super) async fn prepare_account_preview_item(
             AccountPreviewQuota {
                 credentials,
                 settings,
-                common_proxy,
                 existing_account: existing_account.as_ref(),
                 material: &material,
                 provider_account_id,
@@ -244,7 +241,6 @@ pub(super) async fn prepare_account_preview_item(
 struct AccountPreviewQuota<'a> {
     credentials: &'a CredentialStore<NativeSecretBackend>,
     settings: &'a crate::local_pool::models::GatewaySettings,
-    common_proxy: &'a Option<zenith_relay_core::ProxyConfig>,
     existing_account: Option<&'a crate::local_pool::models::LocalAccountRecord>,
     material: &'a ImportedCredentialMaterial,
     provider_account_id: &'a str,
@@ -258,22 +254,14 @@ async fn probe_account_preview_quota(
     let AccountPreviewQuota {
         credentials,
         settings,
-        common_proxy,
         existing_account,
         material,
         provider_account_id,
         now_ms,
     } = probe;
-    let proxy = match existing_account {
-        Some(account) => credentials
-            .load(&account.account.id)
-            .map_err(credential_local_error)?
-            .map(|stored| effective_proxy_config(settings, &stored))
-            .transpose()?
-            .flatten()
-            .or_else(|| (*common_proxy).clone()),
-        None => (*common_proxy).clone(),
-    };
+    let proxy = account_import_proxy(credentials, settings, existing_account)
+        .map_err(import_item_command_error)?;
+    ensure_account_proxy(settings, proxy.as_ref())?;
     let request_timeout = Duration::from_secs(settings.quota_request_timeout_seconds);
     let quota = CodexQuotaClient::new_with_proxy_and_timeout(proxy.as_ref(), request_timeout)
         .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "quota client is unavailable"))?;

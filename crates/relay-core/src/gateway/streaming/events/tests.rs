@@ -170,15 +170,34 @@ fn empty_incomplete_requires_explicit_zero_tokens_and_no_output() {
         "type": "response.incomplete",
         "response": {"output": [], "usage": {"output_tokens": 0}}
     });
-    assert!(is_empty_responses_incomplete(&empty, false, 0));
+    assert!(is_empty_responses_terminal(&empty, false, 0));
 
     let decimal_zero = serde_json::json!({
         "type": "response.incomplete",
         "response": {"output": [], "usage": {"output_tokens": 0.0}}
     });
-    assert!(!is_empty_responses_incomplete(&decimal_zero, false, 0));
-    assert!(!is_empty_responses_incomplete(&empty, true, 0));
-    assert!(!is_empty_responses_incomplete(&empty, false, 1));
+    assert!(!is_empty_responses_terminal(&decimal_zero, false, 0));
+    assert!(!is_empty_responses_terminal(&empty, true, 0));
+    assert!(!is_empty_responses_terminal(&empty, false, 1));
+}
+
+#[test]
+fn empty_completed_also_detected_as_silent_failure() {
+    let empty_completed = serde_json::json!({
+        "type": "response.completed",
+        "response": {"output": [], "usage": {"output_tokens": 0}}
+    });
+    assert!(is_empty_responses_terminal(&empty_completed, false, 0));
+    // If output was seen during streaming, it is not a silent failure.
+    assert!(!is_empty_responses_terminal(&empty_completed, true, 0));
+    // If output items were completed, it is not a silent failure.
+    assert!(!is_empty_responses_terminal(&empty_completed, false, 1));
+    // Non-zero tokens mean the model did generate something.
+    let nonzero = serde_json::json!({
+        "type": "response.completed",
+        "response": {"output": [], "usage": {"output_tokens": 5}}
+    });
+    assert!(!is_empty_responses_terminal(&nonzero, false, 0));
 }
 
 #[test]

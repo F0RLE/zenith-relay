@@ -33,10 +33,21 @@ pub(in crate::protocol::adapter::translation::decode) fn tools(
                 )?);
             }
         } else if protocol == WireApi::Messages {
+            super::super::super::options::messages_fields(
+                tool,
+                &["name", "description", "input_schema", "type", "strict"],
+            )?;
             functions.push(function(
                 tool,
                 "input_schema",
-                &["name", "description", "input_schema", "type", "strict"],
+                &[
+                    "name",
+                    "description",
+                    "input_schema",
+                    "type",
+                    "strict",
+                    "cache_control",
+                ],
                 false,
             )?);
         } else {
@@ -66,7 +77,7 @@ pub(in crate::protocol::adapter::translation::decode) fn tools(
 /// catalog (root `tools` plus `additional_tools` items). Namespace children are
 /// flattened to opaque names and recorded in the returned target map so the
 /// response can restore the client's own name and namespace. Hosted tools have
-/// no function equivalent upstream and are left out.
+/// no function equivalent upstream and must be rejected, not silently omitted.
 pub(in crate::protocol::adapter::translation::decode) fn responses_tools(
     request_body: &Value,
 ) -> AdapterResult<(Vec<Function>, BTreeMap<String, ClientToolTarget>)> {
@@ -77,53 +88,61 @@ pub(in crate::protocol::adapter::translation::decode) fn responses_tools(
         .unwrap_or_default();
     let mut functions = Vec::new();
     let mut targets = BTreeMap::new();
-    for tool in &catalog {
+    push_responses_tools(&mut functions, &mut targets, &catalog, None, None)?;
+    Ok((functions, targets))
+}
+
+fn push_responses_tools(
+    functions: &mut Vec<Function>,
+    targets: &mut BTreeMap<String, ClientToolTarget>,
+    tools: &[Value],
+    namespace: Option<&str>,
+    namespace_description: Option<&str>,
+) -> AdapterResult<()> {
+    for tool in tools {
         let tool = tool
             .as_object()
             .ok_or_else(AdapterError::unsupported_tool)?;
         match tool.get("type").and_then(Value::as_str) {
             Some("namespace") => {
-                let namespace = tool
+                let name = tool
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|namespace_name| !namespace_name.is_empty())
                     .ok_or_else(AdapterError::unsupported_tool)?;
-                let namespace_description = tool
+                let description = tool
                     .get("description")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|description_text| !description_text.is_empty());
-                for child in tool
+                let qualified = namespace
+                    .map(|parent| format!("{parent}.{name}"))
+                    .unwrap_or_else(|| name.to_owned());
+                let description = [namespace_description, description]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let children = tool
                     .get("tools")
                     .and_then(Value::as_array)
-                    .ok_or_else(AdapterError::unsupported_tool)?
-                {
-                    let child = child
-                        .as_object()
-                        .ok_or_else(AdapterError::unsupported_tool)?;
-                    if matches!(
-                        child.get("type").and_then(Value::as_str),
-                        Some("function" | "custom") | None
-                    ) {
-                        push_responses_tool(
-                            &mut functions,
-                            &mut targets,
-                            child,
-                            Some(namespace),
-                            namespace_description,
-                        )?;
-                    }
-                }
+                    .ok_or_else(AdapterError::unsupported_tool)?;
+                push_responses_tools(
+                    functions,
+                    targets,
+                    children,
+                    Some(&qualified),
+                    Some(&description),
+                )?;
             }
             Some("function" | "custom") | None => {
-                push_responses_tool(&mut functions, &mut targets, tool, None, None)?;
+                push_responses_tool(functions, targets, tool, namespace, namespace_description)?;
             }
-            // Hosted tools run on the provider's servers; nothing to declare.
-            Some(_) => {}
+            Some(_) => return Err(AdapterError::unsupported_tool().with_parameter("tools.type")),
         }
     }
-    Ok((functions, targets))
+    Ok(())
 }
 
 fn push_responses_tool(
@@ -193,15 +212,12 @@ fn function(
     {
         return Err(AdapterError::unsupported_tool());
     }
-    let schema = declaration
-        .get(schema_key)
-        .or_else(|| {
-            gemini
-                .then(|| declaration.get("parametersJsonSchema"))
-                .flatten()
-        })
-        .cloned()
-        .unwrap_or_else(|| json!({"type":"object","properties":{}}));
+    let schema = if gemini {
+        super::schema_field(declaration, "parametersJsonSchema", schema_key)?
+    } else {
+        declaration.get(schema_key).cloned()
+    }
+    .unwrap_or_else(|| json!({"type":"object","properties":{}}));
     if !schema.is_object() {
         return Err(AdapterError::invalid_request());
     }

@@ -93,13 +93,15 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         Some("priority"),
         Some("fast"),
     ];
+    // Native transport preserves the selected effort, but does not bypass
+    // the pool's explicit low-only policy configured above.
     for service_tier in client_tiers {
         let mut body = json!({
             "model": OFFICIAL_CODEX_MODEL,
             "input": "hello",
             "parallel_tool_calls": true,
             "reasoning": {
-                "effort": "xhigh",
+                "effort": "low",
                 "summary": "detailed"
             }
         });
@@ -139,7 +141,7 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         );
         assert_eq!(request.responses_lite.as_deref(), Some("true"));
         assert_eq!(request.body["parallel_tool_calls"], false);
-        assert_eq!(request.body["reasoning"]["effort"], "xhigh");
+        assert_eq!(request.body["reasoning"]["effort"], "low");
         assert_eq!(request.body["reasoning"]["summary"], "detailed");
         assert_eq!(request.body["reasoning"]["context"], "all_turns");
     }
@@ -147,8 +149,8 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
     let events = events.lock().unwrap();
     assert_eq!(events.len(), client_tiers.len());
     assert!(events.iter().all(|event| {
-        event.requested_reasoning_effort.as_deref() == Some("xhigh")
-            && event.effective_reasoning_effort.as_deref() == Some("xhigh")
+        event.requested_reasoning_effort.as_deref() == Some("low")
+            && event.effective_reasoning_effort.as_deref() == Some("low")
     }));
 }
 
@@ -523,7 +525,9 @@ async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model()
     assert_eq!(model["use_responses_lite"], true);
     assert_eq!(model["supports_reasoning_summaries"], false);
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
-    assert_eq!(model["context_window"], 128_000);
+    // Short preserves the native card's published default, capped by its
+    // hard maximum. The mixed API source cannot replace that evidence.
+    assert_eq!(model["context_window"], 120_000);
     assert_eq!(model["max_context_window"], 120_000);
 
     let source_requests_before = source_state.requests.lock().unwrap().len();

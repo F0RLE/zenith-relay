@@ -33,11 +33,17 @@ mod protocol_matrix;
 #[path = "support/native_admission.rs"]
 mod native_admission;
 
+#[path = "support/native_fidelity.rs"]
+mod native_fidelity;
+
 #[path = "support/cache_context.rs"]
 mod cache_context;
 
 #[path = "support/tool_policy.rs"]
 mod tool_policy;
+
+#[path = "support/parallel_tools_admission.rs"]
+mod parallel_tools_admission;
 
 #[path = "support/error_recording.rs"]
 mod error_recording;
@@ -101,6 +107,7 @@ async fn spawn_gateway(
             name: "Synthetic upstream".to_string(),
             base_url: format!("{upstream_base_url}/v1"),
             api_key: SOURCE_KEY.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: models.into_iter().map(str::to_string).collect(),
         },
@@ -139,6 +146,7 @@ async fn spawn_messages_bridge_gateway(
         name: "Synthetic Messages source".to_string(),
         base_url: format!("{upstream_base_url}/v1"),
         api_key: SOURCE_KEY.to_string(),
+        proxy_url: None,
         wire_api: WireApi::Messages,
         models: vec!["claude-test".to_string()],
     };
@@ -211,6 +219,7 @@ async fn spawn_mixed_responses_gateway(
         name: "Synthetic mixed source".to_string(),
         base_url: format!("{upstream_base_url}/v1"),
         api_key: SOURCE_KEY.to_string(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: vec!["gpt-test".to_string(), "claude-test".to_string()],
     };
@@ -316,6 +325,7 @@ async fn spawn_gemini_bridge_gateway(
                 name: "Synthetic Gemini source".to_string(),
                 base_url: format!("{upstream_base_url}/v1"),
                 api_key: SOURCE_KEY.to_string(),
+                proxy_url: None,
                 wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
             },
@@ -362,6 +372,7 @@ async fn spawn_native_gemini_gateway(
                 name: "Synthetic native Gemini source".to_string(),
                 base_url: format!("{upstream_base_url}/v1"),
                 api_key: SOURCE_KEY.to_string(),
+                proxy_url: None,
                 wire_api: WireApi::Gemini,
                 models: vec!["gemini-test".to_string()],
             },

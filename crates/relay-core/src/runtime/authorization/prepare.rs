@@ -11,32 +11,76 @@ use reqwest::header::{HeaderValue, AUTHORIZATION};
 use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
+    pub(crate) async fn prepare_route_authorization(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        now_ms: u64,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        if route.account_id.is_none() {
+            return self.prepare_source_authorization(&route.candidate_id, route.binding_key());
+        }
+        self.prepare_authorization(&route.candidate_id, now_ms)
+            .await
+    }
+
+    pub(in crate::runtime) fn prepare_source_authorization(
+        &self,
+        candidate_id: &str,
+        binding_key: crate::SourceProtocolBindingKey,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        let binding = self
+            .source_candidate_bindings
+            .get(candidate_id)
+            .filter(|binding| {
+                binding
+                    .routes
+                    .iter()
+                    .any(|route| route.binding_key == binding_key)
+            })
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let provider_source = self
+            .sources
+            .get(&binding.source_id)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let source_binding = provider_source
+            .binding_for(binding_key)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let (header_name, authorization) =
+            provider_source.authorization_for_binding(source_binding);
+        Ok(PreparedAuthorization {
+            header_name,
+            authorization,
+            identity: None,
+            token_generation: None,
+            token_revision: None,
+            account_plan_supported: true,
+            agent_task_id: None,
+            agent_credential_fingerprint: None,
+            agent_identity_revision: None,
+        })
+    }
+
     pub(crate) async fn prepare_authorization(
         &self,
         candidate_id: &str,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            let provider_source = self
-                .sources
-                .get(&binding.source_id)
+            // A route can be omitted only when all client projections use
+            // one upstream contract and therefore identical authorization.
+            let first = binding
+                .routes
+                .first()
                 .ok_or(ExecutorPrepareError::Authentication)?;
-            let source_binding = provider_source
-                .binding_for(binding.binding_key)
-                .ok_or(ExecutorPrepareError::Authentication)?;
-            let (header_name, authorization) =
-                provider_source.authorization_for_binding(source_binding);
-            return Ok(PreparedAuthorization {
-                header_name,
-                authorization,
-                identity: None,
-                token_generation: None,
-                token_revision: None,
-                account_plan_supported: true,
-                agent_task_id: None,
-                agent_credential_fingerprint: None,
-                agent_identity_revision: None,
-            });
+            let upstream = first.adapter.upstream_protocol(first.wire_api);
+            if binding
+                .routes
+                .iter()
+                .any(|route| route.adapter.upstream_protocol(route.wire_api) != upstream)
+            {
+                return Err(ExecutorPrepareError::Authentication);
+            }
+            return self.prepare_source_authorization(candidate_id, first.binding_key);
         }
         let account = self
             .chatgpt_accounts

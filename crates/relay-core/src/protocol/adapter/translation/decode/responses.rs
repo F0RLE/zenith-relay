@@ -8,9 +8,12 @@ use serde_json::{json, Value};
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     super::super::super::contracts::validate_responses_bridge_request(
         request_body,
-        WireApi::ChatCompletions,
+        WireApi::Gemini,
     )?;
-    let mut decoded_request = Request::default();
+    let mut decoded_request = Request {
+        metadata: super::super::options::metadata(request_body, WireApi::Responses)?,
+        ..Default::default()
+    };
     if let Some(instructions) = request_body
         .get("instructions")
         .filter(|instructions_value| !instructions_value.is_null())
@@ -39,7 +42,10 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 .unwrap_or("message")
             {
                 "message" => {
-                    checked(response_item, &["type", "role", "content", "id", "status"])?;
+                    checked_item(
+                        response_item,
+                        &["type", "role", "content", "id", "status", "phase"],
+                    )?;
                     let role = super::content::role(response_item)?;
                     let blocks = super::content::text_blocks(
                         response_item
@@ -55,9 +61,19 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 }
                 // Tools loaded during the turn are part of the catalog, which
                 // `responses_tools` reads; they are not conversation content.
-                "additional_tools" | "tool_search_call" | "tool_search_output" => {}
+                "additional_tools" => {}
+                "tool_search_call" | "tool_search_output" => {
+                    // Client discovery is a call/result roundtrip, not hosted
+                    // search metadata. Until it has a lossless representation,
+                    // reject it before transport rather than erase the turn.
+                    if response_item.get("execution").and_then(Value::as_str) == Some("client")
+                        || response_item.get("call_id").is_some_and(|id| !id.is_null())
+                    {
+                        return Err(AdapterError::unsupported_tool().with_parameter("input.type"));
+                    }
+                }
                 "function_call" => {
-                    checked(
+                    checked_item(
                         response_item,
                         &[
                             "type",
@@ -79,7 +95,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                     );
                 }
                 "custom_tool_call" => {
-                    checked(
+                    checked_item(
                         response_item,
                         &[
                             "type",
@@ -106,9 +122,9 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                     );
                 }
                 "function_call_output" | "custom_tool_call_output" => {
-                    checked(
+                    checked_item(
                         response_item,
-                        &["type", "id", "status", "call_id", "output"],
+                        &["type", "id", "status", "call_id", "output", "namespace"],
                     )?;
                     decoded_request.messages.push(Message {
                         role: Role::User,
@@ -122,13 +138,19 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                                 WireApi::Responses,
                             )?,
                             is_error: false,
+                            raw_text: response_item.get("type").and_then(Value::as_str)
+                                == Some("custom_tool_call_output"),
                         }],
                     });
                 }
                 "reasoning" => {
-                    // Public summaries are portable. Encrypted state is not:
-                    // `checked` rejects it instead of dropping its ownership.
-                    checked(response_item, &["type", "id", "status", "summary"])?;
+                    // History preparation removes foreign ciphertext only
+                    // from completed turns before a new user message.
+                    // Bridge validation rejects any remaining opaque state.
+                    checked_item(
+                        response_item,
+                        &["type", "id", "status", "summary", "encrypted_content"],
+                    )?;
                     let blocks = response_item
                         .get("summary")
                         .and_then(Value::as_array)
@@ -150,7 +172,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                         .collect::<AdapterResult<Vec<_>>>()?;
                     append_assistant_blocks(&mut decoded_request.messages, blocks);
                 }
-                _ => return Err(AdapterError::parameter_unsupported()),
+                _ => return Err(AdapterError::parameter_unsupported_for("input.type")),
             }
         }
     }
@@ -174,6 +196,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         "top_p",
         "stop",
     )?;
+    super::content::sampling_extensions(&mut decoded_request, request_body, false)?;
     if let Some(text_config) = request_body
         .get("text")
         .filter(|text_config_value| !text_config_value.is_null())
@@ -181,6 +204,18 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         checked(text_config, &["format"])?;
         decoded_request.output_format =
             super::content::output_format(text_config.get("format").unwrap_or(&Value::Null))?;
+    }
+    if let Some(format) = request_body
+        .get("response_format")
+        .filter(|value| !value.is_null())
+    {
+        if request_body
+            .pointer("/text/format")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(AdapterError::parameter_unsupported_for("response_format"));
+        }
+        decoded_request.output_format = super::content::output_format(format)?;
     }
     if let Some(reasoning) = request_body
         .get("reasoning")
@@ -199,6 +234,44 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         }
     }
     Ok(decoded_request)
+}
+
+/// Turn IDs and creation timestamps belong to the receiving harness's trace,
+/// not to model input or signed provider state. Validate this narrow metadata
+/// contract on both history lookup and translation; do not add a blanket
+/// exception to the shared protocol field guard.
+fn checked_item(item: &Value, allowed: &[&str]) -> AdapterResult<()> {
+    const METADATA: &str = "internal_chat_message_metadata_passthrough";
+    const PARAMETER: &str = "input.internal_chat_message_metadata_passthrough";
+    let fields = item.as_object().ok_or_else(AdapterError::invalid_request)?;
+    if fields.iter().any(|(name, value)| {
+        !allowed.contains(&name.as_str()) && name != METADATA && !value.is_null()
+    }) {
+        return Err(AdapterError::parameter_unsupported_for("input"));
+    }
+    let Some(metadata) = fields.get(METADATA).filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let metadata = metadata
+        .as_object()
+        .ok_or_else(|| AdapterError::invalid_request().with_parameter(PARAMETER))?;
+    if metadata.iter().any(|(name, value)| {
+        !matches!(name.as_str(), "turn_id" | "create_time") && !value.is_null()
+    }) {
+        // Content classifications, attribution and execution records are not
+        // tracing IDs. Preserve the guard until their semantics are supported.
+        return Err(AdapterError::parameter_unsupported_for(PARAMETER));
+    }
+    if metadata
+        .get("turn_id")
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+        || metadata
+            .get("create_time")
+            .is_some_and(|value| !value.is_null() && !value.is_number())
+    {
+        return Err(AdapterError::invalid_request().with_parameter(PARAMETER));
+    }
+    Ok(())
 }
 
 /// The upstream name of a replayed call: namespaced calls use the flattened

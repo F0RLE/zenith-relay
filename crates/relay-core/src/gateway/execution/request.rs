@@ -26,6 +26,7 @@ pub(super) struct RequestExecution {
     pub(super) request_id: String,
     pub(super) forwarded_headers: HeaderMap,
     pub(super) client_context_id: Option<String>,
+    pub(super) client_affinity_id: Option<String>,
     pub(super) response_affinity_key: Option<String>,
     pub(super) requires_affinity_owner: bool,
     pub(super) client_wire_api: WireApi,

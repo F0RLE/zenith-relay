@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
@@ -21,7 +21,13 @@ const CODEX_STOP_STABLE_WINDOW: Duration = Duration::from_millis(750);
 const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 mod identity;
+use identity::claude_desktop_pids;
+#[cfg(target_os = "windows")]
+use identity::claude_desktop_pids_for;
 pub(crate) use identity::is_codex_process;
+pub(super) use identity::is_codex_process_identity;
+#[cfg(all(test, target_os = "windows"))]
+pub(super) use identity::is_opencode_process_identity;
 #[cfg(any(target_os = "windows", test))]
 pub(super) use identity::process_stop_is_stable;
 #[cfg(test)]
@@ -33,8 +39,6 @@ pub(super) use identity::wait_for_pids_exit;
 pub(super) use identity::{codex_process_pids, codex_process_system};
 #[cfg(target_os = "windows")]
 use identity::{codex_process_pids_for, opencode_process_pids_for};
-#[cfg(all(test, target_os = "windows"))]
-pub(super) use identity::{is_codex_process_identity, is_opencode_process_identity};
 use identity::{is_opencode_process, opencode_process_pids};
 
 pub(super) fn is_codex_running() -> bool {
@@ -61,6 +65,43 @@ pub(super) fn stop_codex_and_wait() -> Result<bool, String> {
             Ok(true)
         } else {
             Err("ChatGPT did not exit before the profile switch timeout".to_string())
+        }
+    }
+}
+
+const CLAUDE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) fn stop_claude_desktop_and_wait() -> Result<bool, String> {
+    let pids = claude_desktop_pids();
+    if pids.is_empty() {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        stop_windows_processes(
+            &pids,
+            CLAUDE_STOP_TIMEOUT,
+            claude_desktop_pids_for,
+            "Claude Desktop",
+        )?;
+        Ok(true)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let system = codex_process_system();
+        for process in system
+            .processes()
+            .values()
+            .filter(|process| pids.contains(&process.pid().as_u32()))
+        {
+            let _ = process.kill();
+        }
+        if wait_for_pids_exit(&pids, CLAUDE_STOP_TIMEOUT) {
+            Ok(true)
+        } else {
+            Err("Claude Desktop did not exit before the restart timeout".to_string())
         }
     }
 }
@@ -197,6 +238,12 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
         return Ok(());
     }
 
+    if let Some(executable) =
+        super::settings::configured_path(super::settings::Application::Chatgpt)?
+    {
+        return launch_configured_chatgpt(&executable);
+    }
+
     #[cfg(target_os = "windows")]
     {
         launch_codex_desktop()
@@ -219,6 +266,74 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         Err("ChatGPT desktop launch is unavailable on this platform. Open a supported desktop app manually; Relay will not start the terminal CLI in the background".to_string())
+    }
+}
+
+fn launch_configured_chatgpt(executable: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_hidden_command(executable)
+            .spawn()
+            .map_err(|_| "Could not start the selected ChatGPT desktop application".to_string())?;
+        if wait_for_codex_state(true, CODEX_START_TIMEOUT) {
+            Ok(())
+        } else {
+            Err("The selected ChatGPT desktop application did not start".to_string())
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = executable
+            .ancestors()
+            .nth(3)
+            .ok_or("Invalid ChatGPT application path")?;
+        Command::new("open")
+            .arg("-a")
+            .arg(bundle)
+            .status()
+            .map_err(|_| "Could not start the selected ChatGPT desktop application".to_string())?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "The selected ChatGPT desktop application did not start".to_string())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = executable;
+        Err("ChatGPT desktop launch is unavailable on this platform".to_string())
+    }
+}
+
+pub(super) fn detected_chatgpt_launch_path() -> Option<String> {
+    if let Some(path) = codex_process_system()
+        .processes()
+        .values()
+        .filter(|process| is_codex_process(process))
+        .find_map(|process| process.exe())
+    {
+        return Some(path.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_chatgpt_launch_targets().into_iter().next()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut roots = vec![PathBuf::from("/Applications")];
+        if let Some(home) = env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join("Applications"));
+        }
+        roots
+            .into_iter()
+            .flat_map(|root| {
+                ["ChatGPT", "Codex"]
+                    .map(|name| root.join(format!("{name}.app/Contents/MacOS/{name}")))
+            })
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
     }
 }
 

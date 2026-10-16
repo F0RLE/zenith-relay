@@ -36,12 +36,24 @@ impl GatewayRuntime {
             let cached = self.lock_scheduler().has_prompt_affinity(key, now_ms);
             if !cached {
                 if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_prompt_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
+                    let owner = self
+                        .lock_scheduler()
+                        .candidate(&binding.candidate_id)
+                        .map(|candidate| candidate.id.clone())
+                        .or_else(|| {
+                            self.legacy_source_candidate_ids
+                                .get(&binding.candidate_id)
+                                .cloned()
+                                .flatten()
+                        });
+                    if let Some(owner) = owner {
+                        self.lock_scheduler().restore_prompt_affinity(
+                            binding.key,
+                            &owner,
+                            binding.expires_at_ms,
+                            now_ms,
+                        );
+                    }
                 }
             }
         }

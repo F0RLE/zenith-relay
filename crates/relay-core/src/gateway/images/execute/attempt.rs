@@ -102,8 +102,8 @@ pub(super) async fn run_selected_attempt(
     }
     .event(false, StatusCode::UNAUTHORIZED, None);
     let upstream_result = runtime
-        .send_authorized_request(
-            &route.candidate_id,
+        .send_authorized_request_for_route(
+            &route,
             upstream,
             crate::runtime::AuthorizationDispatch {
                 client_version: None,

@@ -35,6 +35,10 @@ pub struct ProviderSourceRecord {
     #[serde(default)]
     pub protocol_config: SourceProtocolConfig,
     pub models: Vec<String>,
+    /// Stored proxy used for every request to this source. The URL and its
+    /// credentials stay in the proxy pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
     #[serde(default)]
     pub allowed_models: Vec<String>,
     #[serde(default)]
@@ -189,6 +193,7 @@ pub(crate) fn synthetic_responses_source() -> ProviderSourceRecord {
         base_url: "https://provider.test/v1".into(),
         secret_ref: "source:test".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),

@@ -308,10 +308,10 @@ fn scoped_bridge_ids_keep_same_upstream_id_isolated_between_routes() {
     assert_ne!(first.response_id, second.response_id);
     assert_eq!(
         first.response_body["output"][0]["id"],
-        format!("msg_{}", first.response_id)
+        format!("msg_{}_0", first.response_id)
     );
     assert_eq!(
         second.response_body["output"][0]["id"],
-        format!("msg_{}", second.response_id)
+        format!("msg_{}_0", second.response_id)
     );
 }

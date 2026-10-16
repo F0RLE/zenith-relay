@@ -1,7 +1,7 @@
 mod account;
-mod basis_points;
+pub(in crate::gateway) mod basis_points;
 mod client;
-mod compatibility;
+pub(in crate::gateway) mod compatibility;
 mod request;
 
 pub(super) use account::{execute_account_endpoint, AccountExecution};
@@ -9,8 +9,7 @@ pub(super) use client::{execute_client_request, execute_gemini_client_request};
 pub(super) use client::{RoutedCompactionRequest, RoutedRequestIdentity};
 
 use super::errors::{
-    api_error_with_origin, api_error_with_origin_and_category, cooldown_error, AttemptFailure,
-    PreservedUpstreamError,
+    api_error_with_origin_and_category, cooldown_error, AttemptFailure, PreservedUpstreamError,
 };
 use super::errors::{
     responses_custom_tool_item_id_requires_ctc_prefix,
@@ -346,7 +345,9 @@ pub(super) fn finish_request_failure(
         failure_origin,
         request_id,
     } = request_failure_input;
-    if failure.status == StatusCode::TOO_MANY_REQUESTS {
+    if failure.status == StatusCode::TOO_MANY_REQUESTS
+        && super::errors::failure_category_requires_cooldown(failure.category)
+    {
         if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             key,
             resolved_model,
@@ -375,38 +376,47 @@ pub(super) fn attempt_error_response(
     failure_origin: ErrorOrigin,
     request_id: &str,
 ) -> Response<Body> {
-    if let Some(preserved) = preserved.filter(|preserved| {
+    let mut response = if let Some(preserved) = preserved.filter(|preserved| {
         preserved.status == failure.status && preserved.category == failure.category
     }) {
-        return api_error_with_origin_and_category(
+        api_error_with_origin_and_category(
             preserved.status,
             &preserved.message,
             &preserved.code,
             preserved.category,
             failure_origin,
             Some(request_id),
-        );
-    }
-    let code = match failure.category {
-        error_codes::UPSTREAM_BODY => error_codes::UPSTREAM_ERROR,
-        _ => {
-            return api_error_with_origin(
-                failure.status,
-                failure.message,
-                failure.category,
-                failure_origin,
-                Some(request_id),
-            );
-        }
+        )
+    } else {
+        let code = match failure.category {
+            error_codes::UPSTREAM_BODY => error_codes::UPSTREAM_ERROR,
+            category => category,
+        };
+        api_error_with_origin_and_category(
+            failure.status,
+            failure.message,
+            code,
+            failure.category,
+            failure_origin,
+            Some(request_id),
+        )
     };
-    api_error_with_origin_and_category(
-        failure.status,
-        failure.message,
-        code,
-        failure.category,
-        failure_origin,
-        Some(request_id),
-    )
+    // A request-local limit can carry Retry-After without creating any pool cooldown.
+    if failure.status == StatusCode::TOO_MANY_REQUESTS {
+        if let Some(delay) = failure.cooldown_hint.retry_after_ms {
+            let seconds = delay
+                .saturating_add(999)
+                .checked_div(1_000)
+                .unwrap_or(0)
+                .max(1);
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+    }
+    response
 }
 
 pub(super) struct CandidateRetryContext<'a> {
@@ -507,7 +517,7 @@ pub(super) async fn wait_for_candidate_retry(
 pub(super) fn bind_responses_turn(
     runtime: &GatewayRuntime,
     local_key_id: &str,
-    candidate_id: &str,
+    route: &crate::runtime::ExecutorRoute,
     request: &Value,
     source_model: &str,
     response_body: &[u8],
@@ -524,7 +534,7 @@ pub(super) fn bind_responses_turn(
         if capture_replay {
             runtime.capture_native_responses_replay(
                 local_key_id,
-                candidate_id,
+                &route.candidate_id,
                 request,
                 source_model,
                 &response,
@@ -532,11 +542,11 @@ pub(super) fn bind_responses_turn(
             );
         }
         for call_id in response_tool_call_ids(&response) {
-            runtime.bind_tool_call_affinity(local_key_id, &call_id, candidate_id, now_ms());
+            runtime.bind_tool_call_route_affinity(local_key_id, &call_id, route, now_ms());
         }
-        runtime.bind_response_affinity(
+        runtime.bind_response_route_affinity(
             response_id_from_bytes(response_body).as_deref(),
-            candidate_id,
+            route,
             now_ms(),
         );
     }

@@ -3,6 +3,14 @@ use super::*;
 impl TranslationStream {
     pub(super) fn event(&mut self, event_kind: &str, mut event_payload: Value) {
         if self.translation_request.client == WireApi::Responses {
+            if let Some(response) = event_payload
+                .get_mut("response")
+                .and_then(Value::as_object_mut)
+            {
+                if !self.translation_request.metadata.is_empty() {
+                    response.insert("metadata".into(), json!(self.translation_request.metadata));
+                }
+            }
             event_payload["sequence_number"] = self.sequence.into();
             self.sequence += 1;
         }
@@ -34,7 +42,9 @@ impl TranslationStream {
             return Err(AdapterError::upstream_stream_invalid());
         }
         for block_index in 0..self.decoded_response.blocks.len() {
-            let block = self.decoded_response.blocks[block_index].clone();
+            let mut block = self.decoded_response.blocks[block_index].clone();
+            self.translation_request
+                .normalize_function_arguments(&mut block, upstream_finished);
             // Gemini patches JSON objects rather than appending JSON text.
             // Emit each assembled call once its upstream response is terminal.
             if self.translation_request.upstream == WireApi::Gemini
@@ -178,7 +188,9 @@ impl TranslationStream {
             WireApi::Messages => {
                 let content = match block {
                     Block::Text(_) | Block::Refusal(_) => json!({"type":"text","text":""}),
-                    Block::Reasoning(_) => return Err(AdapterError::upstream_stream_invalid()),
+                    // No invented Anthropic signature: native state is replayed
+                    // separately to the original upstream after the tool result.
+                    Block::Reasoning(_) => json!({"type":"thinking","thinking":""}),
                     Block::ToolCall { id, name, .. } => {
                         json!({"type":"tool_use","id":id,"name":name,"input":{}})
                     }

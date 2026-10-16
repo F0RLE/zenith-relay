@@ -35,57 +35,6 @@ fn temp_root() -> PathBuf {
 }
 
 #[test]
-fn automatic_compaction_upgrade_runs_once_and_preserves_custom_budgets() {
-    use zenith_relay_core::catalog::context_policy::{
-        ApplicationContextPolicy, CompactionPolicy, ContextWindowPolicy,
-    };
-    let root = temp_root();
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    let mut gateway = store.gateway().clone();
-    gateway.chatgpt_context_defaults_version = 0;
-    gateway.chatgpt_context_policy = ApplicationContextPolicy::Configured {
-        context: ContextWindowPolicy::Custom { tokens: 500000 },
-        compaction: CompactionPolicy::Client,
-    };
-    store.replace_gateway(gateway).unwrap();
-    drop(store);
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(
-        store.gateway().chatgpt_context_policy,
-        ApplicationContextPolicy::Configured {
-            context: ContextWindowPolicy::Custom { tokens: 500000 },
-            compaction: CompactionPolicy::Early,
-        }
-    );
-    let mut gateway = store.gateway().clone();
-    gateway.chatgpt_context_policy = ApplicationContextPolicy::Configured {
-        context: ContextWindowPolicy::Extended,
-        compaction: CompactionPolicy::Client,
-    };
-    store.replace_gateway(gateway.clone()).unwrap();
-    drop(store);
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(
-        store.gateway().chatgpt_context_policy,
-        gateway.chatgpt_context_policy
-    );
-    gateway.chatgpt_context_defaults_version = 0;
-    gateway.chatgpt_context_policy = ApplicationContextPolicy::Configured {
-        context: ContextWindowPolicy::Short,
-        compaction: CompactionPolicy::Custom { tokens: 150000 },
-    };
-    store.replace_gateway(gateway.clone()).unwrap();
-    drop(store);
-    let store = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(
-        store.gateway().chatgpt_context_policy,
-        gateway.chatgpt_context_policy
-    );
-    drop(store);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn fresh_store_is_versioned_and_restart_safe() {
     let root = temp_root();
     let store = LocalPoolStore::open(root.clone()).unwrap();
@@ -376,6 +325,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
@@ -454,6 +404,7 @@ fn failed_transaction_preserves_all_state_and_memory() {
         base_url: "https://example.test/v1".into(),
         secret_ref: "source:source_1".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),

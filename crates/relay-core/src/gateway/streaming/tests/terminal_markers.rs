@@ -115,6 +115,50 @@ async fn native_streams_forward_provider_extensions_without_using_them_as_comple
 }
 
 #[tokio::test]
+async fn native_responses_sse_keeps_wire_bytes_across_chunk_boundaries() {
+    let frames = concat!(
+        ": synthetic heartbeat\r\n\r\n",
+        "id: synthetic-1\r\nretry: 1500\r\nevent: response.created\r\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic-response\"}}\r\n\r\n",
+        "event: vendor_extension\r\ndata: {\"type\":\"vendor_extension\",\"z\":1e3,\"a\":123456789012345678901234567890,\"p\":0.12345678901234567890123456789}\r\n\r\n",
+        "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"ответ\"}\r\n\r\n",
+        "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic-response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}\r\n\r\n",
+    );
+    // Responses stops at the protocol terminal event, not transport EOF or
+    // [DONE]. A CR already terminates the blank line; an optional LF in the
+    // next chunk is outside the completed event and is not awaited.
+    let input_frames = format!("{frames}data: [DONE]\r\n\r\ndata: ignored\n\n");
+    for chunk_size in [1, 7, frames.len()] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let input = stream::iter(
+            input_frames
+                .as_bytes()
+                .chunks(chunk_size)
+                .map(|chunk| Ok::<_, Infallible>(Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>(),
+        );
+        let mut stream = usage_stream_with_events(input, events.clone());
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.unwrap());
+        }
+        let terminal_end = if (frames.len() - 1).is_multiple_of(chunk_size) {
+            frames.len() - 1
+        } else {
+            frames.len()
+        };
+        assert_eq!(
+            output,
+            &frames.as_bytes()[..terminal_end],
+            "chunk size {chunk_size}"
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].success);
+    }
+}
+
+#[tokio::test]
 async fn native_responses_done_marker_without_terminal_is_not_success() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let input = stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"))]);

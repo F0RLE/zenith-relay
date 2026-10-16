@@ -509,7 +509,7 @@ fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
     assert_eq!(error.code(), "adapter_tool_unsupported");
 }
 #[test]
-fn messages_bridge_drops_hosted_tools_and_keeps_client_tools() {
+fn messages_bridge_rejects_hosted_tools_even_beside_client_tools() {
     let request = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
@@ -530,12 +530,8 @@ fn messages_bridge_drops_hosted_tools_and_keeps_client_tools() {
         MessagesReasoningMode::Disabled,
         None,
     )
-    .unwrap();
-    let tools = request.upstream_body()["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["name"], "run_command");
-    assert!(tools[0].get("defer_loading").is_none());
-    assert!(tools[0].get("allowed_callers").is_none());
+    .unwrap_err();
+    assert_eq!(request.code(), "adapter_tool_unsupported");
 }
 #[test]
 fn messages_bridge_flattens_namespace_tools_from_codex_catalogs() {
@@ -556,7 +552,7 @@ fn messages_bridge_flattens_namespace_tools_from_codex_catalogs() {
                     }]
                 }]
             }, {"type": "message", "role": "user", "content": "go"}],
-            "tools": [{"type": "web_search"}]
+            "tools": []
         }),
         "claude-test",
         false,

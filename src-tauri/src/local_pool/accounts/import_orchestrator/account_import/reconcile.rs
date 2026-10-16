@@ -86,14 +86,12 @@ pub(super) fn reconcile_imported_credentials(
     let subscription_active_until_ms = material.subscription_active_until_ms;
     let mut credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
     if let Some(previous_credentials) = old_credential.as_ref() {
-        credentials = credentials.fill_missing_login_from(previous_credentials);
-    }
-    if let Some(proxy_url) = old_credential
-        .as_ref()
-        .and_then(StoredCodexCredentials::proxy_url)
-    {
         credentials = credentials
-            .with_proxy_url(Some(proxy_url.to_string()))
+            .fill_missing_login_from(previous_credentials)
+            .with_proxy_route(
+                previous_credentials.proxy_url().map(str::to_owned),
+                previous_credentials.bypass_common_proxy(),
+            )
             .map_err(credential_item_error)?;
     }
     let proxy = effective_proxy_config(settings, &credentials).map_err(proxy_item_error)?;

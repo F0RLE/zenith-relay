@@ -293,6 +293,32 @@ paths:
         "200": { description: Updated runtime snapshot with the saved or default model order. }
         "400": { description: Invalid model order. }
         "404": { description: Model is not part of the pool. }
+  /models/context:
+    post:
+      operationId: setModelContext
+      security: [{ managementToken: [] }]
+      description: >
+        Select the short or extended context preset for one model. The selector
+        is accepted only when the current pool has confirmed a larger context
+        window for that model; other models remain on their default short mode.
+        Automatic compaction starts at 97% of the selected window, lowered only
+        by the model's own known limits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [modelId, contextPolicy]
+              properties:
+                modelId: { type: string }
+                contextPolicy: { $ref: "#/components/schemas/ModelContextPolicy" }
+      responses:
+        "200": { description: Updated runtime snapshot with the model context policy. }
+        "400": { description: Model context is unsupported or the model id is invalid. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Model is not part of the pool. }
   /sources:
     get:
       security: [{ managementToken: [] }]
@@ -437,9 +463,11 @@ paths:
             Source/account cards include independent refreshState evidence for
             models and balance/quota; the account shape is AccountRefreshState.
             gateway.modelCatalog optionally maps member model IDs to advisory
-            catalogProvider and catalogFamily values, including excluded and
-            binding-only models. catalogProvider is the normalized display
-            group, preferring the canonical manufacturer, a unique primary
+            catalogProvider, catalogFamily, and zero-based catalogOrder values,
+            including excluded, binding-only, and exact saved rule/price models.
+            catalogOrder applies the shared catalog or an explicit manual order
+            across the complete inventory. catalogProvider is the normalized
+            display group, preferring the canonical manufacturer, a unique primary
             family owner, or an unambiguous leaf over the hosting namespace.
             This display metadata does not grant runtime eligibility.
           content:
@@ -870,6 +898,7 @@ components:
         name: { type: string }
         baseUrl: { type: string, format: uri }
         apiKey: { type: string, writeOnly: true }
+        proxyId: { type: string, nullable: true, description: "Stored proxy used for every request of this source (generation, discovery, probe, balance, refresh). Absent keeps the current value, null removes it. A missing or invalid proxy fails the route; it never falls back to a direct connection. The proxy URL is never exposed." }
         wireApi: { $ref: "#/components/schemas/WireApi" }
         protocolBindings: { type: array, items: { $ref: "#/components/schemas/SourceProtocolBinding" } }
         models: { type: array, items: { type: string } }
@@ -882,6 +911,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
+        proxyId: { type: string, nullable: true, readOnly: true }
         refreshRevision: { type: integer, minimum: 1, readOnly: true, description: Non-secret source incarnation and configuration scope; changes on key replacement even if the URL is unchanged. }
         refreshState: { $ref: "#/components/schemas/SourceRefreshState", readOnly: true }
         providerStats: { $ref: "#/components/schemas/SourceProviderStats", readOnly: true, description: Optional runtime-only last observation; never initiates a provider request while reading a snapshot. }
@@ -924,6 +954,9 @@ components:
       type: object
       properties:
         id: { type: string }
+        catalogContextLimit: { type: [integer, "null"], minimum: 0, readOnly: true }
+        contextPolicy: { $ref: "#/components/schemas/ModelContextPolicy" }
+        contextConfigurable: { type: boolean, readOnly: true }
         protocolRoutes: { type: array, items: { $ref: "#/components/schemas/ModelProtocolRoute" }, readOnly: true }
         catalogCapabilities: { $ref: "#/components/schemas/ModelCapabilities", readOnly: true }
         tokenPrice:
@@ -938,6 +971,9 @@ components:
     ServiceTier:
       type: string
       enum: [standard, fast, ultrafast]
+    ModelContextPolicy:
+      type: string
+      enum: [short, extended]
     ModelCapabilities:
       type: object
       description: Normalized reference semantics; never grants model or route access.
@@ -1054,8 +1090,11 @@ components:
       type: object
       additionalProperties: false
       description: >
-        Fixed IANA timezone per account. The fallback for an unconfigured
-        account is America/New_York. This policy does not change the system timezone.
+        Fixed IANA timezone per account, or an account-specific inheritance from
+        its assigned saved proxy. The fallback for an unconfigured account is
+        America/New_York. accountTimezoneBindings can explicitly enable or
+        disable handling for one account; missing entries inherit enabled.
+        This policy does not change the system timezone.
       properties:
         enabled: { type: boolean, default: false }
         accountTimezones:
@@ -1064,6 +1103,21 @@ components:
           maxProperties: 10000
           propertyNames: { type: string, minLength: 1, maxLength: 256 }
           additionalProperties: { type: string, description: Exact identifier from the backend IANA catalog. }
+        accountTimezoneBindings:
+          type: object
+          default: {}
+          maxProperties: 10000
+          propertyNames: { type: string, minLength: 1, maxLength: 256 }
+          additionalProperties: { type: boolean, description: Explicit per-account override; missing entries inherit enabled. }
+        accountTimezoneSources:
+          type: object
+          default: {}
+          maxProperties: 10000
+          propertyNames: { type: string, minLength: 1, maxLength: 256 }
+          additionalProperties:
+            type: string
+            enum: [account, proxy]
+            description: Account uses its saved timezone or the timezone of its assigned proxy.
     PoolRoutingPolicy:
       type: object
       additionalProperties: false

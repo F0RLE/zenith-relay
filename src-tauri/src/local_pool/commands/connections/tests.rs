@@ -50,6 +50,7 @@ fn failed_automatic_discovery_keeps_the_source_without_advertising_models() {
         api_key: "secret".into(),
         wire_api: WireApi::Responses,
         models: Vec::new(),
+        proxy_url: None,
     };
     let configured = vec![SourceProtocolBinding {
         wire_api: WireApi::Responses,

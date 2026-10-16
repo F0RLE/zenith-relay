@@ -31,6 +31,7 @@ pub(super) struct PreparedRequestAttempt {
 }
 
 pub(super) struct RequestPrepareInput<'a> {
+    pub(super) route: ExecutorRoute,
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) request: &'a mut Value,
@@ -56,6 +57,7 @@ pub(super) fn prepare_request_attempt(
     request_prepare_input: RequestPrepareInput<'_>,
 ) -> RequestPrepare {
     let RequestPrepareInput {
+        mut route,
         runtime,
         key,
         request,
@@ -74,16 +76,6 @@ pub(super) fn prepare_request_attempt(
         client_transport,
         last_adapter_error,
     } = request_prepare_input;
-    let allowed_protocols = candidate_protocols(client_wire_api);
-    let Some(mut route) = runtime.executor_route(
-        candidate_id,
-        resolved_model,
-        &key.scope_snapshot(),
-        allowed_protocols,
-        stream,
-    ) else {
-        return RequestPrepare::Continue;
-    };
     let selected_service_tier = service_tier_policy.selected_tier();
     if !GatewayRuntime::route_supports_service_tier(&route, selected_service_tier) {
         *last_adapter_error = Some(AdapterError::parameter_unsupported_for("service_tier"));
@@ -107,33 +99,44 @@ pub(super) fn prepare_request_attempt(
             stream,
             service_tier_policy,
             selected_service_tier,
-            responses_lite.is_some(),
             last_adapter_error,
         ) {
             return step;
         }
     }
-    let route_responses_lite = route_responses_lite_header(
-        client_wire_api,
-        responses_lite,
-        automatic_responses_lite,
-        runtime,
-        resolved_model,
-        route.account_id.as_deref(),
-    );
-    if let Some(step) = normalize_prepared_responses_lite(request, route_responses_lite.is_some()) {
+    // Basis Points does not receive the Responses Lite transport header. Its
+    // adapter does translate Lite's item-level tool catalog, so still apply
+    // the client-side serial-tool normalization before translating the body.
+    let route_responses_lite = if basis_points_route {
+        None
+    } else {
+        route_responses_lite_header(
+            client_wire_api,
+            responses_lite,
+            automatic_responses_lite,
+            runtime,
+            resolved_model,
+            route.account_id.as_deref(),
+        )
+    };
+    let normalize_responses_lite = route_responses_lite.is_some()
+        || (basis_points_route
+            && client_wire_api == WireApi::Responses
+            && responses_lite.is_some());
+    if let Some(step) = normalize_prepared_responses_lite(request, normalize_responses_lite) {
         return step;
     }
-    let previous_continuation = match load_prepared_continuation(runtime, &route, &key.id, request)
-    {
-        Ok(previous_continuation) => previous_continuation,
-        Err(response) => return RequestPrepare::Respond(response),
-    };
+    let previous_continuation =
+        match load_prepared_continuation(runtime, &route, &key.id, request, request_id) {
+            Ok(previous_continuation) => previous_continuation,
+            Err(response) => return RequestPrepare::Respond(response),
+        };
     let client_stream = stream;
     let compaction_plan = match prepare_attempt_compaction(
         client_wire_api,
         route.adapter.is_passthrough(),
         request,
+        request_id,
         last_adapter_error,
     ) {
         Ok(compaction_plan) => compaction_plan,
@@ -142,16 +145,7 @@ pub(super) fn prepare_request_attempt(
     let should_summarize = compaction_plan.summarize();
     let upstream_stream = if should_summarize { false } else { stream };
     if should_summarize && client_stream {
-        if let Some(resolved) = runtime.executor_route(
-            &route.candidate_id,
-            resolved_model,
-            &key.scope_snapshot(),
-            allowed_protocols,
-            false,
-        ) {
-            route.upstream_url = resolved.upstream_url;
-            route.upstream_headers = resolved.upstream_headers;
-        }
+        runtime.set_route_streaming(&mut route, false);
     }
     let mut adapter_request = match translate_prepared_request(
         runtime,
@@ -177,7 +171,9 @@ pub(super) fn prepare_request_attempt(
     }
     let basis_points_request = basis_points_route.then(|| adapter_request.upstream_body().clone());
     if basis_points_route {
-        if let Some(step) = rewrite_basis_points_body(&mut adapter_request, last_adapter_error) {
+        if let Some(step) =
+            rewrite_basis_points_body(&mut adapter_request, request_id, last_adapter_error)
+        {
             return step;
         }
     }
@@ -229,7 +225,6 @@ fn reject_basis_points_admission(
     stream: bool,
     service_tier_policy: &ServiceTierPolicy,
     selected_service_tier: DefaultServiceTier,
-    responses_lite: bool,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Option<RequestPrepare> {
     let error = super::super::compatibility::basis_points_admission_error(
@@ -237,7 +232,6 @@ fn reject_basis_points_admission(
         stream,
         service_tier_policy,
         selected_service_tier,
-        responses_lite,
         false,
     )?;
     *last_adapter_error = Some(error);
@@ -295,13 +289,14 @@ fn load_prepared_continuation(
     route: &ExecutorRoute,
     key_id: &str,
     request: &Value,
+    request_id: &str,
 ) -> Result<Option<crate::MessagesBridgeState>, Response<Body>> {
     if !route.adapter.uses_local_continuation_state() {
         return Ok(None);
     }
     runtime
         .load_adapter_continuation(route, key_id, request, now_ms())
-        .map_err(adapter_error_response)
+        .map_err(|error| adapter_error_response(error, Some(request_id)))
 }
 
 #[allow(clippy::result_large_err)]
@@ -309,6 +304,7 @@ fn prepare_attempt_compaction(
     client_wire_api: WireApi,
     passthrough: bool,
     request: &Value,
+    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<BridgedCompaction, RequestPrepare> {
     if client_wire_api != WireApi::Responses || passthrough {
@@ -316,7 +312,11 @@ fn prepare_attempt_compaction(
     }
     match crate::protocol::prepare_bridged_compaction(request) {
         Ok(compaction) => Ok(compaction),
-        Err(error) => Err(stop_for_adapter_error(error, last_adapter_error)),
+        Err(error) => Err(stop_for_adapter_error(
+            error,
+            request_id,
+            last_adapter_error,
+        )),
     }
 }
 
@@ -351,7 +351,11 @@ fn translate_prepared_request(
         &capabilities,
     ) {
         Ok(request) => Ok(request),
-        Err(error) => Err(stop_for_adapter_error(error, last_adapter_error)),
+        Err(error) => Err(stop_for_adapter_error(
+            error,
+            request_id,
+            last_adapter_error,
+        )),
     }
 }
 
@@ -384,6 +388,7 @@ fn apply_prepared_tool_policy(
 
 fn rewrite_basis_points_body(
     adapter_request: &mut PreparedAdapterRequest,
+    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Option<RequestPrepare> {
     match super::super::basis_points::prepare_request(adapter_request.upstream_body()) {
@@ -391,18 +396,23 @@ fn rewrite_basis_points_body(
             *adapter_request.upstream_body_mut() = prepared;
             None
         }
-        Err(error) => Some(stop_for_adapter_error(error, last_adapter_error)),
+        Err(error) => Some(stop_for_adapter_error(
+            error,
+            request_id,
+            last_adapter_error,
+        )),
     }
 }
 
 fn stop_for_adapter_error(
     error: AdapterError,
+    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> RequestPrepare {
     if error.is_route_incompatible() {
         *last_adapter_error = Some(error);
         RequestPrepare::Continue
     } else {
-        RequestPrepare::Respond(adapter_error_response(error))
+        RequestPrepare::Respond(adapter_error_response(error, Some(request_id)))
     }
 }

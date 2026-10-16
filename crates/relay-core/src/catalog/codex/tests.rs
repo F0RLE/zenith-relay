@@ -100,6 +100,9 @@ fn routed_models_strip_native_only_selectors_from_template() {
     assert!(instructions.contains("apply_patch"));
     assert!(instructions.contains("PowerShell"));
     assert!(instructions.contains("macOS and Linux"));
+    assert!(instructions.contains("inspect the current Relay model catalog"));
+    assert!(instructions.contains("only GPT models"));
+    assert!(instructions.contains("`zenith/`"));
     assert!(!instructions.contains("native Codex instructions"));
     assert!(catalog_entry.get("model_messages").is_none());
     assert!(catalog_entry.get("tool_mode").is_none());
@@ -318,21 +321,27 @@ fn routed_models_publish_known_limits_without_inheriting_template_context_policy
 }
 
 #[test]
-fn api_maximum_does_not_replace_codex_default_context_window() {
+fn routed_api_context_does_not_borrow_codex_default_context_window() {
     let mut model = routed_codex_catalog_entry(None, "gpt-future", 1_000, None);
-    publish_routed_codex_context(&mut model, Some(1_050_000), Some(272_000));
-    assert_eq!(model["context_window"], 272_000);
+    model["context_window"] = json!(272_000);
+    model["max_context_window"] = json!(872_000);
+    model["auto_compact_token_limit"] = json!(244_800);
+    model["effective_context_window_percent"] = json!(95);
+    publish_routed_codex_context(&mut model, Some(1_050_000));
+    assert!(model.get("context_window").is_none());
     assert_eq!(model["max_context_window"], 1_050_000);
     assert!(model.get("auto_compact_token_limit").is_none());
     assert!(model.get("effective_context_window_percent").is_none());
 
-    publish_routed_codex_context(&mut model, Some(128_000), Some(272_000));
-    assert_eq!(model["context_window"], 128_000);
+    publish_routed_codex_context(&mut model, Some(128_000));
+    assert!(model.get("context_window").is_none());
     assert_eq!(model["max_context_window"], 128_000);
 
-    publish_routed_codex_context(&mut model, Some(1_050_000), None);
+    publish_routed_codex_context(&mut model, None);
     assert!(model.get("context_window").is_none());
-    assert_eq!(model["max_context_window"], 1_050_000);
+    assert!(model.get("max_context_window").is_none());
+    publish_routed_codex_context(&mut model, Some(0));
+    assert!(model.get("max_context_window").is_none());
 }
 
 #[test]

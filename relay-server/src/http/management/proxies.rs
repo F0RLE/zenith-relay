@@ -1,4 +1,6 @@
-use super::{account_summary, find_account, runtime_error, store_error, ManagementError};
+use super::{
+    account_summary, find_account, runtime_error, store_error, validation_error, ManagementError,
+};
 use crate::state::{ensure_proxy_record, AppState, MAX_SERVER_ACCOUNTS};
 use axum::extract::{Path, State};
 use axum::routing::post;
@@ -14,6 +16,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/proxies/common", post(set_common_proxy))
         .route("/proxies/policy", post(set_account_proxy_required))
+        .route("/proxies/{id}/timezone", post(set_proxy_timezone))
         .route("/accounts/proxies/assign", post(assign_account_proxies))
         .route("/accounts/{id}/proxy", post(set_account_proxy))
 }
@@ -30,6 +33,12 @@ pub struct SetProxyInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProxyPolicyInput {
     required: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyTimezoneInput {
+    timezone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +124,45 @@ pub async fn set_account_proxy_required(
                 .store
                 .set_account_proxy_required(previous_proxy_required)
         })
+        .await
+        .map_err(runtime_error)?;
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+pub async fn set_proxy_timezone(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<ProxyTimezoneInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
+    let build = state.lock_runtime_rebuild().await;
+    let previous = state
+        .store
+        .proxy(&id)
+        .map_err(store_error)?
+        .ok_or_else(|| ManagementError::not_found(error_codes::NOT_FOUND, "proxy not found"))?;
+    let timezone =
+        zenith_relay_core::normalize_timezone(input.timezone).map_err(validation_error)?;
+    if previous.timezone == timezone {
+        return Ok(Json(state.snapshot().map_err(store_error)?));
+    }
+    let common_proxy_id = state.store.common_proxy_id().map_err(store_error)?;
+    let accounts = state.store.accounts().map_err(store_error)?;
+    let _dispatch_fences = fence_accounts(
+        &state,
+        accounts.iter().filter_map(|account| {
+            (account.proxy_id.as_deref() == Some(id.as_str())
+                || (account.proxy_id.is_none()
+                    && !account.bypass_common_proxy
+                    && common_proxy_id.as_deref() == Some(id.as_str())))
+            .then_some(account.id.as_str())
+        }),
+    )?;
+    let mut updated = previous.clone();
+    updated.timezone = timezone;
+    state.store.save_proxy(&updated).map_err(store_error)?;
+    build
+        .rebuild_or_rollback(&state, || state.store.save_proxy(&previous))
         .await
         .map_err(runtime_error)?;
     Ok(Json(state.snapshot().map_err(store_error)?))
@@ -210,13 +258,15 @@ pub async fn assign_account_proxies(
         let proxy = ensure_proxy_record(&state.store, &state.vault, &normalize_proxy(proxy_url)?)
             .map_err(store_error)?;
         account_record.proxy_id = Some(proxy.id);
+        account_record.bypass_common_proxy = false;
         updated_accounts.push(account_record);
     }
     let _dispatch_fences = fence_accounts(
         &state,
         previous_records.iter().zip(&updated_accounts).filter_map(
             |(previous_record, updated_record)| {
-                (previous_record.proxy_id != updated_record.proxy_id)
+                (previous_record.proxy_id != updated_record.proxy_id
+                    || previous_record.bypass_common_proxy != updated_record.bypass_common_proxy)
                     .then_some(updated_record.id.as_str())
             },
         ),

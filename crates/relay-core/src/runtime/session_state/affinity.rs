@@ -1,4 +1,5 @@
 mod response;
+mod route;
 
 use super::super::{GatewayRuntime, ResponseAffinityBinding};
 use crate::PROMPT_AFFINITY_TTL_MS;

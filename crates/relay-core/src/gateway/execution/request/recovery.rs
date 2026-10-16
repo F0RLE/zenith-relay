@@ -4,20 +4,37 @@ pub(in crate::gateway::execution) fn mark_adapter_failure(
     mut event: UsageEvent,
     error: &AdapterError,
 ) -> UsageEvent {
+    if error.is_upstream_failure() && event.upstream_error.is_none() {
+        let message = error
+            .parameter()
+            .map(|parameter| format!("{} (parameter: {parameter})", error.message()))
+            .unwrap_or_else(|| error.message().to_string());
+        // AdapterError contains only static local labels. Preserve the reason
+        // without retaining the invalid provider body or tool arguments.
+        event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
+            Some(event.http_status),
+            &serde_json::json!({"error": {
+                "code": error.code(), "type": "relay_adapter", "message": message
+            }}),
+        ));
+    }
     event.success = false;
     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
     event.error_category = Some(error.code().to_string());
     event
 }
 
+#[cfg(test)]
+mod tests;
+
 pub(in crate::gateway::execution) fn should_wait_for_candidate_availability(
     enabled: bool,
     last_failure: &Option<AttemptFailure>,
-    has_adapter_error: bool,
+    has_preparation_error: bool,
     has_previous_response_id: bool,
 ) -> bool {
     enabled
-        && !has_adapter_error
+        && !has_preparation_error
         && last_failure.as_ref().is_none_or(|failure| {
             crate::gateway::errors::retryable_recovery_wait(
                 failure.status,
@@ -165,13 +182,17 @@ pub(super) fn replay_native_affinity_continuation(
     Ok(true)
 }
 
-pub(in crate::gateway::execution) fn adapter_error_response(error: AdapterError) -> Response<Body> {
-    adapter_error_response_for_origin(error, crate::ErrorOrigin::Relay)
+pub(in crate::gateway::execution) fn adapter_error_response(
+    error: AdapterError,
+    request_id: Option<&str>,
+) -> Response<Body> {
+    adapter_error_response_for_origin(error, crate::ErrorOrigin::Relay, request_id)
 }
 
 pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
     error: AdapterError,
     origin: crate::ErrorOrigin,
+    request_id: Option<&str>,
 ) -> Response<Body> {
     let status = if error.is_upstream_failure() {
         StatusCode::BAD_GATEWAY
@@ -181,13 +202,22 @@ pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
     let message = error
         .parameter()
         .map(|parameter| format!("{} (parameter: {parameter})", error.message()));
+    // Request-shape and capability failures are produced before an upstream
+    // response exists. They are Relay errors even when the selected route is
+    // an API source; only adapter failures derived from an upstream response
+    // retain the route's provider/account origin.
+    let origin = if error.is_upstream_failure() {
+        origin
+    } else {
+        crate::ErrorOrigin::Relay
+    };
     super::super::super::errors::api_error_with_parameter(
         status,
         message.as_deref().unwrap_or(error.message()),
         error.code(),
         error.code(),
         origin,
-        None,
+        request_id,
         error.parameter(),
     )
 }

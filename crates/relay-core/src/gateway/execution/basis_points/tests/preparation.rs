@@ -2,6 +2,104 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn tool_prompt_and_validation_use_the_same_json_schema() {
+    let schema = json!({"type":"object","properties":{
+        "path":{"type":"string","description":"File path","minLength":1},
+        "limit":{"type":"integer","minimum":1,"maximum":100},
+        "options":{"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"],"additionalProperties":false}
+    },"required":["path","options"],"additionalProperties":false});
+    let request = json!({"model":"gpt-test","input":"Find a file","tools":[{"type":"function","name":"lookup","parameters":schema}]});
+    let original = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(instructions.contains("matching this JSON Schema:"));
+    assert!(instructions.contains(&schema.to_string()));
+    assert_eq!(request, original);
+}
+
+#[test]
+fn preparation_expands_compact_responses_messages_without_losing_content_or_extensions() {
+    let request = json!({
+        "model":"gpt-test",
+        "input":[
+            {"role":"system","content":"Synthetic instructions"},
+            {"role":"user","content":[{"type":"input_text","text":"Hello"},{"type":"input_image","image_url":"https://example.test/image.png"}]},
+            {"role":"assistant","content":"Ready","phase":"final_answer"},
+            {"type":"message","role":"user","content":"Continue"}
+        ]
+    });
+    let before = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let history = &prepared["input"].as_array().unwrap()[1..];
+    assert!(history.iter().all(|item| item["type"] == "message"));
+    assert_eq!(
+        history[0]["content"],
+        json!([{"type":"input_text","text":"Synthetic instructions"}])
+    );
+    assert_eq!(history[1]["content"], request["input"][1]["content"]);
+    assert_eq!(
+        history[2]["content"],
+        json!([{"type":"output_text","text":"Ready"}])
+    );
+    assert_eq!(history[2]["phase"], "final_answer");
+    assert_eq!(
+        history[3]["content"],
+        json!([{"type":"input_text","text":"Continue"}])
+    );
+    assert_eq!(request, before);
+}
+
+#[test]
+fn preparation_normalizes_messages_bridge_history_before_basis_points_dispatch() {
+    use crate::protocol::{AdapterRequestContext, MessagesReasoningMode, SourceAdapter};
+    use crate::{CacheWriteTtl, WireApi};
+
+    for stream in [false, true] {
+        let request = json!({
+            "model":"gpt-test","max_tokens":128,"stream":stream,
+            "metadata":{"user_id":"synthetic-user"},
+            "system":[{"type":"text","text":"Synthetic instructions","cache_control":{"type":"ephemeral"}}],
+            "messages":[
+                {"role":"user","content":"Hello"},
+                {"role":"assistant","content":"Ready"},
+                {"role":"user","content":"Continue"}
+            ]
+        });
+        let bridged = SourceAdapter::MessagesToResponses
+            .prepare_request(AdapterRequestContext {
+                client_wire_api: WireApi::Messages,
+                request: &request,
+                model: "gpt-test",
+                stream,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                cache_write_ttl: CacheWriteTtl::Provider,
+                previous: None,
+                response_scope: "synthetic-source",
+                response_id_seed: "synthetic-request",
+            })
+            .unwrap();
+        let prepared = prepare_request(bridged.upstream_body()).unwrap();
+        let items = prepared["input"].as_array().unwrap();
+        assert!(items.iter().all(|item| item["type"] == "message"));
+        assert_eq!(
+            items.iter().filter(|item| item["role"] == "user").count(),
+            2
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item["role"] == "assistant")
+                .unwrap()["content"],
+            json!([{"type":"output_text","text":"Ready"}])
+        );
+        assert!(prepared["metadata"].get("user_id").is_none());
+        assert_eq!(prepared["metadata"].as_object().unwrap().len(), 3);
+        assert_eq!(request["metadata"]["user_id"], "synthetic-user");
+        assert_eq!(prepared["stream"], stream);
+    }
+}
+
+#[test]
 fn encrypted_agent_assignment_is_rejected_before_technical_history_is_removed() {
     for input in [
         json!({"type":"agent_message","encrypted_content":"synthetic-ciphertext","content":[]}),
@@ -37,6 +135,7 @@ fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema(
             ]}]},
             {"role":"user","content":"Read a file"}
         ],
+        "parallel_tool_calls": false,
         "tool_choice":{"type":"function","namespace":"mcp.repo","name":"read"}
     });
     let before = request.clone();
@@ -44,6 +143,7 @@ fn latest_historical_search_catalog_keeps_nested_namespaces_and_original_schema(
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("mcp.repo.read (function): latest"));
     assert!(!instructions.contains("mcp.repo.read (function): old"));
+    assert!(instructions.contains("Invoke at most one client tool in this response."));
     assert_eq!(request, before);
     assert_eq!(prepared["input"].as_array().unwrap().len(), 2);
     let response = serde_json::to_vec(&json!({"status":"completed","output":[{
@@ -77,7 +177,7 @@ fn tool_examples_follow_the_declared_tool_instead_of_a_fixed_patch() {
     let prepared = prepare_request(&request_with_tool()).unwrap();
     let instructions = prepared["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(instructions.contains("Example outer arguments for exec_command (function)"));
-    assert!(instructions.contains("\"cmd\":string"));
+    assert!(instructions.contains("\"cmd\":{\"type\":\"string\"}"));
     assert!(!instructions.contains("Example outer arguments for apply_patch"));
     assert!(!instructions.contains("*** Begin Patch"));
 
@@ -326,7 +426,7 @@ fn preparation_normalizes_max_effort_and_drops_strictly_unsupported_fields() {
     assert!(prepared.get("max_output_tokens").is_none());
     assert!(prepared.get("parallel_tool_calls").is_none());
     assert!(prepared.get("temperature").is_none());
-    assert_eq!(prepared["metadata"]["request_kind"], "codex");
+    assert!(prepared["metadata"].get("request_kind").is_none());
     assert!(prepared["metadata"].get("nested").is_none());
 }
 
@@ -349,8 +449,30 @@ fn preparation_adds_stable_basis_points_turn_metadata() {
     assert!(first["metadata"]["task_id"].as_str().unwrap().contains('-'));
     assert!(first["metadata"]["turn_id"].as_str().unwrap().contains('-'));
     assert_eq!(first["metadata"]["agent_iteration"], "2");
-    assert_eq!(first["metadata"]["request_kind"], "codex");
+    assert!(first["metadata"].get("request_kind").is_none());
     assert!(first["metadata"].get("nested").is_none());
+}
+
+#[test]
+fn preparation_keeps_client_metadata_out_of_the_strict_transport_contract() {
+    let mut request = request_with_tool();
+    request["metadata"] = json!({
+        "user_id":"synthetic-user",
+        "request_kind":"synthetic",
+        "task_id":"client-task",
+        "turn_id":"client-turn",
+        "agent_iteration":"999",
+        "bps_tools_version_id":"client-version",
+        "bps_prompt_base_override":"client-override"
+    });
+    let before = request.clone();
+    let prepared = prepare_request(&request).unwrap();
+    let mut without_metadata = request.clone();
+    without_metadata.as_object_mut().unwrap().remove("metadata");
+    let baseline = prepare_request(&without_metadata).unwrap();
+    assert_eq!(prepared["metadata"], baseline["metadata"]);
+    assert_eq!(prepared["metadata"].as_object().unwrap().len(), 3);
+    assert_eq!(request, before);
 }
 
 #[test]

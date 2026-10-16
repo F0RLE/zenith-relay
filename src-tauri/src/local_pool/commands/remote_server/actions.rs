@@ -73,6 +73,9 @@ pub async fn execute_remote_server_action(
         RemoteServerAction::SetRequestTimezone | RemoteServerAction::RequestTimezoneCatalog => {
             Some(zenith_relay_core::protocol::Feature::RequestTimezone)
         }
+        RemoteServerAction::SetProxyTimezone { .. } => {
+            Some(zenith_relay_core::protocol::Feature::RequestTimezone)
+        }
         _ => None,
     };
     if let Some(feature) = policy_feature {
@@ -209,6 +212,11 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::AssignAccountProxies => {
             (Method::POST, "/accounts/proxies/assign".to_string(), true)
         }
+        RemoteServerAction::SetProxyTimezone { id } => (
+            Method::POST,
+            format!("{}/timezone", object_path("proxies", id)?),
+            true,
+        ),
         RemoteServerAction::SetPoolMembership => (Method::POST, "/pool/members".to_string(), true),
         RemoteServerAction::SetQuotaPolicy => (Method::POST, "/quota/settings".to_string(), true),
         RemoteServerAction::SetRoutingPolicy => {
@@ -228,6 +236,7 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::SetModelServiceTier => {
             (Method::POST, "/models/service-tier".to_string(), true)
         }
+        RemoteServerAction::SetModelContext => (Method::POST, "/models/context".to_string(), true),
         RemoteServerAction::SetModelOrder => (Method::POST, "/models/order".to_string(), true),
         RemoteServerAction::StartGateway => (Method::POST, "/gateway/start".to_string(), false),
         RemoteServerAction::StopGateway => (Method::POST, "/gateway/stop".to_string(), false),
@@ -345,6 +354,21 @@ mod tests {
             assert!(!needs_payload);
         }
         assert!(action_request(&RemoteServerAction::PurgeTrashedAccount {
+            id: "../other".into()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn proxy_timezone_request_posts_a_payload_to_the_proxy_path() {
+        let (method, path, needs_payload) = action_request(&RemoteServerAction::SetProxyTimezone {
+            id: "proxy_synthetic".into(),
+        })
+        .unwrap();
+        assert_eq!(method, Method::POST);
+        assert_eq!(path, "/proxies/proxy_synthetic/timezone");
+        assert!(needs_payload);
+        assert!(action_request(&RemoteServerAction::SetProxyTimezone {
             id: "../other".into()
         })
         .is_err());

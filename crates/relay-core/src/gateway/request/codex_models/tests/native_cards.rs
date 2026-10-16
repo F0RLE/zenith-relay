@@ -78,11 +78,25 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     assert_eq!(model["default_reasoning_level"], "low");
     assert_eq!(model["context_window"], 128_000);
     assert_eq!(model["max_context_window"], 256_000);
-    assert_eq!(model["auto_compact_token_limit"], 110_000);
+    // The owning card's Short window wins over both proportional and API budgets.
+    assert_eq!(model["auto_compact_token_limit"], 115_200);
     assert_eq!(model["effective_context_window_percent"], 90);
 
+    runtime.remember_codex_model_manifest("native-account", upstream.clone(), 0);
+    let windows = runtime.model_context_windows("gpt-native", ["native-account"]);
+    assert_eq!(windows.default_tokens, Some(128_000));
+    assert_eq!(windows.maximum_tokens, Some(256_000));
+    assert_eq!(
+        runtime.model_context_windows("missing", ["native-account"]),
+        Default::default()
+    );
+    let api_windows = runtime.model_context_windows("gpt-native", []);
+    assert_eq!(api_windows.default_tokens, None);
+    assert_eq!(api_windows.maximum_tokens, Some(1_050_000));
+
     // A missing account card uses this exact model's external name and
-    // capabilities; it does not retain the native-only features above.
+    // capabilities; it does not retain the native-only features above or borrow
+    // a context window from the installed Codex card.
     let fallback = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
     assert_eq!(
         fallback["models"][0]["display_name"],
@@ -91,7 +105,7 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
     assert_eq!(fallback["models"][0]["slug"], "gpt-native");
     assert_eq!(fallback["models"][0]["supports_search_tool"], false);
     assert_eq!(fallback["models"][0]["default_reasoning_level"], "low");
-    assert_eq!(fallback["models"][0]["context_window"], 272_000);
+    assert!(fallback["models"][0].get("context_window").is_none());
     assert!(fallback["models"][0].get("max_context_window").is_none());
     assert!(fallback["models"][0]
         .get("auto_compact_token_limit")
@@ -131,27 +145,65 @@ fn native_account_catalog_uses_reference_capabilities_despite_conflicting_accoun
         .get("auto_compact_token_limit")
         .is_none());
 
-    runtime.set_chatgpt_context_policy(
-        crate::catalog::context_policy::ApplicationContextPolicy::Custom { tokens: 1_000_000 },
-    );
     let explicit = build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
-    assert_eq!(explicit["models"][0]["context_window"], 256_000);
-    assert_eq!(explicit["models"][0]["max_context_window"], 256_000);
-    assert!(
-        explicit["models"][0]["auto_compact_token_limit"]
-            .as_u64()
-            .unwrap()
-            < 256_000
-    );
+    // Default is the native Short window, with compaction at 90%.
+    assert_eq!(explicit["models"][0]["context_window"], 128_000);
+    assert_eq!(explicit["models"][0]["auto_compact_token_limit"], 115_200);
     let unknown =
         build_codex_models_response(&runtime, &key, &visible, Some(&missing_context)).unwrap();
     assert!(unknown["models"][0].get("context_window").is_none());
-    runtime.set_chatgpt_context_policy(
-        crate::catalog::context_policy::ApplicationContextPolicy::Client,
-    );
     let restored = build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
     assert_eq!(restored["models"][0]["context_window"], 128_000);
-    assert_eq!(restored["models"][0]["auto_compact_token_limit"], 110_000);
+
+    let mut smaller_native_maximum = upstream.clone();
+    smaller_native_maximum["models"][0]["max_context_window"] = json!(120_000);
+    let preserved =
+        build_codex_models_response(&runtime, &key, &visible, Some(&smaller_native_maximum))
+            .unwrap();
+    assert_eq!(preserved["models"][0]["context_window"], 120_000);
+    assert_eq!(preserved["models"][0]["max_context_window"], 120_000);
+    assert_eq!(
+        preserved["models"][0]["effective_context_window_percent"],
+        100
+    );
+    assert_eq!(preserved["models"][0]["auto_compact_token_limit"], 108_000);
+
+    runtime
+        .set_model_context_policies(std::collections::BTreeMap::from([(
+            "gpt-native".into(),
+            crate::ModelContextPolicy::Extended,
+        )]))
+        .unwrap();
+    let extended = build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
+    assert_eq!(extended["models"][0]["context_window"], 256_000);
+    assert_eq!(extended["models"][0]["max_context_window"], 256_000);
+    // Extended window 256k: 90% of the selected window.
+    assert_eq!(extended["models"][0]["auto_compact_token_limit"], 230_400);
+    for (policy, window) in [
+        (crate::ModelContextPolicy::Custom { tokens: 64_000 }, 64_000),
+        (crate::ModelContextPolicy::Custom { tokens: 96_000 }, 96_000),
+        (crate::ModelContextPolicy::Short, 128_000),
+    ] {
+        runtime
+            .set_model_context_policies(std::collections::BTreeMap::from([(
+                "gpt-native".into(),
+                policy,
+            )]))
+            .unwrap();
+        let current =
+            build_codex_models_response(&runtime, &key, &visible, Some(&upstream)).unwrap();
+        assert_eq!(current["models"][0]["context_window"], window);
+        assert_eq!(
+            current["models"][0]["auto_compact_token_limit"],
+            window * 90 / 100
+        );
+    }
+    // Catalogs already returned to an earlier request remain its snapshot.
+    assert_eq!(extended["models"][0]["context_window"], 256_000);
+    assert_eq!(
+        runtime.model_context_windows("gpt-native", ["native-account"]),
+        windows
+    );
 }
 
 #[test]

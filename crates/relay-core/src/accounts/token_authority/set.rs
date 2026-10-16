@@ -10,8 +10,9 @@ pub struct TokenSet {
     pub(in crate::accounts::token_authority) generation: u64,
 }
 
-/// Refresh an access token this long before it expires.
-pub const TOKEN_REFRESH_SKEW_MS: u64 = 60_000;
+/// Refresh an access token five minutes before it expires.
+/// Reserve time for the token exchange and persistence before dispatch.
+pub const TOKEN_REFRESH_SKEW_MS: u64 = 5 * 60_000;
 
 /// Returns whether an access token remains usable after the refresh skew.
 pub fn access_token_is_usable(
@@ -143,5 +144,32 @@ impl fmt::Debug for TokenRefresh {
             .field("id_token", &self.id_token.as_ref().map(|_| "[redacted]"))
             .field("expires_at_ms", &self.expires_at_ms)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{access_token_is_usable, TOKEN_REFRESH_SKEW_MS};
+
+    #[test]
+    fn refresh_window_is_five_minutes() {
+        assert_eq!(TOKEN_REFRESH_SKEW_MS, 300_000);
+    }
+
+    #[test]
+    fn token_becomes_unusable_inside_refresh_window() {
+        let now_ms = 1_000_000;
+        let expires_at_ms = now_ms + TOKEN_REFRESH_SKEW_MS;
+
+        assert!(!access_token_is_usable(
+            Some(expires_at_ms),
+            now_ms,
+            TOKEN_REFRESH_SKEW_MS
+        ));
+        assert!(access_token_is_usable(
+            Some(expires_at_ms + 1),
+            now_ms,
+            TOKEN_REFRESH_SKEW_MS
+        ));
     }
 }

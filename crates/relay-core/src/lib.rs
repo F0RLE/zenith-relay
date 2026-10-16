@@ -45,6 +45,7 @@ pub mod pricing;
 pub mod protocol;
 pub mod providers;
 pub mod proxy;
+pub mod quality;
 pub mod quota;
 mod record_impl;
 pub mod request_timezone;
@@ -58,17 +59,18 @@ pub mod usage;
 
 pub use catalog::{
     apply_codex_ultra_from_official_model, canonicalize_reasoning_levels,
+    claude_desktop_model_alias, claude_desktop_reasoning_model_alias,
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
     codex_model_is_picker_eligible, codex_model_is_picker_eligible_for, decode_codex_model_alias,
     deserialize_model_reasoning_allowed_levels, is_degraded_route_model, is_valid_model_id,
     is_valid_model_token, merge_model_display_order, model_id_key, normalize_bounded_model_ids,
-    normalize_codex_catalog_priorities, normalize_model_ids,
+    normalize_codex_catalog_priorities, normalize_model_context_policies, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, publish_routed_codex_context, reasoning_level_rank,
     reasoning_policy_key, reasoning_policy_levels, routed_codex_catalog_entry,
-    source_model_declares_image_input, source_row_declares_reasoning, ModelIdListError,
-    ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
-    MAX_MODEL_LIST_LEN,
+    source_model_declares_image_input, source_row_declares_reasoning, ModelContextPolicy,
+    ModelIdListError, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
+    CODEX_RELAY_CATALOG_HASH, MAX_MODEL_LIST_LEN,
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use ids::{is_ascii_ref, is_ascii_token};
@@ -94,7 +96,10 @@ pub use protocol::{
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
-pub use request_timezone::{RequestTimezonePolicy, RequestTimezoneUpdate};
+pub use request_timezone::{
+    is_valid_timezone, normalize_timezone, AccountTimezoneSource, RequestTimezonePolicy,
+    RequestTimezoneUpdate,
+};
 pub use runtime::{
     changed_runtime_source_policy_updates, normalize_image_base_model,
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
@@ -143,7 +148,8 @@ pub use sources::{
     endpoint_url_protocol, fetch_source_provider_stats, is_http_endpoint, is_loopback_url,
     normalize_source_protocol_bindings, probe_source_generation,
     probe_source_generation_with_scope, read_source_models, read_source_models_with_scope,
-    read_source_provider_stats, read_source_provider_stats_with_scope,
+    read_source_provider_stats, read_source_provider_stats_with_proxy,
+    read_source_provider_stats_with_scope, read_source_provider_stats_with_scope_and_proxy,
     runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
     runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
     runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, service_protocol,

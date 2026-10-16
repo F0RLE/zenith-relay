@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-fn prepare_portable_tool_history(
+pub(super) fn prepare_portable_tool_history(
     client: WireApi,
     upstream: WireApi,
     stream: bool,

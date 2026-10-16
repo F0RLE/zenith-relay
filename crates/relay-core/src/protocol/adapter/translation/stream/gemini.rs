@@ -59,7 +59,11 @@ impl TranslationStream {
             .and_then(Value::as_array)
         {
             for part in parts {
-                super::super::super::gemini::validate_response_part(part).map_err(|_| invalid())?;
+                let fields = super::super::super::gemini::validate_response_part(part)
+                    .map_err(|_| invalid())?;
+                if super::super::super::gemini::is_noop_text_part(fields) {
+                    continue;
+                }
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     let reasoning = part.get("thought").and_then(Value::as_bool) == Some(true);
                     let index = self.decoded_response.blocks.len().saturating_sub(1);
@@ -73,29 +77,19 @@ impl TranslationStream {
                     match self.decoded_response.blocks.last_mut() {
                         Some(Block::Text(block_text)) if !reasoning && append => {
                             block_text.push_str(text);
-                            let Some(native_index) = native_index else {
-                                return Err(invalid());
-                            };
-                            let native = self
-                                .decoded_response
-                                .native_output
-                                .get_mut(native_index)
-                                .ok_or_else(invalid)?;
-                            let previous = native["text"].as_str().ok_or_else(invalid)?;
-                            native["text"] = format!("{previous}{text}").into();
+                            self.native_indices.insert(
+                                index.to_string(),
+                                self.decoded_response.native_output.len(),
+                            );
+                            self.decoded_response.native_output.push(part.clone());
                         }
                         Some(Block::Reasoning(block_text)) if reasoning && append => {
                             block_text.push_str(text);
-                            let Some(native_index) = native_index else {
-                                return Err(invalid());
-                            };
-                            let native = self
-                                .decoded_response
-                                .native_output
-                                .get_mut(native_index)
-                                .ok_or_else(invalid)?;
-                            let previous = native["text"].as_str().ok_or_else(invalid)?;
-                            native["text"] = format!("{previous}{text}").into();
+                            self.native_indices.insert(
+                                index.to_string(),
+                                self.decoded_response.native_output.len(),
+                            );
+                            self.decoded_response.native_output.push(part.clone());
                         }
                         _ => {
                             if !self.decoded_response.blocks.is_empty() {

@@ -30,6 +30,25 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
+    if [
+        "/code",
+        "/error_code",
+        "/error/code",
+        "/detail/code",
+        "/body/code",
+        "/body/error/code",
+        "/response/code",
+        "/response/error/code",
+    ]
+    .iter()
+    .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
+    .any(|code| code.eq_ignore_ascii_case("turn_rate_limit_exceeded"))
+    {
+        return UpstreamErrorClassification {
+            category: error_codes::UPSTREAM_TURN_RATE_LIMITED,
+            message: upstream_failure_message(error_codes::UPSTREAM_TURN_RATE_LIMITED),
+        };
+    }
     if zenith_gateway_invalid_request_value(error_payload) {
         return UpstreamErrorClassification {
             // The legacy gateway envelope does not prove a route failure or

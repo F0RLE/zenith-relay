@@ -70,7 +70,19 @@ pub(super) fn record_connect_affinity_miss(trace: &ConnectTrace<'_>, status: Sta
     emit_usage(trace.runtime, event);
 }
 
-pub(super) fn record_connect_rejection(trace: &ConnectTrace<'_>, failure: &GatewayFailure) {
+pub(super) fn record_connect_repair(trace: &ConnectTrace<'_>, failure: &GatewayFailure) {
+    record_connect_rejection_with_outcome(trace, failure, crate::AttemptOutcome::RetryRepair);
+}
+
+pub(super) fn record_connect_returned_failure(trace: &ConnectTrace<'_>, failure: &GatewayFailure) {
+    record_connect_rejection_with_outcome(trace, failure, crate::AttemptOutcome::ReturnedFailure);
+}
+
+fn record_connect_rejection_with_outcome(
+    trace: &ConnectTrace<'_>,
+    failure: &GatewayFailure,
+    outcome: crate::AttemptOutcome,
+) {
     let mut event = connect_usage(
         trace,
         failure.status.as_u16(),
@@ -78,7 +90,7 @@ pub(super) fn record_connect_rejection(trace: &ConnectTrace<'_>, failure: &Gatew
     );
     event.upstream_error = failure.upstream_error.as_deref().cloned();
     if let Some(routing) = event.routing.as_mut() {
-        routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+        routing.attempt_outcome = Some(outcome);
     }
     emit_usage(trace.runtime, event);
 }

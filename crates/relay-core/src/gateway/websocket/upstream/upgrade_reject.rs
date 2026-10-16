@@ -1,7 +1,8 @@
 use super::super::fallback::websocket_transport_fallback_status;
 use super::super::*;
 use super::telemetry::{
-    record_connect_affinity_miss, record_connect_failure_with_hint, record_connect_rejection,
+    record_connect_affinity_miss, record_connect_failure_with_hint, record_connect_repair,
+    record_connect_returned_failure,
 };
 use super::{ConnectProgress, ConnectScope};
 
@@ -15,6 +16,7 @@ pub(super) async fn handle_upgrade_rejection(
     upgrade: reqwest_websocket::UpgradeResponse,
     status: StatusCode,
     response_headers: &HeaderMap,
+    prepared: &crate::runtime::PreparedAuthorization,
     scope: &mut ConnectScope<'_>,
     progress: &mut ConnectProgress<'_>,
 ) -> Result<UpgradeAction, GatewayFailure> {
@@ -43,7 +45,12 @@ pub(super) async fn handle_upgrade_rejection(
     .and_then(Result::ok);
     let failure =
         GatewayFailure::upstream_status(status, error_body.as_deref(), source_error_origin)
+            .with_retry_headers(response_headers)
             .apply_degraded_route_policy(runtime);
+    if failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+        record_connect_returned_failure(&scope.trace(), &failure);
+        return Ok(UpgradeAction::Fail(failure));
+    }
     if !*legacy_call_id_repair_attempted
         && error_body
             .as_deref()
@@ -57,8 +64,9 @@ pub(super) async fn handle_upgrade_rejection(
     }
     if websocket_transport_fallback_status(status) {
         runtime.mark_websocket_http_only(
-            &route.candidate_id,
+            &GatewayRuntime::websocket_capability_scope(route, prepared),
             &scope.request.resolved_model,
+            &prepared.incarnation(),
             now_ms(),
         );
         *websocket_http_fallback_origin = Some(source_error_origin);
@@ -107,7 +115,7 @@ pub(super) async fn handle_upgrade_rejection(
         });
     if stale_tool_history {
         *stale_tool_history_recovered = true;
-        record_connect_rejection(&scope.trace(), &failure);
+        record_connect_repair(&scope.trace(), &failure);
         *last_failure = Some(failure);
         return Ok(UpgradeAction::ContinueCandidates);
     }
@@ -163,6 +171,6 @@ pub(super) async fn handle_upgrade_rejection(
         *last_failure = Some(failure);
         return Ok(UpgradeAction::ContinueCandidates);
     }
-    record_connect_rejection(&scope.trace(), &failure);
+    record_connect_returned_failure(&scope.trace(), &failure);
     Ok(UpgradeAction::Fail(failure))
 }

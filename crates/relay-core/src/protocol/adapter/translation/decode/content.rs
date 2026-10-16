@@ -8,8 +8,26 @@ use serde_json::{json, Value};
 mod request;
 mod tools;
 
-pub(super) use request::{choice, common, output_format};
+pub(super) use request::{choice, common, output_format, sampling_extensions};
 pub(super) use tools::{responses_tools, tools};
+
+/// Gemini's OpenAPI and JSON Schema fields are mutually exclusive. Resolve
+/// them once without silently preferring one set of constraints over another.
+pub(super) fn schema_field(
+    object: &Value,
+    json_schema: &str,
+    openapi_schema: &str,
+) -> AdapterResult<Option<Value>> {
+    match (object.get(json_schema), object.get(openapi_schema)) {
+        (Some(_), Some(_)) => Err(AdapterError::invalid_request()),
+        (Some(schema), None) if schema.is_object() => Ok(Some(schema.clone())),
+        (None, Some(schema)) if schema.is_object() => {
+            super::super::schema::from_gemini(schema).map(Some)
+        }
+        (None, None) => Ok(None),
+        _ => Err(AdapterError::invalid_request()),
+    }
+}
 
 pub(super) fn role(message_part: &Value) -> AdapterResult<Role> {
     match message_part.get("role").and_then(Value::as_str) {
@@ -46,7 +64,23 @@ pub(super) fn block(
     }
     match required_text(content_part, "type")? {
         "thinking" if protocol == WireApi::Messages => {
-            checked(content_part, &["type", "thinking"])?;
+            checked(content_part, &["type", "thinking", "signature"])?;
+            // Messages clients initialize unsigned, translated summaries with
+            // signature: "" while assembling a stream. It contains no native
+            // state. Real signatures still need their originating native route;
+            // the portable summary cannot replace our scoped continuation.
+            if let Some(signature) = content_part
+                .get("signature")
+                .filter(|value| !value.is_null())
+            {
+                let parameter = "messages[].content[].signature";
+                let signature = signature
+                    .as_str()
+                    .ok_or_else(|| AdapterError::invalid_request().with_parameter(parameter))?;
+                if !signature.is_empty() {
+                    return Err(AdapterError::parameter_unsupported_for(parameter));
+                }
+            }
             Ok(Block::Reasoning(
                 content_part
                     .get("thinking")
@@ -56,7 +90,7 @@ pub(super) fn block(
             ))
         }
         "text" | "input_text" | "output_text" => {
-            checked(content_part, &["type", "text", "annotations"])?;
+            content_fields(content_part, protocol, &["type", "text", "annotations"])?;
             if content_part
                 .get("annotations")
                 .and_then(Value::as_array)
@@ -72,9 +106,19 @@ pub(super) fn block(
                     .into(),
             ))
         }
-        "image_url" | "input_image" | "image" => image_block(content_part),
+        "refusal" if protocol == WireApi::Responses => {
+            checked(content_part, &["type", "refusal"])?;
+            Ok(Block::Refusal(
+                content_part
+                    .get("refusal")
+                    .and_then(Value::as_str)
+                    .ok_or_else(AdapterError::invalid_request)?
+                    .into(),
+            ))
+        }
+        "image_url" | "input_image" | "image" => image_block(content_part, protocol),
         "tool_use" => {
-            checked(content_part, &["type", "id", "name", "input"])?;
+            content_fields(content_part, protocol, &["type", "id", "name", "input"])?;
             Ok(Block::ToolCall {
                 id: required_text(content_part, "id")?.into(),
                 name: required_text(content_part, "name")?.into(),
@@ -86,8 +130,9 @@ pub(super) fn block(
             })
         }
         "tool_result" => {
-            checked(
+            content_fields(
                 content_part,
+                protocol,
                 &["type", "tool_use_id", "content", "is_error"],
             )?;
             Ok(Block::ToolResult {
@@ -98,6 +143,7 @@ pub(super) fn block(
                     protocol,
                 )?,
                 is_error: optional_bool(content_part, "is_error")?.unwrap_or(false),
+                raw_text: false,
             })
         }
         _ => Err(AdapterError::parameter_unsupported()),
@@ -188,12 +234,21 @@ fn gemini_block(gemini_part: &Value) -> AdapterResult<Block> {
             name: required_text(function_response, "name")?.into(),
             content,
             is_error: response_payload.get("error").is_some(),
+            raw_text: false,
         });
     }
     Err(AdapterError::parameter_unsupported())
 }
 
-fn image_block(image_part: &Value) -> AdapterResult<Block> {
+fn content_fields(container: &Value, protocol: WireApi, allowed: &[&str]) -> AdapterResult<()> {
+    if protocol == WireApi::Messages {
+        super::super::options::messages_fields(container, allowed)
+    } else {
+        checked(container, allowed)
+    }
+}
+
+fn image_block(image_part: &Value, protocol: WireApi) -> AdapterResult<Block> {
     match required_text(image_part, "type")? {
         "image_url" | "input_image" => {
             checked(image_part, &["type", "image_url", "detail"])?;
@@ -212,7 +267,7 @@ fn image_block(image_part: &Value) -> AdapterResult<Block> {
             image(url.into(), detail.map(str::to_owned))
         }
         "image" => {
-            checked(image_part, &["type", "source"])?;
+            content_fields(image_part, protocol, &["type", "source"])?;
             let image_source = image_part
                 .get("source")
                 .ok_or_else(AdapterError::invalid_request)?;
@@ -264,6 +319,15 @@ pub(super) fn tool_result_blocks(
     content_value: &Value,
     protocol: WireApi,
 ) -> AdapterResult<Vec<Block>> {
+    if protocol == WireApi::Responses
+        && match content_value {
+            Value::Array(items) => !items.iter().any(|item| item.get("type").is_some()),
+            Value::Object(_) | Value::Bool(_) | Value::Number(_) => true,
+            _ => false,
+        }
+    {
+        return Ok(vec![Block::Text(content_value.to_string())]);
+    }
     let blocks = text_blocks(content_value, protocol)?;
     for block in &blocks {
         if !matches!(block, Block::Text(_) | Block::Image { .. }) {

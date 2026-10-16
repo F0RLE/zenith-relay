@@ -1,4 +1,5 @@
 use super::*;
+use crate::WireApi;
 
 pub(super) fn build_sources(
     sources: Vec<RuntimeSource>,
@@ -9,6 +10,7 @@ pub(super) fn build_sources(
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
     let mut recovery_delays_ms = BTreeMap::new();
+    let mut legacy_candidate_ids = BTreeMap::<String, Option<String>>::new();
     for source in sources {
         source.source.validate()?;
         if source.weight == 0 {
@@ -37,33 +39,86 @@ pub(super) fn build_sources(
             .protocol_config
             .effective_capabilities(&source.source.base_url, &source.source.models);
         let rules = model_rules(&source.allowed_models, &source.excluded_models);
+        let mut routes = Vec::new();
+        let mut model_protocols = BTreeMap::<String, BTreeSet<WireApi>>::new();
         for binding in &bindings {
             let models = normalized_set(binding.model_ids.iter());
             if models.is_empty() {
                 continue;
             }
-            let candidate_id = source_candidate_id(&source_id, binding, source.source.wire_api);
-            if candidate_bindings.contains_key(&candidate_id) {
-                return Err(Error::Validation(
-                    "source protocol candidate ids must be unique".to_string(),
-                ));
+            let legacy_id = source_candidate_id(&source_id, binding, source.source.wire_api);
+            legacy_candidate_ids
+                .entry(legacy_id)
+                .and_modify(|owner| {
+                    if owner.as_ref() != Some(&source_id) {
+                        *owner = None;
+                    }
+                })
+                .or_insert_with(|| Some(source_id.clone()));
+            for model in &models {
+                model_protocols
+                    .entry(crate::model_id_key(model))
+                    .or_default()
+                    .insert(binding.wire_api);
             }
+            routes.push(SourceCandidateRoute {
+                binding_key: binding.key(),
+                wire_api: binding.wire_api,
+                adapter: binding.adapter,
+                reasoning_mode: binding.reasoning_mode,
+                cache_write_ttl: binding.cache_write_ttl,
+                models: models
+                    .iter()
+                    .map(|model| crate::model_id_key(model))
+                    .collect(),
+                capabilities: discovered_capabilities
+                    .iter()
+                    .filter(|capability| {
+                        capability.upstream_wire_api
+                            == binding
+                                .adapter
+                                .upstream_protocol(binding.wire_api)
+                                .wire_api()
+                            && binding.model_ids.iter().any(|model| {
+                                crate::model_id_key(model)
+                                    == crate::model_id_key(&capability.model_id)
+                            })
+                    })
+                    .map(|capability| {
+                        (
+                            crate::model_id_key(&capability.model_id),
+                            capability.clone(),
+                        )
+                    })
+                    .collect(),
+            });
+        }
+        if !routes.is_empty() {
+            let executable_models = normalized_set(
+                source
+                    .source
+                    .models
+                    .iter()
+                    .filter(|model| model_protocols.contains_key(&crate::model_id_key(model))),
+            );
             let candidate = RuntimeCandidate {
-                id: candidate_id.clone(),
+                id: source_id.clone(),
                 kind: CandidateKind::ApiSource,
                 source_id: source_id.clone(),
                 account_id: None,
-                protocol: binding.wire_api,
+                protocol: source.source.wire_api,
+                models: executable_models,
+                model_protocols,
                 enabled: source.enabled,
                 draining: source.draining,
                 priority: source.priority,
                 weight: source.weight,
-                models: models.clone(),
                 model_rules: rules.clone(),
                 health: CandidateHealth::Healthy,
                 quota: CandidateQuota::Unknown,
                 provider_credits_micro_units: None,
                 provider_credits_unlimited: false,
+                provider_credits_observed_at_ms: None,
                 quota_updated_at_ms: None,
                 quota_reset_at_ms: None,
                 cooldowns: BTreeMap::new(),
@@ -71,44 +126,19 @@ pub(super) fn build_sources(
 
                 secret_available: true,
             };
-            registry.replace(candidate_id.clone(), source.source.models.iter());
+            registry.replace(source_id.clone(), source.source.models.iter());
             scheduler.upsert(candidate);
-            scheduler.set_native_route(&candidate_id, binding.adapter.is_passthrough());
             if source.recovery_delay_seconds > 0 {
                 recovery_delays_ms.insert(
-                    candidate_id.clone(),
+                    source_id.clone(),
                     source.recovery_delay_seconds.saturating_mul(1_000),
                 );
             }
             candidate_bindings.insert(
-                candidate_id,
+                source_id.clone(),
                 SourceCandidateBinding {
                     source_id: source_id.clone(),
-                    binding_key: binding.key(),
-                    wire_api: binding.wire_api,
-                    adapter: binding.adapter,
-                    reasoning_mode: binding.reasoning_mode,
-                    cache_write_ttl: binding.cache_write_ttl,
-                    capabilities: discovered_capabilities
-                        .iter()
-                        .filter(|capability| {
-                            capability.upstream_wire_api
-                                == binding
-                                    .adapter
-                                    .upstream_protocol(binding.wire_api)
-                                    .wire_api()
-                                && binding.model_ids.iter().any(|model| {
-                                    crate::model_id_key(model)
-                                        == crate::model_id_key(&capability.model_id)
-                                })
-                        })
-                        .map(|capability| {
-                            (
-                                crate::model_id_key(&capability.model_id),
-                                capability.clone(),
-                            )
-                        })
-                        .collect(),
+                    routes,
                 },
             );
         }
@@ -118,5 +148,6 @@ pub(super) fn build_sources(
         executors,
         candidate_bindings,
         recovery_delays_ms,
+        legacy_candidate_ids,
     })
 }

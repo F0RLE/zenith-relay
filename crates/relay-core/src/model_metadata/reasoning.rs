@@ -41,11 +41,11 @@ fn select_reasoning_evidence<'a>(
 fn first_reasoning_budget(
     budget_index: usize,
     records: [Option<&ReasoningRecord>; 3],
-) -> Option<u64> {
+) -> Option<(u64, &'static str)> {
     records
         .into_iter()
-        .flatten()
-        .find_map(|reasoning_record| reasoning_record.budget[budget_index])
+        .zip(["openrouter", "litellm", "models_dev_details"])
+        .find_map(|(record, source)| Some((record?.budget[budget_index]?, source)))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -121,27 +121,46 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
         if let Some((reasoning_record, source)) =
             select_reasoning_evidence(router_record, lite_record, details_record)
         {
-            model_object.insert("reasoning".into(), Value::Bool(true));
+            let field_source = if source == "models_dev" {
+                "models_dev_details"
+            } else {
+                source
+            };
+            super::provenance::set_field(
+                model_object,
+                "reasoning",
+                Value::Bool(true),
+                field_source,
+            );
             model_object.insert("reasoning_source".into(), Value::String(source.into()));
             if !reasoning_record.levels.is_empty() {
-                model_object.insert(
-                    "reasoning_effort_levels".into(),
+                super::provenance::set_field(
+                    model_object,
+                    "reasoning_effort_levels",
                     serde_json::json!(reasoning_record.levels),
+                    field_source,
                 );
             }
             if let Some(method) = &reasoning_record.method {
-                model_object.insert("reasoning_method".into(), serde_json::json!(method));
+                super::provenance::set_field(
+                    model_object,
+                    "reasoning_method",
+                    serde_json::json!(method),
+                    field_source,
+                );
             }
             // Only publish defaults contained in the confirmed enum.
-            model_object.remove("default_reasoning_effort");
+            super::provenance::remove_field(model_object, "default_reasoning_effort");
             if let Some(default) = reasoning_record
                 .default
                 .as_ref()
                 .filter(|effort_level| reasoning_record.levels.contains(effort_level))
             {
-                model_object.insert(
-                    "default_reasoning_effort".into(),
+                super::provenance::set_field(
+                    model_object,
+                    "default_reasoning_effort",
                     Value::String(default.clone()),
+                    field_source,
                 );
             }
         }
@@ -154,10 +173,10 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
             .into_iter()
             .enumerate()
             {
-                if let Some(budget) =
+                if let Some((budget, source)) =
                     first_reasoning_budget(index, [router_record, lite_record, details_record])
                 {
-                    model_object.insert(key.to_string(), budget.into());
+                    super::provenance::set_field(model_object, key, budget.into(), source);
                 }
             }
         }

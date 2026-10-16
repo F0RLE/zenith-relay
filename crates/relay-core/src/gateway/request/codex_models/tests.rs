@@ -110,6 +110,7 @@ fn native_catalog_test_runtime_with_accounts(
                 cooldowns: Default::default(),
                 consecutive_failures: 0,
                 proxy: None,
+                proxy_timezone: None,
             })
             .collect(),
         vec![RuntimeMixedLocalKey {

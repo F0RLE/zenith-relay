@@ -123,13 +123,18 @@ pub(in crate::gateway) fn is_responses_output_delta_type(event_type: &str) -> bo
 /// Detects the upstream's silent pre-output abort precisely enough for a safe
 /// candidate retry. A missing or non-numeric token count is intentionally not
 /// treated as empty: the response then remains owned by the selected route.
-pub(in crate::gateway) fn is_empty_responses_incomplete(
+/// Covers both `response.incomplete` and `response.completed` terminals that
+/// produced no output items and zero output tokens (e.g. Grok silent failures).
+pub(in crate::gateway) fn is_empty_responses_terminal(
     response_payload: &Value,
     saw_output: bool,
     completed_output_items: usize,
 ) -> bool {
-    if response_payload.get("type").and_then(Value::as_str) != Some("response.incomplete")
-        || saw_output
+    let event_type = response_payload.get("type").and_then(Value::as_str);
+    if !matches!(
+        event_type,
+        Some("response.incomplete" | "response.completed")
+    ) || saw_output
         || completed_output_items > 0
     {
         return false;

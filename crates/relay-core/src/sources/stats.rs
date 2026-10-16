@@ -151,7 +151,15 @@ pub async fn fetch_source_provider_stats(
     base_url: &str,
     api_key: &str,
 ) -> Result<SourceProviderStats, String> {
-    read_source_provider_stats(base_url, api_key)
+    fetch_source_provider_stats_with_proxy(base_url, api_key, None).await
+}
+
+pub async fn fetch_source_provider_stats_with_proxy(
+    base_url: &str,
+    api_key: &str,
+    proxy_url: Option<&str>,
+) -> Result<SourceProviderStats, String> {
+    read_source_provider_stats_with_proxy(base_url, api_key, proxy_url)
         .await
         .read_value
 }
@@ -160,7 +168,21 @@ pub async fn read_source_provider_stats(
     base_url: &str,
     api_key: &str,
 ) -> super::SourceRead<Result<SourceProviderStats, String>> {
-    read_source_provider_stats_with_scope(base_url, api_key, ManagementHttpScope::default()).await
+    read_source_provider_stats_with_proxy(base_url, api_key, None).await
+}
+
+pub async fn read_source_provider_stats_with_proxy(
+    base_url: &str,
+    api_key: &str,
+    proxy_url: Option<&str>,
+) -> super::SourceRead<Result<SourceProviderStats, String>> {
+    read_source_provider_stats_with_scope_and_proxy(
+        base_url,
+        api_key,
+        proxy_url,
+        ManagementHttpScope::default(),
+    )
+    .await
 }
 
 pub async fn read_source_provider_stats_with_scope(
@@ -168,7 +190,16 @@ pub async fn read_source_provider_stats_with_scope(
     api_key: &str,
     scope: ManagementHttpScope,
 ) -> super::SourceRead<Result<SourceProviderStats, String>> {
-    let client = match StatsClient::new_with_scope(base_url, api_key, scope) {
+    read_source_provider_stats_with_scope_and_proxy(base_url, api_key, None, scope).await
+}
+
+pub async fn read_source_provider_stats_with_scope_and_proxy(
+    base_url: &str,
+    api_key: &str,
+    proxy_url: Option<&str>,
+    scope: ManagementHttpScope,
+) -> super::SourceRead<Result<SourceProviderStats, String>> {
+    let client = match StatsClient::new_with_scope_and_proxy(base_url, api_key, proxy_url, scope) {
         Ok(client) => client,
         Err(error) => {
             return super::SourceRead {

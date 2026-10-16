@@ -128,7 +128,13 @@ async fn local_route_incompatibility_does_not_visit_or_exclude_its_member() {
         .await
         .unwrap();
     assert!(!incompatible.contains(&selection.candidate_id));
-    assert_eq!(alias.member_key, "source:source-a");
+    assert_eq!(alias.member_key, "source:source-b");
     assert_eq!(budget.dispatches(), 0);
     assert!(budget.attempted_members().is_empty());
+    drop(alias);
+    let fresh = reserve(&runtime, &budget, WireApi::Responses).await;
+    assert_eq!(
+        fresh.member_key, "source:source-a",
+        "a local rejection must not spend the member's rotation credit"
+    );
 }

@@ -99,6 +99,8 @@ impl RotationEngine {
                 id != &candidate_id
                     || candidate.routes.get(key) == runtime.candidate.routes.get(key)
             });
+            self.health
+                .retain(|(id, key), _| id != &candidate_id || candidate.routes.contains_key(key));
             runtime.candidate = candidate;
         } else {
             let generation = self
@@ -204,6 +206,8 @@ impl RotationEngine {
         self.candidate_generations.remove(candidate_id);
         self.quota_revisions.remove(candidate_id);
         self.circuits
+            .retain(|(candidate, _), _| candidate != candidate_id);
+        self.health
             .retain(|(candidate, _), _| candidate != candidate_id);
         let capacity_key = runtime.candidate.capacity_key.clone();
         self.recompute_capacity_limit(&capacity_key);

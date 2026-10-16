@@ -28,9 +28,9 @@ fn assert_timezone(request: &Value, timezone: &str) {
 #[tokio::test]
 async fn request_timezone_http_uses_the_selected_account_and_disabled_default() {
     for (enabled, configured, expected) in [
-        (false, Some("Europe/Minsk"), "UTC"),
+        (false, Some("Etc/GMT-3"), "UTC"),
         (true, None, "America/New_York"),
-        (true, Some("Europe/Minsk"), "Europe/Minsk"),
+        (true, Some("Etc/GMT-3"), "Etc/GMT-3"),
     ] {
         let (upstream, state) = spawn_upstream(vec![
             success_reply("synthetic-response"),
@@ -55,6 +55,8 @@ async fn request_timezone_http_uses_the_selected_account_and_disabled_default() 
                     account_timezones: configured
                         .map(|zone| BTreeMap::from([("relay-account".into(), zone.into())]))
                         .unwrap_or_default(),
+                    account_timezone_bindings: BTreeMap::new(),
+                    account_timezone_sources: BTreeMap::new(),
                 },
                 ..Default::default()
             },
@@ -79,6 +81,46 @@ async fn request_timezone_http_uses_the_selected_account_and_disabled_default() 
 }
 
 #[tokio::test]
+async fn request_timezone_follows_the_account_proxy_unless_the_account_is_disabled() {
+    for (binding, expected) in [(None, "Etc/GMT-3"), (Some(false), "UTC")] {
+        let (upstream, state) = spawn_upstream(vec![success_reply("synthetic-response")]).await;
+        let mut proxied_account = account("relay-account", "synthetic-provider", &upstream, 10);
+        proxied_account.proxy_timezone = Some("Etc/GMT-3".into());
+        let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
+            Vec::new(),
+            vec![proxied_account],
+            vec![mixed_key(None, None)],
+            ready_authority("relay-account", "synthetic-access").await,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+            GatewayRuntimeOptions {
+                request_timezone: RequestTimezonePolicy {
+                    enabled: false,
+                    account_timezones: BTreeMap::new(),
+                    account_timezone_bindings: binding
+                        .map(|enabled| BTreeMap::from([("relay-account".into(), enabled)]))
+                        .unwrap_or_default(),
+                    account_timezone_sources: BTreeMap::new(),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&body())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_timezone(&requests[0].body, expected);
+    }
+}
+
+#[tokio::test]
 async fn request_timezone_does_not_rewrite_api_source_requests() {
     let (upstream, state) = spawn_upstream(vec![success_reply("synthetic-response")]).await;
     let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
@@ -98,8 +140,10 @@ async fn request_timezone_does_not_rewrite_api_source_requests() {
                 enabled: true,
                 account_timezones: BTreeMap::from([(
                     "synthetic-source".into(),
-                    "Europe/Minsk".into(),
+                    "Etc/GMT-3".into(),
                 )]),
+                account_timezone_bindings: BTreeMap::new(),
+                account_timezone_sources: BTreeMap::new(),
             },
             ..Default::default()
         },
@@ -144,9 +188,11 @@ async fn request_timezone_fallback_uses_each_account_without_mutating_client_his
             request_timezone: RequestTimezonePolicy {
                 enabled: true,
                 account_timezones: BTreeMap::from([
-                    ("first-account".into(), "Europe/Minsk".into()),
+                    ("first-account".into(), "Etc/GMT-3".into()),
                     ("second-account".into(), "Asia/Tokyo".into()),
                 ]),
+                account_timezone_bindings: BTreeMap::new(),
+                account_timezone_sources: BTreeMap::new(),
             },
             ..Default::default()
         },
@@ -164,7 +210,7 @@ async fn request_timezone_fallback_uses_each_account_without_mutating_client_his
     let second_requests = second_state.requests.lock().unwrap();
     assert_eq!(first_requests.len(), 1);
     assert_eq!(second_requests.len(), 1);
-    assert_timezone(&first_requests[0].body, "Europe/Minsk");
+    assert_timezone(&first_requests[0].body, "Etc/GMT-3");
     assert_timezone(&second_requests[0].body, "Asia/Tokyo");
 }
 
@@ -186,10 +232,9 @@ async fn request_timezone_websocket_rewrites_first_and_subsequent_turns() {
         GatewayRuntimeOptions {
             request_timezone: RequestTimezonePolicy {
                 enabled: true,
-                account_timezones: BTreeMap::from([(
-                    "relay-account".into(),
-                    "Europe/Minsk".into(),
-                )]),
+                account_timezones: BTreeMap::from([("relay-account".into(), "Etc/GMT-3".into())]),
+                account_timezone_bindings: BTreeMap::new(),
+                account_timezone_sources: BTreeMap::new(),
             },
             ..Default::default()
         },
@@ -216,6 +261,6 @@ async fn request_timezone_websocket_rewrites_first_and_subsequent_turns() {
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     for request in requests.iter() {
-        assert_timezone(request, "Europe/Minsk");
+        assert_timezone(request, "Etc/GMT-3");
     }
 }

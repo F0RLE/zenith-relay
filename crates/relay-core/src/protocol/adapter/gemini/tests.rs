@@ -196,6 +196,7 @@ fn bridge_preserves_json_schema_constraints_for_gemini() {
                         "query": {
                             "type": "string",
                             "pattern": ".+",
+                            "encrypted": true,
                             "$ref": "#/defs/query"
                         }
                     },
@@ -257,7 +258,68 @@ fn bridge_preserves_json_schema_constraints_for_gemini() {
     assert_eq!(parameters["properties"]["query"]["type"], "string");
     assert_eq!(parameters["properties"]["query"]["pattern"], ".+");
     assert_eq!(parameters["properties"]["query"]["$ref"], "#/defs/query");
+    assert!(parameters["properties"]["query"].get("encrypted").is_none());
     assert_eq!(parameters["additionalProperties"], false);
+}
+
+#[test]
+fn schema_metadata_removal_preserves_property_names_and_literal_data() {
+    let schema = json!({
+        "type": "object",
+        "encrypted": true,
+        "properties": {
+            "encrypted": {"type": "string", "encrypted": true},
+            "payload": {
+                "type": "object",
+                "default": {"encrypted": true},
+                "const": {"encrypted": true},
+                "enum": [{"encrypted": true}],
+                "examples": [{"encrypted": true}],
+                "properties": {"encrypted": {"type": "boolean"}}
+            },
+            "entries": {
+                "type": "array",
+                "items": {"type": "string", "encrypted": false}
+            }
+        },
+        "$defs": {
+            "encrypted": {"type": "string", "encrypted": true}
+        },
+        "allOf": [{"properties": {"mode": {"type": "string", "encrypted": true}}}],
+        "required": ["encrypted", "payload"],
+        "additionalProperties": false
+    });
+    let prepared = prepare_responses_to_gemini_with_reasoning(
+        &json!({"input": "synthetic", "tools": [{
+            "type": "function", "name": "store_entry", "parameters": schema
+        }]}),
+        "gemini-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+        "route",
+        "schema-metadata",
+    )
+    .unwrap();
+    let mut expected = schema;
+    for path in [
+        "",
+        "/properties/encrypted",
+        "/properties/entries/items",
+        "/$defs/encrypted",
+        "/allOf/0/properties/mode",
+    ] {
+        expected
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted");
+    }
+    assert_eq!(
+        prepared.upstream_body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"],
+        expected
+    );
 }
 
 #[test]

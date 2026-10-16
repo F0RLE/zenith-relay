@@ -94,6 +94,7 @@ fn source_summary(id: &str, models: &[&str]) -> SourceSummary {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),

@@ -1,16 +1,63 @@
 use super::super::errors::{upstream_failure_status, AttemptFailure};
-use super::super::streaming::{parse_sse_event, StreamBootstrapFailure, TerminalOutcome};
+use super::super::streaming::{
+    parse_sse_event, StreamBootstrapFailure, TerminalEvent, TerminalOutcome,
+};
 use crate::error_codes;
 use crate::protocol::sse_event_end;
 use axum::http::StatusCode;
 use futures_util::StreamExt;
 use serde_json::Value;
+use std::time::Instant;
+
+#[derive(Default)]
+pub(in crate::gateway) struct BufferedResponseTiming {
+    first_output_ms: Option<u64>,
+    finished_ms: Option<u64>,
+}
+
+impl BufferedResponseTiming {
+    pub(in crate::gateway) fn observe(&mut self, event: &TerminalEvent, elapsed_ms: u64) {
+        // A completed snapshot is not evidence of when its first token arrived.
+        if event.valid
+            && event.has_output_delta
+            && !event.is_compaction
+            && self.first_output_ms.is_none()
+        {
+            self.first_output_ms = Some(elapsed_ms);
+        }
+    }
+
+    pub(in crate::gateway) fn finish(&mut self, elapsed_ms: u64) {
+        self.finished_ms = Some(elapsed_ms);
+    }
+
+    pub(in crate::gateway) fn apply(&self, event: &mut crate::usage::UsageEvent) {
+        if self.finished_ms.is_none() && self.first_output_ms.is_none() {
+            // A default recorder is also used by transports it does not observe.
+            // Do not erase those transports' own timing evidence.
+            return;
+        }
+        if let Some(finished_ms) = self.finished_ms {
+            event.latency_ms = finished_ms;
+        }
+        // On disconnect or malformed EOF, retain the raw first-output evidence
+        // and use the stream settlement's elapsed time for the partial attempt.
+        event.ttft_ms = self.first_output_ms;
+        event.generation_ms = self
+            .first_output_ms
+            .map(|first| event.latency_ms.saturating_sub(first));
+    }
+}
 
 pub(in crate::gateway) fn stop_basis_points_event(
     event: &[u8],
     expected_model: Option<&str>,
 ) -> bool {
     let event = parse_sse_event(event);
+    should_stop_basis_points_event(&event, expected_model)
+}
+
+fn should_stop_basis_points_event(event: &TerminalEvent, expected_model: Option<&str>) -> bool {
     event.outcome.is_some()
         || (event.has_data && !event.valid)
         || expected_model.is_some_and(|expected| {
@@ -23,14 +70,23 @@ pub(in crate::gateway) fn stop_basis_points_event(
 pub(in crate::gateway) async fn collect_basis_points_response(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
+    started: Instant,
+    timing: &mut BufferedResponseTiming,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     let bytes = crate::transport::collect_with_progress(
         upstream,
         crate::transport::basis_points_progress_timeout(),
-        |event| stop_basis_points_event(event, expected_model),
+        |bytes| {
+            let event = parse_sse_event(bytes);
+            timing.observe(&event, started.elapsed().as_millis() as u64);
+            should_stop_basis_points_event(&event, expected_model)
+        },
     )
-    .await
-    .map_err(|error| {
+    .await;
+    // Capture transport completion before JSON validation or client translation,
+    // including partial failures. Synthetic client SSE is never timing evidence.
+    timing.finish(started.elapsed().as_millis() as u64);
+    let bytes = bytes.map_err(|error| {
         let category = if error.timed_out {
             error_codes::STREAM_IDLE_TIMEOUT
         } else {
@@ -66,9 +122,7 @@ pub(in crate::gateway) async fn collect_upstream_response(
         });
     let bytes = if is_sse && account_stream {
         let (_, first, mut remaining) =
-            super::super::streaming::bootstrap_stream(upstream, expected_model)
-                .await
-                .map_err(Box::new)?;
+            super::super::streaming::bootstrap_stream(upstream, expected_model).await?;
         let mut bytes = first.to_vec();
         let mut inspected = 0;
         loop {

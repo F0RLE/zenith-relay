@@ -111,7 +111,7 @@ fn ambiguous_leaf_ids_are_not_guessed() {
 }
 
 #[test]
-fn provider_blocks_preserve_source_order_and_manual_override() {
+fn provider_blocks_follow_catalog_and_preserve_manual_override() {
     let catalog = catalog(
         r#"{
         "xai/model-x":{"family":"line-x"},
@@ -146,7 +146,7 @@ fn provider_order_does_not_use_release_dates() {
     );
     assert_eq!(
         catalog.order_model_ids(["unknown", "old", "new"]),
-        ["old", "new", "unknown"]
+        ["new", "old", "unknown"]
     );
     assert_eq!(
         catalog.order_model_ids(["unknown", "new", "old"]),
@@ -222,13 +222,13 @@ fn clearing_saved_order_restores_provider_blocks() {
     assert_eq!(
         reset,
         [
-            "gpt-old",
             "gpt-new",
-            "claude-old",
+            "gpt-old",
             "claude-new",
-            "gemini-undated",
-            "gemini-old",
+            "claude-old",
             "gemini-new",
+            "gemini-old",
+            "gemini-undated",
             "unknown",
         ]
     );
@@ -248,7 +248,7 @@ fn saved_models_keep_their_relative_order() {
         ["old", "middle", "new"],
         &["old".to_string(), "new".to_string()],
     );
-    assert_eq!(ordered, ["old", "middle", "new"]);
+    assert_eq!(ordered, ["middle", "old", "new"]);
     assert_eq!(
         ordered
             .iter()
@@ -278,7 +278,7 @@ fn keeps_source_and_canonical_model_identity_separate() {
 }
 
 #[test]
-fn native_protocol_follows_the_model_group_not_the_host() {
+fn preferred_protocol_follows_the_model_group_not_the_host() {
     let catalog = catalog(
         r#"{
             "openai/gpt-test": {"name": "GPT Test", "family": "gpt"},
@@ -305,7 +305,7 @@ fn native_protocol_follows_the_model_group_not_the_host() {
         ("openai/gpt-test", WireApi::Responses),
         ("anthropic/claude-test", WireApi::Messages),
         ("google/gemini-test", WireApi::Gemini),
-        ("deepseek/deepseek-test", WireApi::ChatCompletions),
+        ("deepseek/deepseek-test", WireApi::Responses),
         // A Relay-qualified or bare ID resolves through its unique leaf.
         ("relay/gpt-test", WireApi::Responses),
         ("claude-test", WireApi::Messages),
@@ -314,11 +314,11 @@ fn native_protocol_follows_the_model_group_not_the_host() {
         ("google-vertex/claude-vertex", WireApi::Messages),
         // Without a canonical ID the family still outranks the host namespace.
         ("google-vertex/claude-family-only", WireApi::Messages),
-        // Open-weight "gpt-oss" is not an OpenAI-hosted GPT model.
-        ("groq/oss-test", WireApi::ChatCompletions),
+        // Open-weight models share the Responses preference.
+        ("groq/oss-test", WireApi::Responses),
     ] {
         assert_eq!(
-            catalog.native_protocol_for(model),
+            catalog.preferred_protocol_for(model),
             Some(expected),
             "{model}"
         );
@@ -326,7 +326,7 @@ fn native_protocol_follows_the_model_group_not_the_host() {
 }
 
 #[test]
-fn native_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
+fn preferred_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
     let catalog = catalog(
         r#"{
             "alpha/shared": {"name": "Alpha Name"},
@@ -335,9 +335,12 @@ fn native_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
             "gpt-capabilities-only": {"service_tiers": ["priority", "ultrafast"]}
         }"#,
     );
-    assert_eq!(catalog.native_protocol_for("unlisted-model"), None);
-    assert_eq!(catalog.native_protocol_for("shared"), None);
-    assert_eq!(catalog.native_protocol_for("gpt-capabilities-only"), None);
+    assert_eq!(catalog.preferred_protocol_for("unlisted-model"), None);
+    assert_eq!(catalog.preferred_protocol_for("shared"), None);
+    assert_eq!(
+        catalog.preferred_protocol_for("gpt-capabilities-only"),
+        None
+    );
 }
 
 #[test]

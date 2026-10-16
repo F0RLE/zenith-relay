@@ -36,6 +36,7 @@ impl ProxyPool {
                 url,
                 assigned_account_ids: Vec::new(),
                 created_at_ms: now_ms,
+                timezone: None,
                 last_check: None,
             });
             added += 1;
@@ -84,6 +85,7 @@ impl ProxyPool {
                     url: proxy_url.clone(),
                     assigned_account_ids: vec![account_id.clone()],
                     created_at_ms: now_ms,
+                    timezone: None,
                     last_check: None,
                 });
             }
@@ -139,6 +141,7 @@ impl ProxyPool {
                     url,
                     assigned_account_ids: Vec::new(),
                     created_at_ms: now_ms,
+                    timezone: None,
                     last_check: None,
                 });
                 self.entries.len() - 1
@@ -161,10 +164,6 @@ impl ProxyPool {
                 .assigned_account_ids
                 .retain(|assigned_account_id| assigned_account_id != account_id);
         }
-    }
-
-    pub(crate) fn delete(&mut self, proxy_id: &str) -> Result<()> {
-        self.delete_many(&[proxy_id.to_string()])
     }
 
     pub(crate) fn delete_many(&mut self, proxy_ids: &[String]) -> Result<()> {

@@ -10,7 +10,7 @@ impl SourceProtocolConfig {
         let hint = self
             .endpoint_hint
             .or_else(|| endpoint_url_protocol(base_url));
-        let profile = service_protocol(base_url);
+        let profile = service_protocols(base_url);
         let mut indexed = BTreeMap::<_, Vec<_>>::new();
         for capability in &self.capabilities {
             // Legacy generation probes are diagnostic records, not routing or
@@ -47,7 +47,7 @@ impl SourceProtocolConfig {
                     .unwrap_or_default();
                 let declaration = if hint == Some(upstream) {
                     Some(CapabilityOrigin::EndpointUrl)
-                } else if hint.is_none() && profile == Some(upstream) {
+                } else if hint.is_none() && profile.contains(&upstream) {
                     Some(CapabilityOrigin::ServiceProfile)
                 } else {
                     None
@@ -189,11 +189,9 @@ impl SourceProtocolConfig {
         self.resolve_with_catalog(base_url, models, legacy_bindings, fallback_protocol, None)
     }
 
-    /// Resolve one upstream protocol per model before projecting client APIs.
-    /// An owner-pinned endpoint wins, followed by exact model declarations,
-    /// the reference group's native protocol, and the service host. Explicit
-    /// exclusions apply at every step. Prices and generation probes never
-    /// establish routing support.
+    /// Preserve the source's supported upstream contracts before projecting
+    /// client APIs. A recommendation orders routes, never creates an endpoint.
+    /// Pins and explicit exclusions apply before legacy fallback.
     pub fn resolve_with_catalog(
         &self,
         base_url: &str,
@@ -260,14 +258,12 @@ impl SourceProtocolConfig {
                 .get(&key)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            // Pick one physical upstream contract for the model before
-            // projecting any client-facing contract. A model must not reach
-            // Responses for one harness and Messages/Gemini for another just
-            // because the client wire API changed.
-            let Some(selected_protocol) = select_upstream_protocol(
+            let supported_protocols = supported_upstream_protocols(
                 UpstreamProtocolHints {
                     pinned: pinned_protocol,
-                    group_native: reference_catalog
+                    model_preference: reference_catalog
+                        .and_then(|catalog| catalog.preferred_protocol_for(model)),
+                    native: reference_catalog
                         .and_then(|catalog| catalog.native_protocol_for(model)),
                     host: host_protocol,
                 },
@@ -275,95 +271,112 @@ impl SourceProtocolConfig {
                 unsupported_protocols.get(&key),
                 legacy_protocols,
                 fallback_protocol,
-            ) else {
-                continue;
-            };
-            for client_protocol in WireApi::ALL {
-                if let Some(adapter) = SourceAdapter::between(client_protocol, selected_protocol) {
-                    let model_ids = routes
-                        .entry((client_protocol, adapter))
-                        .or_insert_with(Vec::new);
-                    model_ids.push(model.clone());
+            );
+            for upstream in supported_protocols {
+                for client_protocol in WireApi::ALL {
+                    if let Some(adapter) = SourceAdapter::between(client_protocol, upstream) {
+                        let model_ids = routes
+                            .entry((client_protocol, adapter))
+                            .or_insert_with(Vec::new);
+                        model_ids.push(model.clone());
+                    }
                 }
             }
         }
-        Ok(routes
+        let resolved = routes
             .into_iter()
-            .map(|((wire_api, adapter), model_ids)| SourceProtocolBinding {
-                wire_api,
-                adapter,
-                reasoning_mode: if adapter.is_passthrough() {
-                    MessagesReasoningMode::Disabled
-                } else {
-                    MessagesReasoningMode::Adaptive
-                },
-                cache_write_ttl: CacheWriteTtl::Provider,
-                model_ids,
+            .map(|((wire_api, adapter), model_ids)| {
+                let legacy = legacy_bindings
+                    .iter()
+                    .find(|binding| binding.wire_api == wire_api && binding.adapter == adapter);
+                SourceProtocolBinding {
+                    wire_api,
+                    adapter,
+                    reasoning_mode: legacy.map_or_else(
+                        || {
+                            if adapter.is_passthrough() {
+                                MessagesReasoningMode::Disabled
+                            } else {
+                                MessagesReasoningMode::Adaptive
+                            }
+                        },
+                        |binding| binding.reasoning_mode,
+                    ),
+                    cache_write_ttl: legacy
+                        .map_or(CacheWriteTtl::Provider, |binding| binding.cache_write_ttl),
+                    model_ids,
+                }
             })
-            .collect())
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+        crate::normalize_source_protocol_bindings(resolved, fallback_protocol, models)
     }
 }
 
-/// Declared protocol hints for one model, from strongest to weakest.
+/// Endpoint and preference inputs for one model's upstream protocol.
 struct UpstreamProtocolHints {
     /// Endpoint the source owner chose through a hint or an endpoint URL.
     pinned: Option<WireApi>,
-    /// Protocol native to the model's group in the reference catalog.
-    group_native: Option<WireApi>,
+    /// Protocol preferred for the model's group in the reference catalog.
+    model_preference: Option<WireApi>,
+    /// A validated manufacturer contract, independent of the client's API.
+    native: Option<WireApi>,
     /// Protocol implied by a known service host.
     host: Option<WireApi>,
 }
 
-fn select_upstream_protocol(
+fn supported_upstream_protocols(
     hints: UpstreamProtocolHints,
     available_capabilities: &[ModelEndpointCapability],
     unsupported_protocols: Option<&BTreeSet<WireApi>>,
     legacy_protocols: &[WireApi],
     fallback_protocol: WireApi,
-) -> Option<WireApi> {
+) -> Vec<WireApi> {
     let is_unsupported =
         |protocol: &WireApi| unsupported_protocols.is_some_and(|set| set.contains(protocol));
-    if let Some(protocol) = hints.pinned.filter(|protocol| !is_unsupported(protocol)) {
-        return Some(protocol);
+    if let Some(protocol) = hints.pinned {
+        return (!is_unsupported(&protocol)
+            && hints.native.is_none_or(|native| native == protocol))
+        .then_some(protocol)
+        .into_iter()
+        .collect();
     }
-    available_capabilities
+    let mut declared = available_capabilities
         .iter()
-        .filter(|capability| {
-            matches!(
-                capability.origin,
-                CapabilityOrigin::Catalog | CapabilityOrigin::Manual
-            )
-        })
         .filter(|capability| !is_unsupported(&capability.upstream_wire_api))
-        .max_by_key(|capability| {
-            (
-                capability.status == CapabilityStatus::Confirmed,
-                capability.checked_at_ms,
-                Some(capability.upstream_wire_api) == hints.group_native,
-                Some(capability.upstream_wire_api) == hints.host,
-                std::cmp::Reverse(capability.upstream_wire_api),
-            )
-        })
         .map(|capability| capability.upstream_wire_api)
-        .or_else(|| {
-            [hints.group_native, hints.host]
-                .into_iter()
-                .flatten()
-                .find(|protocol| !is_unsupported(protocol))
-        })
-        .or_else(|| {
+        .collect::<BTreeSet<_>>();
+    if declared.is_empty() {
+        // Preserve configured legacy contracts on unknown services. Catalog
+        // identity, price rows and family preferences cannot supply support.
+        declared.extend(
             legacy_protocols
                 .iter()
-                .filter(|protocol| !is_unsupported(protocol))
-                .find(|protocol| **protocol == fallback_protocol)
-                .or_else(|| {
-                    legacy_protocols
-                        .iter()
-                        .find(|protocol| !is_unsupported(protocol))
-                })
                 .copied()
-        })
-        .or_else(|| (!is_unsupported(&fallback_protocol)).then_some(fallback_protocol))
+                .filter(|protocol| !is_unsupported(protocol)),
+        );
+        if declared.is_empty() {
+            declared.extend(
+                hints
+                    .host
+                    .or(Some(fallback_protocol))
+                    .filter(|protocol| !is_unsupported(protocol)),
+            );
+        }
+    }
+    let mut protocols = declared.into_iter().collect::<Vec<_>>();
+    protocols.retain(|protocol| hints.native.is_none_or(|native| native == *protocol));
+    protocols.sort_by_key(|protocol| {
+        (
+            Some(*protocol) != hints.model_preference,
+            Some(*protocol) != hints.host,
+            *protocol != fallback_protocol,
+            *protocol,
+        )
+    });
+    protocols
 }
 
 /// Field view shared by stored source records.

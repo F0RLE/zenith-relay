@@ -375,6 +375,7 @@ async fn bridged_responses_does_not_claim_a_native_context_comparison() {
             name: "Synthetic chat".into(),
             base_url: upstream.base_url.clone(),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::ChatCompletions,
             models: vec!["synthetic-chat".into()],
         },

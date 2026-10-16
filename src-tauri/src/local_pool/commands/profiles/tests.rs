@@ -14,6 +14,7 @@ fn source_record(id: &str) -> ProviderSourceRecord {
         base_url: "https://provider.test/v1".into(),
         secret_ref: "source:test".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),

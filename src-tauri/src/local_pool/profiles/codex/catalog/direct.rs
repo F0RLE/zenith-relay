@@ -49,13 +49,13 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
     source_models: &[String],
     metadata: &ModelMetadataCatalog,
 ) -> Result<Option<String>> {
-    let catalog = direct_source_model_catalog_with_manifest(codex_home, source_models, None)?;
+    let ordered_models = metadata.order_model_ids(source_models);
+    let catalog = direct_source_model_catalog_with_manifest(codex_home, &ordered_models, None)?;
     let Some(catalog) = catalog else {
         return Ok(None);
     };
     let mut catalog_document: Value = serde_json::from_str(&catalog)
         .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
-    let bundled = super::installed::bundled_codex_ultra_models();
     if let Some(models) = catalog_document
         .get_mut("models")
         .and_then(Value::as_array_mut)
@@ -70,9 +70,6 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
             zenith_relay_core::publish_routed_codex_context(
                 model,
                 metadata.capabilities_for(&decoded).context_limit,
-                bundled
-                    .get(&zenith_relay_core::model_id_key(&decoded))
-                    .and_then(|official| official.get("context_window").and_then(Value::as_u64)),
             );
         }
     }

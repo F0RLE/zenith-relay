@@ -61,7 +61,8 @@ pub(super) fn repair_collected_rejection(
     } = repairs;
     // Classify even early identifier repairs, which previously had no usage row.
     populate_tokens(event, &bytes);
-    let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+    let mut failure =
+        AttemptFailure::status_with_body(status, Some(&bytes)).with_retry_headers(response_headers);
     super::super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
     *last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
     event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_response(
@@ -70,6 +71,17 @@ pub(super) fn repair_collected_rejection(
         response_headers,
     ));
     event.error_category = Some(failure.category.to_string());
+    if failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+        let state = settle_route_failure(runtime, lease, route, &failure, response_headers);
+        apply_failure_state(event, state);
+        emit_usage(runtime, event.clone());
+        return AfterRepair::Step(FailureStep::Respond(attempt_error_response(
+            failure,
+            last_preserved_upstream_error.as_ref(),
+            selected_error_origin,
+            request_id,
+        )));
+    }
     if failure.execution.certainty == ExecutionCertainty::NotSent
         && try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
             request,
@@ -145,7 +157,10 @@ pub(super) fn repair_collected_rejection(
             Err(error) => {
                 emit_usage(runtime, mark_adapter_failure(event.clone(), &error));
                 lease.settle_rotation_terminal(now_ms());
-                return AfterRepair::Step(FailureStep::Respond(adapter_error_response(error)));
+                return AfterRepair::Step(FailureStep::Respond(adapter_error_response(
+                    error,
+                    Some(request_id),
+                )));
             }
         }
     }

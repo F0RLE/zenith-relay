@@ -32,8 +32,8 @@ pub(super) fn inline_local_refs(schema_value: &mut Value) {
     }
     if !contains_ref(&expanded_schema) {
         if let Some(schema_object) = expanded_schema.as_object_mut() {
-            schema_object.remove("$defs");
-            schema_object.remove("definitions");
+            schema_object.shift_remove("$defs");
+            schema_object.shift_remove("definitions");
         }
     }
     *schema_value = expanded_schema;
@@ -42,7 +42,12 @@ pub(super) fn inline_local_refs(schema_value: &mut Value) {
 // Account for strings, keys and tree nodes before cloning a referenced subtree.
 // A small DAG can otherwise expand exponentially.
 fn charge(schema_value: &Value, remaining: &mut usize) -> bool {
-    let cost = std::mem::size_of::<Value>() + schema_value.as_str().map_or(0, str::len);
+    let text_bytes = match schema_value {
+        Value::String(text) => text.len(),
+        Value::Number(number) => number.as_str().len(),
+        _ => 0,
+    };
+    let cost = std::mem::size_of::<Value>() + text_bytes;
     let Some(left) = remaining.checked_sub(cost) else {
         return false;
     };
@@ -238,6 +243,13 @@ mod tests {
             inline_local_refs(&mut schema);
             assert_eq!(schema, original);
         }
+    }
+
+    #[test]
+    fn schema_expansion_charges_arbitrary_precision_number_text() {
+        let number_text = "7".repeat(4096);
+        let number: Value = serde_json::from_str(&number_text).unwrap();
+        assert!(!charge(&number, &mut 4095));
     }
 
     #[test]

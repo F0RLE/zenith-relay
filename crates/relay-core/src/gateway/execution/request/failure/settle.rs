@@ -57,6 +57,7 @@ pub(super) fn settle_collected_rejection(
     // the safe hand-off path: the new candidate receives the
     // materialized conversation, never a foreign opaque response id.
     if client_wire_api == WireApi::Responses
+        && failure.execution.certainty == ExecutionCertainty::NotSent
         && adapter_is_passthrough
         && has_previous_response_id
         && response_affinity_hit
@@ -102,7 +103,9 @@ pub(super) fn settle_collected_rejection(
                 return FailureStep::Continue;
             }
             Ok(false) => {}
-            Err(error) => return FailureStep::Respond(adapter_error_response(error)),
+            Err(error) => {
+                return FailureStep::Respond(adapter_error_response(error, Some(request_id)))
+            }
         }
     }
     if cache_write_rejected {

@@ -3,20 +3,15 @@ use super::super::*;
 pub(super) async fn resolve_gateway_oauth_binding(
     state: &DesktopState,
     request: GatewayOAuthBindingRequest<'_>,
-    profile_dir: &std::path::Path,
 ) -> LocalResult<Option<(String, PreparedAccountCredentials)>> {
     if request == GatewayOAuthBindingRequest::Disabled {
         return Ok(None);
     }
     let requested_account_id = match request {
         GatewayOAuthBindingRequest::Account(account_id) => Some(account_id),
-        GatewayOAuthBindingRequest::Disabled | GatewayOAuthBindingRequest::Automatic => None,
+        GatewayOAuthBindingRequest::Disabled => None,
     };
-    let preferred_account_id = match requested_account_id {
-        Some(account_id) => Some(account_id.to_string()),
-        None => codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?,
-    };
-    let automatic = requested_account_id.is_none();
+    let preferred_account_id = requested_account_id.map(str::to_owned);
     let mut candidates = {
         let store = state.store()?;
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
@@ -62,7 +57,7 @@ pub(super) async fn resolve_gateway_oauth_binding(
         }
         candidates
     };
-    prioritize_account_candidates(&mut candidates, preferred_account_id.as_deref(), automatic);
+    prioritize_account_candidates(&mut candidates, preferred_account_id.as_deref());
     if requested_account_id.is_some()
         && candidates
             .first()

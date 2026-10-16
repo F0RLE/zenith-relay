@@ -3,7 +3,7 @@ use super::super::errors::{
     responses_tool_call_links_rejected_value, upstream_failure_status, AttemptFailure,
     PreservedUpstreamError,
 };
-use super::events::{is_empty_responses_incomplete, parse_sse_event, TerminalOutcome};
+use super::events::{is_empty_responses_terminal, parse_sse_event, TerminalOutcome};
 use super::UpstreamStream;
 use crate::error_codes;
 use crate::protocol::completion::{GeminiStreamCompletion, ResponseCompletion};
@@ -50,16 +50,33 @@ pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFail
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "The bounded bootstrap failure carries the diagnostics needed for retry and response ownership."
-)]
 pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
-) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_stream_impl(upstream, expected_model, false).await
+}
+
+pub(in crate::gateway) async fn bootstrap_basis_points_stream(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_stream_impl(upstream, expected_model, true).await
+}
+
+async fn bootstrap_stream_impl(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+    basis_points: bool,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
+    if basis_points {
+        stream = super::basis_points::guard_progress(
+            stream,
+            crate::transport::basis_points_progress_timeout(),
+        );
+    }
     let mut buffered = Vec::new();
     let mut inspected = 0;
     let mut saw_output = false;
@@ -93,14 +110,14 @@ pub(in crate::gateway) async fn bootstrap_stream(
                                 crate::scheduler::rotation::ExecutionObservation::accepted();
                         }
                         failure.partial_body = buffered;
-                        return Err(failure);
+                        return Err(Box::new(failure));
                     }
                     if event.has_data && !event.valid {
-                        return Err(StreamBootstrapFailure {
+                        return Err(Box::new(StreamBootstrapFailure {
                             upstream_error: event.upstream_error,
                             partial_body: buffered,
                             ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
-                        });
+                        }));
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
                         let category = event
@@ -113,7 +130,7 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             category,
                             event.cooldown_hint,
                         );
-                        return Err(StreamBootstrapFailure {
+                        return Err(Box::new(StreamBootstrapFailure {
                             execution: if saw_output || event.semantic_output {
                                 crate::scheduler::rotation::ExecutionObservation::accepted()
                             } else {
@@ -133,7 +150,7 @@ pub(in crate::gateway) async fn bootstrap_stream(
                                 .as_ref()
                                 .is_some_and(responses_tool_call_links_rejected_value),
                             partial_body: buffered,
-                        });
+                        }));
                     }
                     if event.output_item.is_some() && !event.is_compaction {
                         completed_output_items = completed_output_items.saturating_add(1);
@@ -147,27 +164,27 @@ pub(in crate::gateway) async fn bootstrap_stream(
                         .event_payload
                         .as_ref()
                         .is_some_and(|terminal_payload| {
-                            is_empty_responses_incomplete(
+                            is_empty_responses_terminal(
                                 terminal_payload,
                                 saw_output,
                                 completed_output_items,
                             )
                         })
                     {
-                        return Err(StreamBootstrapFailure {
+                        return Err(Box::new(StreamBootstrapFailure {
                             partial_body: buffered,
                             ..AttemptFailure::stream(error_codes::RESPONSE_INCOMPLETE).into()
-                        });
+                        }));
                     }
                     if let Some(payload) = event.event_payload.as_ref() {
                         native_gemini |= payload.get("candidates").is_some()
                             || payload.get("promptFeedback").is_some()
                             || payload.get("usageMetadata").is_some();
                         if native_gemini && gemini_completion.observe(payload).is_err() {
-                            return Err(StreamBootstrapFailure {
+                            return Err(Box::new(StreamBootstrapFailure {
                                 partial_body: buffered,
                                 ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
-                            });
+                            }));
                         }
                     }
                     // A Gemini finish reason closes one candidate, not the
@@ -190,16 +207,16 @@ pub(in crate::gateway) async fn bootstrap_stream(
                 }
             }
             Some(Err(error)) => {
-                return Err(StreamBootstrapFailure {
+                return Err(Box::new(StreamBootstrapFailure {
                     partial_body: buffered,
                     ..AttemptFailure::transport(&error).into()
-                })
+                }))
             }
             None => {
-                return Err(StreamBootstrapFailure {
+                return Err(Box::new(StreamBootstrapFailure {
                     partial_body: buffered,
                     ..AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()
-                })
+                }))
             }
         }
     }

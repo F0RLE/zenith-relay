@@ -25,13 +25,14 @@ pub(super) struct SelectionMissInput<'a> {
     pub(super) has_unpaired_tool_output: &'a mut bool,
     pub(super) repairs: &'a mut AttemptRepairs,
     pub(super) tried: &'a mut HashSet<String>,
-    pub(super) incompatible: &'a HashSet<String>,
     pub(super) retry_context: &'a CandidateRetryContext<'a>,
     pub(super) last_failure: &'a Option<AttemptFailure>,
+    pub(super) has_preparation_error: bool,
     pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) retry_until_available: bool,
     pub(super) attempt: u16,
     pub(super) retry_window_expired: bool,
+    pub(super) request_id: &'a str,
 }
 
 /// No reserved candidate is available for this attempt. Recover a pinned
@@ -144,7 +145,10 @@ fn replay_pinned_continuation(
             Some(SelectionMiss::Continue)
         }
         Ok(false) => None,
-        Err(error) => Some(SelectionMiss::Respond(adapter_error_response(error))),
+        Err(error) => Some(SelectionMiss::Respond(adapter_error_response(
+            error,
+            Some(selection_context.request_id),
+        ))),
     }
 }
 
@@ -185,14 +189,7 @@ fn reject_unavailable_pinned_owner(
 async fn wait_for_route_recovery(selection_context: &mut SelectionMissInput<'_>) -> bool {
     wait_for_recovery(
         selection_context.budget,
-        &CandidateRetryContext {
-            runtime: selection_context.retry_context.runtime,
-            key: selection_context.retry_context.key,
-            resolved_model: selection_context.retry_context.resolved_model,
-            protocols: selection_context.retry_context.protocols,
-            operation: selection_context.retry_context.operation,
-            exclusions: selection_context.incompatible,
-        },
+        selection_context.retry_context,
         selection_context.tried,
         selection_context.response_affinity_key.as_deref(),
     )
@@ -205,7 +202,7 @@ async fn wait_for_candidate_availability(
     if !should_wait_for_candidate_availability(
         selection_context.retry_until_available,
         selection_context.last_failure,
-        selection_context.last_adapter_error.is_some(),
+        selection_context.has_preparation_error || selection_context.last_adapter_error.is_some(),
         selection_context.has_previous_response_id,
     ) {
         return None;
@@ -249,7 +246,10 @@ fn first_attempt_cooldown(selection_context: &SelectionMissInput<'_>) -> Option<
 fn stop_without_candidate(selection_context: &mut SelectionMissInput<'_>) -> SelectionMiss {
     if selection_context.last_failure.is_none() {
         if let Some(error) = selection_context.last_adapter_error.take() {
-            return SelectionMiss::Respond(adapter_error_response(error));
+            return SelectionMiss::Respond(adapter_error_response(
+                error,
+                Some(selection_context.request_id),
+            ));
         }
     }
     SelectionMiss::Stop {

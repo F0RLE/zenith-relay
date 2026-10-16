@@ -2,17 +2,6 @@ use super::*;
 
 impl PoolScheduler {
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
-        self.record_success_with_metrics(candidate_id, model, now_ms, None, 0)
-    }
-
-    pub fn record_success_with_metrics(
-        &mut self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-        _output_tokens: Option<u64>,
-        _latency_ms: u64,
-    ) -> bool {
         let recovered = {
             let Some(candidate) = self.candidates.get_mut(candidate_id) else {
                 return false;

@@ -41,6 +41,8 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
+        .header("user-agent", "codex_test/1.0.0")
+        .header("version", "1.0.0")
         .header("originator", "codex_test")
         .header("openai-beta", "existing_feature=1")
         .header("x-openai-internal-codex-responses-lite", "true")
@@ -86,6 +88,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
             Some("provider-account")
         );
         assert_eq!(header(headers, "originator").as_deref(), Some("codex_test"));
+        assert_eq!(
+            header(headers, "user-agent").as_deref(),
+            Some("codex_test/1.0.0")
+        );
+        assert_eq!(header(headers, "version").as_deref(), Some("1.0.0"));
         assert_eq!(
             header(headers, "x-openai-internal-codex-responses-lite").as_deref(),
             Some("true")

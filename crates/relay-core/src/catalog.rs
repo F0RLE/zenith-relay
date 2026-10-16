@@ -1,3 +1,4 @@
+mod claude_desktop;
 mod codex;
 mod context;
 mod order;
@@ -6,6 +7,10 @@ mod rules;
 mod speed;
 
 pub use crate::model_metadata::ModelMetadataCatalog;
+pub use claude_desktop::{claude_desktop_model_alias, claude_desktop_reasoning_model_alias};
+pub(crate) use claude_desktop::{
+    claude_desktop_model_alias_matches, is_claude_desktop_model_alias,
+};
 pub(crate) use codex::set_codex_service_tiers;
 pub use codex::{
     apply_codex_ultra_from_official_model, codex_catalog_entry_is_compatible, codex_model_alias,
@@ -31,3 +36,4 @@ pub use rules::ModelRules;
 pub use speed::model_service_tiers;
 pub(crate) use speed::{reference_service_tiers, transport_supports_service_tier};
 pub mod context_policy;
+pub use context_policy::{normalize_model_context_policies, ModelContextPolicy};

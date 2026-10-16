@@ -1,8 +1,11 @@
 mod capabilities;
 mod catalog;
+mod export;
 mod loader;
 mod order;
 mod parsing;
+mod protocol_policy;
+mod provenance;
 mod reasoning;
 mod reference;
 pub(crate) use reasoning::enrich_reasoning_metadata_with_models_dev_details;
@@ -13,7 +16,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+pub use export::{PublicModelCatalog, PublicModelCatalogEntry, MODEL_CATALOG_SCHEMA};
 pub use loader::{ModelMetadataCatalogLoader, ModelMetadataError};
+pub use order::{
+    model_order_revision, validate_model_order_catalog, ModelDisplayIdentity, MODEL_ORDER_JSON,
+};
 use parsing::{metadata_payload_hash, validate_metadata_payload};
 
 pub const MODELS_DEV_SOURCE_URL: &str = "https://models.dev/models.json";
@@ -106,6 +113,13 @@ pub struct ModelMetadata {
     /// advisory identity metadata and never grants a runtime route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_model_id: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Ordered recommendations. They never declare a user's endpoint support.
+    #[serde(default)]
+    pub protocol_preferences: Vec<crate::WireApi>,
+    #[serde(default)]
+    pub field_provenance: BTreeMap<String, MetadataFieldProvenance>,
     pub family: Option<String>,
     pub name: Option<String>,
     pub release_date: Option<String>,
@@ -113,6 +127,23 @@ pub struct ModelMetadata {
     pub status: Option<String>,
     pub knowledge: Option<String>,
     pub capabilities: ModelCapabilities,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataFieldProvenance {
+    pub source: String,
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<MetadataFieldConflict>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataFieldConflict {
+    pub source: String,
+    pub revision: Option<String>,
+    pub value: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,11 +155,13 @@ pub struct ModelMetadataCatalog {
     entries: BTreeMap<String, ModelMetadata>,
     leaf_matches: BTreeMap<String, String>,
     ambiguous_leaves: BTreeSet<String>,
+    alias_matches: BTreeMap<String, Option<String>>,
     /// None marks a family claimed by several primary catalog providers.
     family_providers: BTreeMap<String, Option<String>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetadataSourceStatus {
     pub revision: Option<String>,
     pub fetched_at_ms: Option<u64>,

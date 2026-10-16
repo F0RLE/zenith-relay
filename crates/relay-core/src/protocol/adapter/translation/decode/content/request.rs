@@ -38,6 +38,43 @@ pub(in crate::protocol::adapter::translation::decode) fn common(
     Ok(())
 }
 
+pub(in crate::protocol::adapter::translation::decode) fn sampling_extensions(
+    request: &mut Request,
+    fields: &Value,
+    gemini: bool,
+) -> AdapterResult<()> {
+    request.top_k = optional_u64(fields, if gemini { "topK" } else { "top_k" })?;
+    if request.top_k == Some(0) {
+        return Err(AdapterError::invalid_request().with_parameter("top_k"));
+    }
+    request.presence_penalty = optional_f64(
+        fields,
+        if gemini {
+            "presencePenalty"
+        } else {
+            "presence_penalty"
+        },
+    )?;
+    request.frequency_penalty = optional_f64(
+        fields,
+        if gemini {
+            "frequencyPenalty"
+        } else {
+            "frequency_penalty"
+        },
+    )?;
+    request.seed = fields
+        .get("seed")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_i64()
+                .ok_or_else(|| AdapterError::invalid_request().with_parameter("seed"))
+        })
+        .transpose()?;
+    Ok(())
+}
+
 pub(in crate::protocol::adapter::translation::decode) fn choice(
     choice_value: Option<&Value>,
     protocol: WireApi,
@@ -123,6 +160,16 @@ pub(in crate::protocol::adapter::translation::decode) fn output_format(
                     .and_then(Value::as_str)
                     .unwrap_or("response")
                     .into(),
+                description: schema_value
+                    .get("description")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(AdapterError::invalid_request)
+                    })
+                    .transpose()?,
                 schema: schema_value
                     .get("schema")
                     .filter(|schema_value| schema_value.is_object())

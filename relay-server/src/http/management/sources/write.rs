@@ -10,7 +10,8 @@ pub async fn create_source(
     let secret_ref = format!("source:{source_id}");
     let mut new_source_record = source_record(source_id, secret_ref.clone(), input)?;
     ensure_not_server_self_source(&state, &new_source_record.base_url)?;
-    match discover_models(&new_source_record, &api_key).await {
+    let proxy_url = source_proxy_url(&state, &new_source_record)?;
+    match discover_models(&new_source_record, &api_key, proxy_url).await {
         Ok(discovery) => {
             discovery.apply_catalog(
                 &mut new_source_record.base_url,
@@ -82,6 +83,9 @@ pub async fn update_source(
         source_record.official_provider_family =
             normalize_pricing_identity(Some(provider_family), "official provider family")?;
     }
+    if let Some(proxy_id) = input.proxy_id {
+        source_record.proxy_id = proxy_id;
+    }
     if let Some(wire_api) = input.wire_api {
         source_record.wire_api = wire_api;
     }
@@ -144,6 +148,7 @@ pub async fn update_source(
         &source_record,
         input.api_key.as_deref().unwrap_or(&previous_secret),
     )?;
+    source_proxy_url(&state, &source_record)?;
     ensure_not_server_self_source(&state, &source_record.base_url)?;
     let source_order = if source_priorities.is_empty() {
         None

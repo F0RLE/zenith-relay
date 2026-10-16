@@ -22,12 +22,13 @@ pub(super) struct StatsClient {
 impl StatsClient {
     #[cfg(test)]
     pub(super) fn new(base_url: &str, api_key: &str) -> Result<Self, String> {
-        Self::new_with_scope(base_url, api_key, ManagementHttpScope::default())
+        Self::new_with_scope_and_proxy(base_url, api_key, None, ManagementHttpScope::default())
     }
 
-    pub(super) fn new_with_scope(
+    pub(super) fn new_with_scope_and_proxy(
         base_url: &str,
         api_key: &str,
+        proxy_url: Option<&str>,
         scope: ManagementHttpScope,
     ) -> Result<Self, String> {
         let invalid = || "source stats base URL is invalid".to_owned();
@@ -42,10 +43,17 @@ impl StatsClient {
         let mut site = base.clone();
         site.set_path(&format!("{site_prefix}/"));
         base.set_path(&format!("{prefix}/"));
-        let client = reqwest::Client::builder()
+        let client_builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(6))
+            .timeout(Duration::from_secs(6));
+        let client_builder = match proxy_url {
+            Some(proxy_url) if !proxy_url.trim().is_empty() => crate::ProxyConfig::parse(proxy_url)
+                .map_err(|_| "source stats proxy is invalid".to_owned())?
+                .apply(client_builder),
+            _ => client_builder,
+        };
+        let client = client_builder
             .build()
             .map_err(|_| "source stats request could not be initialized".to_owned())?;
         Ok(Self {

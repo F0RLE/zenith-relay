@@ -37,9 +37,18 @@ use support::source_catalog_visibility_changed;
 use support::source_dispatch_configuration_changed;
 use support::source_probe_matches;
 use support::source_runtime_policy_compatible;
-pub(crate) use support::validate_source_record;
+use support::validated_source_proxy_id;
+pub(crate) use support::{source_proxy_url, validate_source_record};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
+
+/// Distinguishes an absent field from an explicit `null`.
+fn nullable_field<'de, D>(deserializer: D) -> std::result::Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +56,8 @@ pub struct CreateSourceInput {
     name: String,
     base_url: String,
     api_key: String,
+    #[serde(default)]
+    proxy_id: Option<String>,
     #[serde(default)]
     pricing_provider: Option<String>,
     #[serde(default)]
@@ -79,6 +90,9 @@ pub struct UpdateSourceInput {
     source_id: String,
     name: String,
     base_url: String,
+    /// Absent keeps the current proxy, `null` removes it, a string selects one.
+    #[serde(default, deserialize_with = "nullable_field")]
+    proxy_id: Option<Option<String>>,
     #[serde(default)]
     pricing_provider: Option<String>,
     #[serde(default)]

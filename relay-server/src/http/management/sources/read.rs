@@ -1,3 +1,4 @@
+use super::record::source_proxy_url;
 use super::*;
 
 pub async fn list_sources(
@@ -69,6 +70,7 @@ pub async fn probe_source(
         api_key: api_key.clone(),
         wire_api: source_record.wire_api,
         models: source_record.models.clone(),
+        proxy_url: source_proxy_url(&state, &source_record)?,
     };
     let (_, refresh_fence) = state.store.source_refresh_scope(&id).map_err(store_error)?;
     let refresh_state = state.clone();
@@ -151,6 +153,7 @@ pub async fn source_stats(
 pub(super) async fn discover_models(
     source_record: &SourceRecord,
     api_key: &str,
+    proxy_url: Option<String>,
 ) -> Result<SourceDiscovery, ManagementError> {
     let provider_source = ProviderSource {
         id: source_record.id.clone(),
@@ -159,6 +162,7 @@ pub(super) async fn discover_models(
         api_key: api_key.to_string(),
         wire_api: source_record.wire_api,
         models: source_record.models.clone(),
+        proxy_url,
     };
     let discovery = discover_source_with_protocol_config(
         &provider_source,

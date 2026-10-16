@@ -56,7 +56,11 @@ pub(super) async fn open_upgraded_socket(
         *last_failure = Some(failure);
         return Ok(OpenedSocket::Continue(request));
     };
-    runtime.mark_websocket_supported(&route.candidate_id, &request.resolved_model);
+    runtime.mark_websocket_supported(
+        &GatewayRuntime::websocket_capability_scope(&route, &prepared),
+        &request.resolved_model,
+        &prepared.incarnation(),
+    );
     // WebSocket upgrade/auth probes are not generation dispatches. The
     // actual payload send is; all reconnect and HTTP fallback paths share
     // this same counter through ClientRequest.

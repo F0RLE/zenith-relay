@@ -1,4 +1,5 @@
 mod adapters;
+mod catalog_refresh;
 mod catalog_warning;
 mod coordination;
 mod paths;
@@ -75,6 +76,7 @@ pub struct DesktopStateOwner {
     failed_usage_writes: Arc<AtomicU64>,
     failed_affinity_writes: Arc<AtomicU64>,
     catalog_refresh_error: Arc<Mutex<Option<String>>>,
+    pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     subscription_refresh_lock: AsyncMutex<()>,
@@ -188,6 +190,7 @@ impl DesktopState {
                 failed_usage_writes,
                 failed_affinity_writes,
                 catalog_refresh_error,
+                client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
                 subscription_refresh_lock: AsyncMutex::new(()),

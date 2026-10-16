@@ -122,7 +122,7 @@ fn endpoint_metadata_and_gemini_methods_are_scoped_declarations() {
 }
 
 #[test]
-fn one_model_uses_one_upstream_contract_across_clients() {
+fn one_model_retains_all_declared_upstream_contracts_across_clients() {
     let models = vec!["mixed".into()];
     let mut config = SourceProtocolConfig::default();
     config.merge_catalog(catalog_capabilities(
@@ -136,12 +136,15 @@ fn one_model_uses_one_upstream_contract_across_clients() {
     let routes = config
         .resolve("https://example.test/v1", &models, &[], WireApi::Responses)
         .unwrap();
-    assert_eq!(routes.len(), WireApi::ALL.len());
+    assert_eq!(routes.len(), WireApi::ALL.len() * 2);
     let upstreams = routes
         .iter()
         .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
         .collect::<BTreeSet<_>>();
-    assert_eq!(upstreams, BTreeSet::from([WireApi::Responses]));
+    assert_eq!(
+        upstreams,
+        BTreeSet::from([WireApi::Responses, WireApi::Messages])
+    );
     assert_eq!(
         routes
             .iter()
@@ -156,12 +159,12 @@ fn one_model_uses_one_upstream_contract_across_clients() {
             .find(|route| route.wire_api == WireApi::Messages)
             .unwrap()
             .adapter,
-        SourceAdapter::MessagesToResponses
+        SourceAdapter::Native
     );
 }
 
 #[test]
-fn source_profile_selects_one_native_upstream_over_catalog_superset() {
+fn source_profile_preserves_additional_declared_endpoints() {
     let models = vec!["claude-test".into()];
     let mut config = SourceProtocolConfig::automatic("https://api.anthropic.com/v1");
     config.merge_catalog(catalog_capabilities(
@@ -184,7 +187,10 @@ fn source_profile_selects_one_native_upstream_over_catalog_superset() {
         .iter()
         .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
         .collect::<BTreeSet<_>>();
-    assert_eq!(upstreams, BTreeSet::from([WireApi::Messages]));
+    assert_eq!(
+        upstreams,
+        BTreeSet::from([WireApi::Responses, WireApi::Messages])
+    );
 }
 
 #[test]
@@ -320,7 +326,7 @@ fn explicit_endpoint_and_service_profile_do_not_match_lookalikes() {
     );
     assert_eq!(
         service_protocol("https://openrouter.ai/api/v1"),
-        Some(WireApi::ChatCompletions)
+        Some(WireApi::Responses)
     );
     assert_eq!(
         service_protocol("https://openrouter.ai.example.test/v1"),
@@ -337,7 +343,7 @@ fn explicit_endpoint_and_service_profile_do_not_match_lookalikes() {
 }
 
 #[test]
-fn known_responses_service_keeps_unprobed_catalog_models_routable() {
+fn known_multi_protocol_service_declares_its_generation_endpoints() {
     let models = vec![
         "gpt-5.6-sol".into(),
         "claude-fable-5".into(),
@@ -365,16 +371,19 @@ fn known_responses_service_keeps_unprobed_catalog_models_routable() {
         )
         .unwrap();
 
-    assert_eq!(routes.len(), WireApi::ALL.len());
+    assert_eq!(routes.len(), WireApi::ALL.len() * WireApi::ALL.len());
     for client in WireApi::ALL {
-        let route = routes
+        let client_routes = routes
             .iter()
-            .find(|route| route.wire_api == client)
-            .expect("every client protocol should have an adapter route");
-        assert_eq!(route.model_ids, models);
+            .filter(|route| route.wire_api == client)
+            .collect::<Vec<_>>();
+        assert!(client_routes.iter().all(|route| route.model_ids == models));
         assert_eq!(
-            route.adapter.upstream_protocol(client).wire_api(),
-            WireApi::Responses
+            client_routes
+                .iter()
+                .map(|route| route.adapter.upstream_protocol(client).wire_api())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(WireApi::ALL)
         );
     }
 }
@@ -439,7 +448,7 @@ fn upstreams(routes: &[SourceProtocolBinding], model: &str) -> BTreeSet<WireApi>
 }
 
 #[test]
-fn reseller_host_sends_each_model_its_group_native_protocol() {
+fn catalog_preferences_never_create_support_on_an_unknown_reseller() {
     let url = "https://reseller.example.test/v1";
     let models = ["gpt-test", "claude-test", "gemini-test", "deepseek-test"]
         .map(String::from)
@@ -453,16 +462,15 @@ fn reseller_host_sends_each_model_its_group_native_protocol() {
             Some(&reference_catalog()),
         )
         .unwrap();
-    for (model, native) in [
-        ("gpt-test", WireApi::Responses),
-        ("claude-test", WireApi::Messages),
-        ("gemini-test", WireApi::Gemini),
-        ("deepseek-test", WireApi::ChatCompletions),
-    ] {
+    for model in ["gpt-test", "claude-test", "gemini-test", "deepseek-test"] {
+        if model != "deepseek-test" {
+            assert!(upstreams(&routes, model).is_empty(), "{model}");
+            continue;
+        }
         // One physical upstream for every harness, every client protocol served.
         assert_eq!(
             upstreams(&routes, model),
-            BTreeSet::from([native]),
+            BTreeSet::from([WireApi::ChatCompletions]),
             "{model}"
         );
         let clients = routes
@@ -493,7 +501,7 @@ fn without_a_reference_catalog_the_previous_resolution_is_unchanged() {
 }
 
 #[test]
-fn explicit_endpoint_url_outranks_the_group_native_protocol() {
+fn explicit_foreign_endpoint_cannot_override_the_native_model_contract() {
     let url = "https://reseller.example.test/v1/chat/completions";
     let models = vec!["claude-test".to_string()];
     let routes = SourceProtocolConfig::automatic(url)
@@ -505,14 +513,11 @@ fn explicit_endpoint_url_outranks_the_group_native_protocol() {
             Some(&reference_catalog()),
         )
         .unwrap();
-    assert_eq!(
-        upstreams(&routes, "claude-test"),
-        BTreeSet::from([WireApi::ChatCompletions])
-    );
+    assert!(routes.is_empty());
 }
 
 #[test]
-fn unsupported_native_protocol_falls_through_instead_of_failing_the_route() {
+fn unsupported_native_protocol_does_not_fall_through_to_a_foreign_contract() {
     let url = "https://reseller.example.test/v1";
     let models = vec!["claude-test".to_string()];
     let mut config = SourceProtocolConfig::automatic(url);
@@ -535,14 +540,11 @@ fn unsupported_native_protocol_falls_through_instead_of_failing_the_route() {
             Some(&reference_catalog()),
         )
         .unwrap();
-    assert_eq!(
-        upstreams(&routes, "claude-test"),
-        BTreeSet::from([WireApi::ChatCompletions])
-    );
+    assert!(routes.is_empty());
 }
 
 #[test]
-fn catch_all_chat_guess_yields_to_declared_source_evidence() {
+fn responses_preference_yields_to_declared_source_evidence() {
     let url = "https://reseller.example.test/v1";
     let catalog = crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
         r#"{"deepseek/deepseek-test": {"name": "DeepSeek Test", "family": "deepseek"}}"#,
@@ -570,7 +572,7 @@ fn catch_all_chat_guess_yields_to_declared_source_evidence() {
 }
 
 #[test]
-fn rejected_legacy_protocol_does_not_override_an_available_fallback() {
+fn rejected_legacy_native_protocol_does_not_enable_a_foreign_fallback() {
     let url = "https://reseller.example.test/v1";
     let models = vec!["claude-test".to_string()];
     let config = SourceProtocolConfig {
@@ -602,10 +604,7 @@ fn rejected_legacy_protocol_does_not_override_an_available_fallback() {
             Some(&reference_catalog()),
         )
         .unwrap();
-    assert_eq!(
-        upstreams(&routes, "claude-test"),
-        BTreeSet::from([WireApi::ChatCompletions])
-    );
+    assert!(routes.is_empty());
 }
 
 #[test]

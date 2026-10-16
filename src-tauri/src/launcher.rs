@@ -1,4 +1,8 @@
+mod claude_desktop;
 mod opencode_desktop;
+pub(crate) mod settings;
+
+pub(crate) use claude_desktop::{is_claude_desktop_running, launch_claude_desktop};
 mod process;
 
 pub(crate) use process::is_codex_process;
@@ -27,6 +31,9 @@ pub fn is_codex_running() -> bool {
 
 pub fn stop_codex_and_wait() -> Result<bool, String> {
     process::stop_codex_and_wait()
+}
+pub fn stop_claude_desktop_and_wait() -> Result<bool, String> {
+    process::stop_claude_desktop_and_wait()
 }
 #[cfg(test)]
 mod tests;

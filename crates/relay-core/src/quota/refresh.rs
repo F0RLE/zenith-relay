@@ -126,6 +126,7 @@ impl QuotaRefreshData {
                 available_credits_micro_units: self.available_credits_micro_units,
                 provider_credits_available: self.provider_credits_available,
                 provider_credits_unlimited: self.provider_credits_unlimited,
+                provider_credits_observed_at_ms: Some(self.observed_at_ms),
                 direct_balance_micro_usd: self.direct_balance_micro_usd,
                 updated_at_ms: Some(self.observed_at_ms),
                 error: None,

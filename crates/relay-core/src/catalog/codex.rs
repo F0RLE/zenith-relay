@@ -20,14 +20,9 @@ pub use entry::{
     normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
 };
 
-/// Keep the model maximum separate from Codex's default conversation window.
-/// Only an exact Codex-owned card supplies a default; a reference API maximum
-/// must never enable long context by default.
-pub fn publish_routed_codex_context(
-    catalog_entry: &mut Value,
-    context_limit: Option<u64>,
-    default_context_window: Option<u64>,
-) {
+/// Publish a routed model's known maximum without borrowing Codex's defaults.
+/// Provider-owned native cards retain their windows on the native path.
+pub fn publish_routed_codex_context(catalog_entry: &mut Value, context_limit: Option<u64>) {
     let Some(catalog_object) = catalog_entry.as_object_mut() else {
         return;
     };
@@ -41,12 +36,6 @@ pub fn publish_routed_codex_context(
     }
     if let Some(window) = context_limit.filter(|window| *window > 0) {
         catalog_object.insert("max_context_window".into(), window.into());
-    }
-    if let Some(window) = default_context_window.filter(|window| *window > 0) {
-        let window = context_limit
-            .filter(|limit| *limit > 0)
-            .map_or(window, |limit| window.min(limit));
-        catalog_object.insert("context_window".into(), window.into());
     }
 }
 

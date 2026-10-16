@@ -51,11 +51,11 @@ impl GatewayRuntime {
         passive_quota_state.dirty = true;
         let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
-            quota,
-            passive_quota_state.snapshot.updated_at_ms,
-            passive_quota_state.snapshot.limiting_reset_at_ms(),
-            passive_quota_state.snapshot.available_credits_micro_units,
-            passive_quota_state.snapshot.provider_credits_unlimited,
+            CandidateQuotaState::from_snapshot(
+                &passive_quota_state.snapshot,
+                observed_at_ms,
+                self.quota_stale_after_ms,
+            ),
         );
         drop(quotas);
         if updated {
@@ -83,15 +83,13 @@ impl GatewayRuntime {
                 reconcile_passive_quota_snapshot(passive_quota_state, snapshot, observed_at_ms)
             })
             .unwrap_or_else(|| snapshot.clone());
-        let quota =
-            CandidateQuota::from_snapshot(&effective, observed_at_ms, self.quota_stale_after_ms);
         let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
-            quota,
-            effective.updated_at_ms,
-            effective.limiting_reset_at_ms(),
-            effective.available_credits_micro_units,
-            effective.provider_credits_unlimited,
+            CandidateQuotaState::from_snapshot(
+                &effective,
+                observed_at_ms,
+                self.quota_stale_after_ms,
+            ),
         );
         drop(quotas);
         if updated {
@@ -162,17 +160,11 @@ impl GatewayRuntime {
                 reconcile_passive_quota_snapshot(passive_quota_state, snapshot, observed_at_ms)
             })
             .unwrap_or_else(|| snapshot.clone());
-        let quota_state = CandidateQuotaState {
-            quota: CandidateQuota::from_snapshot(
-                &effective,
-                observed_at_ms,
-                self.quota_stale_after_ms,
-            ),
-            updated_at_ms: effective.updated_at_ms,
-            reset_at_ms: effective.limiting_reset_at_ms(),
-            provider_credits_micro_units: effective.available_credits_micro_units,
-            provider_credits_unlimited: effective.provider_credits_unlimited,
-        };
+        let quota_state = CandidateQuotaState::from_snapshot(
+            &effective,
+            observed_at_ms,
+            self.quota_stale_after_ms,
+        );
         let mut scheduler = self.lock_scheduler();
         let effective_health = if preserve_live_block && health.is_eligible() {
             scheduler
@@ -295,18 +287,13 @@ impl GatewayRuntime {
         }
         passive_quota_state.dirty = true;
         passive_quota_state.force_persist = true;
-        let quota = CandidateQuota::from_snapshot(
-            &passive_quota_state.snapshot,
-            observed_at_ms,
-            self.quota_stale_after_ms,
-        );
         let updated = self.lock_scheduler().update_candidate_quota_at(
             candidate_id,
-            quota,
-            passive_quota_state.snapshot.updated_at_ms,
-            passive_quota_state.snapshot.limiting_reset_at_ms(),
-            passive_quota_state.snapshot.available_credits_micro_units,
-            passive_quota_state.snapshot.provider_credits_unlimited,
+            CandidateQuotaState::from_snapshot(
+                &passive_quota_state.snapshot,
+                observed_at_ms,
+                self.quota_stale_after_ms,
+            ),
         );
         drop(quotas);
         if updated {
@@ -342,10 +329,18 @@ fn reconcile_passive_quota_snapshot(
         _ => incoming_at >= current_at,
     };
     if incoming_wins {
+        let previous = passive_quota_state.snapshot.clone();
         passive_quota_state.snapshot = incoming.clone();
-        passive_quota_state.dirty = false;
+        passive_quota_state.dirty = passive_quota_state
+            .snapshot
+            .merge_provider_credits(&previous);
         passive_quota_state.force_persist = false;
         passive_quota_state.last_persist_hint_ms = incoming.updated_at_ms.unwrap_or(observed_at_ms);
+    } else if passive_quota_state
+        .snapshot
+        .merge_provider_credits(incoming)
+    {
+        passive_quota_state.dirty = true;
     }
     passive_quota_state.snapshot.clone()
 }

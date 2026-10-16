@@ -18,6 +18,7 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
                 api_key: "synthetic-upstream".into(),
                 wire_api: WireApi::Responses,
                 models: vec!["gpt-test".into()],
+                proxy_url: None,
             },
             LocalGatewayKey {
                 id: "synthetic-key".into(),

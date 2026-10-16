@@ -5,13 +5,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
-use zenith_relay_core::error_codes;
 use zenith_relay_core::{
+    error_codes,
     protocol::{
         canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,
         update_model_reasoning_policy, ModelPolicyError, RuntimeStateSnapshot,
-        SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput,
-        SetModelServiceTierInput,
+        SetModelContextInput, SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput,
+        SetModelReasoningInput, SetModelServiceTierInput,
     },
     ApiModelPriceOverride, DefaultServiceTier,
 };
@@ -23,6 +23,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/models/prices", post(set_model_price))
         .route("/models/reasoning", post(set_model_reasoning))
         .route("/models/service-tier", post(set_model_service_tier))
+        .route("/models/context", post(set_model_context))
         .route("/models/order", post(set_model_order))
 }
 
@@ -122,6 +123,8 @@ pub async fn set_model_service_tier(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelServiceTierInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let _configuration = state.configuration_lock.lock().await;
+    let _build = state.lock_runtime_rebuild().await;
     let snapshot = state.snapshot().map_err(store_error)?;
     let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
     let runtime = state.runtime().map_err(runtime_error)?;
@@ -155,6 +158,42 @@ pub async fn set_model_service_tier(
             state
                 .store
                 .set_model_service_tier_overrides(previous_overrides)
+                .map_err(store_error)?;
+            return Err(runtime_error(error.to_string()));
+        }
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
+pub async fn set_model_context(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelContextInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    input.context_policy.validate().map_err(|message| {
+        ManagementError::validation(error_codes::MODEL_CONTEXT_UNSUPPORTED, message)
+    })?;
+    let _configuration = state.configuration_lock.lock().await;
+    let _build = state.lock_runtime_rebuild().await;
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let canonical = canonical_model_id(&state, &snapshot, &input.model_id)?;
+    let previous = state.store.model_context_policies().map_err(store_error)?;
+    let mut updated = previous.clone();
+    updated.insert(
+        zenith_relay_core::model_id_key(&canonical),
+        input.context_policy,
+    );
+    if updated == previous {
+        return Ok(Json(snapshot));
+    }
+    state
+        .store
+        .set_model_context_policies(updated.clone())
+        .map_err(store_error)?;
+    if let Some(runtime) = state.runtime().map_err(runtime_error)? {
+        if let Err(error) = runtime.set_model_context_policies(updated) {
+            state
+                .store
+                .set_model_context_policies(previous)
                 .map_err(store_error)?;
             return Err(runtime_error(error.to_string()));
         }

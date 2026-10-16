@@ -80,10 +80,11 @@ fn decode_chat_completion(
             "tool_calls",
             "refusal",
             "reasoning_content",
+            "reasoning",
             "annotations",
         ],
     )
-    .map_err(|_| invalid())?;
+    .map_err(|_| invalid().with_parameter("choices[].message"))?;
     if message
         .get("role")
         .is_some_and(|role| !role.is_null() && role.as_str() != Some("assistant"))
@@ -98,13 +99,11 @@ fn decode_chat_completion(
     if refusal.is_some() && response.finish == Finish::Stop {
         response.finish = Finish::Refusal;
     }
-    if let Some(reasoning) = message
-        .get("reasoning_content")
-        .filter(|reasoning_value| !reasoning_value.is_null())
-    {
-        response.blocks.push(Block::Reasoning(
-            reasoning.as_str().ok_or_else(invalid)?.into(),
-        ));
+    if let Some(reasoning) = chat_reasoning_text(
+        message,
+        invalid().with_parameter("choices[].message.reasoning"),
+    )? {
+        response.blocks.push(Block::Reasoning(reasoning.into()));
     }
     if let Some(content) = message
         .get("content")
@@ -418,7 +417,10 @@ fn decode_gemini(
         return Err(invalid());
     }
     for (index, part) in parts.into_iter().flatten().enumerate() {
-        super::super::super::gemini::validate_response_part(part)?;
+        let fields = super::super::super::gemini::validate_response_part(part)?;
+        if super::super::super::gemini::is_noop_text_part(fields) {
+            continue;
+        }
         let mut native_part = part.clone();
         if let Some(text) = part.get("text").and_then(Value::as_str) {
             response.blocks.push(

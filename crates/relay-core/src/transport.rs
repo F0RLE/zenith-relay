@@ -21,13 +21,13 @@ pub(crate) struct BodyReadFailure {
 }
 
 #[derive(Default)]
-struct SseProgress {
+pub(crate) struct SseProgress {
     line_started: bool,
     comment: bool,
 }
 
 impl SseProgress {
-    fn observe(&mut self, bytes: &[u8]) -> bool {
+    pub(crate) fn observe(&mut self, bytes: &[u8]) -> bool {
         let mut progress = false;
         for &byte in bytes {
             if matches!(byte, b'\r' | b'\n') {

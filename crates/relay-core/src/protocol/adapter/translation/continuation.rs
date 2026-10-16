@@ -9,6 +9,35 @@ pub(super) fn request_key(
     request: &Value,
     model: &str,
 ) -> AdapterResult<Option<String>> {
+    // Lookup and request preparation must hash the same portable view of a
+    // Relay-owned checkpoint. Compaction control items are not provider turns.
+    let compaction = if client == WireApi::Responses {
+        Some(super::super::compaction::prepare_bridged_compaction(
+            request,
+        )?)
+    } else {
+        None
+    };
+    let request = compaction
+        .as_ref()
+        .map_or(request, |compaction| compaction.request(request));
+    // A lookup compares portable history only. This does not authorize
+    // forwarding ciphertext or reconstructing a native signed block.
+    let portable;
+    let request = if client == WireApi::Responses {
+        let input = request
+            .get("input")
+            .ok_or_else(AdapterError::invalid_request)?;
+        portable = json!({"input": match input {
+            Value::Array(items) => Value::Array(items.iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"))
+                .cloned().collect()),
+            input => input.clone(),
+        }});
+        &portable
+    } else {
+        request
+    };
     let mut decoded = decode::request(client, request)?;
     decode::resolve_tool_history(&mut decoded.messages)?;
     let Some(end) = decoded
@@ -101,6 +130,7 @@ pub(super) fn restore(
     mode: MessagesReasoningMode,
 ) -> AdapterResult<BTreeMap<usize, Vec<Value>>> {
     if !previous.reusable
+        || previous.client_wire_api != Some(client)
         || previous.model != model
         || previous.reasoning_mode != mode
         || previous.upstream_protocol != Some(upstream)

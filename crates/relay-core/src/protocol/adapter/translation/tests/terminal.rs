@@ -1,6 +1,51 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn responses_stream_failures_name_the_stage_without_echoing_provider_content() {
+    for (event, parameter) in [
+        (
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"synthetic-private-content"}),
+            "response.text.delta",
+        ),
+        (
+            json!({"type":"synthetic-private-event","content":"synthetic-private-content"}),
+            "stream.responses.event",
+        ),
+    ] {
+        let mut bridge = prepare(
+            WireApi::Messages,
+            WireApi::Responses,
+            &input(WireApi::Messages),
+            true,
+        )
+        .into_stream_bridge()
+        .unwrap();
+        bridge.push(format!("data: {event}\n\n").as_bytes());
+        bridge.finish();
+        assert!(bridge.completed().is_none());
+        let wire = String::from_utf8(
+            std::iter::from_fn(|| bridge.pop_output())
+                .flatten()
+                .collect(),
+        )
+        .unwrap();
+        let error: Value = serde_json::from_str(
+            wire.lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error["error"]["param"], parameter);
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(parameter));
+        assert!(!wire.contains("synthetic-private"));
+        assert!(!wire.contains("event: message_stop"));
+    }
+}
+
 fn refusal_finish(protocol: WireApi) -> Finish {
     if protocol == WireApi::Gemini {
         Finish::Filter

@@ -320,6 +320,11 @@ impl<S> UsageStream<S> {
                 }
             }
             if let Some(terminal_event_payload) = terminal.event_payload.as_ref() {
+                if let (Some(capture), Some(event)) =
+                    (self.tool_call_capture.as_ref(), self.event.as_ref())
+                {
+                    crate::poison::mutex(capture).observe(terminal_event_payload, event.wire_api);
+                }
                 if let Some(usage_event) = self.event.as_mut() {
                     usage_event
                         .tool_use
@@ -418,6 +423,12 @@ impl<S> UsageStream<S> {
                 return true;
             }
             if terminal.has_data {
+                if let (Some(capture), Some(payload)) = (
+                    self.tool_call_capture.as_ref(),
+                    terminal.event_payload.as_ref(),
+                ) {
+                    crate::poison::mutex(capture).observe(payload, WireApi::Gemini);
+                }
                 if terminal
                     .event_payload
                     .as_ref()

@@ -1,6 +1,34 @@
 use super::*;
 use zenith_relay_core::{PoolParticipant, SourceTransportRecord};
 
+/// Resolves the stored proxy of an API source. A source without a proxy has no
+/// proxy. A missing or invalid proxy is an error: the source never falls back
+/// to a direct connection.
+pub(crate) fn source_proxy_url(source: &ProviderSourceRecord) -> LocalResult<Option<String>> {
+    if source.proxy_id.is_none() {
+        return Ok(None);
+    }
+    crate::local_pool::accounts::proxy::ProxyPool::load()?.source_url(source.proxy_id.as_deref())
+}
+
+/// Checks that a proxy chosen for a source exists and is usable.
+pub(crate) fn validated_source_proxy_id(proxy_id: Option<String>) -> LocalResult<Option<String>> {
+    let Some(proxy_id) = proxy_id
+        .map(|proxy_id| proxy_id.trim().to_string())
+        .filter(|proxy_id| !proxy_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !crate::local_pool::accounts::proxy::is_proxy_id(&proxy_id) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "source proxy is invalid",
+        ));
+    }
+    crate::local_pool::accounts::proxy::ProxyPool::load()?.source_url(Some(&proxy_id))?;
+    Ok(Some(proxy_id))
+}
+
 /// Keeps an API source editable after an automatic catalog request fails.
 /// Its routes remain configured, but are intentionally model-less until a
 /// later successful refresh confirms upstream capabilities.
@@ -98,6 +126,7 @@ pub(crate) fn validate_source_record(
         api_key,
         wire_api: source.wire_api,
         models: source.models.clone(),
+        proxy_url: source_proxy_url(source)?,
     };
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(state, &runtime_source.base_url)

@@ -35,6 +35,7 @@ pub(crate) fn imported_source_record(
         protocol_config,
         protocol_bindings,
         models: runtime_source.models,
+        proxy_id: existing.as_ref().and_then(|source| source.proxy_id.clone()),
         allowed_models: existing
             .as_ref()
             .map(|source| source.allowed_models.clone())

@@ -8,13 +8,25 @@ pub fn merge_codex_quota_headers(
     headers: &HeaderMap,
     observed_at_ms: u64,
 ) -> Option<QuotaSnapshot> {
-    let primary = parse_window(headers, "primary", QuotaWindowKind::Primary, observed_at_ms);
+    let primary = parse_window(headers, "primary", QuotaWindowKind::Primary, observed_at_ms)
+        .filter(|observed| {
+            previous_snapshot
+                .primary
+                .as_ref()
+                .is_none_or(|previous| observed.observed_at_ms >= previous.observed_at_ms)
+        });
     let secondary = parse_window(
         headers,
         "secondary",
         QuotaWindowKind::Secondary,
         observed_at_ms,
-    );
+    )
+    .filter(|observed| {
+        previous_snapshot
+            .secondary
+            .as_ref()
+            .is_none_or(|previous| observed.observed_at_ms >= previous.observed_at_ms)
+    });
     let mut merged = previous_snapshot.clone();
     let removed_placeholder = merged
         .secondary
@@ -92,9 +104,6 @@ fn merge_window(
     let Some(previous_window) = previous_window else {
         return Some(observed);
     };
-    if observed.observed_at_ms < previous_window.observed_at_ms {
-        return Some(previous_window.clone());
-    }
     let new_cycle = is_new_cycle(Some(previous_window), &observed);
     if !new_cycle {
         observed.available_basis_points = match (
@@ -104,7 +113,11 @@ fn merge_window(
             (Some(previous_available), Some(observed_available)) => {
                 Some(previous_available.min(observed_available))
             }
-            (previous_available, None) => previous_available,
+            (previous_available, None) => {
+                // Timer-only headers do not re-observe the carried remainder.
+                observed.observed_at_ms = previous_window.observed_at_ms;
+                previous_available
+            }
             (None, observed_available) => observed_available,
         };
     }
@@ -143,6 +156,58 @@ fn header_u64(headers: &HeaderMap, header_name: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
+
+    #[test]
+    fn older_headers_cannot_clear_an_explicit_limit_or_a_newer_refresh_error() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("20"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("10"),
+        );
+        let mut current =
+            merge_codex_quota_headers(&QuotaSnapshot::default(), &headers, 2_000).unwrap();
+        current.limit_reached = true;
+        current.error = Some(crate::quota::QuotaErrorState::new("quota_transport", 2_000));
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("600"),
+        );
+        assert!(merge_codex_quota_headers(&current, &headers, 1_000).is_none());
+    }
+
+    #[test]
+    fn reset_only_headers_do_not_renew_remainder_or_ledger_evidence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("20"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("600"),
+        );
+        let mut first =
+            merge_codex_quota_headers(&QuotaSnapshot::default(), &headers, 1_000).unwrap();
+        first.provider_credits_observed_at_ms = Some(500);
+        let mut timer = HeaderMap::new();
+        timer.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("599"),
+        );
+        let merged = merge_codex_quota_headers(&first, &timer, 2_000).unwrap();
+        assert_eq!(
+            merged.primary.as_ref().unwrap().available_basis_points,
+            Some(8_000)
+        );
+        assert_eq!(merged.primary.as_ref().unwrap().observed_at_ms, 1_000);
+        assert_eq!(merged.quota_observed_at_ms(), Some(1_000));
+        assert_eq!(merged.provider_credits_observed_at_ms, Some(500));
+        assert_eq!(merged.updated_at_ms, Some(2_000));
+    }
 
     #[test]
     fn partial_headers_merge_without_increasing_a_live_cycle() {

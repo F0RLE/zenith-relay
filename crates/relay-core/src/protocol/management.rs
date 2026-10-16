@@ -27,11 +27,12 @@ pub use account::{
 pub use model::{
     apply_member_model_display_order, apply_model_display_order,
     apply_model_display_order_with_catalog, apply_model_metadata, apply_model_reasoning_summary,
-    apply_model_speed_summary, apply_pool_model_configuration, member_model_catalog,
-    model_has_api_source_route, pool_candidate_count, pooled_source_runtime_available,
-    source_runtime_available, GatewaySummary, ModelCatalogIdentity, ModelSummary,
-    SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput, SetModelReasoningInput,
-    SetModelServiceTierInput,
+    apply_model_speed_summary, apply_pool_model_configuration,
+    apply_pool_model_configuration_with_context, member_model_catalog, model_has_api_source_route,
+    pool_candidate_count, pooled_source_runtime_available, source_runtime_available,
+    GatewaySummary, ModelCatalogIdentity, ModelSummary, PoolModelConfigurationInput,
+    SetModelContextInput, SetModelEnabledInput, SetModelOrderInput, SetModelPriceInput,
+    SetModelReasoningInput, SetModelServiceTierInput,
 };
 pub use model_policy::{
     canonical_pool_model_id, complete_model_display_order, configured_source_model_ids,

@@ -207,6 +207,7 @@ fn failed_refresh_clears_the_source_catalog() {
         secret_ref: "source:source".to_string(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: vec![SourceProtocolBinding {
@@ -261,6 +262,7 @@ async fn source_stats_rejects_a_self_route_before_contacting_gateway() {
         secret_ref: "source:self-source".to_string(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: Vec::new(),

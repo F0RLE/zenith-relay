@@ -54,30 +54,6 @@ pub async fn set_local_request_timezone(
 }
 
 #[tauri::command]
-pub async fn set_local_chatgpt_context_policy(
-    input: zenith_relay_core::catalog::context_policy::ApplicationContextPolicy,
-    state: State<'_, DesktopState>,
-) -> Result<LocalPoolSnapshot, CommandError> {
-    let _mutation = state.setup_guard().await;
-    input.validate().map_err(LocalPoolError::invalid_state)?;
-    let previous = state.store()?.gateway().clone();
-    let mut gateway = previous.clone();
-    gateway.chatgpt_context_policy = input;
-    state.store()?.replace_gateway(gateway)?;
-    let refreshed = super::super::profiles::refresh_active_codex_catalog(state.inner()).await;
-    if let Err(error) = refreshed {
-        let previous_policy = previous.chatgpt_context_policy;
-        state.store()?.replace_gateway(previous)?;
-        if let Some(runtime) = state.gateway.runtime().await {
-            runtime.set_chatgpt_context_policy(previous_policy);
-        }
-        return Err(error.into());
-    }
-    super::super::record_catalog_refresh_result(state.inner(), &refreshed);
-    state.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
 pub async fn set_local_tool_policy(
     input: zenith_relay_core::ToolPolicyUpdate,
     state: State<'_, DesktopState>,

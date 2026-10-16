@@ -9,6 +9,7 @@ fn api_sources_generate_strict_codex_models_without_hidden_or_media_rows() {
             name: "source".into(),
             base_url: "https://example.test/v1".into(),
             api_key: "upstream-secret".into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec![
                 "vendor/claude-opus-4-8".into(),
@@ -104,7 +105,7 @@ fn api_gpt_picker_ids_stay_native_without_account_cards_or_extra_models() {
     }
 }
 #[test]
-fn known_non_native_model_publishes_reference_limits_without_client_policy() {
+fn known_non_native_model_publishes_short_budget_from_reference_maximum() {
     use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
     let catalog = ModelMetadataCatalog::from_models_dev_json(
         r#"{
@@ -128,10 +129,10 @@ fn known_non_native_model_publishes_reference_limits_without_client_policy() {
     let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
     let model_row = &response["models"][0];
     assert_eq!(model_row["input_modalities"], json!(["text"]));
-    assert!(model_row.get("context_window").is_none());
+    assert_eq!(model_row["context_window"], 16_000);
     assert_eq!(model_row["max_context_window"], 64_000);
-    assert!(model_row.get("auto_compact_token_limit").is_none());
-    assert!(model_row.get("effective_context_window_percent").is_none());
+    assert_eq!(model_row["auto_compact_token_limit"], 14_400);
+    assert_eq!(model_row["effective_context_window_percent"], 100);
     assert_eq!(model_row["supports_parallel_tool_calls"], true);
     assert_eq!(model_row["default_reasoning_level"], "high");
     assert_eq!(
@@ -145,7 +146,7 @@ fn known_non_native_model_publishes_reference_limits_without_client_policy() {
 }
 
 #[test]
-fn api_catalog_keeps_installed_short_context_separate_from_reference_maximum() {
+fn api_context_policies_ignore_installed_codex_context() {
     use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
     let catalog = ModelMetadataCatalog::from_models_dev_json(
         r#"{"gpt-future":{"limit":{"context":1050000}}}"#,
@@ -160,7 +161,11 @@ fn api_catalog_keeps_installed_short_context_separate_from_reference_maximum() {
     );
     runtime.set_official_codex_ultra_models(std::collections::BTreeMap::from([(
         "gpt-future".into(),
-        json!({"slug": "gpt-future", "context_window": 272000}),
+        json!({
+            "slug": "gpt-future", "context_window": 272000,
+            "max_context_window": 872000, "auto_compact_token_limit": 244800,
+            "effective_context_window_percent": 95
+        }),
     )]));
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
@@ -168,10 +173,40 @@ fn api_catalog_keeps_installed_short_context_separate_from_reference_maximum() {
     let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
     let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
     let row = &response["models"][0];
-    assert_eq!(row["context_window"], 272_000);
+    assert_eq!(row["context_window"], 262_500);
     assert_eq!(row["max_context_window"], 1_050_000);
-    assert!(row.get("auto_compact_token_limit").is_none());
-    assert!(row.get("effective_context_window_percent").is_none());
+    assert_eq!(row["auto_compact_token_limit"], 236_250);
+    assert_eq!(row["effective_context_window_percent"], 100);
+
+    let windows = runtime.model_context_windows("gpt-future", []);
+    assert_eq!(windows.default_tokens, None);
+    assert_eq!(windows.maximum_tokens, Some(1_050_000));
+    for (policy, window) in [
+        (crate::ModelContextPolicy::Extended, 1_050_000),
+        (
+            crate::ModelContextPolicy::Custom { tokens: 500_000 },
+            500_000,
+        ),
+        (
+            crate::ModelContextPolicy::Custom { tokens: 2_000_000 },
+            1_050_000,
+        ),
+        (crate::ModelContextPolicy::Short, 262_500),
+    ] {
+        runtime
+            .set_model_context_policies(std::collections::BTreeMap::from([(
+                "gpt-future".into(),
+                policy,
+            )]))
+            .unwrap();
+        let response = build_codex_models_response(&runtime, &key, &visible, None).unwrap();
+        let row = &response["models"][0];
+        assert_eq!(row["context_window"], window);
+        assert_eq!(row["max_context_window"], 1_050_000);
+        assert_eq!(row["auto_compact_token_limit"], window * 90 / 100);
+        assert_eq!(windows.window_tokens(policy), Some(window));
+        assert_eq!(runtime.model_context_windows("gpt-future", []), windows);
+    }
 }
 #[test]
 fn messages_bridge_does_not_invent_codex_ultra_from_max() {
@@ -192,6 +227,7 @@ fn messages_bridge_does_not_invent_codex_ultra_from_max() {
         api_key: "upstream-secret".into(),
         wire_api: WireApi::Responses,
         models: vec![model.into()],
+        proxy_url: None,
     };
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource {
@@ -356,9 +392,10 @@ fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
             name: "source".into(),
             base_url: "https://example.test/v1".into(),
             api_key: "upstream-secret".into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec![
-                "vendor/glm-5.2".into(),
+                "vendor/glm-5.3".into(),
                 "vendor/grok-4.5".into(),
                 "vendor/gemini-3.6-flash".into(),
                 "vendor/claude-opus-4-8".into(),
@@ -378,7 +415,7 @@ fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
         .unwrap();
     let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
     let upstream = json!({"models": [{
-        "slug": "vendor/glm-5.2",
+        "slug": "vendor/glm-5.3",
         "supported_in_api": true
     }, {
         "slug": "vendor/grok-4.5",
@@ -415,10 +452,18 @@ fn codex_catalog_uses_unique_priorities_and_shared_capability_defaults() {
             "Claude Opus 4.8",
             "Gemini 3.6 Flash",
             "Grok 4.5",
-            "GLM 5.2",
+            "GLM 5.3",
         ]
     );
     assert!(models.iter().all(codex_catalog_entry_is_compatible));
+    let glm = models
+        .iter()
+        .find(|model| model["display_name"] == "GLM 5.3")
+        .expect("external model must be published to the Codex catalog");
+    assert_eq!(glm["slug"], crate::codex_model_alias("vendor/glm-5.3"));
+    assert!(glm["base_instructions"].as_str().is_some_and(
+        |instructions| instructions.contains("inspect the current Relay model catalog")
+    ));
     // A generic Responses source can reuse an OpenAI-looking model ID
     // without supporting Codex's native tool contract. Only account
     // manifests are authoritative for this capability.
@@ -432,6 +477,7 @@ fn mixed_upstream_and_fallback_catalog_rows_get_unique_priorities() {
             name: "source".into(),
             base_url: "https://example.test/v1".into(),
             api_key: "upstream-secret".into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec![
                 "gpt-5.6-sol".into(),

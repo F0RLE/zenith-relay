@@ -1,6 +1,6 @@
 use super::{is_agent_identity_task_invalid_response, CodexIdentityEnvelope};
-use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::{transport::collect_limited, Error, ProxyConfig};
+use crate::scheduler::refresh::http::ManagementHttpScope;
+use crate::ProxyConfig;
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
     redirect::Policy,
@@ -11,6 +11,7 @@ use url::Url;
 mod basis_points;
 mod failure;
 mod parse;
+mod request;
 pub(crate) use basis_points::normalize_basis_points_reasoning_effort;
 pub use basis_points::{
     basis_points_access_url, parse_basis_points_model_access, BasisPointsModelAccess,
@@ -39,7 +40,7 @@ impl AccountModelsClient {
     pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, ModelDiscoveryFailure> {
         Self::new_with_proxy_and_timeout_and_user_agent(
             proxy,
-            Duration::from_secs(10),
+            Duration::from_secs(20),
             "Zenith Relay",
         )
     }
@@ -184,43 +185,8 @@ impl AccountModelsClient {
                 })?
                 .apply(request)
         };
-        let (response, permit) = self
-            .scope
-            .send(&self.http, request, HttpClass::Ordinary)
-            .await
-            .map_err(|error| {
-                ModelDiscoveryFailure::retryable(if error.is_timeout() {
-                    ModelDiscoveryFailureCode::Timeout
-                } else {
-                    ModelDiscoveryFailureCode::Transport
-                })
-            })?;
-        let status = response.status();
-        let retry_after_ms =
-            crate::transport::retry_after_ms(response.headers(), std::time::SystemTime::now());
-        let models_response_body = collect_limited(
-            response,
-            if basis_points {
-                MAX_BASIS_POINTS_ACCESS_BYTES
-            } else {
-                MAX_MODELS_RESPONSE_BYTES
-            },
-        )
-        .await
-        .map_err(|error| match error {
-            Error::UpstreamBodyTooLarge => {
-                ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
-            }
-            Error::Upstream(error) if error.is_timeout() => {
-                ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Timeout)
-            }
-            _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
-        })
-        .map_err(|mut failure| {
-            failure.retry_after_ms = retry_after_ms;
-            failure
-        })?;
-        drop(permit);
+        let (status, retry_after_ms, models_response_body) =
+            self.read_response(request, basis_points).await?;
         if !status.is_success() {
             let (code, retryable) = if is_agent_identity_task_invalid_response(
                 status.as_u16(),

@@ -1,6 +1,7 @@
 use super::super::{
-    runtime_now_ms, AuthorizationIncarnation, AuthorizedRequestError, AuthorizedResponse,
-    CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime, PreparedAuthorization,
+    runtime_now_ms, AuthorizationIdentityPolicy, AuthorizationIncarnation, AuthorizedRequestError,
+    AuthorizedResponse, CodexTurnStateScope, ExecutorPrepareError, GatewayRuntime,
+    PreparedAuthorization,
 };
 use super::prepare::{agent_credential_fingerprint, inspect_agent_identity_unauthorized};
 use super::AuthorizationDispatch;
@@ -23,6 +24,32 @@ impl GatewayRuntime {
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
+        self.send_authorized_request_with_binding(candidate_id, request, dispatch, None)
+            .await
+    }
+
+    pub(crate) async fn send_authorized_request_for_route(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        request: reqwest::RequestBuilder,
+        dispatch: AuthorizationDispatch<'_>,
+    ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
+        self.send_authorized_request_with_binding(
+            &route.candidate_id,
+            request,
+            dispatch,
+            route.account_id.is_none().then(|| route.binding_key()),
+        )
+        .await
+    }
+
+    async fn send_authorized_request_with_binding(
+        &self,
+        candidate_id: &str,
+        request: reqwest::RequestBuilder,
+        dispatch: AuthorizationDispatch<'_>,
+        binding: Option<crate::SourceProtocolBindingKey>,
+    ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
         if self.is_basis_points_account(candidate_id) {
             self.validate_basis_points_plan(candidate_id, None)
                 .map_err(AuthorizedRequestError::ModelAccess)?;
@@ -31,7 +58,10 @@ impl GatewayRuntime {
         let first_request = request
             .try_clone()
             .ok_or(AuthorizedRequestError::NotReplayable)?;
-        let prepared = if budget.is_some() && self.is_basis_points_account(candidate_id) {
+        let prepared = if let Some(binding) = binding {
+            self.prepare_source_authorization(candidate_id, binding)
+                .map_err(AuthorizedRequestError::Prepare)?
+        } else if budget.is_some() && self.is_basis_points_account(candidate_id) {
             self.prepare_basis_points_authorization(candidate_id)
                 .await?
         } else {
@@ -224,18 +254,46 @@ impl GatewayRuntime {
         scope: Option<&CodexTurnStateScope<'_>>,
         prepared: &PreparedAuthorization,
     ) {
-        if let Some(turn_state_header) = headers.get("x-codex-turn-state") {
-            if !scope.is_some_and(|scope| {
+        if prepared.identity.is_none() {
+            return;
+        }
+        let now_ms = runtime_now_ms();
+        let authorization = prepared.incarnation();
+        super::super::session_state::request::guard_headers(headers, &|state| {
+            scope.is_some_and(|scope| {
                 self.codex_turn_state_matches(
                     scope,
-                    turn_state_header.as_bytes(),
+                    state,
                     prepared.turn_state_credential(),
-                    runtime_now_ms(),
+                    &authorization,
+                    now_ms,
                 )
-            }) {
-                headers.remove("x-codex-turn-state");
-            }
+            })
+        });
+    }
+
+    pub(crate) fn guard_codex_payload(
+        &self,
+        payload: &mut serde_json::Value,
+        scope: Option<&CodexTurnStateScope<'_>>,
+        prepared: &PreparedAuthorization,
+    ) -> bool {
+        if prepared.identity.is_none() {
+            return false;
         }
+        let now_ms = runtime_now_ms();
+        let authorization = prepared.incarnation();
+        super::super::session_state::request::guard_payload(payload, &|state| {
+            scope.is_some_and(|scope| {
+                self.codex_turn_state_matches(
+                    scope,
+                    state,
+                    prepared.turn_state_credential(),
+                    &authorization,
+                    now_ms,
+                )
+            })
+        })
     }
 
     pub(crate) fn observe_turn_state(
@@ -249,6 +307,7 @@ impl GatewayRuntime {
                 scope,
                 turn_state_header.as_bytes(),
                 prepared.turn_state_credential(),
+                &prepared.incarnation(),
                 runtime_now_ms(),
             );
         }
@@ -279,7 +338,31 @@ impl GatewayRuntime {
             self.verify_basis_points_request(candidate_id, prepared, &authorized_request)
                 .await?;
         }
-        self.guard_turn_state(authorized_request.headers_mut(), scope, prepared);
+        if identity_policy == AuthorizationIdentityPolicy::RelayCodex && prepared.identity.is_some()
+        {
+            self.guard_turn_state(authorized_request.headers_mut(), scope, prepared);
+            let json_body = authorized_request
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+            if let Some(body) = authorized_request.body().filter(|_| json_body) {
+                let bytes = body
+                    .as_bytes()
+                    .ok_or(AuthorizedRequestError::NotReplayable)?;
+                let mut payload: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|_| AuthorizedRequestError::NotReplayable)?;
+                if self.guard_codex_payload(&mut payload, scope, prepared) {
+                    let scoped_body = serde_json::to_vec(&payload)
+                        .map_err(|_| AuthorizedRequestError::NotReplayable)?;
+                    *authorized_request.body_mut() = Some(scoped_body.into());
+                    authorized_request
+                        .headers_mut()
+                        .remove(reqwest::header::CONTENT_LENGTH);
+                }
+            }
+        }
         let url = authorized_request.url().clone();
         let cookies = self.routing_cookies(candidate_id, prepared);
         if let Some(cookies) = &cookies {

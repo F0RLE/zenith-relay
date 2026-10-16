@@ -193,8 +193,28 @@ impl MessagesBridgeStore {
         candidate_id: &str,
         now_ms: u64,
     ) -> AdapterResult<MessagesBridgeState> {
-        let Some(stored_bridge_state) = self.store.get(local_key_id, response_id, now_ms) else {
-            return Err(AdapterError::continuation_missing());
+        self.store.prune(now_ms);
+        let stored_bridge_state = if let Some(stored) = self
+            .store
+            .entries
+            .get(&(local_key_id.to_owned(), response_id.to_owned()))
+        {
+            stored
+        } else {
+            // A full-history Responses client may omit the response ID. Keep
+            // one bounded snapshot and find its portable-history alias.
+            let mut matches = self.store.entries.iter().filter(|((key, _), stored)| {
+                key == local_key_id && stored.state.history_key() == Some(response_id)
+            });
+            let (_, first) = matches
+                .next()
+                .ok_or_else(AdapterError::continuation_missing)?;
+            if matches.any(|(_, other)| {
+                other.candidate_id != first.candidate_id || other.state != first.state
+            }) {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            first
         };
         if stored_bridge_state.candidate_id != candidate_id {
             return Err(AdapterError::continuation_mismatch());
@@ -227,6 +247,15 @@ impl MessagesBridgeStore {
         bridge_state: MessagesBridgeState,
         now_ms: u64,
     ) -> bool {
+        if self
+            .store
+            .get(local_key_id, response_id, now_ms)
+            .is_some_and(|stored| {
+                stored.candidate_id != candidate_id || stored.state != bridge_state
+            })
+        {
+            return false;
+        }
         self.store.insert(
             local_key_id,
             response_id,

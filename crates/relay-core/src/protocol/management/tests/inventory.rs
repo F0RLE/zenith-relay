@@ -13,6 +13,7 @@ fn model_summaries_keep_member_exclusions_and_apply_pool_hidden_state() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),
@@ -187,7 +188,7 @@ fn member_model_order_uses_complete_inventory_independently_of_rules() {
     let original_account = accounts[0].clone();
 
     apply_member_model_display_order(&mut sources, &mut accounts, &[], &metadata);
-    let expected = ["older", "newer", "unknown-z", "unknown-a"];
+    let expected = ["newer", "older", "unknown-a", "unknown-z"];
     assert_eq!(sources[0].models, expected);
     assert_eq!(accounts[0].models, expected);
     let mut expected_source = original_source;
@@ -196,11 +197,15 @@ fn member_model_order_uses_complete_inventory_independently_of_rules() {
     expected_account.models = expected_source.models.clone();
     assert_eq!(sources[0], expected_source);
     assert_eq!(accounts[0], expected_account);
-    let identities = member_model_catalog(&sources, &accounts, &metadata);
-    assert_eq!(identities.len(), 2);
+    let identities = member_model_catalog(&sources, &accounts, &[], &metadata);
+    assert_eq!(identities.len(), 4);
     assert_eq!(identities["newer"].catalog_provider, "test");
     assert_eq!(identities["older"].catalog_provider, "test");
-    assert!(!identities.contains_key("unknown-z"));
+    assert_eq!(identities["unknown-z"].catalog_provider, "other");
+    assert_eq!(identities["newer"].catalog_order, Some(0));
+    assert_eq!(identities["older"].catalog_order, Some(1));
+    assert_eq!(identities["unknown-a"].catalog_order, Some(2));
+    assert_eq!(identities["unknown-z"].catalog_order, Some(3));
     assert!(!identities.contains_key("catalog-only"));
 
     sources[0].excluded_models.clear();
@@ -217,7 +222,7 @@ fn member_model_order_uses_complete_inventory_independently_of_rules() {
     );
     assert_eq!(
         sources[0].models,
-        ["older", "newer", "unknown-z", "unknown-a"]
+        ["older", "newer", "unknown-a", "unknown-z"]
     );
     assert_eq!(accounts[0].models, sources[0].models);
 }
@@ -272,7 +277,7 @@ fn advisory_metadata_changes_only_presentation_fields_and_order() {
             .iter()
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>(),
-        ["older", "newer"]
+        ["newer", "older"]
     );
     let newer = models.iter().find(|model| model.id == "newer").unwrap();
     assert_eq!(newer.catalog_name.as_deref(), Some("Newer"));
@@ -349,6 +354,7 @@ fn source_summary_projects_every_catalog_model_to_all_client_protocols() {
         base_url: "https://example.test/v1".into(),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
         protocol_config: crate::SourceProtocolConfig::default(),

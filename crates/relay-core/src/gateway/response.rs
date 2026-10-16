@@ -2,7 +2,9 @@ mod completion;
 mod http;
 mod usage;
 
-pub(in crate::gateway) use completion::{collect_basis_points_response, stop_basis_points_event};
+pub(in crate::gateway) use completion::{
+    collect_basis_points_response, stop_basis_points_event, BufferedResponseTiming,
+};
 pub(super) use completion::{
     collect_upstream_response, completed_upstream_response, validate_upstream_response,
 };

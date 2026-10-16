@@ -31,6 +31,7 @@ pub(super) struct OpenStreamInput<'a> {
     pub(super) route: ExecutorRoute,
     pub(super) lease: CandidateLease,
     pub(super) adapter_request: PreparedAdapterRequest,
+    pub(super) basis_points_request: Option<Value>,
     pub(super) request: Value,
     pub(super) request_id: String,
     pub(super) key: &'a AuthenticatedKey,
@@ -70,6 +71,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         route,
         lease,
         adapter_request,
+        basis_points_request,
         mut request,
         request_id,
         key,
@@ -106,41 +108,39 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         requested_model,
         prompt_affinity_key,
     };
-    match bootstrap_stream(
-        upstream,
-        (route.account_id.is_some() && runtime.block_degraded_routes_enabled())
-            .then_some(route.source_model.as_str()),
-    )
-    .await
-    {
-        Ok((headers, first, remaining)) => {
-            let account_route = route.account_id.is_some();
-            respond_opened_stream(
-                StreamExecution {
-                    runtime: runtime.clone(),
-                    route,
-                    lease,
-                    adapter_request,
-                    request,
-                    request_id,
-                    local_key_id: key.id.clone(),
-                    requested_model,
-                    source_model,
-                    prompt_affinity_key,
-                    client_wire_api,
-                    reasoning_effort,
-                    tool_use,
-                    attempt,
-                    started,
-                },
-                status,
-                forwarded_headers,
-                headers,
-                first,
-                remaining,
-                account_route,
-            )
-        }
+    let expected_model = (route.account_id.is_some() && runtime.block_degraded_routes_enabled())
+        .then_some(route.source_model.as_str());
+    let opened = if basis_points_request.is_some() {
+        crate::gateway::streaming::bootstrap_basis_points_stream(upstream, expected_model).await
+    } else {
+        bootstrap_stream(upstream, expected_model).await
+    };
+    match opened {
+        Ok((headers, first, remaining)) => respond_opened_stream(
+            StreamExecution {
+                runtime: runtime.clone(),
+                route,
+                lease,
+                adapter_request,
+                request,
+                request_id,
+                local_key_id: key.id.clone(),
+                requested_model,
+                source_model,
+                prompt_affinity_key,
+                client_wire_api,
+                reasoning_effort,
+                tool_use,
+                attempt,
+                started,
+            },
+            status,
+            forwarded_headers,
+            headers,
+            first,
+            remaining,
+            basis_points_request,
+        ),
         Err(bootstrap_failure) => {
             let invalid_function_call_output_call_id =
                 bootstrap_failure.invalid_function_call_output_call_id;
@@ -149,7 +149,9 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 .as_ref()
                 .is_some_and(|error| responses_tool_call_is_missing_output_message(&error.message));
             let tool_links_rejected = bootstrap_failure.responses_tool_call_links_rejected;
-            let mut failure = bootstrap_failure.failure;
+            let mut failure = bootstrap_failure
+                .failure
+                .with_retry_headers(response_headers);
             failure.execution = bootstrap_failure.execution;
             *last_preserved_upstream_error = bootstrap_failure.preserved;
             let upstream_error = bootstrap_failure.upstream_error;
@@ -173,7 +175,8 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 details.http_status = Some(status.as_u16());
                 details
             });
-            let safe_to_repair = failure.execution.certainty == ExecutionCertainty::NotSent;
+            let safe_to_repair = failure.execution.certainty == ExecutionCertainty::NotSent
+                && failure.category != error_codes::UPSTREAM_TURN_RATE_LIMITED;
             if safe_to_repair
                 && try_repair_legacy_responses_call_ids(LegacyCallIdRepair {
                     request: &mut request,
@@ -239,7 +242,10 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                     Err(error) => {
                         emit_usage(runtime, mark_adapter_failure(event, &error));
                         lease.settle_rotation_terminal(now_ms());
-                        return OpenedStream::Respond(adapter_error_response(error));
+                        return OpenedStream::Respond(adapter_error_response(
+                            error,
+                            Some(&request_id),
+                        ));
                     }
                 }
             }
@@ -309,9 +315,20 @@ fn respond_opened_stream(
     headers: reqwest::header::HeaderMap,
     first: Bytes,
     remaining: UpstreamStream,
-    account_route: bool,
+    basis_points_request: Option<Value>,
 ) -> OpenedStream {
-    let mut stream_response = execution.into_response(status, headers.clone(), first, remaining);
+    let account_route = execution.route.account_id.is_some();
+    let mut stream_response = if basis_points_request.is_some() {
+        execution.into_response_with_basis_points(
+            status,
+            headers.clone(),
+            first,
+            remaining,
+            basis_points_request,
+        )
+    } else {
+        execution.into_response(status, headers.clone(), first, remaining)
+    };
     if account_route {
         relay_account_response_header(forwarded_headers, &headers, &mut stream_response);
     }

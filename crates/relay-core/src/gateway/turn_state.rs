@@ -16,7 +16,11 @@ const SESSION_HEADERS: &[&str] = &[
 
 fn client_session_id(headers: &HeaderMap) -> Option<&str> {
     SESSION_HEADERS.iter().find_map(|header_name| {
-        let session_id = headers.get(*header_name)?.to_str().ok()?.trim();
+        let mut values = headers.get_all(*header_name).iter();
+        let session_id = values.next()?.to_str().ok()?.trim();
+        if values.next().is_some() {
+            return None;
+        }
         (!session_id.is_empty()
             && session_id.len() <= 256
             && !session_id.chars().any(char::is_control))
@@ -29,12 +33,14 @@ pub(super) fn request_scope<'a>(
     headers: &'a HeaderMap,
     account_id: Option<&'a str>,
     model: &'a str,
+    endpoint: &'a str,
 ) -> Option<CodexTurnStateScope<'a>> {
     Some(CodexTurnStateScope {
         local_key_id,
         session_id: client_session_id(headers)?,
         account_id: account_id?,
         model,
+        endpoint,
     })
 }
 
@@ -95,5 +101,27 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(CODEX_TURN_STATE_HEADER, HeaderValue::from_static("state"));
         assert!(client_session_id(&headers).is_none());
+    }
+
+    #[test]
+    fn soft_root_metadata_does_not_authorize_opaque_turn_state() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(r#"{"session_id":"synthetic-root","thread_id":"child-a"}"#),
+        );
+        headers.insert(
+            CODEX_TURN_STATE_HEADER,
+            HeaderValue::from_static("unknown-state"),
+        );
+        assert!(request_scope("key", &headers, Some("account"), "model", "endpoint").is_none());
+    }
+
+    #[test]
+    fn duplicate_session_headers_cannot_authorize_turn_state() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-codex-session-id", HeaderValue::from_static("session-a"));
+        headers.append("x-codex-session-id", HeaderValue::from_static("session-b"));
+        assert!(request_scope("key", &headers, Some("account"), "model", "endpoint").is_none());
     }
 }

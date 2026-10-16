@@ -2,7 +2,7 @@ use super::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::{
     accounts::{
         credentials::CredentialStore,
-        proxy::{ProxyPool, ProxyPoolSummary},
+        proxy::{account_proxy_pool_id, common_proxy_pool_id, ProxyPool, ProxyPoolSummary},
         NativeSecretBackend,
     },
     error::CommandError,
@@ -18,7 +18,8 @@ pub(crate) use apply::set_account_proxy_inner;
 use apply::{apply_choices, load_reconciled_pool, normalize_ids};
 use types::{
     AssignFreeProxiesInput, AssignStoredProxyInput, DeleteStoredProxiesInput, ImportProxyPoolInput,
-    ProxyChoice, ProxyPoolImportResult, SetStoredProxyAccountsInput, StoredProxyAssignmentResult,
+    ProxyChoice, ProxyPoolImportResult, SetStoredProxyAccountsInput, SetStoredProxyTimezoneInput,
+    StoredProxyAssignmentResult,
 };
 
 #[tauri::command]
@@ -88,11 +89,10 @@ pub async fn delete_local_stored_proxy(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<ProxyPoolSummary, CommandError> {
     let _mutation = state.setup_guard().await;
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let mut pool = load_reconciled_pool(&state, &credentials)?;
-    pool.delete(proxy_id.trim())?;
-    pool.save()?;
-    Ok(pool.summary())
+    let proxy_ids = normalize_ids(vec![proxy_id], false)?;
+    apply::delete_proxies(&state, &proxy_ids)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -102,11 +102,9 @@ pub async fn delete_local_stored_proxies(
 ) -> std::result::Result<ProxyPoolSummary, CommandError> {
     let _mutation = state.setup_guard().await;
     let proxy_ids = normalize_ids(input.proxy_ids, false)?;
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let mut pool = load_reconciled_pool(&state, &credentials)?;
-    pool.delete_many(&proxy_ids)?;
-    pool.save()?;
-    Ok(pool.summary())
+    apply::delete_proxies(&state, &proxy_ids)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -131,21 +129,46 @@ pub async fn set_local_stored_proxy_accounts(
     let _mutation = state.setup_guard().await;
     let proxy_id = input.proxy_id.trim().to_string();
     let account_ids = normalize_ids(input.account_ids, true)?;
+    apply::set_proxy_accounts(&state, &proxy_id, account_ids)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_stored_proxy_timezone(
+    input: SetStoredProxyTimezoneInput,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<ProxyPoolSummary, CommandError> {
+    let _mutation = state.setup_guard().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let currently_assigned_account_ids =
-        load_reconciled_pool(&state, &credentials)?.assigned_account_ids(&proxy_id)?;
-    let selected = account_ids.iter().cloned().collect::<HashSet<_>>();
-    let mut choices = currently_assigned_account_ids
-        .into_iter()
-        .filter(|account_id| !selected.contains(account_id.as_str()))
-        .map(|account_id| (account_id, ProxyChoice::Inherited))
-        .collect::<Vec<_>>();
-    choices.extend(
-        account_ids
-            .into_iter()
-            .map(|account_id| (account_id, ProxyChoice::Stored(proxy_id.clone()))),
-    );
-    apply_choices(&state, choices).await.map_err(Into::into)
+    let old_pool = load_reconciled_pool(&state, &credentials)?;
+    let mut pool = old_pool.clone();
+    let changed = pool.set_timezone(input.proxy_id.trim(), input.timezone)?;
+    if !changed {
+        return Ok(pool.summary());
+    }
+    let settings = state.store()?.gateway().clone();
+    let common_proxy_id = common_proxy_pool_id(&settings, &pool);
+    let mut affected_accounts = Vec::new();
+    for account in state.store()?.accounts() {
+        if let Some(secret) = credentials
+            .load(&account.account.id)
+            .map_err(crate::local_pool::accounts::credentials::credential_invalid_state_error)?
+        {
+            if account_proxy_pool_id(&pool, &secret, common_proxy_id.as_deref()).as_deref()
+                == Some(input.proxy_id.trim())
+            {
+                affected_accounts.push(account.account.id.clone());
+            }
+        }
+    }
+    let runtime = state.gateway.runtime().await;
+    let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &affected_accounts, &[]);
+    pool.save()?;
+    if let Err(error) = restart_or_rollback(&state, move || old_pool.save()).await {
+        return Err(error.into());
+    }
+    Ok(pool.summary())
 }
 
 #[tauri::command]

@@ -19,6 +19,15 @@ pub(super) enum Service {
 }
 
 impl Service {
+    pub(super) fn protocols(self, url: &Url) -> Vec<WireApi> {
+        match self {
+            // This service publishes all four generation endpoints. The model's
+            // native contract is selected separately from the client's wire API.
+            Self::Zenith => WireApi::ALL.to_vec(),
+            _ => self.protocol(url).into_iter().collect(),
+        }
+    }
+
     pub(super) fn from_host(host: &str) -> Option<Self> {
         match host {
             "api.zenithmarket.dev" => Some(Self::Zenith),
@@ -41,7 +50,13 @@ impl Service {
     pub(super) fn protocol(self, url: &Url) -> Option<WireApi> {
         let path = url.path().trim_end_matches('/');
         match self {
-            Self::Zenith | Self::OpenAi | Self::Moonshot => Some(WireApi::Responses),
+            Self::Zenith
+            | Self::OpenAi
+            | Self::OpenRouter
+            | Self::Deepseek
+            | Self::Groq
+            | Self::Moonshot
+            | Self::Xai => Some(WireApi::Responses),
             Self::Anthropic => Some(WireApi::Messages),
             Self::Gemini => Some(WireApi::Gemini),
             Self::KimiCode if path == "/coding" || path.starts_with("/coding/") => {
@@ -51,10 +66,8 @@ impl Service {
             Self::MiniMax if path == "/anthropic" || path.starts_with("/anthropic/") => {
                 Some(WireApi::Messages)
             }
-            Self::MiniMax | Self::OpenRouter | Self::Deepseek | Self::Groq | Self::Mistral => {
-                Some(WireApi::ChatCompletions)
-            }
-            Self::SiliconFlow | Self::Xai => None,
+            Self::MiniMax | Self::Mistral => Some(WireApi::ChatCompletions),
+            Self::SiliconFlow => None,
         }
     }
 
@@ -63,6 +76,17 @@ impl Service {
         let path = match (self, url.path().trim_end_matches('/')) {
             (Self::KimiCode, "/coding") => "/coding/v1/",
             (Self::MiniMax, "/anthropic") => "/anthropic/v1/",
+            _ => return,
+        };
+        url.set_path(path);
+    }
+
+    /// Published Gemini endpoints can use a different root from OpenAI routes.
+    /// Keep custom roots and explicitly selected Gemini versions intact.
+    pub(super) fn normalize_gemini_api_root(self, url: &mut Url) {
+        let path = match (self, url.path().trim_end_matches('/')) {
+            (Self::Zenith, "" | "/v1") => "/v1beta/",
+            (Self::Gemini, "" | "/v1beta/openai") => "/v1beta/",
             _ => return,
         };
         url.set_path(path);

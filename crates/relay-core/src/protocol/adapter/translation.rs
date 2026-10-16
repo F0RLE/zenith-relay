@@ -3,10 +3,13 @@ mod citations;
 mod continuation;
 mod decode;
 mod encode;
+mod options;
 mod response;
+mod schema;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod tool_arguments;
 
 pub(super) use super::contracts::validate_bridge_fields as checked;
 use super::contracts::{
@@ -28,6 +31,17 @@ pub(crate) fn continuation_key(
     continuation::request_key(client, request, model)
 }
 
+pub(in crate::protocol::adapter) fn responses_history(
+    input: &Value,
+) -> AdapterResult<Vec<Message>> {
+    decode::responses_history(input)
+}
+
+pub(in crate::protocol::adapter) fn validate_responses_history(input: &Value) -> AdapterResult<()> {
+    let mut messages = responses_history(input)?;
+    decode::resolve_tool_history(&mut messages)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(super) enum Block {
     Text(String),
@@ -45,6 +59,8 @@ pub(super) enum Block {
         name: String,
         content: Vec<Block>,
         is_error: bool,
+        /// Custom-tool output is literal text, even when it looks like JSON.
+        raw_text: bool,
     },
     Reasoning(String),
     Refusal(String),
@@ -76,6 +92,7 @@ enum OutputFormat {
     JsonObject,
     JsonSchema {
         name: String,
+        description: Option<String>,
         schema: Value,
         strict: Option<bool>,
     },
@@ -91,6 +108,8 @@ enum Reasoning {
 
 #[derive(Clone, Debug, Default)]
 struct Request {
+    origin: Option<WireApi>,
+    metadata: BTreeMap<String, String>,
     instructions: Option<Message>,
     messages: Vec<Message>,
     tools: Vec<Function>,
@@ -102,6 +121,10 @@ struct Request {
     max_tokens: Option<u64>,
     temperature: Option<f64>,
     top_p: Option<f64>,
+    top_k: Option<u64>,
+    presence_penalty: Option<f64>,
+    frequency_penalty: Option<f64>,
+    seed: Option<i64>,
     stop: Vec<String>,
     output_format: Option<OutputFormat>,
     reasoning: Option<Reasoning>,
@@ -143,6 +166,7 @@ struct Response {
 #[derive(Clone, Debug)]
 pub struct TranslationRequest {
     pub(super) upstream_body: Value,
+    metadata: BTreeMap<String, String>,
     client: WireApi,
     upstream: WireApi,
     model: String,
@@ -153,6 +177,7 @@ pub struct TranslationRequest {
     allowed_tool_names: BTreeSet<String>,
     parallel_tools: bool,
     response_tools: Option<Vec<Value>>,
+    response_call_targets: BTreeMap<String, ClientToolTarget>,
     native_turns: BTreeMap<usize, Vec<Value>>,
 }
 
@@ -191,7 +216,6 @@ impl TranslationRequest {
         } else {
             None
         };
-        let mut decoded_request = decode::request(context.client_wire_api, &effective_request)?;
         let has_previous = context.client_wire_api == WireApi::Responses
             && context
                 .request
@@ -201,6 +225,12 @@ impl TranslationRequest {
         if has_previous && context.previous.is_none() {
             return Err(AdapterError::continuation_missing());
         }
+        let response_call_targets = if context.client_wire_api == WireApi::Responses {
+            decode::responses_tool_results(&effective_request, context.previous.as_ref())?
+        } else {
+            BTreeMap::new()
+        };
+        let mut decoded_request = decode::request(context.client_wire_api, &effective_request)?;
         let native_turns = if let Some(previous) = context.previous {
             continuation::restore(
                 &mut decoded_request,
@@ -245,6 +275,7 @@ impl TranslationRequest {
         );
         Ok(Self {
             upstream_body,
+            metadata: decoded_request.metadata,
             client: context.client_wire_api,
             upstream,
             model: context.model.to_owned(),
@@ -263,6 +294,7 @@ impl TranslationRequest {
                 .collect(),
             parallel_tools: decoded_request.parallel_tools.unwrap_or(true),
             response_tools,
+            response_call_targets,
             native_turns,
         })
     }
@@ -282,10 +314,21 @@ impl TranslationRequest {
 
     fn complete(self, mut response: Response) -> AdapterResult<MessagesBridgeResponse> {
         self.validate_tool_calls(&response.blocks)?;
+        for block in &mut response.blocks {
+            self.normalize_function_arguments(block, true);
+        }
         response.id = self.response_id.clone();
-        let response_body =
+        let mut response_body =
             response::encode(self.client, &response, &self.model, &self.client_tools)?;
+        if self.client == WireApi::Responses {
+            options::write_metadata(
+                response_body.as_object_mut().expect("encoded response"),
+                &self.metadata,
+                self.client,
+            )?;
+        }
         let mut continuation = MessagesBridgeState::new(&self.model, self.reasoning_mode);
+        continuation.client_wire_api = Some(self.client);
         continuation.reusable = matches!(response.finish, Finish::Stop | Finish::Tools);
         let mut history = self.history;
         continuation.native_turns = self.native_turns;
@@ -301,16 +344,31 @@ impl TranslationRequest {
         });
         continuation.portable_history = Some(history);
         continuation.response_tools = self.response_tools;
-        if self.client != WireApi::Responses {
-            continuation.history_key = Some(continuation::history_key(
-                self.client,
-                &self.model,
-                continuation
-                    .portable_history
-                    .as_deref()
-                    .expect("portable history"),
-            )?);
+        continuation.response_call_targets = self.response_call_targets;
+        for block in continuation
+            .portable_history
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|message| &message.blocks)
+        {
+            if let Block::ToolCall { id, name, .. } = block {
+                if let Some(target) = self.client_tools.get(name) {
+                    continuation
+                        .response_call_targets
+                        .entry(id.clone())
+                        .or_insert_with(|| target.clone());
+                }
+            }
         }
+        continuation.history_key = Some(continuation::history_key(
+            self.client,
+            &self.model,
+            continuation
+                .portable_history
+                .as_deref()
+                .expect("portable history"),
+        )?);
         Ok(MessagesBridgeResponse {
             response_body,
             response_id: self.response_id,
@@ -318,14 +376,37 @@ impl TranslationRequest {
         })
     }
 
+    fn normalize_function_arguments(&self, block: &mut Block, complete: bool) {
+        if self.client != WireApi::Responses {
+            return;
+        }
+        if let Block::ToolCall {
+            name, arguments, ..
+        } = block
+        {
+            if !self
+                .client_tools
+                .get(name)
+                .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
+            {
+                *arguments = tool_arguments::normalize(arguments, complete);
+            }
+        }
+    }
+
     fn validate_tool_call(&self, id: &str, name: &str) -> AdapterResult<()> {
         if id.is_empty()
-            || !self.allowed_tool_names.contains(name)
             || self.history.iter().flat_map(|message| &message.blocks).any(
                 |block| matches!(block, Block::ToolCall { id: previous_id, .. } if previous_id == id),
             )
         {
-            return Err(AdapterError::upstream_response_invalid());
+            return Err(
+                AdapterError::upstream_response_invalid().with_parameter("tool_calls.id")
+            );
+        }
+        if !self.allowed_tool_names.contains(name) {
+            return Err(AdapterError::upstream_response_invalid()
+                .with_parameter("tool_calls.function.name"));
         }
         Ok(())
     }
@@ -342,6 +423,24 @@ impl TranslationRequest {
             return Err(AdapterError::upstream_response_invalid());
         }
         Ok(())
+    }
+}
+
+/// Compatible Chat providers use either spelling for the same plaintext.
+/// Conflicting nonempty values cannot be merged without changing their meaning.
+fn chat_reasoning_text(message: &Value, invalid: AdapterError) -> AdapterResult<Option<&str>> {
+    let text = |field| {
+        message
+            .get(field)
+            .filter(|value| !value.is_null())
+            .map(|value| value.as_str().ok_or(invalid))
+            .transpose()
+            .map(|value| value.filter(|text| !text.is_empty()))
+    };
+    match (text("reasoning_content")?, text("reasoning")?) {
+        (Some(content), Some(reasoning)) if content != reasoning => Err(invalid),
+        (Some(content), _) => Ok(Some(content)),
+        (_, reasoning) => Ok(reasoning),
     }
 }
 

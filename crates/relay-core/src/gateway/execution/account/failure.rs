@@ -80,6 +80,24 @@ pub(super) fn handle_account_status_failure(
     mut account_failure_input: AccountStatusFailureInput<'_>,
 ) -> AccountStatusFailure {
     let mut classified = classify_account_failure(&mut account_failure_input);
+    if classified.failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+        let input = &account_failure_input;
+        let state = settle_route_failure(
+            input.runtime,
+            input.lease,
+            input.route,
+            &classified.failure,
+            input.response_headers,
+        );
+        apply_failure_state(&mut classified.event, state);
+        emit_usage(input.runtime, classified.event);
+        return AccountStatusFailure::Respond(super::super::attempt_error_response(
+            classified.failure,
+            input.last_preserved_upstream_error.as_ref(),
+            input.selected_error_origin,
+            input.request_id,
+        ));
+    }
     if let Some(step) = repair_account_body(&mut account_failure_input, &mut classified) {
         return step;
     }
@@ -156,7 +174,8 @@ fn classify_account_failure(
     let mut failure = AttemptFailure::status_with_body(
         account_failure_input.status,
         Some(&account_failure_input.bytes),
-    );
+    )
+    .with_retry_headers(account_failure_input.response_headers);
     super::super::super::errors::apply_degraded_route_policy(
         account_failure_input.runtime,
         &mut failure,

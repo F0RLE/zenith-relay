@@ -35,18 +35,20 @@ mod history;
 mod policy;
 mod process;
 
-pub(in crate::local_pool::commands) use catalog::refresh_active_codex_catalog;
 pub(in crate::local_pool) use catalog::CodexCatalogRefreshStatus;
 use catalog::{fetch_codex_model_catalog, load_direct_source_api_key, validate_direct_source};
 
 pub(in crate::local_pool) async fn refresh_active_client_catalogs(
     state: &DesktopState,
 ) -> LocalResult<CodexCatalogRefreshStatus> {
-    catalog::refresh_client_catalogs(
+    let claude = super::claude_desktop::refresh_catalog(state).await;
+    let other_clients = catalog::refresh_client_catalogs(
         super::opencode::refresh_active_opencode_catalog(state),
         catalog::refresh_active_codex_catalog(state),
     )
-    .await
+    .await;
+    claude?;
+    other_clients
 }
 pub(in crate::local_pool::commands) use actions::verify_remote_profile_binding;
 use actions::{
@@ -73,11 +75,7 @@ fn with_chatgpt_context<T>(
     profile_dir: &Path,
     operation: impl FnOnce() -> Result<T, CommandError>,
 ) -> Result<T, CommandError> {
-    let change = codex::sync_context_policy(
-        profile_dir,
-        &state.profile_backup_root(),
-        state.store()?.gateway().chatgpt_context_policy,
-    )?;
+    let change = codex::sync_context_policy(profile_dir, &state.profile_backup_root())?;
     operation().map_err(|mut error| {
         if let Err(rollback) = change.rollback() {
             error.message = format!(

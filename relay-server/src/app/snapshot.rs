@@ -15,9 +15,10 @@ use zenith_relay_core::{
     pricing::{PricingCatalog, PricingContext, PricingMetadata},
     protocol::{
         apply_model_display_order_with_catalog, apply_model_metadata,
-        apply_pool_model_configuration, pool_candidate_count, pool_model_summaries_with_pricing,
-        pool_pricing_source_summary, pooled_source_runtime_available, source_runtime_available,
-        AccountRefreshState, AccountSummary, GatewaySummary, ProxyMode, QuotaWindowUsage,
+        apply_pool_model_configuration_with_context, pool_candidate_count,
+        pool_model_summaries_with_pricing, pool_pricing_source_summary,
+        pooled_source_runtime_available, source_runtime_available, AccountRefreshState,
+        AccountSummary, GatewaySummary, PoolModelConfigurationInput, ProxyMode, QuotaWindowUsage,
         RefreshStatus, RuntimeStateSnapshot, RuntimeTargetSummary, SourceRefreshState,
         SourceSummary,
     },
@@ -57,6 +58,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
     let model_price_overrides = state.store.model_price_overrides()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
+    let model_context_policies = state.store.model_context_policies()?;
     let model_display_order = state.store.model_display_order()?;
     let configuration_revision = configuration_revision(&state.store.configuration_settings()?)?;
     let pricing_catalog = state.pricing_catalog();
@@ -114,14 +116,17 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
         &pricing_context,
     );
     apply_model_metadata(&mut models, &model_metadata);
-    apply_pool_model_configuration(
+    apply_pool_model_configuration_with_context(
         &mut models,
-        &source_summaries,
-        &account_summaries,
-        &model_price_overrides,
-        &model_reasoning_allowed_levels,
-        &model_service_tier_overrides,
-        runtime.as_deref(),
+        PoolModelConfigurationInput {
+            sources: &source_summaries,
+            accounts: &account_summaries,
+            model_price_overrides: &model_price_overrides,
+            model_reasoning_allowed_levels: &model_reasoning_allowed_levels,
+            model_context_policies: &model_context_policies,
+            model_service_tier_overrides: &model_service_tier_overrides,
+            runtime: runtime.as_deref(),
+        },
     );
     apply_model_display_order_with_catalog(&mut models, &model_display_order, &model_metadata);
     zenith_relay_core::protocol::apply_member_model_display_order(
@@ -183,6 +188,7 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             model_catalog: zenith_relay_core::protocol::member_model_catalog(
                 &source_summaries,
                 &account_summaries,
+                &model_display_order,
                 &model_metadata,
             ),
             common_proxy_configured: proxy_settings.common_configured,
@@ -193,7 +199,6 @@ pub(super) fn build(state: &AppState) -> Result<RuntimeStateSnapshot, String> {
             chatgpt_interface_quota_reserve_basis_points: None,
             codex_background_tasks_enabled,
             codex_websockets_enabled,
-            chatgpt_context_policy: Default::default(),
             chatgpt_retry_until_available,
             block_degraded_routes_enabled,
             routing_order,

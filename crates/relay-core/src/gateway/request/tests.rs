@@ -38,6 +38,7 @@ fn capability_test_runtime(models: &[&str], options: GatewayRuntimeOptions) -> G
             api_key: "upstream-secret".into(),
             wire_api: WireApi::Responses,
             models: models.iter().map(|id| (*id).to_string()).collect(),
+            proxy_url: None,
         })],
         vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
             id: "key".into(),

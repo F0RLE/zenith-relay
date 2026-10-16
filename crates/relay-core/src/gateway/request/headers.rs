@@ -1,7 +1,6 @@
 use crate::providers::chatgpt::valid_codex_client_version;
 use crate::runtime::DefaultServiceTier;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
-use sha2::{Digest, Sha256};
 
 pub(in crate::gateway) const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
 
@@ -18,6 +17,18 @@ fn is_client_auth_header(header_name: &str) -> bool {
             | "x-auth-token"
             | "x-api-token"
     ) || header_name.ends_with("-api-key")
+}
+
+// Connection options are hop-by-hop even when they name an otherwise allowed
+// protocol extension. Never restore them on the next upstream connection.
+fn is_connection_header(client_headers: &HeaderMap, header_name: &str) -> bool {
+    client_headers.get_all("connection").iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|option| option.trim().eq_ignore_ascii_case(header_name))
+        })
+    })
 }
 
 const FORWARDED_RESPONSES_HEADERS: &[&str] = &[
@@ -45,17 +56,6 @@ const FORWARDED_RESPONSES_HEADERS: &[&str] = &[
     "x-session-id",
 ];
 
-const CLIENT_CONTEXT_HEADERS: &[&str] = &[
-    "x-codex-session-id",
-    "x-session-id",
-    "session_id",
-    "session-id",
-    "thread-id",
-    "x-codex-parent-thread-id",
-    "x-codex-window-id",
-    "x-codex-installation-id",
-];
-
 const MANAGED_CODEX_USER_AGENT_PREFIXES: &[&str] = &[
     "codex desktop/",
     "codex-tui/",
@@ -73,25 +73,6 @@ const MANAGED_CODEX_ORIGINATORS: &[&str] = &[
 
 const CODEX_VERSION_USER_AGENT_PREFIXES: &[&str] =
     &["codex desktop/", "codex-tui/", "codex_cli_rs/"];
-
-/// Returns a stable, privacy-safe identifier for the client stream that sent
-/// a request. Raw session, thread, installation, and window values never
-/// leave this function.
-pub(in crate::gateway) fn client_context_fingerprint(client_headers: &HeaderMap) -> Option<String> {
-    let mut digest = Sha256::new();
-    let (header_name, context_value) = CLIENT_CONTEXT_HEADERS.iter().find_map(|&header_name| {
-        client_headers
-            .get(header_name)
-            .and_then(|header_value| header_value.to_str().ok())
-            .map(str::trim)
-            .filter(|context_value| !context_value.is_empty())
-            .map(|context_value| (header_name, context_value))
-    })?;
-    digest.update(header_name.as_bytes());
-    digest.update([0]);
-    digest.update(context_value.as_bytes());
-    Some(format!("client_{}", hex::encode(&digest.finalize()[..12])))
-}
 
 /// Identifies Relay-managed Codex or ChatGPT traffic without treating an
 /// ordinary OpenAI-compatible API call as a managed client request. The result
@@ -134,8 +115,27 @@ pub(in crate::gateway) fn is_managed_codex_client(headers: &HeaderMap) -> bool {
 pub(in crate::gateway) fn forwarded_responses_headers(client_headers: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for &header_name in FORWARDED_RESPONSES_HEADERS {
-        if let Some(header_value) = client_headers.get(header_name) {
-            headers.insert(HeaderName::from_static(header_name), header_value.clone());
+        if is_connection_header(client_headers, header_name) {
+            continue;
+        }
+        // Session/state identity is a singleton contract, unlike beta feature
+        // lists. Do not let upstream choose a different duplicate from Relay.
+        if matches!(
+            header_name,
+            "session-id"
+                | "session_id"
+                | "thread-id"
+                | "x-codex-session-id"
+                | "x-codex-parent-thread-id"
+                | "x-codex-turn-metadata"
+                | "x-codex-turn-state"
+                | "x-session-id"
+        ) && client_headers.get_all(header_name).iter().count() != 1
+        {
+            continue;
+        }
+        for header_value in client_headers.get_all(header_name) {
+            headers.append(HeaderName::from_static(header_name), header_value.clone());
         }
     }
     headers
@@ -148,6 +148,14 @@ pub(in crate::gateway) fn forwarded_codex_headers(
     let mut headers = forwarded_responses_headers(client_headers);
     let session_id = client_headers
         .get(CLAUDE_CODE_SESSION_HEADER)
+        .filter(|_| !is_connection_header(client_headers, CLAUDE_CODE_SESSION_HEADER))
+        .filter(|_| {
+            client_headers
+                .get_all(CLAUDE_CODE_SESSION_HEADER)
+                .iter()
+                .count()
+                == 1
+        })
         .or_else(|| {
             [
                 "x-codex-session-id",
@@ -157,6 +165,8 @@ pub(in crate::gateway) fn forwarded_codex_headers(
                 "thread-id",
             ]
             .iter()
+            .filter(|header_name| !is_connection_header(client_headers, header_name))
+            .filter(|header_name| client_headers.get_all(**header_name).iter().count() == 1)
             .find_map(|header_name| client_headers.get(*header_name))
         })
         .cloned()
@@ -232,6 +242,14 @@ pub(in crate::gateway) fn forwarded_bridge_messages_headers(
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for header_name in ["user-agent", CLAUDE_CODE_SESSION_HEADER] {
+        if is_connection_header(client_headers, header_name) {
+            continue;
+        }
+        if header_name == CLAUDE_CODE_SESSION_HEADER
+            && client_headers.get_all(header_name).iter().count() != 1
+        {
+            continue;
+        }
         if let Some(header_value) = client_headers.get(header_name) {
             headers.insert(HeaderName::from_static(header_name), header_value.clone());
         }
@@ -243,7 +261,10 @@ pub(in crate::gateway) fn forwarded_bridge_messages_headers(
 /// harmless client identity header and never forward Claude/OpenAI metadata.
 pub(in crate::gateway) fn forwarded_bridge_gemini_headers(client_headers: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Some(user_agent) = client_headers.get("user-agent") {
+    if let Some(user_agent) = client_headers
+        .get("user-agent")
+        .filter(|_| !is_connection_header(client_headers, "user-agent"))
+    {
         headers.insert(HeaderName::from_static("user-agent"), user_agent.clone());
     }
     headers
@@ -261,7 +282,12 @@ pub(in crate::gateway) fn forwarded_messages_headers(client_headers: &HeaderMap)
             || header_name.starts_with("anthropic-")
             || header_name.starts_with("x-claude-")
             || header_name.starts_with("x-stainless-");
-        if is_messages_metadata && !is_client_auth_header(header_name) {
+        if is_messages_metadata
+            && !is_client_auth_header(header_name)
+            && !is_connection_header(client_headers, header_name)
+            && (header_name != CLAUDE_CODE_SESSION_HEADER
+                || client_headers.get_all(header_name).iter().count() == 1)
+        {
             headers.append(
                 HeaderName::from_bytes(header_name.as_bytes())
                     .expect("request header name is valid"),

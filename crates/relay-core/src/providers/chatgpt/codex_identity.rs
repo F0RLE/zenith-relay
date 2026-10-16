@@ -103,33 +103,48 @@ impl CodexIdentityEnvelope {
         self.with_client_version(&client_version)
     }
 
-    /// Applies Relay's owned account binding and fallback identity to a
-    /// request created outside the gateway forwarding path.
-    ///
-    /// This keeps discovery and quota probes on the same header contract as
-    /// forwarded account traffic without overwriting an identity which the
-    /// request builder has already supplied.
+    /// Applies Relay's account binding and client profile to discovery and
+    /// quota probes. Gateway forwarding uses `insert` on the existing headers.
     pub fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut headers = HeaderMap::new();
         self.insert(&mut headers);
         request.headers(headers)
     }
 
-    /// Adds Relay's fallback identity only where the downstream request did
-    /// not already provide one. The selected account binding is the one
-    /// exception: it is always owned by Relay and cannot be supplied by the
-    /// client.
+    /// Preserve a complete client profile as one unit. An incomplete profile
+    /// uses the entire Relay envelope, never a mixture of the two clients.
     pub fn insert(&self, headers: &mut HeaderMap) {
-        if !headers.contains_key(USER_AGENT) {
+        let complete_profile = [USER_AGENT.as_str(), "version", "originator"]
+            .iter()
+            .all(|name| {
+                let mut values = headers.get_all(*name).iter();
+                values.next().is_some_and(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .is_some_and(|value| !value.trim().is_empty() && value.len() <= 1024)
+                }) && values.next().is_none()
+            })
+            && headers["version"]
+                .to_str()
+                .ok()
+                .is_some_and(valid_codex_client_version);
+        if !complete_profile {
             headers.insert(USER_AGENT, self.user_agent.clone());
+            headers.insert(HeaderName::from_static("version"), self.version.clone());
+            headers.insert(
+                HeaderName::from_static("originator"),
+                self.originator.clone(),
+            );
         }
-        let version = HeaderName::from_static("version");
-        if !headers.contains_key(&version) {
-            headers.insert(version, self.version.clone());
-        }
-        let originator = HeaderName::from_static("originator");
-        if !headers.contains_key(&originator) {
-            headers.insert(originator, self.originator.clone());
+        for name in [
+            "x-oai-attestation",
+            "openai-project",
+            "openai-organization",
+            "x-openai-project",
+            "x-openai-organization",
+        ] {
+            headers.remove(name);
         }
         // This is an account-binding header, not a client identity header.
         // Never allow a forwarded value to bind a request to another account.

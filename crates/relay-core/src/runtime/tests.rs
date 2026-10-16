@@ -12,9 +12,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 mod affinity;
 mod basis_points;
+mod claude_desktop;
 mod dispatch;
 mod listing;
 mod member_quota;
+mod native_protocol;
 mod policy;
 
 struct NeverRefresh;
@@ -70,6 +72,7 @@ fn source(id: &str, key: &str, models: &[&str]) -> ProviderSource {
         name: id.to_string(),
         base_url: "https://example.test/v1".to_string(),
         api_key: key.to_string(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: models.iter().map(|model| (*model).to_string()).collect(),
     }
@@ -109,6 +112,7 @@ fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
         proxy: None,
+        proxy_timezone: None,
     }
 }
 

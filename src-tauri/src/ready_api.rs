@@ -69,6 +69,7 @@ fn setup_desktop(
         }
     };
     crate::diagnostics::initialize(&relay_root);
+    crate::launcher::settings::initialize(&relay_root);
     let initialized_state = match local_pool::initialize(&app_handle) {
         Ok(initialized_state) => initialized_state,
         Err(error) => {
@@ -148,6 +149,9 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         get_state,
         get_platform,
         get_system_locale,
+        crate::launcher::settings::get_application_launch_path,
+        crate::launcher::settings::set_application_launch_path,
+        crate::launcher::settings::pick_application_launch_path,
         crate::portable_update::get_portable_update_target,
         crate::portable_update::install_portable_update,
         get_saved_key_models,
@@ -198,6 +202,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::proxies::delete_local_stored_proxies,
         local_pool::commands::proxies::assign_local_stored_proxy,
         local_pool::commands::proxies::set_local_stored_proxy_accounts,
+        local_pool::commands::proxies::set_local_stored_proxy_timezone,
         local_pool::commands::proxies::assign_free_local_account_proxies,
         local_pool::accounts::mutations::edit::set_local_account_enabled,
         local_pool::accounts::mutations::delete::delete_local_account,
@@ -227,6 +232,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::pool::set_local_model_price,
         local_pool::commands::pool::set_local_model_reasoning,
         local_pool::commands::pool::set_local_model_service_tier,
+        local_pool::commands::pool::set_local_model_context,
         local_pool::commands::pool::set_local_model_display_order,
         local_pool::commands::pool::export_local_configuration_preset,
         local_pool::commands::pool::preview_local_configuration_preset,
@@ -247,7 +253,6 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::gateway::settings::set_local_chatgpt_retry_until_available,
         local_pool::commands::gateway::settings::set_local_block_degraded_routes,
         local_pool::commands::gateway::settings::set_local_codex_websockets,
-        local_pool::commands::gateway::settings::set_local_chatgpt_context_policy,
         local_pool::commands::gateway::settings::set_codex_profile_websockets,
         local_pool::commands::gateway::diagnostics::diagnose_local_gateway,
         local_pool::commands::usage::get_local_usage_page,
@@ -269,6 +274,11 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::profiles::actions::launch_codex_source,
         local_pool::commands::profiles::actions::list_codex_account_bindings,
         local_pool::commands::profiles::actions::restore_codex_account_profile,
+        local_pool::commands::claude_desktop::get_claude_desktop_status,
+        local_pool::commands::claude_desktop::create_claude_desktop_snapshot,
+        local_pool::commands::claude_desktop::connect_claude_desktop,
+        local_pool::commands::claude_desktop::launch_claude_desktop,
+        local_pool::commands::claude_desktop::restore_claude_desktop,
         local_pool::commands::opencode::get_opencode_config_status,
         local_pool::commands::opencode::create_opencode_snapshot,
         local_pool::commands::opencode::connect_opencode_to_local_gateway,

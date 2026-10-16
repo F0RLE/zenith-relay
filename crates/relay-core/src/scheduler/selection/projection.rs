@@ -50,7 +50,8 @@ impl PoolScheduler {
             .unwrap_or_default();
         rotation_candidate.provider_credits_micro_units = candidate.provider_credits_micro_units;
         rotation_candidate.provider_credits_unlimited = candidate.provider_credits_unlimited;
-        rotation_candidate.provider_credits_observed_at_ms = candidate.quota_updated_at_ms;
+        rotation_candidate.provider_credits_observed_at_ms =
+            candidate.provider_credits_observed_at_ms;
         rotation_candidate.enabled = candidate.enabled;
         rotation_candidate.draining = candidate.draining;
         rotation_candidate.routes.clear();
@@ -108,7 +109,12 @@ impl PoolScheduler {
             let routing_quota = self.routing_quota(candidate);
             let (quota, remaining) = match routing_quota {
                 CandidateQuota::Unknown => (RotationQuotaState::Unknown, None),
-                CandidateQuota::CreditFallback => (RotationQuotaState::Unknown, None),
+                CandidateQuota::CreditFallback => (
+                    RotationQuotaState::CreditFallback {
+                        reset_at_ms: candidate.quota_reset_at_ms,
+                    },
+                    None,
+                ),
                 CandidateQuota::Available(0) => (
                     RotationQuotaState::Exhausted {
                         reset_at_ms: candidate.quota_reset_at_ms,
@@ -152,7 +158,7 @@ impl PoolScheduler {
                 &candidate_id,
                 candidate.provider_credits_micro_units,
                 candidate.provider_credits_unlimited,
-                candidate.quota_updated_at_ms,
+                candidate.provider_credits_observed_at_ms,
             );
             for model in &candidate.models {
                 let not_before_ms = candidate

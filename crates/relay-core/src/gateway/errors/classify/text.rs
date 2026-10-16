@@ -32,6 +32,13 @@ impl Rule {
 
 const RULES: &[Rule] = &[
     Rule::Phrases(
+        &[
+            "turn_rate_limit_exceeded",
+            error_codes::UPSTREAM_TURN_RATE_LIMITED,
+        ],
+        error_codes::UPSTREAM_TURN_RATE_LIMITED,
+    ),
+    Rule::Phrases(
         &[error_codes::UPSTREAM_ROUTE_DEGRADED],
         error_codes::UPSTREAM_ROUTE_DEGRADED,
     ),
@@ -329,7 +336,12 @@ fn unauthorized(status: StatusCode, text: &str) -> Option<&'static str> {
         .then_some(error_codes::UPSTREAM_UNAUTHORIZED)
 }
 
-fn invalid_request(_status: StatusCode, text: &str) -> Option<&'static str> {
+fn invalid_request(status: StatusCode, text: &str) -> Option<&'static str> {
+    // Some providers label body validation failures as server_error. The
+    // explicit 422 rejection must not penalize accounts or trigger failover.
+    if status == StatusCode::UNPROCESSABLE_ENTITY && text.contains("invalid request body") {
+        return Some(error_codes::UPSTREAM_INVALID_REQUEST);
+    }
     (text_has_any(
         text,
         &[

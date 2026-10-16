@@ -181,28 +181,32 @@ async fn prepare_oauth_completion(
     if let Some(existing) = existing {
         preserve_existing_settings(&mut account_record, existing);
     }
-    let quota_outcome = refresh_sign_in_quota(
-        &mut account_record,
-        proxy.as_ref(),
-        &checkpoint.access_token,
-        &checkpoint.provider_account_id,
-        now_ms,
-        std::time::Duration::from_secs(settings.quota_request_timeout_seconds),
-    )
-    .await;
+    // Both probes are read-only and independent after agent registration.
+    // Discover with the new credentials' plan hint, not the previous record's
+    // potentially stale subscription. Fresh quota still gates the durable commit.
+    let (quota_outcome, model_result) = tokio::join!(
+        refresh_sign_in_quota(
+            &mut account_record,
+            proxy.as_ref(),
+            &checkpoint.access_token,
+            &checkpoint.provider_account_id,
+            now_ms,
+            std::time::Duration::from_secs(settings.quota_request_timeout_seconds),
+        ),
+        discover_sign_in_models(
+            proxy.as_ref(),
+            &credentials,
+            &checkpoint.provider_account_id,
+            credentials.plan_type(),
+            now_ms,
+            previous_models,
+        ),
+    );
     crate::local_pool::accounts::records::validate_account_plan(
         &credentials,
         account_record.account.subscription.plan_type.as_deref(),
     )?;
-    let (models, model_issue) = discover_sign_in_models(
-        proxy.as_ref(),
-        &credentials,
-        &checkpoint.provider_account_id,
-        account_record.account.subscription.plan_type.as_deref(),
-        now_ms,
-        previous_models,
-    )
-    .await?;
+    let (models, model_issue) = model_result?;
     crate::diagnostics::breadcrumb(
         "oauth",
         "initial_probes_complete",

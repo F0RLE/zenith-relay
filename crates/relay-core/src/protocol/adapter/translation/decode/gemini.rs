@@ -88,6 +88,10 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 "maxOutputTokens",
                 "temperature",
                 "topP",
+                "topK",
+                "presencePenalty",
+                "frequencyPenalty",
+                "seed",
                 "stopSequences",
                 "responseMimeType",
                 "responseSchema",
@@ -99,6 +103,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         if optional_u64(generation_config, "candidateCount")?.is_some_and(|n| n != 1) {
             return Err(AdapterError::parameter_unsupported());
         }
+        super::content::sampling_extensions(&mut decoded_request, generation_config, true)?;
         super::content::common(
             &mut decoded_request,
             generation_config,
@@ -106,24 +111,32 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             "topP",
             "stopSequences",
         )?;
-        if let Some(mime) = generation_config
+        let response_schema = super::content::schema_field(
+            generation_config,
+            "responseJsonSchema",
+            "responseSchema",
+        )?;
+        let mime = generation_config
             .get("responseMimeType")
-            .and_then(Value::as_str)
-        {
+            .and_then(Value::as_str);
+        if response_schema.is_some() && mime != Some("application/json") {
+            return Err(
+                AdapterError::invalid_request().with_parameter("generationConfig.responseMimeType")
+            );
+        }
+        if let Some(mime) = mime {
             decoded_request.output_format = match mime {
                 "text/plain" => None,
-                "application/json" => Some(
-                    generation_config
-                        .get("responseJsonSchema")
-                        .or_else(|| generation_config.get("responseSchema"))
-                        .map_or(OutputFormat::JsonObject, |schema| {
-                            OutputFormat::JsonSchema {
-                                name: "response".into(),
-                                schema: schema.clone(),
-                                strict: None,
-                            }
-                        }),
-                ),
+                "application/json" => {
+                    Some(response_schema.map_or(OutputFormat::JsonObject, |schema| {
+                        OutputFormat::JsonSchema {
+                            name: "response".into(),
+                            description: None,
+                            schema,
+                            strict: None,
+                        }
+                    }))
+                }
                 _ => return Err(AdapterError::parameter_unsupported()),
             };
         }

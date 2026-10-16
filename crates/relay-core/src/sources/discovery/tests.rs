@@ -110,6 +110,7 @@ async fn valid_empty_catalog_is_successful() {
         api_key: "secret".into(),
         wire_api: WireApi::Responses,
         models: Vec::new(),
+        proxy_url: None,
     };
 
     let discovery = discover_source_models_and_protocol_bindings(&source, &[])

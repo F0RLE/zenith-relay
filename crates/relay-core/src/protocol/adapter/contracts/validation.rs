@@ -65,6 +65,7 @@ pub(in crate::protocol::adapter) fn validate_responses_bridge_request(
         "context_management",
         "prompt_cache_key",
         "client_metadata",
+        "metadata",
     ];
     if upstream == WireApi::Gemini {
         allowed.extend([
@@ -192,13 +193,6 @@ pub(in crate::protocol::adapter) fn validate_responses_bridge_request(
     {
         return Err(AdapterError::parameter_unsupported_for("reasoning"));
     }
-    if upstream == WireApi::Gemini
-        && request_object.get("parallel_tool_calls") == Some(&Value::Bool(false))
-    {
-        return Err(AdapterError::parameter_unsupported_for(
-            "parallel_tool_calls",
-        ));
-    }
     if let Some(tools) = request_tool_catalog(request_object)? {
         for tool in &tools {
             validate_bridge_tool(tool)?;
@@ -294,9 +288,25 @@ pub(super) fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
                     return Err(AdapterError::invalid_request());
                 }
             }
-            // `defer_loading` and `allowed_callers` only steer OpenAI-side tool
-            // search and caller policy. A bridged upstream sees an ordinary
-            // client tool, so the flags are dropped instead of failing the request.
+            if let Some(callers) = tool_object
+                .get("allowed_callers")
+                .filter(|value| !value.is_null())
+            {
+                let callers = callers
+                    .as_array()
+                    .ok_or_else(AdapterError::invalid_request)?;
+                if callers.is_empty()
+                    || callers
+                        .iter()
+                        .any(|caller| caller.as_str() != Some("direct"))
+                {
+                    return Err(
+                        AdapterError::unsupported_tool().with_parameter("tools.allowed_callers")
+                    );
+                }
+            }
+            // Eager declarations retain callable schemas. Only direct client
+            // execution is representable; never erase a hosted-caller policy.
         }
         Some("namespace") => {
             validate_bridge_fields(tool, &["type", "name", "description", "tools"])?;
@@ -315,9 +325,9 @@ pub(super) fn validate_bridge_tool(tool: &Value) -> AdapterResult<()> {
                 validate_bridge_tool(child)?;
             }
         }
-        // Hosted tools (web search, image generation, ...) run on OpenAI's
-        // servers and have no equivalent on a bridged upstream. They are left
-        // out of the translated catalog; a forced choice of one still fails.
+        // The typed decoder rejects unsupported hosted tools explicitly.
+        // Structural validation must not imply that they will be silently
+        // removed from the translated catalog.
         Some(other) if !matches!(other, "function" | "custom") => {}
         _ => return Err(AdapterError::unsupported_tool()),
     }
@@ -331,10 +341,27 @@ pub(in crate::protocol::adapter) fn validate_bridge_fields(
     let field_entries = field_container
         .as_object()
         .ok_or_else(AdapterError::invalid_request)?;
-    if field_entries.iter().any(|(field_name, field_value)| {
+    if let Some((field_name, _)) = field_entries.iter().find(|(field_name, field_value)| {
         !allowed.contains(&field_name.as_str()) && !field_value.is_null()
     }) {
-        return Err(AdapterError::parameter_unsupported());
+        // Expose only fixed contract names, never arbitrary payload keys/values.
+        let parameter = [
+            "metadata",
+            "cache_control",
+            "context_management",
+            "service_tier",
+            "thinking",
+            "output_config",
+            "citations",
+            "container",
+            "mcp_servers",
+        ]
+        .into_iter()
+        .find(|known| *known == field_name);
+        return Err(parameter.map_or_else(
+            AdapterError::parameter_unsupported,
+            AdapterError::parameter_unsupported_for,
+        ));
     }
     Ok(())
 }

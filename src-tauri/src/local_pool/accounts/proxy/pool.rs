@@ -23,6 +23,8 @@ struct StoredProxy {
     assigned_account_ids: Vec<String>,
     created_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_check: Option<ProxyCheckResult>,
 }
 
@@ -44,6 +46,8 @@ struct PersistedStoredProxy {
     assigned_account_id: Option<String>,
     created_at_ms: u64,
     #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
     last_check: Option<ProxyCheckResult>,
 }
 
@@ -56,6 +60,7 @@ pub struct ProxyPoolEntrySummary {
     pub country_code: Option<String>,
     pub region: Option<String>,
     pub created_at_ms: u64,
+    pub timezone: Option<String>,
     pub last_check: Option<ProxyCheckResult>,
 }
 
@@ -104,6 +109,31 @@ impl ProxyPool {
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
     }
 
+    pub(crate) fn proxy_id_for_account(&self, account_id: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|stored_proxy| {
+                stored_proxy
+                    .assigned_account_ids
+                    .iter()
+                    .any(|assigned_account_id| assigned_account_id == account_id)
+            })
+            .map(|stored_proxy| stored_proxy.id.clone())
+    }
+
+    pub(crate) fn id_for_url(&self, proxy_url: &str) -> Option<String> {
+        let normalized_url = zenith_relay_core::normalize_proxy_url(proxy_url).ok()?;
+        self.entries
+            .iter()
+            .find(|stored_proxy| {
+                zenith_relay_core::normalize_proxy_url(&stored_proxy.url)
+                    .ok()
+                    .as_deref()
+                    == Some(normalized_url.as_str())
+            })
+            .map(|stored_proxy| stored_proxy.id.clone())
+    }
+
     pub(crate) fn config(&self, proxy_id: &str) -> Result<ProxyConfig> {
         let stored_proxy = self
             .entries
@@ -122,6 +152,48 @@ impl ProxyPool {
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
     }
 
+    /// Resolves the proxy URL of an API source. A source without a proxy uses
+    /// no proxy; a source whose proxy is missing or invalid is an error and
+    /// must never fall back to a direct connection.
+    pub(crate) fn source_url(&self, proxy_id: Option<&str>) -> Result<Option<String>> {
+        let Some(proxy_id) = proxy_id else {
+            return Ok(None);
+        };
+        let proxy_url = self.stored_url(proxy_id).map_err(|_| {
+            LocalPoolError::new(ErrorCode::InvalidState, "source proxy is not available")
+        })?;
+        zenith_relay_core::normalize_proxy_url(&proxy_url)
+            .map(Some)
+            .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "source proxy is invalid"))
+    }
+
+    pub(crate) fn timezone(&self, proxy_id: &str) -> Result<Option<String>> {
+        self.entries
+            .iter()
+            .find(|stored_proxy| stored_proxy.id == proxy_id)
+            .map(|stored_proxy| stored_proxy.timezone.clone())
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
+    }
+
+    pub(crate) fn set_timezone(
+        &mut self,
+        proxy_id: &str,
+        timezone: Option<String>,
+    ) -> Result<bool> {
+        let timezone = zenith_relay_core::normalize_timezone(timezone)
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        let stored_proxy = self
+            .entries
+            .iter_mut()
+            .find(|stored_proxy| stored_proxy.id == proxy_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
+        if stored_proxy.timezone == timezone {
+            return Ok(false);
+        }
+        stored_proxy.timezone = timezone;
+        Ok(true)
+    }
+
     pub(crate) fn summary(&self) -> ProxyPoolSummary {
         let proxy_summaries = self
             .entries
@@ -135,6 +207,7 @@ impl ProxyPool {
                     country_code,
                     region,
                     created_at_ms: stored_proxy.created_at_ms,
+                    timezone: stored_proxy.timezone.clone(),
                     last_check: stored_proxy.last_check.clone(),
                 }
             })

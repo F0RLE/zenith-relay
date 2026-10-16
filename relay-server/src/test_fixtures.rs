@@ -84,6 +84,7 @@ pub(crate) fn pooled_source(id: &str, model: &str) -> SourceRecord {
         secret_ref: format!("source:{id}"),
         pricing_provider: None,
         official_provider_family: None,
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
         protocol_bindings: Vec::new(),

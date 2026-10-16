@@ -118,6 +118,7 @@ pub(super) async fn execute(
             api_key,
             wire_api: source_record.wire_api,
             models: source_record.models.clone(),
+            proxy_url: crate::app::source_proxy_url(state, &source_record)?,
         };
         (source_record, provider_source)
     };
@@ -198,9 +199,10 @@ pub(super) async fn execute(
             Ok(RefreshRead::SourceModels(Box::new(refreshed_source_record)))
         }
         RefreshKind::Balance => {
-            let stats_read = zenith_relay_core::read_source_provider_stats_with_scope(
+            let stats_read = zenith_relay_core::read_source_provider_stats_with_scope_and_proxy(
                 &provider_source.base_url,
                 &provider_source.api_key,
+                provider_source.proxy_url.as_deref(),
                 source_http_scope(state, fence),
             )
             .await;

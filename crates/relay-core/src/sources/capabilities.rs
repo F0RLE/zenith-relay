@@ -112,6 +112,16 @@ pub fn service_protocol(base_url: &str) -> Option<WireApi> {
     super::services::Service::from_host(url.host_str()?)?.protocol(&url)
 }
 
+pub(super) fn service_protocols(base_url: &str) -> Vec<WireApi> {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return Vec::new();
+    };
+    url.host_str()
+        .and_then(super::services::Service::from_host)
+        .map(|service| service.protocols(&url))
+        .unwrap_or_default()
+}
+
 pub(super) fn endpoint_type(endpoint_type_text: &str) -> Option<WireApi> {
     match endpoint_type_text {
         "openai-response" | "responses" | "/v1/responses" => Some(WireApi::Responses),

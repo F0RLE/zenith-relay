@@ -99,7 +99,8 @@ impl AdapterError {
     pub(in crate::protocol::adapter) const fn unsupported_tool() -> Self {
         Self {
             code: error_codes::ADAPTER_TOOL_UNSUPPORTED,
-            message: "the selected source adapter supports JSON-schema function and direct custom text tools only",
+            message:
+                "the selected source adapter cannot represent the requested tool type or format",
             parameter: None,
         }
     }
@@ -117,6 +118,14 @@ impl AdapterError {
             code: error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
             message: "the upstream response cannot be represented by the selected client protocol",
             parameter: None,
+        }
+    }
+
+    pub(crate) const fn upstream_tool_arguments_invalid() -> Self {
+        Self {
+            code: error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID,
+            message: "tool call arguments do not match the declared JSON Schema",
+            parameter: Some("output.run_officejs.args.schema"),
         }
     }
 

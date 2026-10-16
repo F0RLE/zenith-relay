@@ -6,31 +6,95 @@ use super::*;
 use crate::DefaultServiceTier;
 
 impl GatewayRuntime {
-    pub fn set_chatgpt_context_policy(
+    /// Resolve Desktop's reserved client namespace against configured model
+    /// identities only. Callers still apply key scope, rules, visibility and
+    /// route eligibility to the result. Never fall back to a raw provider model
+    /// with an alias-shaped name: it could shadow a different model's route.
+    fn desktop_requested_model<'a>(
         &self,
-        policy: crate::catalog::context_policy::ApplicationContextPolicy,
-    ) {
-        *crate::poison::mutex(&self.chatgpt_context_policy) = policy;
+        key: &AuthenticatedKey,
+        requested: &'a str,
+    ) -> Option<std::borrow::Cow<'a, str>> {
+        let requested = requested.trim();
+        if !crate::catalog::is_claude_desktop_model_alias(requested) {
+            return Some(std::borrow::Cow::Borrowed(requested));
+        }
+        let scheduler = self.lock_scheduler();
+        let mut resolved: Option<String> = None;
+        for model in scheduler
+            .candidates()
+            .flat_map(|candidate| &candidate.models)
+        {
+            let displayed = match key.model_prefix.as_deref() {
+                Some(prefix) => format!("{prefix}/{model}"),
+                None => model.clone(),
+            };
+            if !crate::catalog::claude_desktop_model_alias_matches(requested, &displayed) {
+                continue;
+            }
+            if let Some(previous) = &resolved {
+                // A compact-hash collision must fail closed, never choose by pool order.
+                if crate::model_id_key(previous) != crate::model_id_key(&displayed) {
+                    return None;
+                }
+            } else {
+                resolved = Some(displayed);
+            }
+        }
+        resolved.map(std::borrow::Cow::Owned)
     }
 
-    pub(crate) fn apply_chatgpt_context_policy(
+    pub fn set_model_context_policies(
+        &self,
+        policies: std::collections::BTreeMap<String, crate::ModelContextPolicy>,
+    ) -> crate::Result<()> {
+        let policies = crate::normalize_model_context_policies(policies)
+            .map_err(|message| crate::Error::Validation(message.to_string()))?;
+        *crate::poison::mutex(&self.model_context_policies) = policies;
+        Ok(())
+    }
+
+    pub(crate) fn apply_model_context(
         &self,
         entry: &mut Value,
         model: &str,
         native: bool,
+        native_card: bool,
     ) {
-        let policy = *crate::poison::mutex(&self.chatgpt_context_policy);
+        let selected = crate::poison::mutex(&self.model_context_policies)
+            .get(&crate::model_id_key(model))
+            .copied()
+            .unwrap_or_default();
+        // A native account without an exact model card has no authoritative
+        // context window. Keep the identity-only fallback untouched unless
+        // the user explicitly selected a custom window for this model.
+        if native && !native_card && !selected.is_custom() {
+            return;
+        }
         let capabilities = self.model_capabilities(model);
-        policy.apply(
-            entry,
-            if native {
-                None
-            } else {
-                capabilities.context_limit
-            },
-            capabilities.input_limit,
-            capabilities.output_limit,
-        );
+        if !crate::catalog::context_policy::model_supports_text_context(
+            model,
+            None,
+            &capabilities.output_modalities,
+        ) {
+            return;
+        }
+        if native {
+            crate::catalog::context_policy::apply_native_model_context(
+                entry,
+                selected,
+                capabilities.input_limit,
+                capabilities.output_limit,
+            );
+        } else {
+            crate::catalog::context_policy::apply_model_context(
+                entry,
+                selected,
+                capabilities.context_limit,
+                capabilities.input_limit,
+                capabilities.output_limit,
+            );
+        }
     }
 
     pub(crate) fn resolve_model(&self, key: &AuthenticatedKey, model: &str) -> Option<String> {
@@ -89,6 +153,8 @@ impl GatewayRuntime {
         model: &str,
         allowed_protocols: &[WireApi],
     ) -> Option<String> {
+        let desktop_model = self.desktop_requested_model(key, model)?;
+        let model = desktop_model.as_ref();
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
         let resolve = |candidate: &str| {
@@ -115,6 +181,8 @@ impl GatewayRuntime {
         key: &AuthenticatedKey,
         model: &str,
     ) -> Option<String> {
+        let desktop_model = self.desktop_requested_model(key, model)?;
+        let model = desktop_model.as_ref();
         let resolve = |candidate: &str| {
             let resolved = self.resolve_model(key, candidate)?;
             (!self
@@ -132,6 +200,8 @@ impl GatewayRuntime {
         requested: &str,
         visible: &[String],
     ) -> Option<String> {
+        let desktop_model = self.desktop_requested_model(key, requested)?;
+        let requested = desktop_model.as_ref();
         let resolve = |candidate: &str| {
             let resolved = self.resolve_model(key, candidate)?;
             visible

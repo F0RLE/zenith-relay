@@ -34,6 +34,29 @@ pub(super) fn opencode_process_pids() -> Vec<u32> {
         .collect()
 }
 
+pub(in crate::launcher) fn claude_desktop_pids() -> Vec<u32> {
+    let system = codex_process_system();
+    system
+        .processes()
+        .values()
+        .filter(|process| {
+            process
+                .exe()
+                .is_some_and(super::super::claude_desktop::is_desktop_executable)
+        })
+        .map(|process| process.pid().as_u32())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn claude_desktop_pids_for(targets: &[u32]) -> Vec<u32> {
+    matching_process_pids(targets, |process| {
+        process
+            .exe()
+            .is_some_and(super::super::claude_desktop::is_desktop_executable)
+    })
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn codex_process_pids_for(targets: &[u32]) -> Vec<u32> {
     matching_process_pids(targets, is_codex_process)

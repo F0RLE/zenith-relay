@@ -20,14 +20,12 @@ pub async fn start_local_gateway(
         let runtime = runtime_from_store(&state).await?;
         let port = state.store()?.gateway().port;
         state.gateway.start(runtime, port).await?;
-        let catalog_refresh_result =
-            super::super::profiles::refresh_active_client_catalogs(&state).await;
-        super::super::record_catalog_refresh_result(&state, &catalog_refresh_result);
         let enable_result = { state.store()?.set_gateway_enabled(true) };
         if let Err(error) = enable_result {
             state.gateway.stop().await;
             return Err(error.into());
         }
+        super::super::queue_active_client_catalog_refresh(&state);
         state.snapshot().await.map_err(Into::into)
     }
     .await;
@@ -145,9 +143,7 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
         // scheduler exists so startup cannot strand fresh provider credits.
         super::super::sync_running_account_states(state).await?;
         if state.background_session_active() {
-            let catalog_refresh_result =
-                super::super::profiles::refresh_active_client_catalogs(state).await;
-            super::super::record_catalog_refresh_result(state, &catalog_refresh_result);
+            super::super::queue_active_client_catalog_refresh(state);
         }
     }
     Ok(())

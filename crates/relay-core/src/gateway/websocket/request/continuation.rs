@@ -6,6 +6,27 @@ use crate::GatewayRuntime;
 use serde_json::Value;
 
 impl super::ClientRequest {
+    pub(in crate::gateway::websocket) fn yield_response_owner(
+        &mut self,
+        runtime: &GatewayRuntime,
+        local_key_id: &str,
+    ) {
+        if continuation::prepare_response_owner_change(
+            runtime,
+            local_key_id,
+            &mut self.request_body,
+            &self.resolved_model,
+            self.requires_affinity_owner,
+            now_ms(),
+        ) {
+            continuation::clear_materialized_continuation(
+                &mut self.response_affinity_key,
+                &mut self.requires_affinity_owner,
+                &mut self.has_unpaired_tool_output,
+            );
+        }
+    }
+
     pub(in crate::gateway::websocket) fn native_replay_request(&self) -> Value {
         self.request_body.clone()
     }

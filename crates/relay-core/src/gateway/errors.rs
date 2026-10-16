@@ -39,16 +39,15 @@ pub(super) use failure::{
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    retryable_failure, retryable_status,
+    retryable_failure,
 };
 
 #[cfg(test)]
-use failure::{responses_call_id_is_missing, zenith_gateway_invalid_request};
+use failure::{responses_call_id_is_missing, retryable_status, zenith_gateway_invalid_request};
 
 pub(super) use response::{
-    api_error, api_error_code, api_error_type, api_error_with_origin,
-    api_error_with_origin_and_category, api_error_with_parameter, cooldown_error,
-    prefix_error_body, prefix_error_value,
+    api_error, api_error_code, api_error_type, api_error_with_origin_and_category,
+    api_error_with_parameter, cooldown_error, prefix_error_body, prefix_error_value,
 };
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
@@ -130,10 +129,8 @@ pub(super) fn retryable_route_status(
     status: StatusCode,
     has_previous_response_id: bool,
 ) -> bool {
-    if route_forbids_fallback(route, status, "") {
-        return false;
-    }
-    retryable_status(status, has_previous_response_id)
+    let failure = AttemptFailure::status_with_body(status, None);
+    retryable_route_failure(route, status, failure.category, has_previous_response_id)
 }
 
 pub(super) fn admission_failure(

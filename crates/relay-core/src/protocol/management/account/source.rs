@@ -17,6 +17,7 @@ pub trait SourceSummaryRecord: SourceProtocolResolution {
     fn summary_draining(&self) -> bool;
     fn summary_pricing_provider(&self) -> Option<&str>;
     fn summary_official_provider_family(&self) -> Option<&str>;
+    fn summary_proxy_id(&self) -> Option<&str>;
     fn summary_priority(&self) -> i32;
     fn summary_weight(&self) -> u32;
     fn summary_recovery_delay_seconds(&self) -> u64;
@@ -48,6 +49,8 @@ pub struct SourceSummary {
     pub pricing_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_provider_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -175,6 +178,7 @@ impl SourceSummary {
             official_provider_family: source_record
                 .summary_official_provider_family()
                 .map(str::to_string),
+            proxy_id: source_record.summary_proxy_id().map(str::to_string),
             wire_api: source_record.protocol_fallback(),
             protocol_config: source_record
                 .source_protocol_config()

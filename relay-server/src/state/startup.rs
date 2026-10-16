@@ -45,6 +45,7 @@ pub fn ensure_proxy_record(
         ),
         secret_ref: format!("proxy:{proxy_identifier}"),
         created_at_ms: now_ms(),
+        timezone: None,
     };
     vault.save(&proxy_record.secret_ref, &normalized_proxy_url)?;
     if let Err(error) = store.save_proxy(&proxy_record) {

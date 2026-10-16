@@ -75,10 +75,6 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        if gateway.upgrade_context_defaults() {
-            database
-                .replace_state_json(&[(STATE_GATEWAY, persistence::serialize_state(&gateway)?)])?;
-        }
         let mut sources = state.sources;
         for source in &mut sources {
             source.normalize();

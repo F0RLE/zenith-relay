@@ -1,5 +1,6 @@
 use super::{
-    account_runtime::{account_proxy_config, runtime_account, runtime_key, runtime_source},
+    account_runtime::{account_proxy_runtime, runtime_account, runtime_key, runtime_source},
+    runtime_records::source_proxy_url,
     AccountCredential, AppState,
 };
 use crate::{
@@ -42,6 +43,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     let hidden_models = state.store.hidden_models()?;
     let model_reasoning_allowed_levels = state.store.model_reasoning_allowed_levels()?;
     let model_service_tier_overrides = state.store.model_service_tier_overrides()?;
+    let model_context_policies = state.store.model_context_policies()?;
     let model_display_order = state.store.model_display_order()?;
     let routing_policy = state.store.routing_policy()?;
     let pool_routing = resolve_pool_routing(&routing_policy, &source_records, &account_records);
@@ -111,6 +113,7 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
             image_pricing_catalog: Some(state.pricing_catalog()),
             model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
             model_reasoning_allowed_levels,
+            model_context_policies: model_context_policies.clone(),
             response_affinity_store: Some(state.store.clone()),
         },
         usage,
@@ -118,6 +121,9 @@ pub(super) async fn rebuild(state: &Arc<AppState>) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     runtime
         .set_model_service_tier_overrides(model_service_tier_overrides)
+        .map_err(|error| error.to_string())?;
+    runtime
+        .set_model_context_policies(model_context_policies)
         .map_err(|error| error.to_string())?;
     runtime.set_model_display_order(model_display_order);
     runtime.set_codex_background_tasks_enabled(codex_background_tasks_enabled);
@@ -200,7 +206,8 @@ fn build_sources(
         let Some(api_key) = state.vault.load(&source_record.secret_ref)? else {
             continue;
         };
-        sources.push(runtime_source(source_record, api_key));
+        let proxy_url = source_proxy_url(state, &source_record)?;
+        sources.push(runtime_source(source_record, api_key, proxy_url));
     }
     Ok(sources)
 }
@@ -221,9 +228,10 @@ async fn build_accounts(
         };
         let credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
-        let Ok(proxy) = account_proxy_config(state, &account_record, &credential) else {
+        let Ok(proxy_runtime) = account_proxy_runtime(state, &account_record, &credential) else {
             continue;
         };
+        let proxy = proxy_runtime.config;
         if let Some(agent) = credential.agent_identity()? {
             build
                 .agent_identities
@@ -260,6 +268,7 @@ async fn build_accounts(
             account_record,
             &credential,
             proxy,
+            proxy_runtime.timezone,
             QUOTA_STALE_AFTER_MS,
         ));
     }

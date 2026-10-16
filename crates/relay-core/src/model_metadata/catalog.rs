@@ -55,6 +55,7 @@ impl ModelMetadataCatalog {
             entries: BTreeMap::new(),
             leaf_matches: BTreeMap::new(),
             ambiguous_leaves: BTreeSet::new(),
+            alias_matches: BTreeMap::new(),
             family_providers: BTreeMap::new(),
         }
     }
@@ -82,11 +83,12 @@ impl ModelMetadataCatalog {
             let provider_namespace = source_id
                 .split_once('/')
                 .map_or("", |(provider, _)| provider);
-            let Some(metadata) =
+            let Some(mut metadata) =
                 parsing::parse_metadata(&source_id, provider_namespace, metadata_record)
             else {
                 continue;
             };
+            super::protocol_policy::apply(&mut metadata);
             let normalized_model_id = order::normalize(&source_id);
             let leaf = order::model_leaf(&normalized_model_id).to_string();
             let priority = reference::identity_priority(metadata_record);
@@ -162,6 +164,23 @@ impl ModelMetadataCatalog {
             return Err(ModelMetadataError::InvalidCatalog);
         }
 
+        let mut alias_matches = BTreeMap::<String, Option<String>>::new();
+        for (id, metadata) in &metadata_entries {
+            for alias in &metadata.aliases {
+                let alias = order::normalize(alias);
+                for key in [alias.clone(), order::model_leaf(&alias).to_string()] {
+                    alias_matches
+                        .entry(key)
+                        .and_modify(|owner| {
+                            if owner.as_ref() != Some(id) {
+                                *owner = None;
+                            }
+                        })
+                        .or_insert_with(|| Some(id.clone()));
+                }
+            }
+        }
+
         Ok(Self {
             revision,
             fetched_at_ms,
@@ -170,6 +189,7 @@ impl ModelMetadataCatalog {
             entries: metadata_entries,
             leaf_matches,
             ambiguous_leaves,
+            alias_matches,
             family_providers,
         })
     }
@@ -181,6 +201,11 @@ impl ModelMetadataCatalog {
         if let Some(metadata) = self.entries.get(&normalized_model_id) {
             return Some(metadata);
         }
+        if let Some(owner) = self.alias_matches.get(&normalized_model_id) {
+            if normalized_model_id.contains('/') {
+                return owner.as_ref().and_then(|id| self.entries.get(id));
+            }
+        }
         let leaf = order::model_leaf(&normalized_model_id);
         if self.ambiguous_leaves.contains(leaf) {
             return None;
@@ -188,6 +213,12 @@ impl ModelMetadataCatalog {
         self.leaf_matches
             .get(leaf)
             .and_then(|model_id| self.entries.get(model_id))
+            .or_else(|| {
+                self.alias_matches
+                    .get(leaf)
+                    .and_then(Option::as_ref)
+                    .and_then(|id| self.entries.get(id))
+            })
     }
 
     /// Presentation only: prefer the canonical manufacturer, then a family
@@ -231,56 +262,45 @@ impl ModelMetadataCatalog {
             .or_else(|| order::provider_key(&metadata.provider))
     }
 
-    /// The protocol native to the model's own group, independent of the host
-    /// or reseller serving it: OpenAI models use Responses, Anthropic models
-    /// use Messages, Google models use the Gemini endpoint, and every other
-    /// model uses OpenAI-compatible Chat Completions.
+    /// Prefer the manufacturer's native API for known model groups.
+    /// Exact source endpoint declarations take
+    /// precedence; this preference does not establish endpoint support.
     ///
     /// The group comes from the validated reference record: the canonical
     /// model ID's namespace first, then a first-party namespace, then the
     /// family. A hosting namespace alone never decides it. Unknown or
     /// ambiguous models return `None` so callers keep their other evidence.
+    pub fn preferred_protocol_for(&self, model: &str) -> Option<crate::WireApi> {
+        self.protocol_preferences_for(model).first().copied()
+    }
+
+    /// Select the provider contract before adapting the client's protocol.
+    /// Only validated manufacturer/family identity supplies this requirement;
+    /// an arbitrary model name or reseller namespace cannot establish it.
     pub fn native_protocol_for(&self, model: &str) -> Option<crate::WireApi> {
-        let metadata = self.resolve(model)?;
-        let canonical_namespace = metadata
-            .canonical_model_id
-            .as_deref()
-            .and_then(|canonical| canonical.split_once('/'))
-            .map(|(namespace, _)| namespace.to_ascii_lowercase());
-        let first_party_namespace = metadata.provider.to_ascii_lowercase();
-        let group = canonical_namespace
-            .filter(|namespace| !namespace.is_empty())
-            .or_else(|| {
-                matches!(
-                    first_party_namespace.as_str(),
-                    "openai" | "anthropic" | "google"
-                )
-                .then_some(first_party_namespace)
-            });
-        let family = metadata
-            .family
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        // Capability-only metadata must not turn the configured endpoint into
-        // a Chat Completions route without a provider or family identity.
-        if group.is_none() && metadata.provider.trim().is_empty() && family.is_empty() {
-            return None;
-        }
-        // Every model outside the three first-party groups falls to the
-        // family, and then to Chat Completions. This last arm is the single
-        // place that defines "all other models".
-        Some(match group.as_deref() {
-            Some("openai") => crate::WireApi::Responses,
-            Some("anthropic") => crate::WireApi::Messages,
-            Some("google") => crate::WireApi::Gemini,
-            _ if family.starts_with("gpt") && !family.starts_with("gpt-oss") => {
-                crate::WireApi::Responses
+        self.resolve(model)
+            .and_then(super::protocol_policy::native_protocol)
+    }
+
+    pub fn protocol_preferences_for(&self, model: &str) -> Vec<crate::WireApi> {
+        self.resolve(model)
+            .map(|metadata| metadata.protocol_preferences.clone())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn bind_field_revisions(&mut self) {
+        for metadata in self.entries.values_mut() {
+            for origin in metadata.field_provenance.values_mut() {
+                if let Some(status) = self.sources.get(&origin.source) {
+                    origin.revision = status.revision.clone();
+                }
+                for conflict in &mut origin.conflicts {
+                    if let Some(status) = self.sources.get(&conflict.source) {
+                        conflict.revision = status.revision.clone();
+                    }
+                }
             }
-            _ if family.starts_with("claude") => crate::WireApi::Messages,
-            _ if family.starts_with("gemini") => crate::WireApi::Gemini,
-            _ => crate::WireApi::ChatCompletions,
-        })
+        }
     }
 
     pub fn reasoning_effort_levels(&self, model: &str) -> Option<Vec<String>> {
@@ -288,24 +308,43 @@ impl ModelMetadataCatalog {
             .map(|metadata| metadata.capabilities.reasoning_effort_levels.clone())
     }
 
-    /// Keep provider blocks together while preserving the order supplied by
-    /// the account or API source inside each block. Presentation never
-    /// determines eligibility and the catalog must not invent a model ranking
-    /// from release dates, family names, or model IDs.
+    pub fn display_identity_for(&self, model: &str) -> super::ModelDisplayIdentity {
+        self.display_order_key(model).identity
+    }
+
+    fn display_order_key(&self, model: &str) -> order::ModelOrderKey {
+        let metadata = self.resolve(model);
+        order::ModelOrderKey::new(
+            metadata
+                .and_then(|metadata| metadata.canonical_model_id.as_deref())
+                .unwrap_or(model),
+            self.display_provider_for(model),
+            metadata.and_then(|metadata| metadata.family.as_deref()),
+            metadata.and_then(|metadata| metadata.name.as_deref()),
+            metadata.and_then(|metadata| metadata.release_date.as_deref()),
+        )
+    }
+
+    /// Apply Relay's shared provider/family/class policy and descending
+    /// numeric versions. The original route IDs and inventory stay intact.
     pub fn order_model_ids<I, S>(&self, models: I) -> Vec<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let source_model_ids = crate::normalize_model_ids(models);
-        let mut indexed = source_model_ids.into_iter().enumerate().collect::<Vec<_>>();
-        indexed.sort_by(
-            |(left_position, left_model_id), (right_position, right_model_id)| {
-                order::compare_model_groups(self, left_model_id, right_model_id)
-                    .then_with(|| left_position.cmp(right_position))
-            },
-        );
-        indexed.into_iter().map(|(_, model_id)| model_id).collect()
+        let mut models = crate::normalize_model_ids(models)
+            .into_iter()
+            .map(|model| {
+                let key = self.display_order_key(&model);
+                (model, key)
+            })
+            .collect::<Vec<_>>();
+        models.sort_by(|(left, left_key), (right, right_key)| {
+            left_key
+                .compare(right_key)
+                .then_with(|| crate::model_id_key(left).cmp(&crate::model_id_key(right)))
+        });
+        models.into_iter().map(|(model, _)| model).collect()
     }
 
     /// Preserve the relative order explicitly saved by the user. Newly
@@ -345,5 +384,9 @@ fn equivalent_reference_metadata(left: &ModelMetadata, right: &ModelMetadata) ->
     left.source_model_id.clear();
     right.source_model_id.clear();
     left.provider = right.provider.clone();
+    left.field_provenance.clear();
+    right.field_provenance.clear();
+    left.aliases.clear();
+    right.aliases.clear();
     left == right
 }

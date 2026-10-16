@@ -433,6 +433,7 @@ mod tests {
             available_credits_micro_units: None,
             provider_credits_available: false,
             provider_credits_unlimited: false,
+            provider_credits_observed_at_ms: None,
             direct_balance_micro_usd: None,
             updated_at_ms: Some(1),
             error: None,

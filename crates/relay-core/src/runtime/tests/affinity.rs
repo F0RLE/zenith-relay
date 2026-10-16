@@ -32,7 +32,10 @@ fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
     );
     assert!(runtime.invalidate_response_affinity(Some(&affinity_key)));
     assert!(!runtime.invalidate_response_affinity(Some(&affinity_key)));
-    assert_eq!(*crate::poison::mutex(&store.deletes), vec![affinity_key]);
+    assert_eq!(
+        *crate::poison::mutex(&store.deletes),
+        vec![affinity_key.clone(), format!("route:{affinity_key}")]
+    );
 }
 #[tokio::test]
 async fn incomplete_response_affinity_is_connection_scoped_and_never_persisted() {
@@ -192,6 +195,23 @@ fn prompt_affinity_uses_explicit_cache_key_before_session_context() {
     assert!(session.is_some());
     assert_ne!(explicit, session);
     assert_ne!(session, other_session);
+    assert_ne!(
+        session,
+        runtime.prompt_affinity_key("key-2", "gpt-test", None, Some("client-session"))
+    );
+    assert_ne!(
+        session,
+        runtime.prompt_affinity_key("key-1", "other-model", None, Some("client-session"))
+    );
+    assert_eq!(
+        explicit,
+        runtime.prompt_affinity_key(
+            "key-1",
+            "gpt-test",
+            Some("cache-key"),
+            Some("other-session")
+        )
+    );
     assert_eq!(
         session,
         runtime.prompt_affinity_key("key-1", "gpt-test", None, Some("client-session"))

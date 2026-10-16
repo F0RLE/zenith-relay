@@ -5,7 +5,10 @@ use super::super::super::{
             credential_invalid_state_error as account_credential_error, CredentialStore,
             StoredCodexCredentials,
         },
-        proxy::{effective_proxy_config, ProxyRefreshClient},
+        proxy::{
+            account_proxy_pool_id, common_proxy_pool_id, effective_proxy_config, ProxyPool,
+            ProxyRefreshClient,
+        },
         records::CODEX_RESPONSES_URL,
         NativeSecretBackend,
     },
@@ -73,7 +76,9 @@ pub(in crate::local_pool) async fn runtime_from_store(
                     .is_ok()
                 })
     });
-    let (sources, source_ids) = admit_runtime_sources(state, source_records, &source_api_keys);
+    let proxy_pool = ProxyPool::load().unwrap_or_default();
+    let (sources, source_ids) =
+        admit_runtime_sources(state, source_records, &source_api_keys, &proxy_pool);
     // Key scopes must reference only source executors admitted above. Keeping
     // a stale id for a malformed or credential-less source can make the core
     // reject an otherwise valid mixed pool while rebuilding the gateway.
@@ -90,8 +95,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
         account_records,
         &account_credentials,
         &pending_move_ids,
-    )
-    .await?;
+        &proxy_pool,
+    )?;
     let secret = pool::ensure_local_gateway_key_secret(&system_key)?;
     let keys = vec![RuntimeMixedLocalKey {
         key: LocalGatewayKey {
@@ -145,6 +150,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
         image_pricing_catalog: Some(state.pricing_catalog()),
         model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
         model_reasoning_allowed_levels: settings.model_reasoning_allowed_levels,
+        model_context_policies: settings.model_context_policies.clone(),
         response_affinity_store: Some(state.response_affinity_store()),
     };
     let usage_callback = state.usage_callback();
@@ -174,11 +180,13 @@ pub(in crate::local_pool) async fn runtime_from_store(
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
-    runtime.set_chatgpt_context_policy(settings.chatgpt_context_policy);
     runtime.set_route_recovery_enabled(settings.chatgpt_retry_until_available);
     runtime.set_block_degraded_routes_enabled(settings.block_degraded_routes_enabled);
     runtime
         .set_model_service_tier_overrides(settings.model_service_tier_overrides)
+        .map_err(core_error)?;
+    runtime
+        .set_model_context_policies(settings.model_context_policies)
         .map_err(core_error)?;
     runtime.set_model_display_order(settings.model_display_order);
     runtime.set_official_codex_ultra_models(
@@ -198,6 +206,7 @@ fn admit_runtime_sources(
     state: &DesktopState,
     source_records: Vec<ProviderSourceRecord>,
     source_api_keys: &BTreeMap<String, Option<String>>,
+    proxy_pool: &ProxyPool,
 ) -> (Vec<RuntimeSource>, HashSet<String>) {
     let mut sources = Vec::new();
     let mut source_ids = HashSet::new();
@@ -212,6 +221,13 @@ fn admit_runtime_sources(
                 continue;
             }
         };
+        let proxy_url = match proxy_pool.source_url(source.proxy_id.as_deref()) {
+            Ok(proxy_url) => proxy_url,
+            Err(_) => {
+                quarantine_source_runtime_error(state, &source, SOURCE_RUNTIME_INVALID_CODE);
+                continue;
+            }
+        };
         let runtime_source = ProviderSource {
             id: source.id.clone(),
             name: source.name.clone(),
@@ -219,6 +235,7 @@ fn admit_runtime_sources(
             api_key,
             wire_api: source.wire_api,
             models: source.models.clone(),
+            proxy_url,
         };
         if runtime_source.validate().is_err()
             || source.weight == 0
@@ -261,12 +278,13 @@ struct AdmittedRuntimeAccount {
     agent_identity: Option<(String, AgentIdentityCredential)>,
 }
 
-async fn admit_runtime_accounts(
+fn admit_runtime_accounts(
     authority: &TokenAuthority,
     settings: &GatewaySettings,
     account_records: Vec<LocalAccountRecord>,
     account_credentials: &HashMap<String, Option<StoredCodexCredentials>>,
     pending_move_ids: &HashSet<String>,
+    proxy_pool: &ProxyPool,
 ) -> Result<AdmittedAccounts> {
     let mut accounts = Vec::new();
     let mut refresh_proxies = Vec::new();
@@ -278,8 +296,14 @@ async fn admit_runtime_accounts(
         else {
             continue;
         };
-        let Some(admitted) =
-            admit_runtime_account(authority, settings, account, secret, pending_move_ids).await?
+        let Some(admitted) = admit_runtime_account(
+            authority,
+            settings,
+            account,
+            secret,
+            pending_move_ids,
+            proxy_pool,
+        )?
         else {
             continue;
         };
@@ -298,12 +322,13 @@ async fn admit_runtime_accounts(
     })
 }
 
-async fn admit_runtime_account(
+fn admit_runtime_account(
     authority: &TokenAuthority,
     settings: &GatewaySettings,
     account: LocalAccountRecord,
     secret: &StoredCodexCredentials,
     pending_move_ids: &HashSet<String>,
+    proxy_pool: &ProxyPool,
 ) -> Result<Option<AdmittedRuntimeAccount>> {
     let Some(chatgpt_account_id) = secret.provider_account_id() else {
         return Ok(None);
@@ -312,20 +337,27 @@ async fn admit_runtime_account(
         return Ok(None);
     };
     let account_id = account.account.id.clone();
+    let common_proxy_id = if secret.proxy_url().is_none() && !secret.bypass_common_proxy() {
+        common_proxy_pool_id(settings, proxy_pool)
+    } else {
+        None
+    };
+    let proxy_timezone = account_proxy_pool_id(proxy_pool, secret, common_proxy_id.as_deref())
+        .and_then(|proxy_id| proxy_pool.timezone(&proxy_id).ok().flatten());
     let agent_identity = secret
         .agent_identity()
         .map(|agent| (account_id.clone(), agent.clone()));
     if secret.has_oauth() {
         authority
-            // Runtime reconstruction must not erase a newer in-memory
-            // refresh or its pending durable metadata retry with the
-            // snapshot read at the beginning of this build.
-            .register_if_newer(
+            // Bootstrap missing registrations only. Credential mutations and
+            // renewal own updates to existing slots; rebuilding unrelated
+            // routes must neither wait on their OAuth I/O nor replace their
+            // in-flight refresh/pending persistence with a disk snapshot.
+            .register_if_absent(
                 &account_id,
                 secret.to_token_set().map_err(account_credential_error)?,
                 account.account.auth_state,
             )
-            .await
             .map_err(LocalPoolError::invalid_state)?;
     }
     let operational = runtime_account_operational_state(&account.account, current_time_ms());
@@ -376,6 +408,7 @@ async fn admit_runtime_account(
             cooldowns: Default::default(),
             consecutive_failures: 0,
             proxy,
+            proxy_timezone,
         },
         refresh_proxy,
         agent_identity,

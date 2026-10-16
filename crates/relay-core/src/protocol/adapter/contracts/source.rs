@@ -1,4 +1,4 @@
-use super::super::{gemini, messages};
+use super::super::messages;
 use super::{
     AdapterError, AdapterResult, MessagesBridgeState, MessagesReasoningMode, PreparedAdapterRequest,
 };
@@ -160,11 +160,13 @@ impl SourceAdapter {
             return Ok(None);
         }
         if client == WireApi::Responses {
-            return Ok(request
+            if let Some(key) = request
                 .get("previous_response_id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.trim().is_empty())
-                .map(str::to_owned));
+            {
+                return Ok(Some(key.to_owned()));
+            }
         }
         super::super::translation::continuation_key(client, request, model)
     }
@@ -243,6 +245,11 @@ impl SourceAdapter {
         effort: &str,
         capabilities: &crate::model_metadata::ModelCapabilities,
     ) -> bool {
+        // Passthrough preserves native wire fields, not a capability claim.
+        // Exact route evidence must also constrain the client model picker.
+        if capabilities.reasoning == Some(false) {
+            return crate::catalog::canonical_reasoning_level(effort) == "none";
+        }
         self.is_passthrough()
             || super::ReasoningPolicy::new(
                 self.upstream_protocol(WireApi::Responses).wire_api(),
@@ -275,10 +282,22 @@ impl SourceAdapter {
         } else {
             context
         };
-        if !matches!(
-            self,
-            Self::Native | Self::ResponsesToMessages | Self::ResponsesToGemini
-        ) {
+        let history_request =
+            if !self.is_passthrough() && context.client_wire_api == WireApi::Responses {
+                Some(super::history::prepare_request(
+                    context.request,
+                    context.previous.as_ref(),
+                    context.model,
+                )?)
+            } else {
+                None
+            };
+        let context = if let Some(request) = history_request.as_deref() {
+            AdapterRequestContext { request, ..context }
+        } else {
+            context
+        };
+        if !self.is_passthrough() {
             let upstream = self.upstream_protocol(context.client_wire_api).wire_api();
             return super::super::translation::TranslationRequest::prepare(
                 context,
@@ -289,7 +308,6 @@ impl SourceAdapter {
                 request: Box::new(request),
             });
         }
-        self.validate(context.client_wire_api, context.reasoning_mode)?;
         match self {
             Self::Native => {
                 let mut upstream_body = context.request.clone();
@@ -300,7 +318,7 @@ impl SourceAdapter {
                     // Gemini places the model in the endpoint path. A model
                     // field is not part of the generateContent contract and
                     // some providers reject it as an unknown field.
-                    upstream_object.remove("model");
+                    upstream_object.shift_remove("model");
                 } else {
                     upstream_object.insert(
                         "model".to_string(),
@@ -312,20 +330,7 @@ impl SourceAdapter {
                 }
                 Ok(PreparedAdapterRequest::Native { upstream_body })
             }
-            Self::ResponsesToMessages => {
-                messages::prepare_responses_to_messages_with_capabilities(context, capabilities)
-                    .map(|request| PreparedAdapterRequest::ResponsesToMessages {
-                        request: Box::new(request),
-                    })
-            }
-            Self::ResponsesToGemini => {
-                gemini::prepare_responses_to_gemini_with_capabilities(context, capabilities).map(
-                    |request| PreparedAdapterRequest::ResponsesToGemini {
-                        request: Box::new(request),
-                    },
-                )
-            }
-            _ => unreachable!("registered translation handled before legacy adapters"),
+            _ => unreachable!("all conversions use the shared protocol codecs"),
         }
     }
 }

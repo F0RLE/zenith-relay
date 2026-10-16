@@ -5,6 +5,161 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::HeaderValue;
 
 #[test]
+fn buffered_timing_ignores_lifecycle_empty_invalid_and_terminal_snapshots() {
+    let mut timing = BufferedResponseTiming::default();
+    for bytes in [
+        b": heartbeat\n\n".as_slice(),
+        b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+        b"data: {\"type\":\"response.in_progress\"}\n\n",
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n",
+        b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_test\"}}\n\n",
+        b"data: {\"type\":\"response.compaction.delta\",\"delta\":\"opaque\"}\n\n",
+        b"data: invalid\n\n",
+        b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"synthetic\"}]}]}}\n\n",
+    ] {
+        timing.observe(&crate::gateway::streaming::parse_sse_event(bytes), 50);
+    }
+    timing.finish(120);
+    let mut event = test_usage_event();
+    timing.apply(&mut event);
+    assert_eq!(event.latency_ms, 120);
+    assert_eq!(event.ttft_ms, None);
+    assert_eq!(event.generation_ms, None);
+}
+
+#[test]
+fn buffered_timing_keeps_first_output_through_completion_and_failure() {
+    for output in [
+        serde_json::json!({"type":"response.output_text.delta","delta":"synthetic"}),
+        serde_json::json!({"type":"response.reasoning_text.delta","delta":"synthetic"}),
+        serde_json::json!({"type":"response.function_call_arguments.delta","delta":"{}"}),
+        serde_json::json!({"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_test","name":"test"}}),
+    ] {
+        for success in [false, true] {
+            let mut timing = BufferedResponseTiming::default();
+            let bytes = format!("data: {output}\n\n");
+            let parsed = crate::gateway::streaming::parse_sse_event(bytes.as_bytes());
+            timing.observe(&parsed, 50);
+            timing.observe(&parsed, 80);
+            timing.finish(120);
+            let mut event = test_usage_event();
+            event.success = success;
+            timing.apply(&mut event);
+            assert_eq!(event.ttft_ms, Some(50));
+            assert_eq!(event.latency_ms, 120);
+            assert_eq!(event.generation_ms, Some(70));
+            assert_eq!(event.success, success);
+        }
+    }
+}
+
+#[test]
+fn buffered_timing_preserves_unobserved_transports_and_known_zero() {
+    let mut event = test_usage_event();
+    event.latency_ms = 120;
+    event.ttft_ms = Some(30);
+    event.generation_ms = Some(90);
+    BufferedResponseTiming::default().apply(&mut event);
+    assert_eq!(event.latency_ms, 120);
+    assert_eq!(event.ttft_ms, Some(30));
+    assert_eq!(event.generation_ms, Some(90));
+
+    let mut timing = BufferedResponseTiming::default();
+    timing.observe(
+        &crate::gateway::streaming::parse_sse_event(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+        ),
+        0,
+    );
+    timing.finish(120);
+    timing.apply(&mut event);
+    assert_eq!(event.ttft_ms, Some(0));
+    assert_eq!(event.generation_ms, Some(120));
+}
+
+#[tokio::test]
+async fn basis_points_collector_times_fragmented_output_and_keeps_partial_failures() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for outcome in ["completed", "failed", "truncated", "json"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let response = serde_json::json!({
+                "id":"resp_test", "model":"gpt-6-astra", "status":"completed",
+                "output":[{"type":"message","content":[{"type":"output_text","text":"synthetic"}]}],
+                "usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}
+            });
+            if outcome == "json" {
+                let body = response.to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                return;
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let terminal = if outcome == "failed" {
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"synthetic_failure\",\"message\":\"Synthetic failure\"}}}\n\n".to_string()
+            } else {
+                format!("data: {{\"type\":\"response.completed\",\"response\":{response}}}\n\n")
+            };
+            for frame in [
+                ": heartbeat\n\ndata: {\"type\":\"response.created\"}\n\n".to_string(),
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"syn".to_string(),
+                "thetic\"}\n\n".to_string(),
+            ] {
+                socket
+                    .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            if outcome == "truncated" {
+                return;
+            }
+            socket
+                .write_all(format!("{:x}\r\n{terminal}\r\n", terminal.len()).as_bytes())
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let started = std::time::Instant::now();
+        let upstream = reqwest::get(format!("http://{address}/")).await.unwrap();
+        let mut timing = BufferedResponseTiming::default();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            collect_basis_points_response(upstream, Some("gpt-6-astra"), started, &mut timing),
+        )
+        .await;
+        server.abort();
+        let result = result.expect("collector must stop without waiting for EOF");
+        let bytes = match result {
+            Ok(bytes) => {
+                assert!(matches!(outcome, "completed" | "json"));
+                bytes
+            }
+            Err(failure) => {
+                assert!(matches!(outcome, "failed" | "truncated"));
+                failure.partial_body
+            }
+        };
+        let mut event = test_usage_event();
+        event.latency_ms = u64::MAX;
+        timing.apply(&mut event);
+        assert_ne!(event.latency_ms, u64::MAX);
+        if outcome == "json" {
+            assert_eq!(event.ttft_ms, None);
+            assert_eq!(event.generation_ms, None);
+        } else {
+            let first = event.ttft_ms.expect("complete output delta was observed");
+            assert!(first <= event.latency_ms);
+            assert_eq!(event.generation_ms, Some(event.latency_ms - first));
+            assert!(String::from_utf8_lossy(&bytes).contains("synthetic"));
+        }
+    }
+}
+
+#[test]
 fn buffered_json_and_account_stream_keep_original_failure_details() {
     for (body, account_stream, expected_code, expected_message) in [
         (
@@ -327,7 +482,19 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
         let upstream = reqwest::get(format!("http://{address}/")).await.unwrap();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             if basis_points {
-                super::collect_basis_points_response(upstream, Some("gpt-6-astra")).await
+                let mut timing = BufferedResponseTiming::default();
+                let bytes = super::collect_basis_points_response(
+                    upstream,
+                    Some("gpt-6-astra"),
+                    std::time::Instant::now(),
+                    &mut timing,
+                )
+                .await;
+                let mut event = test_usage_event();
+                timing.apply(&mut event);
+                assert_eq!(event.ttft_ms, None);
+                assert_eq!(event.generation_ms, None);
+                bytes
             } else {
                 super::collect_upstream_response(upstream, true, Some("gpt-6-astra")).await
             }

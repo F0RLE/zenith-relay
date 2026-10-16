@@ -64,6 +64,14 @@ pub(crate) async fn import_source_item(
         api_key: api_key.clone(),
         wire_api,
         models: requested_models,
+        proxy_url: existing
+            .as_ref()
+            .map(crate::local_pool::commands::connections::source_proxy_url)
+            .transpose()
+            .map_err(|_| {
+                ImportItemError::new(error_codes::SOURCE_INVALID, "source proxy is not available")
+            })?
+            .flatten(),
     };
     runtime_source.validate().map_err(|_| {
         ImportItemError::new(error_codes::SOURCE_INVALID, "imported source is invalid")

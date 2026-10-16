@@ -20,6 +20,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         mut request_id,
         forwarded_headers,
         client_context_id,
+        client_affinity_id,
         mut response_affinity_key,
         mut requires_affinity_owner,
         client_wire_api,
@@ -30,6 +31,10 @@ pub(in crate::gateway::execution) async fn execute_request(
         transport,
     } = context;
     let mut tried: HashSet<String> = Default::default();
+    // Local preparation failures belong to this request, not provider health.
+    // Recovery may revisit dispatched members after their cooldown, but it
+    // must never recycle a route that cannot prepare the unchanged request.
+    let mut preparation_exclusions = HashSet::new();
     let mut attempt = attempt_offset;
     let mut confirmed_response_missing = false;
     let mut repairs = AttemptRepairs::default();
@@ -50,17 +55,8 @@ pub(in crate::gateway::execution) async fn execute_request(
         &key.id,
         &resolved_model,
         request.get("prompt_cache_key").and_then(Value::as_str),
-        client_context_id.as_deref(),
+        client_affinity_id.as_deref(),
     );
-    let retry_context = CandidateRetryContext {
-        runtime: &runtime,
-        key: &key,
-        resolved_model: &resolved_model,
-        protocols: candidate_protocols(client_wire_api),
-        operation: crate::scheduler::rotation::RotationOperation::Text,
-        exclusions: &HashSet::new(),
-    };
-
     loop {
         budget.retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
             &request,
@@ -82,11 +78,12 @@ pub(in crate::gateway::execution) async fn execute_request(
                     candidate_protocols(client_wire_api),
                     &tried,
                     now_ms(),
-                ) && drop_materialized_previous_response_id(
+                ) && prepare_response_owner_change(
                     &runtime,
                     &key.id,
                     &mut request,
                     &resolved_model,
+                    requires_affinity_owner,
                     now_ms(),
                 ) {
                     clear_materialized_continuation(
@@ -115,16 +112,26 @@ pub(in crate::gateway::execution) async fn execute_request(
         {
             response_affinity_key = None;
         }
-        let (incompatible, admission_error) = incompatible_routes(RouteCompatibility {
+        let (mut incompatible, mut admitted, admission_error) =
+            incompatible_routes(RouteCompatibility {
+                runtime: &runtime,
+                key: &key,
+                model: &resolved_model,
+                client: client_wire_api,
+                request: &request,
+                stream,
+                tier_policy: &service_tier_policy,
+                now_ms: now_ms(),
+            });
+        incompatible.extend(preparation_exclusions.iter().cloned());
+        let retry_context = CandidateRetryContext {
             runtime: &runtime,
             key: &key,
-            model: &resolved_model,
-            client: client_wire_api,
-            request: &request,
-            stream,
-            tier_policy: &service_tier_policy,
-            now_ms: now_ms(),
-        });
+            resolved_model: &resolved_model,
+            protocols: candidate_protocols(client_wire_api),
+            operation: crate::scheduler::rotation::RotationOperation::Text,
+            exclusions: &incompatible,
+        };
         let mut selection_exclusions = tried.clone();
         selection_exclusions.extend(incompatible.iter().cloned());
         if admission_error.is_some() {
@@ -166,13 +173,14 @@ pub(in crate::gateway::execution) async fn execute_request(
                 has_unpaired_tool_output: &mut has_unpaired_tool_output,
                 repairs: &mut repairs,
                 tried: &mut tried,
-                incompatible: &incompatible,
                 retry_context: &retry_context,
                 last_failure: &last_failure,
+                has_preparation_error: !preparation_exclusions.is_empty(),
                 last_adapter_error: &mut last_adapter_error,
                 retry_until_available,
                 attempt,
                 retry_window_expired,
+                request_id: &request_id,
             })
             .await
             {
@@ -191,7 +199,14 @@ pub(in crate::gateway::execution) async fn execute_request(
             &mut response_affinity_key,
             &mut requires_affinity_owner,
         );
+        let Some(route) = admitted.remove(&selected.candidate_id) else {
+            preparation_exclusions.insert(selected.candidate_id.clone());
+            tried.insert(selected.candidate_id.clone());
+            drop(lease);
+            continue;
+        };
         let driven = drive_selected_attempt(DriveAttemptInput {
+            route,
             selected,
             lease,
             request,
@@ -216,6 +231,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             last_failure: &mut last_failure,
             last_failure_origin: &mut last_failure_origin,
             tried: &mut tried,
+            preparation_exclusions: &mut preparation_exclusions,
             has_previous_response_id,
             has_unpaired_tool_output: &mut has_unpaired_tool_output,
             requires_affinity_owner: &mut requires_affinity_owner,
@@ -292,6 +308,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 request_id,
                 forwarded_headers,
                 client_context_id,
+                client_affinity_id,
                 response_affinity_key: None,
                 requires_affinity_owner: false,
                 client_wire_api,
@@ -312,7 +329,7 @@ pub(in crate::gateway::execution) async fn execute_request(
 
     if last_failure.is_none() {
         if let Some(error) = last_adapter_error {
-            return adapter_error_response(error);
+            return adapter_error_response(error, Some(&request_id));
         }
     }
     if let Some(error) = crate::gateway::errors::admission_error(&budget) {

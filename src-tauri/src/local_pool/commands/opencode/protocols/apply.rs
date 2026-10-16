@@ -50,8 +50,11 @@ pub(in crate::local_pool::commands::opencode) fn apply_source(
     metadata: &ModelMetadataCatalog,
     select_connection: bool,
 ) -> Result<(), LocalPoolError> {
-    let routes = source
-        .effective_protocol_bindings()
+    let routes =
+        zenith_relay_core::SourceProtocolResolution::resolved_protocol_bindings_with_catalog(
+            source,
+            Some(metadata),
+        )
         .map_err(LocalPoolError::invalid_state)?;
     let mut groups = BTreeMap::<WireApi, Vec<String>>::new();
     let native = routes
@@ -62,18 +65,24 @@ pub(in crate::local_pool::commands::opencode) fn apply_source(
         native.iter().flat_map(|binding| binding.model_ids.iter()),
     );
     for model in model_ids {
-        let protocol = existing_protocol(config, &model, |protocol| {
-            native
-                .iter()
-                .any(|binding| binding.wire_api == protocol && binding.model_ids.contains(&model))
-        })
-        .unwrap_or_else(|| {
-            native
-                .iter()
-                .find(|binding| binding.model_ids.contains(&model))
-                .unwrap()
-                .wire_api
-        });
+        let supported = native
+            .iter()
+            .filter(|binding| binding.model_ids.contains(&model))
+            .map(|binding| binding.wire_api)
+            .collect::<Vec<_>>();
+        let protocol = metadata
+            .native_protocol_for(&model)
+            .or_else(|| metadata.preferred_protocol_for(&model))
+            .filter(|protocol| supported.contains(protocol))
+            .or_else(|| {
+                supported
+                    .contains(&source.wire_api)
+                    .then_some(source.wire_api)
+            })
+            .or_else(|| supported.first().copied())
+            .ok_or_else(|| {
+                LocalPoolError::invalid_state("source model has no native protocol route")
+            })?;
         groups.entry(protocol).or_default().push(model);
     }
     let mut generated_groups = Vec::new();

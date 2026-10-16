@@ -7,10 +7,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::{Notify, Semaphore};
 
+mod quota_rotation;
 mod recovery;
+mod retry_admission;
 
 struct AccessReply {
     status: StatusCode,
@@ -23,7 +25,9 @@ struct AccessState {
     generation_bodies: Mutex<Vec<Value>>,
     access_requests: AtomicUsize,
     generation_requests: AtomicUsize,
+    attachment_requests: AtomicUsize,
     generation_status: Mutex<StatusCode>,
+    strict_request_schema: AtomicBool,
     first_started: Notify,
     first_release: Semaphore,
     hold_first: bool,
@@ -54,7 +58,9 @@ impl AccessServer {
             generation_bodies: Mutex::new(Vec::new()),
             access_requests: AtomicUsize::new(0),
             generation_requests: AtomicUsize::new(0),
+            attachment_requests: AtomicUsize::new(0),
             generation_status: Mutex::new(StatusCode::OK),
+            strict_request_schema: AtomicBool::new(false),
             first_started: Notify::new(),
             first_release: Semaphore::new(0),
             hold_first,
@@ -62,6 +68,7 @@ impl AccessServer {
         let app = Router::new()
             .route("/responses/access", get(access))
             .route("/responses", post(generation))
+            .route("/attachments", post(failed_attachment))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let responses_url = Url::parse(&format!(
@@ -80,6 +87,11 @@ impl AccessServer {
     fn reply_with(&self, status: StatusCode, body: Value) {
         *crate::poison::mutex(&self.state.reply) = AccessReply { status, body };
     }
+}
+
+async fn failed_attachment(State(state): State<Arc<AccessState>>) -> StatusCode {
+    state.attachment_requests.fetch_add(1, Ordering::SeqCst);
+    StatusCode::BAD_GATEWAY
 }
 
 async fn access(State(state): State<Arc<AccessState>>, uri: Uri, headers: HeaderMap) -> Response {
@@ -111,7 +123,28 @@ async fn access(State(state): State<Arc<AccessState>>, uri: Uri, headers: Header
 
 async fn generation(State(state): State<Arc<AccessState>>, Json(body): Json<Value>) -> Response {
     state.generation_requests.fetch_add(1, Ordering::SeqCst);
+    let explicit_messages = body["input"].as_array().is_some_and(|items| {
+        items.iter().all(|item| {
+            item.get("role").is_none() || (item["type"] == "message" && item["content"].is_array())
+        })
+    });
+    let transport_metadata = body["metadata"].as_object().is_some_and(|metadata| {
+        metadata.len() == 3
+            && metadata.iter().all(|(key, value)| {
+                matches!(key.as_str(), "task_id" | "turn_id" | "agent_iteration")
+                    && value.is_string()
+            })
+    });
     crate::poison::mutex(&state.generation_bodies).push(body);
+    if state.strict_request_schema.load(Ordering::SeqCst)
+        && (!explicit_messages || !transport_metadata)
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error":{"type":"server_error","message":"422: Invalid request body."}})),
+        )
+            .into_response();
+    }
     (
         *crate::poison::mutex(&state.generation_status),
         Json(crate::poison::mutex(&state.generation_body).clone()),
@@ -549,7 +582,7 @@ async fn concurrent_access_reads_share_one_discovery_and_publish_inventory() {
     assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
     assert_eq!(
         runtime.visible_account_models(&key),
-        ["gpt-test", "gpt-new"]
+        ["gpt-new", "gpt-test"]
     );
     assert_eq!(
         runtime

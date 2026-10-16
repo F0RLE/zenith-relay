@@ -47,6 +47,7 @@ pub(super) struct AccountPrepareInput<'a> {
     pub(super) half_open_probe: bool,
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
+    pub(super) request_id: &'a str,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_adapter_error: &'a mut Option<crate::protocol::AdapterError>,
 }
@@ -72,6 +73,7 @@ pub(super) fn prepare_account_attempt(
         half_open_probe,
         diagnostics,
         client_context_id,
+        request_id,
         last_failure,
         last_adapter_error,
         ..
@@ -112,20 +114,28 @@ pub(super) fn prepare_account_attempt(
             request,
             service_tier_policy,
             selected_service_tier,
-            responses_lite.is_some(),
             endpoint,
             last_adapter_error,
         ) {
             return step;
         }
     }
-    let route_responses_lite = super::super::responses_lite_header(
-        responses_lite,
-        automatic_responses_lite,
-        runtime,
-        resolved_model,
-        route.account_id.as_deref(),
-    );
+    // Basis Points does not receive the Responses Lite transport header, but
+    // its adapter translates the Lite item-level tool catalog. Keep that
+    // client-side contract active while preparing the body.
+    let route_responses_lite = if basis_points_route {
+        None
+    } else {
+        super::super::responses_lite_header(
+            responses_lite,
+            automatic_responses_lite,
+            runtime,
+            resolved_model,
+            route.account_id.as_deref(),
+        )
+    };
+    let normalize_responses_lite =
+        route_responses_lite.is_some() || (basis_points_route && responses_lite.is_some());
     let selected_error_origin = route_error_origin(&route);
     let Some(upstream_url) =
         account_upstream_url(&route, endpoint, basis_points_route, last_failure)
@@ -137,7 +147,7 @@ pub(super) fn prepare_account_attempt(
         &route.source_model,
         rewrite_model,
         endpoint,
-        route_responses_lite.is_some(),
+        normalize_responses_lite,
         basis_points_route,
     ) {
         Ok(upstream_response_body) => upstream_response_body,
@@ -150,7 +160,7 @@ pub(super) fn prepare_account_attempt(
         return step;
     }
     if basis_points_route {
-        match rewrite_account_basis_points_body(&upstream_body, last_adapter_error) {
+        match rewrite_account_basis_points_body(&upstream_body, request_id, last_adapter_error) {
             Ok(prepared) => upstream_body = prepared,
             Err(step) => return step,
         }
@@ -194,7 +204,6 @@ fn reject_account_basis_points(
     request: &Value,
     service_tier_policy: &ServiceTierPolicy,
     selected_service_tier: DefaultServiceTier,
-    responses_lite: bool,
     endpoint: AccountEndpoint,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Option<AccountPrepare> {
@@ -203,7 +212,6 @@ fn reject_account_basis_points(
         request.get("stream").and_then(Value::as_bool) == Some(true),
         service_tier_policy,
         selected_service_tier,
-        responses_lite,
         endpoint != AccountEndpoint::Wake,
     )?;
     *last_adapter_error = Some(error);
@@ -242,7 +250,7 @@ fn prepare_account_upstream_body(
             .unwrap()
             .insert("model".to_string(), Value::String(source_model.to_string()));
     }
-    if responses_lite && !basis_points_route {
+    if responses_lite {
         if let Some(object) = upstream_body.as_object_mut() {
             if !responses_lite_parallel_tool_calls_valid(object) {
                 return Err(AccountPrepare::Respond(api_error(
@@ -251,7 +259,9 @@ fn prepare_account_upstream_body(
                     error_codes::INVALID_REQUEST,
                 )));
             }
-            if endpoint == AccountEndpoint::Compact {
+            if basis_points_route {
+                crate::gateway::request::normalize_responses_lite_request(object);
+            } else if endpoint == AccountEndpoint::Compact {
                 crate::gateway::request::normalize_compact_account_request(object, true);
             } else {
                 crate::gateway::request::normalize_account_request(object, true);
@@ -282,6 +292,7 @@ fn apply_account_tool_policy(
 #[allow(clippy::result_large_err)]
 fn rewrite_account_basis_points_body(
     upstream_body: &Value,
+    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<Value, AccountPrepare> {
     match super::super::basis_points::prepare_request(upstream_body) {
@@ -291,7 +302,10 @@ fn rewrite_account_basis_points_body(
             Err(AccountPrepare::Continue)
         }
         Err(error) => Err(AccountPrepare::Respond(
-            super::super::request::adapter_error_response(error),
+            super::super::request::adapter_error_response(error, Some(request_id)),
         )),
     }
 }
+
+#[cfg(test)]
+mod tests;

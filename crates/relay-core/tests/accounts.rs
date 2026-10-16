@@ -295,6 +295,7 @@ fn account(
         cooldowns: Default::default(),
         consecutive_failures: 0,
         proxy: None,
+        proxy_timezone: None,
     }
 }
 
@@ -305,6 +306,7 @@ fn source(id: &str, server: &TestServer, key: &str, priority: i32) -> RuntimeSou
             name: id.to_string(),
             base_url: format!("{}/v1", server.base_url),
             api_key: key.to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec![MODEL.to_string()],
         },
@@ -1033,9 +1035,8 @@ async fn receive_websocket_json_with_timeout(
     loop {
         let message = tokio::time::timeout(timeout_duration, socket.next())
             .await
-            .unwrap()
-            .unwrap()
             .unwrap();
+        let message = message.unwrap().unwrap();
         if let ClientWsMessage::Text(text) = message {
             return serde_json::from_str(&text).unwrap();
         }

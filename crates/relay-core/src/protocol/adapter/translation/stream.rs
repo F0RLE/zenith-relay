@@ -88,8 +88,8 @@ impl TranslationStream {
             self,
             |stream| stream.terminal,
             |stream, event| {
-                if stream.consume(event).is_err() {
-                    stream.fail();
+                if let Err(error) = stream.consume(event) {
+                    stream.fail(error);
                 }
             },
         );
@@ -100,11 +100,11 @@ impl TranslationStream {
             return;
         }
         if self.awaiting_upstream_end() && self.pending.iter().all(u8::is_ascii_whitespace) {
-            if self.complete().is_err() {
-                self.fail();
+            if let Err(error) = self.complete() {
+                self.fail(error);
             }
         } else {
-            self.fail();
+            self.fail(AdapterError::upstream_stream_invalid().with_parameter("stream.terminal"));
         }
     }
     pub(in crate::protocol::adapter) fn awaiting_upstream_end(&self) -> bool {
@@ -114,7 +114,7 @@ impl TranslationStream {
     }
     pub(in crate::protocol::adapter) fn abort(&mut self) {
         if !self.terminal {
-            self.fail();
+            self.fail(AdapterError::upstream_stream_invalid().with_parameter("stream.transport"));
         }
     }
     pub fn pop_output(&mut self) -> Option<Vec<u8>> {
@@ -131,7 +131,9 @@ impl TranslationStream {
     }
 
     fn consume(&mut self, bytes: &[u8]) -> AdapterResult<()> {
-        std::str::from_utf8(bytes).map_err(|_| AdapterError::upstream_stream_invalid())?;
+        std::str::from_utf8(bytes).map_err(|_| {
+            AdapterError::upstream_stream_invalid().with_parameter("stream.encoding")
+        })?;
         let sse_payload = crate::protocol::sse_data(bytes);
         if sse_payload.is_empty() {
             return Ok(());
@@ -143,12 +145,12 @@ impl TranslationStream {
                 _ => false,
             };
             if !completed || self.finish_reason.is_none() {
-                return Err(AdapterError::upstream_stream_invalid());
+                return Err(AdapterError::upstream_stream_invalid().with_parameter("stream.done"));
             }
             return self.complete();
         }
         let event_payload: Value = serde_json::from_slice(&sse_payload)
-            .map_err(|_| AdapterError::upstream_stream_invalid())?;
+            .map_err(|_| AdapterError::upstream_stream_invalid().with_parameter("stream.json"))?;
         self.observe_usage(&event_payload);
         if event_payload
             .get("error")
@@ -160,14 +162,32 @@ impl TranslationStream {
         }
         let terminal = match self.translation_request.upstream {
             WireApi::ChatCompletions => self.chat(&event_payload)?,
-            WireApi::Responses => self.responses(&event_payload)?,
+            WireApi::Responses => self.responses(&event_payload).map_err(|error| {
+                if error.parameter().is_some() {
+                    error
+                } else {
+                    error.with_parameter(responses::diagnostic_parameter(&event_payload))
+                }
+            })?,
             WireApi::Messages => self.messages(&event_payload)?,
             WireApi::Gemini => self.gemini(&event_payload)?,
         };
         if terminal && self.translation_request.upstream != WireApi::Gemini {
-            self.complete()?;
+            self.complete().map_err(|error| {
+                if error.parameter().is_some() {
+                    error
+                } else {
+                    error.with_parameter("stream.complete")
+                }
+            })?;
         } else {
-            self.emit_changes(false)?;
+            self.emit_changes(false).map_err(|error| {
+                if error.parameter().is_some() {
+                    error
+                } else {
+                    error.with_parameter("stream.output")
+                }
+            })?;
         }
         Ok(())
     }
@@ -241,7 +261,7 @@ impl TranslationStream {
         Ok(())
     }
 
-    fn fail(&mut self) {
+    fn fail(&mut self, failure: AdapterError) {
         self.terminal = true;
         if self.translation_request.client == WireApi::Responses
             && self
@@ -256,7 +276,19 @@ impl TranslationStream {
                 return;
             }
         }
-        let error = json!({"type":"api_error","code":crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,"message":"Upstream stream cannot be represented by the selected route"});
+        // Adapter errors contain only static diagnostics. Keep their cause and
+        // field in the error envelope without echoing any provider payload.
+        let message = match failure.parameter() {
+            Some(parameter) => format!(
+                "Upstream stream conversion failed at {parameter}: {}",
+                failure.message()
+            ),
+            None => format!("Upstream stream conversion failed: {}", failure.message()),
+        };
+        let mut error = json!({"type":"api_error","code":crate::error_codes::ADAPTER_UPSTREAM_STREAM_INVALID,"message":message});
+        if let Some(parameter) = failure.parameter() {
+            error["param"] = parameter.into();
+        }
         match self.translation_request.client {
             WireApi::Responses => self.event("response.failed", json!({"type":"response.failed","response":{"id":self.decoded_response.id,"object":"response","status":"failed","output":[],"error":error}})),
             WireApi::Messages => self.event("error", json!({"type":"error","error":error})),

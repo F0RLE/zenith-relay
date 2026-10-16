@@ -42,7 +42,31 @@ pub(super) fn merge_reference_records(
             } else {
                 format!("{provider_name}/{model_id}")
             };
-            insert(&mut merged_records, &qualified_id, model_record.clone(), 3);
+            if !model_record.is_object() {
+                continue;
+            }
+            let mut projected = model_record.clone();
+            if model_id != source_id {
+                let alias = if source_id.contains('/') {
+                    source_id.clone()
+                } else {
+                    format!("{provider_name}/{source_id}")
+                };
+                let aliases = projected
+                    .as_object_mut()
+                    .expect("validated catalog record")
+                    .entry("aliases")
+                    .or_insert_with(|| json!([]));
+                if let Some(aliases) = aliases.as_array_mut() {
+                    if !aliases
+                        .iter()
+                        .any(|existing| existing.as_str() == Some(&alias))
+                    {
+                        aliases.push(json!(alias));
+                    }
+                }
+            }
+            insert(&mut merged_records, &qualified_id, projected, 3);
         }
     }
     for route_record in openrouter
@@ -126,6 +150,9 @@ pub(super) fn merge_reference_records(
             }
         }
         for field in [
+            "aliases",
+            "canonical_model_id",
+            "protocol_preferences",
             "supported_modalities",
             "supported_output_modalities",
             "supported_service_tiers",
@@ -203,9 +230,15 @@ fn insert(
             _ => "models_dev",
         });
     }
+    super::provenance::initialize(&mut metadata_record, priority);
     if let Some(existing_record) = merged_records.get_mut(&normalized_model_id) {
         existing_record[IDENTITY_PRIORITY] =
             json!(identity_priority(existing_record).min(priority));
+        super::provenance::merge(existing_record, &metadata_record);
+        metadata_record
+            .as_object_mut()
+            .expect("object record")
+            .remove(super::provenance::MARKER);
         fill_missing(existing_record, metadata_record);
     } else if merged_records.len() < MAX_RECORDS {
         merged_records.insert(normalized_model_id, metadata_record);

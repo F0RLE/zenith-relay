@@ -10,7 +10,7 @@ impl GatewayRuntime {
         let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
         // Filter the shared ordered catalog instead of rebuilding it from
-        // account/model BTreeMaps, which would replace upstream order with
+        // account/model BTreeMaps, which would replace catalog order with
         // alphabetical order. Keep the account-only inventory boundary.
         models
             .into_iter()

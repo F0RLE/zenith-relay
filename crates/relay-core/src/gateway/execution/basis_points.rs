@@ -16,12 +16,13 @@ mod catalog;
 mod codec;
 mod history;
 mod prepare;
-mod response;
+pub(in crate::gateway) mod response;
 mod schema;
+pub(in crate::gateway::execution) mod structured_output;
 
 pub(in crate::gateway::execution) use attachments::{attach_input_images, AttachmentFailure};
 pub(in crate::gateway::execution) use prepare::prepare_request;
-pub(in crate::gateway::execution) use response::{synthetic_stream, translate_response};
+pub(in crate::gateway) use response::{synthetic_stream, translate_response};
 
 pub(super) const TRANSPORT_TOOL: &str = "run_officejs";
 pub(super) const TRANSPORT_TOOL_ALIAS: &str = "functions.run_officejs";

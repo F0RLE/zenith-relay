@@ -70,11 +70,12 @@ use config::source_candidate_id;
 pub use config::{
     changed_runtime_source_policy_updates, normalize_model_service_tier_overrides,
     pool_catalog_visibility_changed, pool_dispatch_permission_changed, DefaultServiceTier,
-    GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
-    ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey,
-    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
-    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
+    GatewayRuntimeOptions, ModelContextPolicy, PoolAccess, PoolParticipant,
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeActivitySnapshot,
+    RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
+    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
+    RESPONSE_AFFINITY_UPSERT_SQL,
 };
 
 pub(crate) use attempt::CandidateLease;
@@ -112,7 +113,13 @@ pub struct GatewayRuntime {
     clients: RuntimeHttpClients,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
+    /// Per-source HTTP clients for sources that configure a proxy. Sources
+    /// without a proxy use the shared `clients.http` client instead.
+    source_http_clients: BTreeMap<String, reqwest::Client>,
+    /// Per-source WebSocket clients for sources that configure a proxy.
+    source_websocket_clients: BTreeMap<String, reqwest::Client>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    legacy_source_candidate_ids: BTreeMap<String, Option<String>>,
     source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
@@ -128,12 +135,12 @@ pub struct GatewayRuntime {
     image_pricing_catalog: Option<Arc<PricingCatalog>>,
     codex_responses_lite_models: Mutex<BTreeSet<(String, String)>>,
     official_codex_ultra: Mutex<BTreeMap<String, Value>>,
-    websocket_http_only: Mutex<BTreeMap<(String, String), u64>>,
+    websocket_http_only: Mutex<BTreeMap<(String, String), clients::WebsocketCapabilityObservation>>,
     model_metadata: SourceModelMetadataState,
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    model_context_policies: Mutex<BTreeMap<String, ModelContextPolicy>>,
     model_service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
     model_display_order: Mutex<Vec<String>>,
-    chatgpt_context_policy: Mutex<crate::catalog::context_policy::ApplicationContextPolicy>,
     model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
@@ -145,6 +152,7 @@ pub struct GatewayRuntime {
     quota_stale_after_ms: u64,
     default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+    response_route_affinity: Mutex<crate::scheduler::AffinityCache>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
     activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
@@ -202,6 +210,7 @@ struct ChatGptAccountExecutor {
     chatgpt_account_id: String,
     chatgpt_user_id: Option<String>,
     basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,
+    proxy_timezone: Option<String>,
     identity: CodexIdentityEnvelope,
     responses_url: Url,
     basis_points_url: Url,
@@ -255,14 +264,29 @@ pub(crate) struct ExecutorRoute {
     pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
 }
 
+impl ExecutorRoute {
+    pub(crate) fn binding_key(&self) -> SourceProtocolBindingKey {
+        SourceProtocolBindingKey {
+            wire_api: self.client_wire_api,
+            adapter: self.adapter,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SourceCandidateBinding {
     source_id: String,
+    routes: Vec<SourceCandidateRoute>,
+}
+
+#[derive(Clone, Debug)]
+struct SourceCandidateRoute {
     binding_key: SourceProtocolBindingKey,
     wire_api: WireApi,
     adapter: SourceAdapter,
     reasoning_mode: MessagesReasoningMode,
     cache_write_ttl: CacheWriteTtl,
+    models: BTreeSet<String>,
     /// Capability evidence for this exact upstream model route. Reference
     /// metadata remains separate and is merged only during request admission.
     capabilities: BTreeMap<String, crate::ModelEndpointCapability>,
@@ -351,23 +375,6 @@ impl GatewayRuntime {
             provider_source.protocol_bindings(),
         )
         .await
-    }
-
-    pub(crate) fn record_success_with_metrics(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-        output_tokens: Option<u64>,
-        latency_ms: u64,
-    ) -> bool {
-        self.lock_scheduler().record_success_with_metrics(
-            candidate_id,
-            model,
-            now_ms,
-            output_tokens,
-            latency_ms,
-        )
     }
 
     /// Returns a non-secret fingerprint for the OAuth credential currently

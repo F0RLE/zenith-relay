@@ -77,7 +77,27 @@ pub(in crate::local_pool) fn apply_quota_read(
         let (outcome, exhaustion_transitions) = if quota_is_newer(account, scope) {
             // No transition may be emitted from superseded evidence, including
             // a late exhaustion/full result that could trigger a paid action.
-            (AccountQuotaOutcome::Skipped, Vec::new())
+            // The ledger has its own clock: continuous response headers must
+            // not starve complete credit observations while preserving windows.
+            let credits_updated = match &quota {
+                QuotaRefreshOutcome::Updated(result) => result
+                    .quota
+                    .clone()
+                    .normalize(&account.account.quota)
+                    .is_ok_and(|(snapshot, _)| {
+                        account.account.quota.merge_provider_credits(&snapshot)
+                    }),
+                QuotaRefreshOutcome::Failed { .. } => false,
+            };
+            let outcome = if credits_updated {
+                AccountQuotaOutcome::Updated {
+                    transitions: Vec::new(),
+                    exhaustion_transitions: Vec::new(),
+                }
+            } else {
+                AccountQuotaOutcome::Skipped
+            };
+            (outcome, Vec::new())
         } else {
             let applied = apply_quota_outcome_with_transitions(account, quota, scope.started_at_ms);
             if account_snapshot.account.subscription != scope.initial_account.account.subscription {
@@ -202,6 +222,7 @@ struct QuotaSchedulingEvidence {
     available_credits_micro_units: Option<u64>,
     provider_credits_available: bool,
     provider_credits_unlimited: bool,
+    provider_credits_observed_at_ms: Option<u64>,
     direct_balance_micro_usd: Option<u64>,
     supplemental: Vec<(String, Option<u16>)>,
 }
@@ -216,6 +237,7 @@ impl QuotaSchedulingEvidence {
             available_credits_micro_units: quota.available_credits_micro_units,
             provider_credits_available: quota.provider_credits_available,
             provider_credits_unlimited: quota.provider_credits_unlimited,
+            provider_credits_observed_at_ms: quota.provider_credits_observed_at_ms,
             direct_balance_micro_usd: quota.direct_balance_micro_usd,
             supplemental: quota
                 .supplemental

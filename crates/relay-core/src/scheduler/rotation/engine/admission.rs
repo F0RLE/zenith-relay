@@ -183,13 +183,11 @@ impl RotationEngine {
             .candidate
             .quota_remaining_basis_points
             .filter(|remaining| *remaining > 0)?;
-        if runtime
-            .candidate
-            .quota_observed_at_ms
-            .is_some_and(|observed_at_ms| {
-                now_ms.saturating_sub(observed_at_ms) > self.quota_stale_after_ms
-            })
-        {
+        if !crate::quota::observation_is_fresh(
+            runtime.candidate.quota_observed_at_ms,
+            now_ms,
+            self.quota_stale_after_ms,
+        ) {
             return None;
         }
         Some(remaining)
@@ -210,8 +208,11 @@ impl RotationEngine {
 
     pub(crate) fn fresh_provider_credits(&self, candidate_id: &str, now_ms: u64) -> Option<u64> {
         let candidate = &self.candidates.get(candidate_id)?.candidate;
-        let observed_at_ms = candidate.provider_credits_observed_at_ms?;
-        if now_ms.saturating_sub(observed_at_ms) > self.quota_stale_after_ms {
+        if !crate::quota::observation_is_fresh(
+            candidate.provider_credits_observed_at_ms,
+            now_ms,
+            self.quota_stale_after_ms,
+        ) {
             return None;
         }
         if candidate.provider_credits_unlimited {
@@ -286,50 +287,67 @@ impl RotationEngine {
                 // Spread independent concurrent work across the least-loaded
                 // physical members first. Quota and credit balances decide
                 // among members at the same normalized load.
-                let least_loaded_candidates = self.least_loaded_group(ready);
-                let best_quota = least_loaded_candidates
+                let mut candidates = self.least_loaded_group(ready);
+                let best_quota = candidates
                     .iter()
                     .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
                     .max();
                 if let Some(best_quota) = best_quota {
-                    return least_loaded_candidates
-                        .iter()
-                        .filter(|candidate| {
-                            self.fresh_quota_remaining(&candidate.id, now_ms) == Some(best_quota)
-                        })
-                        .cloned()
-                        .collect();
-                }
-
-                let best_credits = least_loaded_candidates
+                    candidates.retain(|candidate| {
+                        self.fresh_quota_remaining(&candidate.id, now_ms) == Some(best_quota)
+                    });
+                } else if let Some(best_credits) = candidates
                     .iter()
                     .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
-                    .max();
-                if let Some(best_credits) = best_credits {
-                    if let Some(preferred) = least_loaded_candidates.iter().find(|candidate| {
-                        request.preferred.as_deref() == Some(candidate.id.as_str())
-                    }) {
-                        if self
-                            .fresh_provider_credits(&preferred.id, now_ms)
-                            .is_some_and(|preferred_credits| {
-                                best_credits.saturating_sub(preferred_credits)
-                                    < PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS
+                    .max()
+                {
+                    candidates.retain(|candidate| {
+                        self.fresh_provider_credits(&candidate.id, now_ms)
+                            .is_some_and(|credits| {
+                                credits == best_credits
+                                    || (request.preferred.as_deref() == Some(candidate.id.as_str())
+                                        && best_credits.saturating_sub(credits)
+                                            < PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS)
                             })
-                        {
-                            return vec![preferred.clone()];
-                        }
-                    }
-                    return least_loaded_candidates
-                        .iter()
-                        .filter(|candidate| {
-                            self.fresh_provider_credits(&candidate.id, now_ms) == Some(best_credits)
-                        })
-                        .cloned()
-                        .collect();
+                    });
                 }
-                least_loaded_candidates
+                self.soft_health_group(candidates)
             }
         }
+    }
+
+    fn soft_health_group(&self, mut candidates: Vec<ReadyCandidate>) -> Vec<ReadyCandidate> {
+        let Some(best_failure_score) = candidates
+            .iter()
+            .map(|candidate| candidate.failure_score_milli)
+            .min()
+        else {
+            return candidates;
+        };
+        // Compare all members with one baseline. Pairwise switch margins do
+        // not define a transitive ordering and can make selection depend on IDs.
+        candidates.retain(|candidate| {
+            candidate
+                .failure_score_milli
+                .saturating_sub(best_failure_score)
+                < HEALTH_FAILURE_SWITCH_MARGIN_MILLI
+        });
+        let fastest = candidates
+            .iter()
+            .filter_map(|candidate| candidate.first_output_latency_ms)
+            .map(|latency| latency.max(1))
+            .min();
+        if let Some(fastest) = fastest {
+            candidates.retain(|candidate| {
+                // Missing measurements remain eligible for ordinary rotation.
+                candidate.first_output_latency_ms.is_none_or(|latency| {
+                    u128::from(latency.max(1)) * 1_000
+                        < u128::from(fastest)
+                            * u128::from(1_000 + HEALTH_LATENCY_SWITCH_MARGIN_MILLI)
+                })
+            });
+        }
+        candidates
     }
 
     pub(super) fn mutable_availability(
@@ -349,12 +367,21 @@ impl RotationEngine {
         }
         let mut earliest_wait = None;
         match runtime.candidate.quota {
+            QuotaState::CreditFallback { .. }
+                if crate::quota::observation_is_fresh(
+                    runtime.candidate.provider_credits_observed_at_ms,
+                    now_ms,
+                    self.quota_stale_after_ms,
+                ) => {}
             QuotaState::Exhausted {
+                reset_at_ms: Some(reset_at_ms),
+            }
+            | QuotaState::CreditFallback {
                 reset_at_ms: Some(reset_at_ms),
             } if reset_at_ms > now_ms => {
                 earliest_wait = Some((reset_at_ms, CandidateBlockReason::QuotaExhausted));
             }
-            QuotaState::Exhausted { .. } => {
+            QuotaState::Exhausted { .. } | QuotaState::CreditFallback { .. } => {
                 return CandidateAvailability::Blocked(CandidateBlockReason::QuotaExhausted)
             }
             QuotaState::Unknown | QuotaState::Available | QuotaState::Stale => {}
@@ -468,6 +495,19 @@ impl RotationEngine {
                     },
                     recovery,
                     due_at_ms,
+                    failure_score_milli: self
+                        .health
+                        .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
+                        .map_or(0, |health| self.decayed_failure_score(health, now_ms)),
+                    first_output_latency_ms: self
+                        .health
+                        .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
+                        .filter(|health| {
+                            health.latency_observed_at_ms.is_some_and(|observed_at_ms| {
+                                now_ms.saturating_sub(observed_at_ms) <= HEALTH_HALF_LIFE_MS
+                            })
+                        })
+                        .and_then(|health| health.first_output_latency_ms),
                 })
             })
             // Aliases of a verified physical member carry one vote/weight.

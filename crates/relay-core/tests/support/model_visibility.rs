@@ -32,7 +32,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
-        ["alpha", "shared", "beta"]
+        ["alpha", "beta", "shared"]
     );
     assert_eq!(models(&gateway, "scoped-key").await, ["alpha", "shared"]);
     assert!(models(&gateway, "empty-key").await.is_empty());
@@ -41,7 +41,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 }
 
 #[tokio::test]
-async fn public_models_group_providers_and_preserve_order_inside_each_group() {
+async fn public_models_follow_shared_provider_and_family_order() {
     let (upstream, _) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway(
         vec![source(
@@ -70,16 +70,16 @@ async fn public_models_group_providers_and_preserve_order_inside_each_group() {
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
         [
-            "gpt-image-2",
-            "gpt-5.4-mini",
             "gpt-5.6-sol",
+            "gpt-5.4-mini",
+            "gpt-image-2",
             "vendor/claude-haiku-4-5",
             "vendor/gemini-3.6-flash-low",
             "vendor/grok-4.5",
-            "private-second",
-            "vendor/glm-4.7",
             "vendor/glm-5.2",
+            "vendor/glm-4.7",
             "private-first",
+            "private-second",
         ]
     );
 }

@@ -2,6 +2,38 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn websocket_frame_identity_keeps_root_affinity_and_child_context_separate() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let parse = |thread, cache_key| {
+        let body = serde_json::to_vec(&json!({
+            "type": "response.create", "model": "relay/upstream-model", "input": "synthetic",
+            "client_metadata": {"session_id": "synthetic-root", "thread_id": thread},
+            "prompt_cache_key": cache_key
+        }))
+        .unwrap();
+        ClientRequest::parse(&runtime, &key, &HeaderMap::new(), &body)
+            .unwrap_or_else(|_| panic!("synthetic WebSocket request must parse"))
+    };
+    let first = parse("child-a", None::<&str>);
+    let second = parse("child-b", None::<&str>);
+    assert!(first.prompt_affinity_key.is_some());
+    assert_eq!(first.prompt_affinity_key, second.prompt_affinity_key);
+    assert_ne!(first.client_context_id, second.client_context_id);
+    assert!(!first.requires_affinity_owner);
+    assert!(!second.requires_affinity_owner);
+    let cached = parse("child-a", Some("explicit-cache"));
+    assert_ne!(first.prompt_affinity_key, cached.prompt_affinity_key);
+    assert!(cached
+        .prompt_affinity_key
+        .as_deref()
+        .unwrap()
+        .starts_with("cache:"));
+}
+
+#[test]
 fn client_request_resolves_the_visible_model_before_upstream_serialization() {
     let runtime = runtime();
     runtime.bind_response_affinity(Some("resp_previous"), "source", crate::unix_time_ms());

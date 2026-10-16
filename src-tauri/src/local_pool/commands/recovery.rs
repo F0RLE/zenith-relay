@@ -31,6 +31,7 @@ pub enum RelayFolder {
     CrashLogs,
     OperationLogs,
     ProfileBackups,
+    ClaudeDesktopBackups,
     #[serde(rename = "opencode_backups")]
     OpenCodeBackups,
 }
@@ -146,6 +147,7 @@ pub fn open_relay_folder(
         RelayFolder::CrashLogs => state.crash_logs_root(),
         RelayFolder::OperationLogs => state.operation_logs_root(),
         RelayFolder::ProfileBackups => state.profile_backup_root(),
+        RelayFolder::ClaudeDesktopBackups => state.claude_desktop_backup_root(),
         RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
     };
     fs::create_dir_all(&folder_path).map_err(io_error)?;
@@ -157,6 +159,7 @@ pub fn open_relay_folder(
 #[tauri::command]
 pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
+    super::claude_desktop::restore_connection(&state)?;
     restore_managed_profiles_before_reset(&state).await?;
     state.gateway.stop().await;
     let (source_refs, account_ids, key_refs) = {
@@ -264,6 +267,8 @@ mod tests {
     fn relay_folder_serializes_open_code_backup_directory_name() {
         let folder: RelayFolder = serde_json::from_str("\"opencode_backups\"").unwrap();
         assert!(matches!(folder, RelayFolder::OpenCodeBackups));
+        let folder: RelayFolder = serde_json::from_str("\"claude_desktop_backups\"").unwrap();
+        assert!(matches!(folder, RelayFolder::ClaudeDesktopBackups));
     }
 
     #[test]

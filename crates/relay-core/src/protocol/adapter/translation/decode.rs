@@ -7,6 +7,59 @@ mod responses;
 use super::*;
 use std::collections::BTreeMap;
 
+/// Keep Responses custom/function result identity outside provider tool names.
+pub(super) fn responses_tool_results(
+    request: &Value,
+    previous: Option<&MessagesBridgeState>,
+) -> AdapterResult<BTreeMap<String, ClientToolTarget>> {
+    let mut targets = previous
+        .map(|state| state.response_call_targets.clone())
+        .unwrap_or_default();
+    for item in request
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let kind = item.get("type").and_then(Value::as_str);
+        if matches!(kind, Some("function_call" | "custom_tool_call")) {
+            let fields = item.as_object().ok_or_else(AdapterError::invalid_request)?;
+            let target = ClientToolTarget::from_call(fields)?;
+            let id = required_text(item, "call_id")?;
+            if targets.get(id).is_some_and(|expected| expected != &target) {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            targets.insert(id.into(), target);
+        } else if matches!(
+            kind,
+            Some("function_call_output" | "custom_tool_call_output")
+        ) {
+            let fields = item.as_object().ok_or_else(AdapterError::invalid_request)?;
+            let target = targets
+                .get(required_text(item, "call_id")?)
+                .ok_or_else(AdapterError::continuation_mismatch)?;
+            if super::super::contracts::ResponsesToolKind::from_output_item(fields)? != target.kind
+                || fields
+                    .get("namespace")
+                    .filter(|value| !value.is_null())
+                    .is_some_and(|value| value.as_str() != target.namespace.as_deref())
+            {
+                return Err(AdapterError::continuation_mismatch());
+            }
+            if target.kind == ResponsesToolKind::Custom
+                && !fields.get("output").is_some_and(Value::is_string)
+            {
+                return Err(AdapterError::invalid_request());
+            }
+        }
+    }
+    Ok(targets)
+}
+
+pub(super) fn responses_history(input: &Value) -> AdapterResult<Vec<Message>> {
+    responses::decode(&serde_json::json!({"input": input})).map(|request| request.messages)
+}
+
 pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<Request> {
     let mut decoded_request = match protocol {
         WireApi::Responses => responses::decode(request_body)?,
@@ -14,6 +67,7 @@ pub(super) fn request(protocol: WireApi, request_body: &Value) -> AdapterResult<
         WireApi::Messages => messages::decode(request_body)?,
         WireApi::Gemini => gemini::decode(request_body)?,
     };
+    decoded_request.origin = Some(protocol);
     if let Some(Reasoning::Effort(effort)) = &mut decoded_request.reasoning {
         *effort = crate::catalog::canonical_reasoning_level(effort);
         if effort.is_empty() {

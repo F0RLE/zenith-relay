@@ -10,6 +10,7 @@ fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
             base_url: "https://example.test/v1".into(),
             pricing_provider: None,
             official_provider_family: None,
+            proxy_id: None,
             wire_api: WireApi::Responses,
             protocol_bindings: Vec::new(),
             enabled: true,
@@ -38,9 +39,11 @@ fn legacy_preset_without_pricing_identity_round_trips_without_new_fields() {
         hidden_models: Vec::new(),
         model_price_overrides: BTreeMap::new(),
         model_reasoning_allowed_levels: BTreeMap::new(),
+        model_context_policies: BTreeMap::new(),
         model_service_tier_overrides: BTreeMap::new(),
         model_display_order: Vec::new(),
         model_reasoning_allowed_levels_present: true,
+        model_context_policies_present: true,
         model_service_tier_overrides_present: true,
         model_display_order_present: true,
     };
@@ -138,11 +141,13 @@ fn sparse_configuration_preset_keeps_newer_model_policy() {
             "gpt-test".into(),
             DefaultServiceTier::Fast,
         )]),
+        model_context_policies: BTreeMap::new(),
         model_display_order: vec!["gpt-test".into()],
         ..current
     };
     current.model_reasoning_allowed_levels_present = true;
     current.model_service_tier_overrides_present = true;
+    current.model_context_policies_present = true;
     current.model_display_order_present = true;
     let mut sparse = current.clone();
     sparse.model_reasoning_allowed_levels.clear();
@@ -150,6 +155,7 @@ fn sparse_configuration_preset_keeps_newer_model_policy() {
     sparse.model_display_order.clear();
     sparse.model_reasoning_allowed_levels_present = false;
     sparse.model_service_tier_overrides_present = false;
+    sparse.model_context_policies_present = false;
     sparse.model_display_order_present = false;
 
     let merged = merge_configuration_preset_settings(&current, &sparse).unwrap();

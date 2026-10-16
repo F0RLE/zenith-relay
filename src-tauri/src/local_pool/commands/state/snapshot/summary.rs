@@ -35,6 +35,7 @@ pub(super) fn local_source_summary(
 
 pub(super) struct LocalAccountSummaryContext<'a> {
     pub(super) settings: &'a GatewaySettings,
+    pub(super) proxy_id: Option<String>,
     pub(super) credentials: Option<AccountCredentialFacts>,
     pub(super) common_proxy_available: bool,
     pub(super) api_equivalent: ApiEquivalentSummary,
@@ -50,6 +51,7 @@ pub(super) fn local_account_summary(
 ) -> crate::local_pool::error::Result<AccountSummary> {
     let LocalAccountSummaryContext {
         settings,
+        proxy_id,
         credentials,
         common_proxy_available,
         api_equivalent,
@@ -127,7 +129,7 @@ pub(super) fn local_account_summary(
         remote_location: account_record.remote_location.clone(),
         proxy_mode,
         proxy_available,
-        proxy_id: None,
+        proxy_id,
         quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
             account_record.account.auth_state,
             &account_record.account.quota,

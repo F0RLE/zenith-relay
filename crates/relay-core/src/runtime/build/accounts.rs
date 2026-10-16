@@ -96,6 +96,7 @@ pub(super) fn build_accounts(
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             protocol: WireApi::Responses,
+            model_protocols: BTreeMap::new(),
             enabled: account.enabled
                 && account
                     .oauth_client_kind
@@ -109,7 +110,8 @@ pub(super) fn build_accounts(
             quota: account.quota,
             provider_credits_micro_units: account.quota_snapshot.available_credits_micro_units,
             provider_credits_unlimited: account.quota_snapshot.provider_credits_unlimited,
-            quota_updated_at_ms: account.quota_updated_at_ms,
+            provider_credits_observed_at_ms: account.quota_snapshot.provider_credits_observed_at_ms,
+            quota_updated_at_ms: account.quota_snapshot.quota_observed_at_ms(),
             quota_reset_at_ms: account.quota_snapshot.limiting_reset_at_ms(),
             cooldowns: BTreeMap::new(),
             last_used_at: account.last_used_at_ms,
@@ -136,6 +138,7 @@ pub(super) fn build_accounts(
                 chatgpt_account_id: account.chatgpt_account_id,
                 chatgpt_user_id: account.chatgpt_user_id,
                 basis_points_headers: account.basis_points_headers,
+                proxy_timezone: account.proxy_timezone,
                 identity,
                 responses_url,
                 basis_points_url,

@@ -521,7 +521,7 @@ data: {"type":"message_stop"}
     );
 
     let completed = bridge.completed().expect("thinking stream should complete");
-    let messages = &completed.continuation.messages;
-    assert_eq!(messages[1]["content"][0]["thinking"], "initial more");
-    assert_eq!(messages[1]["content"][0]["signature"], "sig-part");
+    let native = &completed.continuation.native_turns[&1];
+    assert_eq!(native[0]["thinking"], "initial more");
+    assert_eq!(native[0]["signature"], "sig-part");
 }

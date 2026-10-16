@@ -19,12 +19,16 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             "max_completion_tokens",
             "temperature",
             "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
             "stop",
             "response_format",
             "reasoning_effort",
             "stream_options",
             "n",
             "store",
+            "metadata",
         ],
     )?;
     if optional_u64(request_body, "n")?.is_some_and(|n| n != 1)
@@ -38,7 +42,11 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     {
         checked(options, &["include_usage"])?;
     }
-    let mut decoded_request = Request::default();
+    let mut decoded_request = Request {
+        metadata: super::super::options::metadata(request_body, WireApi::ChatCompletions)?,
+        ..Default::default()
+    };
+    super::content::sampling_extensions(&mut decoded_request, request_body, false)?;
     for message in request_body
         .get("messages")
         .and_then(Value::as_array)
@@ -50,27 +58,42 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                 "role",
                 "content",
                 "tool_calls",
+                "function_call",
                 "tool_call_id",
+                "name",
                 "reasoning_content",
+                "reasoning",
             ],
         )?;
-        let reasoning = message
-            .get("reasoning_content")
-            .filter(|field_value| !field_value.is_null());
+        let reasoning = super::super::chat_reasoning_text(
+            message,
+            AdapterError::invalid_request().with_parameter("messages[].reasoning"),
+        )?;
         if reasoning.is_some() && super::content::role(message)? != Role::Assistant {
             return Err(AdapterError::invalid_request());
         }
-        if message.get("role").and_then(Value::as_str) == Some("tool") {
+        if matches!(
+            message.get("role").and_then(Value::as_str),
+            Some("tool" | "function")
+        ) {
+            let tool_result_id = if message.get("role").and_then(Value::as_str) == Some("function")
+            {
+                // Legacy `function` role carries `name`, not `tool_call_id`.
+                required_text(message, "name")?.to_string()
+            } else {
+                required_text(message, "tool_call_id")?.to_string()
+            };
             decoded_request.messages.push(Message {
                 role: Role::User,
                 blocks: vec![Block::ToolResult {
-                    id: required_text(message, "tool_call_id")?.into(),
+                    id: tool_result_id,
                     name: String::new(),
                     content: super::content::tool_result_blocks(
                         message.get("content").unwrap_or(&Value::Null),
                         WireApi::ChatCompletions,
                     )?,
                     is_error: false,
+                    raw_text: false,
                 }],
             });
             continue;
@@ -80,15 +103,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             WireApi::ChatCompletions,
         )?;
         if let Some(reasoning) = reasoning {
-            blocks.insert(
-                0,
-                Block::Reasoning(
-                    reasoning
-                        .as_str()
-                        .ok_or_else(AdapterError::invalid_request)?
-                        .into(),
-                ),
-            );
+            blocks.insert(0, Block::Reasoning(reasoning.into()));
         }
         if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
@@ -106,6 +121,19 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
                     arguments: required_text(function, "arguments")?.into(),
                 });
             }
+        }
+        // Legacy single `function_call` field (pre-tool_calls format).
+        if let Some(legacy_call) = message.get("function_call").filter(|v| v.is_object()) {
+            checked(legacy_call, &["name", "arguments"])?;
+            blocks.push(Block::ToolCall {
+                id: String::new(),
+                name: required_text(legacy_call, "name")?.into(),
+                arguments: legacy_call
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
+            });
         }
         decoded_request.messages.push(Message {
             role: super::content::role(message)?,

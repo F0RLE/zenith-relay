@@ -90,8 +90,7 @@ pub async fn attach_codex_to_local_gateway(
     let catalog = super::catalog::context_catalog(&state, &catalog)?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let activation_result: Result<ProfileActivation, CommandError> = async {
-        let bound_oauth =
-            resolve_gateway_oauth_binding(&state, binding_request, &profile_dir).await?;
+        let bound_oauth = resolve_gateway_oauth_binding(&state, binding_request).await?;
         let binding = with_chatgpt_context(&state, &profile_dir, || {
             let history_backup = if sync_history {
                 synchronize_history_for_command(

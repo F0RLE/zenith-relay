@@ -23,6 +23,36 @@ pub(super) fn text_message(role: &str, content_type: &str, text: String) -> Valu
     })
 }
 
+pub(super) fn explicit_input_message(mut item: Value) -> Value {
+    let Some(fields) = item.as_object_mut() else {
+        return item;
+    };
+    let Some(role @ ("user" | "assistant" | "system" | "developer")) =
+        fields.get("role").and_then(Value::as_str)
+    else {
+        return item;
+    };
+    let content_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    match fields.get("type") {
+        None => {
+            fields.insert("type".into(), Value::String("message".into()));
+        }
+        Some(Value::String(kind)) if kind == "message" => {}
+        _ => return item,
+    }
+    // Responses accepts compact messages without a discriminator and with
+    // string content. BPS needs explicit message/content variants, including
+    // for histories emitted by the shared cross-protocol codec.
+    if let Some(Value::String(text)) = fields.get("content") {
+        fields.insert("content".into(), json!([{"type":content_type,"text":text}]));
+    }
+    item
+}
+
 pub(super) fn json_text(json_value: &Value) -> Result<String, AdapterError> {
     serde_json::to_string(json_value).map_err(|_| AdapterError::invalid_request())
 }
@@ -59,31 +89,6 @@ pub(super) fn basis_points_reasoning_effort(request_body: &Map<String, Value>) -
         .map(str::trim)
         .filter(|effort_text| !effort_text.is_empty())
         .map(crate::providers::chatgpt::normalize_basis_points_reasoning_effort)
-}
-
-pub(super) fn sanitized_metadata(metadata_value: Option<&Value>) -> Option<Value> {
-    let metadata_object = metadata_value?.as_object()?;
-    let mut metadata = Map::new();
-    for (metadata_key, metadata_value) in metadata_object {
-        if matches!(
-            metadata_key.as_str(),
-            "task_id" | "turn_id" | "agent_iteration"
-        ) {
-            continue;
-        }
-        let safe_key = metadata_key.chars().take(64).collect::<String>();
-        if safe_key.is_empty() {
-            continue;
-        }
-        let safe_value = match metadata_value {
-            Value::String(text) => text.chars().take(512).collect::<String>(),
-            Value::Bool(boolean_value) => boolean_value.to_string(),
-            Value::Number(number_value) => number_value.to_string(),
-            _ => continue,
-        };
-        metadata.insert(safe_key, Value::String(safe_value));
-    }
-    (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
 pub(super) fn explicit_conversation_key(request_fields: &Map<String, Value>) -> Option<String> {

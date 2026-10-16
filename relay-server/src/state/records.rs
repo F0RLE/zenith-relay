@@ -17,6 +17,8 @@ pub struct ServerProxyRecord {
     pub endpoint: String,
     pub secret_ref: String,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -34,6 +36,8 @@ pub struct SourceRecord {
     pub pricing_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_provider_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub protocol_bindings: Vec<SourceProtocolBinding>,

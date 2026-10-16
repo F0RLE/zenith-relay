@@ -1,7 +1,7 @@
 use super::super::*;
 use super::messages::first_message_terminal;
 use super::telemetry::{
-    record_connect_affinity_miss, record_connect_failure_with_outcome, record_connect_rejection,
+    record_connect_affinity_miss, record_connect_failure_with_outcome, record_connect_repair,
     record_identifier_repair,
 };
 use super::{ConnectProgress, ConnectScope};
@@ -36,10 +36,15 @@ pub(super) fn handle_initial_terminal(
         UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
         _ => None,
     });
+    let (status, category) = resolved_terminal_failure(&terminal);
+    if category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+        // Forward the original terminal frame and let the bridge settle it.
+        // A turn limit must not enter any history repair or candidate retry.
+        return Ok(TerminalAction::Proceed);
+    }
     if continue_after_item_prefix_repair(terminal_body, scope, progress) {
         return Ok(TerminalAction::Continue);
     }
-    let (status, category) = resolved_terminal_failure(&terminal);
     if continue_after_legacy_call_links(terminal_body, scope, progress) {
         return Ok(TerminalAction::Continue);
     }
@@ -343,7 +348,7 @@ fn remember_terminal_rejection(
 ) {
     let failure =
         classified_terminal_failure(status, category, scope.source_error_origin, terminal);
-    record_connect_rejection(&scope.trace(), &failure);
+    record_connect_repair(&scope.trace(), &failure);
     scope.lease.settle_rotation_repair(now_ms());
     *progress.last_failure = Some(failure);
 }

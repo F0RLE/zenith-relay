@@ -100,6 +100,10 @@ pub(crate) struct DesktopOAuthEvents {
 }
 
 impl DesktopOAuthEvents {
+    pub(in crate::local_pool) fn is_attached(&self) -> bool {
+        self.app.lock().is_ok_and(|app| app.is_some())
+    }
+
     fn set_app_handle(&self, app: tauri::AppHandle) {
         if let Ok(mut app_handle) = self.app.lock() {
             *app_handle = Some(app);

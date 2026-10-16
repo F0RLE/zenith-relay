@@ -17,25 +17,20 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     slug: String,
-    #[serde(default)]
-    priority: Option<i32>,
 }
 
 pub(super) fn parse_models(
     models_response_body: &[u8],
 ) -> Result<Vec<String>, ModelDiscoveryFailure> {
-    let mut models_response: ModelsResponse = serde_json::from_slice(models_response_body)
+    let models_response: ModelsResponse = serde_json::from_slice(models_response_body)
         .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidResponse))?;
     if models_response.models.len() > MAX_MODELS {
         return Err(ModelDiscoveryFailure::new(
             ModelDiscoveryFailureCode::InvalidResponse,
         ));
     }
-    // ChatGPT's array position is not its picker order. Lower official
-    // priorities come first; ties and models without one retain array order.
-    models_response
-        .models
-        .sort_by_key(|model| (model.priority.is_none(), model.priority.unwrap_or_default()));
+    // Discovery retains inventory. All presentation uses the shared model
+    // catalog, independently of upstream array positions or picker priorities.
     let mut seen = HashSet::new();
     Ok(models_response
         .models

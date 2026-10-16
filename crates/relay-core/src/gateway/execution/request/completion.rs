@@ -111,6 +111,7 @@ pub(super) async fn complete_buffered_response(
             started.elapsed().as_millis() as u64,
         )
     };
+    let mut timing = crate::gateway::response::BufferedResponseTiming::default();
     let bytes = match read_completed_body(
         upstream,
         &mut CompletedBodyRead {
@@ -126,6 +127,7 @@ pub(super) async fn complete_buffered_response(
             client_wire_api,
             stream,
             account_route,
+            started,
             response_affinity_hit,
             has_previous_response_id,
             selected_error_origin,
@@ -138,6 +140,7 @@ pub(super) async fn complete_buffered_response(
             last_preserved_upstream_error,
         },
         &usage,
+        &mut timing,
     )
     .await
     {
@@ -162,6 +165,7 @@ pub(super) async fn complete_buffered_response(
         status.as_u16(),
         (!completed).then(|| error_codes::RESPONSE_INCOMPLETE.to_string()),
     );
+    timing.apply(&mut event);
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
     if completion == crate::protocol::completion::ResponseCompletion::Invalid {
@@ -171,6 +175,7 @@ pub(super) async fn complete_buffered_response(
         return CompletionStep::Respond(adapter_error_response_for_origin(
             error,
             selected_error_origin,
+            Some(request_id),
         ));
     }
     let translated = if let Some(responses_request) = basis_points_request.as_ref() {
@@ -196,6 +201,7 @@ pub(super) async fn complete_buffered_response(
             return CompletionStep::Respond(adapter_error_response_for_origin(
                 error,
                 selected_error_origin,
+                Some(request_id),
             ));
         }
     };
@@ -206,19 +212,13 @@ pub(super) async fn complete_buffered_response(
             return CompletionStep::Respond(adapter_error_response_for_origin(
                 error,
                 selected_error_origin,
+                Some(request_id),
             ));
         }
     }
     if completed {
-        let recovered = runtime.record_success_with_metrics(
-            &route.candidate_id,
-            source_model,
-            now_ms(),
-            event.output_tokens,
-            event.generation_ms.unwrap_or(event.latency_ms),
-        );
+        let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
         event.consecutive_failures = recovered.then_some(0);
-        lease.settle_rotation_success(now_ms());
         runtime.bind_prompt_affinity(
             prompt_affinity_key.as_deref(),
             &route.candidate_id,
@@ -233,9 +233,9 @@ pub(super) async fn complete_buffered_response(
         .filter(|_| completed)
         .and_then(|response| response.continuation())
     {
-        runtime.save_messages_bridge_response(
+        runtime.save_messages_bridge_response_for_route(
             &key.id,
-            &route.candidate_id,
+            route,
             &crate::MessagesBridgeResponse {
                 response_body: bridge_response
                     .as_ref()
@@ -252,12 +252,18 @@ pub(super) async fn complete_buffered_response(
         bind_responses_turn(
             runtime,
             &key.id,
-            &route.candidate_id,
+            route,
             request,
             source_model,
             &bytes,
             adapter_is_passthrough,
         );
+    } else if completed {
+        if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+            let mut calls = crate::gateway::request::ToolCallCapture::default();
+            calls.observe(&response, client_wire_api);
+            calls.bind(runtime, &key.id, route, now_ms());
+        }
     }
     buffered_client_response(
         status,
@@ -270,6 +276,7 @@ pub(super) async fn complete_buffered_response(
         summarize,
         client_stream,
         selected_error_origin,
+        request_id,
     )
 }
 
@@ -285,6 +292,7 @@ fn buffered_client_response(
     summarize: bool,
     client_stream: bool,
     selected_error_origin: ErrorOrigin,
+    request_id: &str,
 ) -> CompletionStep {
     if let Some(stream_body) = basis_points_stream {
         let mut stream_response =
@@ -300,6 +308,7 @@ fn buffered_client_response(
                     return CompletionStep::Respond(adapter_error_response_for_origin(
                         error,
                         selected_error_origin,
+                        Some(request_id),
                     ));
                 }
             };
@@ -336,6 +345,7 @@ struct CompletedBodyRead<'a> {
     client_wire_api: WireApi,
     stream: bool,
     account_route: bool,
+    started: Instant,
     response_affinity_hit: bool,
     has_previous_response_id: bool,
     selected_error_origin: ErrorOrigin,
@@ -353,20 +363,28 @@ async fn read_completed_body(
     upstream: reqwest::Response,
     read: &mut CompletedBodyRead<'_>,
     usage: &impl Fn(bool, u16, Option<String>) -> UsageEvent,
+    timing: &mut crate::gateway::response::BufferedResponseTiming,
 ) -> Result<Vec<u8>, CompletionStep> {
     let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
         .then_some(read.route.source_model.as_str());
-    let collected = if read.route.account_transport
-        == crate::runtime::AccountTransport::ExcelBasisPoints
-    {
-        super::super::super::response::collect_basis_points_response(upstream, expected_model).await
-    } else {
-        collect_upstream_response(upstream, read.account_route, expected_model).await
-    };
+    let collected =
+        if read.route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints {
+            super::super::super::response::collect_basis_points_response(
+                upstream,
+                expected_model,
+                read.started,
+                timing,
+            )
+            .await
+        } else {
+            collect_upstream_response(upstream, read.account_route, expected_model).await
+        };
     match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
-            let mut failure = upstream_failure.failure;
+            let mut failure = upstream_failure
+                .failure
+                .with_retry_headers(read.response_headers);
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
             let failure_state = if matches!(
@@ -389,6 +407,7 @@ async fn read_completed_body(
                 failure.status.as_u16(),
                 Some(failure.category.to_string()),
             );
+            timing.apply(&mut event);
             populate_tokens(&mut event, &upstream_failure.partial_body);
             event.upstream_error = upstream_failure.upstream_error.map(|mut details| {
                 details.http_status = Some(read.status.as_u16());
@@ -428,7 +447,10 @@ async fn read_completed_body(
                     Err(error) => {
                         emit_usage(read.runtime, mark_adapter_failure(event, &error));
                         read.lease.settle_rotation_terminal(now_ms());
-                        return Err(CompletionStep::Respond(adapter_error_response(error)));
+                        return Err(CompletionStep::Respond(adapter_error_response(
+                            error,
+                            Some(read.request_id),
+                        )));
                     }
                 }
             }

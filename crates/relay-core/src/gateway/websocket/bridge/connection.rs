@@ -149,6 +149,7 @@ pub(super) fn install_in_flight(
     clear_transient_response_affinity(runtime, state);
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
+    state.upstream_route = route.clone();
     state.credential_fingerprint = credential_fingerprint;
     state.authorization_incarnation = authorization_incarnation;
     state.upstream_origin = route_error_origin(&route);

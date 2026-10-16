@@ -145,6 +145,16 @@ impl CandidateLease {
         now_ms: u64,
         apply: impl FnOnce(&mut PoolScheduler),
     ) -> std::result::Result<Option<RotationSettlement>, RotationSettlementError> {
+        self.settle_rotation_with_latency(observation, now_ms, None, apply)
+    }
+
+    fn settle_rotation_with_latency(
+        &self,
+        observation: RotationAttemptObservation,
+        now_ms: u64,
+        first_output_latency_ms: Option<u64>,
+        apply: impl FnOnce(&mut PoolScheduler),
+    ) -> std::result::Result<Option<RotationSettlement>, RotationSettlementError> {
         let budget = &self.rotation_budget;
         if self.rotation_settled.load(Ordering::Acquire) {
             return Ok(None);
@@ -155,11 +165,12 @@ impl CandidateLease {
             }
             request_budget.observe_execution(observation.execution);
             let mut scheduler = crate::poison::mutex(&self.scheduler);
-            let settlement = scheduler.settle_rotation(
+            let settlement = scheduler.settle_rotation_with_latency(
                 self.reservation_id,
                 observation,
                 request_budget,
                 now_ms,
+                first_output_latency_ms,
             )?;
             if settlement.observation_current {
                 apply(&mut scheduler);
@@ -172,14 +183,31 @@ impl CandidateLease {
         Ok(settlement_result)
     }
 
+    #[cfg(test)]
     pub(crate) fn settle_rotation_success(&self, now_ms: u64) {
-        let _ = self.settle_rotation(
+        self.settle_rotation_success_with_latency(now_ms, None);
+    }
+
+    /// Success and its measured first output belong to this dispatched lease.
+    /// Duplicate or superseded completions cannot update a replacement member.
+    pub(crate) fn settle_rotation_success_with_latency(
+        &self,
+        now_ms: u64,
+        first_output_latency_ms: Option<u64>,
+    ) -> bool {
+        let mut recovered = false;
+        let _ = self.settle_rotation_with_latency(
             RotationAttemptObservation {
                 execution: RotationExecutionObservation::committed(),
                 health: RotationHealthObservation::Success,
             },
             now_ms,
+            first_output_latency_ms,
+            |scheduler| {
+                recovered = scheduler.record_success(&self.candidate_id, &self.model, now_ms);
+            },
         );
+        recovered
     }
 
     #[cfg(test)]
